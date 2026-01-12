@@ -25,6 +25,7 @@ impl std::error::Error for CoreError {}
 pub mod nip34;
 
 pub use nip34::RepoAnnouncement;
+pub use nip34::RepoState;
 
 #[cfg(test)]
 mod tests {

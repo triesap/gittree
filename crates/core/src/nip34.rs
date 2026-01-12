@@ -1,4 +1,5 @@
 use crate::{CoreError, Result};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoAnnouncement {
@@ -108,6 +109,49 @@ impl RepoAnnouncement {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoState {
+    pub identifier: String,
+    pub state: HashMap<String, String>,
+}
+
+impl RepoState {
+    pub fn from_tags(tags: &[Vec<String>]) -> Result<Self> {
+        let mut identifier = None;
+        let mut state = HashMap::new();
+
+        for tag in tags {
+            match tag.as_slice() {
+                [t, id, ..] if t == "d" => identifier = Some(id.clone()),
+                [name, value, ..] if is_state_ref(name) && is_state_value(value) => {
+                    state.insert(name.to_string(), value.to_string());
+                }
+                _ => {}
+            }
+        }
+
+        let identifier = identifier.ok_or(CoreError::MissingField("d"))?;
+
+        Ok(Self { identifier, state })
+    }
+
+    pub fn to_tags(&self) -> Vec<Vec<String>> {
+        let mut tags = Vec::new();
+        tags.push(vec!["d".to_string(), self.identifier.clone()]);
+
+        let mut keys: Vec<&String> = self.state.keys().collect();
+        keys.sort();
+
+        for key in keys {
+            if let Some(value) = self.state.get(key) {
+                tags.push(vec![key.clone(), value.clone()]);
+            }
+        }
+
+        tags
+    }
+}
+
 fn push_unique(target: &mut Vec<String>, value: &str) {
     if !target.iter().any(|item| item == value) {
         target.push(value.to_string());
@@ -127,9 +171,24 @@ fn join_tag_values(kind: &str, values: &[String]) -> Vec<String> {
     tag
 }
 
+fn is_state_ref(name: &str) -> bool {
+    (name == "HEAD" || name.starts_with("refs/heads/") || name.starts_with("refs/tags"))
+        && !name.ends_with("^{}")
+}
+
+fn is_state_value(value: &str) -> bool {
+    is_hex40(value) || value.starts_with("ref: refs/")
+}
+
+fn is_hex40(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::RepoAnnouncement;
+    use super::RepoState;
+    use std::collections::HashMap;
 
     #[test]
     fn announcement_round_trips_tags() {
@@ -150,5 +209,29 @@ mod tests {
         let parsed = RepoAnnouncement::from_tags(&tags).expect("parse tags");
 
         assert_eq!(parsed, announcement);
+    }
+
+    #[test]
+    fn state_round_trips_tags() {
+        let mut state = HashMap::new();
+        state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        state.insert(
+            "refs/tags/v1.0.0".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+
+        let tags = repo_state.to_tags();
+        let parsed = RepoState::from_tags(&tags).expect("parse tags");
+
+        assert_eq!(parsed, repo_state);
     }
 }
