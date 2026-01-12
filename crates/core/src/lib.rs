@@ -23,6 +23,7 @@ impl std::fmt::Display for CoreError {
 impl std::error::Error for CoreError {}
 
 pub mod grasp;
+pub mod kinds;
 pub mod nip34;
 pub mod nip11;
 pub mod refs;
@@ -31,6 +32,12 @@ pub mod tags;
 pub use grasp::{
     extract_npub, format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
     is_grasp_server_clone_url, is_grasp_server_in_list, normalize_grasp_server_url,
+};
+pub use kinds::{
+    status_kinds, NostrKind, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_PULL_REQUEST_UPDATE, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
+    KIND_GIT_STATUS_APPLIED, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN,
+    KIND_USER_GRASP_LIST,
 };
 pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use nip34::RepoAnnouncement;
