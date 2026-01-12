@@ -254,6 +254,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-core"
+version = "0.1.0"
+
+[[package]]
 name = "gittree-observability"
 version = "0.1.0"
 dependencies = [

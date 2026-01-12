@@ -2,6 +2,7 @@
 members = [
   "crates/config",
   "crates/observability",
+  "crates/core",
 ]
 resolver = "2"
 
