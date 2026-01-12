@@ -22,6 +22,10 @@ impl std::fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
+pub mod nip34;
+
+pub use nip34::RepoAnnouncement;
+
 #[cfg(test)]
 mod tests {
     use super::CoreError;
