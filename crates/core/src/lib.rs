@@ -26,6 +26,7 @@ pub mod grasp;
 pub mod kinds;
 pub mod nip34_common;
 pub mod nip34;
+pub mod nip34_grasp_list;
 pub mod nip34_issues;
 pub mod nip34_patches;
 pub mod nip34_proposals;
@@ -47,6 +48,7 @@ pub use kinds::{
 pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use nip34::RepoAnnouncement;
 pub use nip34::RepoState;
+pub use nip34_grasp_list::UserGraspList;
 pub use nip34_issues::Issue;
 pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
