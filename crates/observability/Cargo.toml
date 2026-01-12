@@ -5,3 +5,13 @@ edition = "2024"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+opentelemetry = "0.22"
+opentelemetry-otlp = { version = "0.15", features = ["grpc-tonic", "trace"] }
+opentelemetry-prometheus = "0.15"
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
+prometheus = "0.13"
+tracing = "0.1"
+tracing-opentelemetry = "0.23"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
