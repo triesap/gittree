@@ -122,6 +122,14 @@ pub fn format_grasp_server_url_as_clone_url(
     Ok(format!("{prefix}{grasp_server_url}/{npub}/{identifier}.git"))
 }
 
+pub fn format_grasp_server_url_as_blossom_url(url: &str) -> Result<String> {
+    let grasp_server_url = normalize_grasp_server_url(url)?;
+    if grasp_server_url.contains("http://") {
+        return Ok(grasp_server_url);
+    }
+    Ok(format!("https://{grasp_server_url}"))
+}
+
 fn validate_npub(npub: &str) -> Result<()> {
     let (hrp, _) = bech32::decode(npub).map_err(|_| CoreError::InvalidField {
         field: "npub",
@@ -232,6 +240,20 @@ mod tests {
             clone,
             format!("http://localhost:8080/{SAMPLE_NPUB}/repo.git")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn format_grasp_server_url_as_blossom_url_handles_https() -> Result<()> {
+        let blossom = format_grasp_server_url_as_blossom_url("https://gittr.ee")?;
+        assert_eq!(blossom, "https://gittr.ee");
+        Ok(())
+    }
+
+    #[test]
+    fn format_grasp_server_url_as_blossom_url_handles_http() -> Result<()> {
+        let blossom = format_grasp_server_url_as_blossom_url("http://localhost:8080")?;
+        assert_eq!(blossom, "http://localhost:8080");
         Ok(())
     }
 

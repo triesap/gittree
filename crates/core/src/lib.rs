@@ -37,7 +37,8 @@ pub mod tags;
 
 pub use grasp::{
     extract_npub, format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
-    is_grasp_server_clone_url, is_grasp_server_in_list, normalize_grasp_server_url,
+    format_grasp_server_url_as_blossom_url, is_grasp_server_clone_url, is_grasp_server_in_list,
+    normalize_grasp_server_url,
 };
 pub use kinds::{
     status_kinds, NostrKind, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST,
