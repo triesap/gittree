@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/config",
+  "crates/observability",
 ]
 resolver = "2"
 
