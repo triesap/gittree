@@ -1,3 +1,4 @@
+use crate::tags::{extend_unique, join_tag_values, push_unique};
 use crate::{CoreError, Result};
 use std::collections::HashMap;
 
@@ -150,25 +151,6 @@ impl RepoState {
 
         tags
     }
-}
-
-fn push_unique(target: &mut Vec<String>, value: &str) {
-    if !target.iter().any(|item| item == value) {
-        target.push(value.to_string());
-    }
-}
-
-fn extend_unique(target: &mut Vec<String>, values: &[String]) {
-    for value in values {
-        push_unique(target, value);
-    }
-}
-
-fn join_tag_values(kind: &str, values: &[String]) -> Vec<String> {
-    let mut tag = Vec::with_capacity(values.len() + 1);
-    tag.push(kind.to_string());
-    tag.extend(values.iter().cloned());
-    tag
 }
 
 fn is_state_ref(name: &str) -> bool {
