@@ -1,5 +1,7 @@
 [workspace]
-members = []
+members = [
+  "crates/config",
+]
 resolver = "2"
 
 [workspace.package]
