@@ -3,6 +3,9 @@ pub struct GittreeConfig {
     pub relay_bind: String,
 }
 
+const DEFAULT_RELAY_BIND: &str = "0.0.0.0:8080";
+const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     InvalidRelayBind(String),
@@ -23,7 +26,7 @@ impl std::error::Error for ConfigError {}
 impl Default for GittreeConfig {
     fn default() -> Self {
         Self {
-            relay_bind: "0.0.0.0:8080".to_string(),
+            relay_bind: DEFAULT_RELAY_BIND.to_string(),
         }
     }
 }
@@ -31,7 +34,7 @@ impl Default for GittreeConfig {
 impl GittreeConfig {
     pub fn from_env() -> Self {
         let relay_bind =
-            std::env::var("GITTREE_RELAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+            std::env::var(ENV_RELAY_BIND).unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_string());
 
         Self { relay_bind }
     }
@@ -81,7 +84,7 @@ mod tests {
 
     #[test]
     fn env_config_overrides_relay_bind() {
-        with_env_var("GITTREE_RELAY_BIND", "127.0.0.1:9000", || {
+        with_env_var(ENV_RELAY_BIND, "127.0.0.1:9000", || {
             let config = GittreeConfig::from_env();
             assert_eq!(config.relay_bind, "127.0.0.1:9000");
         });
@@ -91,10 +94,10 @@ mod tests {
     fn env_config_falls_back_to_default() {
         // SAFETY: this test controls the env var for its duration only.
         unsafe {
-            std::env::remove_var("GITTREE_RELAY_BIND");
+            std::env::remove_var(ENV_RELAY_BIND);
         }
         let config = GittreeConfig::from_env();
-        assert_eq!(config.relay_bind, "0.0.0.0:8080");
+        assert_eq!(config.relay_bind, DEFAULT_RELAY_BIND);
     }
 
     #[test]
@@ -118,7 +121,7 @@ mod tests {
 
     #[test]
     fn from_env_validated_returns_error_for_invalid_bind() {
-        with_env_var("GITTREE_RELAY_BIND", "bad:addr", || {
+        with_env_var(ENV_RELAY_BIND, "bad:addr", || {
             let result = GittreeConfig::from_env_validated();
             assert_eq!(
                 result,
@@ -129,7 +132,7 @@ mod tests {
 
     #[test]
     fn from_env_validated_accepts_valid_bind() {
-        with_env_var("GITTREE_RELAY_BIND", "0.0.0.0:7000", || {
+        with_env_var(ENV_RELAY_BIND, "0.0.0.0:7000", || {
             let config = GittreeConfig::from_env_validated();
             assert!(matches!(
                 config,
