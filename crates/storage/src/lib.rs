@@ -4,8 +4,10 @@ use sqlx::Postgres;
 use std::time::Duration;
 
 pub mod migrations;
+pub mod repo;
 
 pub use migrations::{Migration, MigrationRunner};
+pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {
@@ -22,6 +24,8 @@ pub struct StorageConfig {
 pub enum StorageError {
     InvalidConnectionString { value: String, source: sqlx::Error },
     InvalidPoolConfig { field: &'static str, value: u32 },
+    InvalidHex { field: &'static str, value: String },
+    Serialization { field: &'static str, source: serde_json::Error },
     Migration { message: String },
     Database { source: sqlx::Error },
 }
@@ -35,6 +39,12 @@ impl std::fmt::Display for StorageError {
             StorageError::InvalidPoolConfig { field, value } => {
                 write!(f, "invalid pool config {field}: {value}")
             }
+            StorageError::InvalidHex { field, value } => {
+                write!(f, "invalid hex {field}: {value}")
+            }
+            StorageError::Serialization { field, source } => {
+                write!(f, "invalid {field}: {source}")
+            }
             StorageError::Migration { message } => write!(f, "migration error: {message}"),
             StorageError::Database { source } => write!(f, "database error: {source}"),
         }
@@ -46,6 +56,8 @@ impl std::error::Error for StorageError {
         match self {
             StorageError::InvalidConnectionString { source, .. } => Some(source),
             StorageError::InvalidPoolConfig { .. } => None,
+            StorageError::InvalidHex { .. } => None,
+            StorageError::Serialization { source, .. } => Some(source),
             StorageError::Migration { .. } => None,
             StorageError::Database { source } => Some(source),
         }

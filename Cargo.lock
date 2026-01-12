@@ -527,6 +527,9 @@ dependencies = [
 name = "gittree-storage"
 version = "0.1.0"
 dependencies = [
+ "gittree-core",
+ "hex",
+ "serde_json",
  "sqlx",
 ]
 
