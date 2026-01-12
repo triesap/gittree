@@ -14,6 +14,10 @@ pub struct MigrationRunner {
     migrations: Vec<Migration>,
 }
 
+pub fn core_migrations() -> Vec<Migration> {
+    vec![migration_repo_announcement(), migration_repo_state()]
+}
+
 impl MigrationRunner {
     pub fn new(mut migrations: Vec<Migration>) -> Result<Self, StorageError> {
         migrations.sort_by_key(|migration| migration.version);
@@ -89,8 +93,55 @@ where
     Ok(version.unwrap_or(0))
 }
 
+fn migration_repo_announcement() -> Migration {
+    Migration {
+        version: 1,
+        description: "repo announcements",
+        sql: r#"
+CREATE TABLE repo_announcement (
+    id BIGSERIAL PRIMARY KEY,
+    event_id BYTEA NOT NULL UNIQUE,
+    pubkey BYTEA NOT NULL,
+    identifier TEXT NOT NULL,
+    name TEXT,
+    description TEXT,
+    root_commit TEXT,
+    clone_urls TEXT[] NOT NULL,
+    web_urls TEXT[] NOT NULL DEFAULT '{}',
+    relays TEXT[] NOT NULL,
+    blossoms TEXT[] NOT NULL DEFAULT '{}',
+    hashtags TEXT[] NOT NULL DEFAULT '{}',
+    maintainers TEXT[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX repo_announcement_lookup_idx
+    ON repo_announcement (pubkey, identifier, created_at DESC);
+"#,
+    }
+}
+
+fn migration_repo_state() -> Migration {
+    Migration {
+        version: 2,
+        description: "repo state",
+        sql: r#"
+CREATE TABLE repo_state (
+    id BIGSERIAL PRIMARY KEY,
+    event_id BYTEA NOT NULL UNIQUE,
+    pubkey BYTEA NOT NULL,
+    identifier TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    state JSONB NOT NULL
+);
+CREATE INDEX repo_state_lookup_idx
+    ON repo_state (pubkey, identifier, created_at DESC);
+"#,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::core_migrations;
     use super::Migration;
     use super::MigrationRunner;
     use crate::StorageError;
@@ -141,5 +192,24 @@ mod tests {
 
         let err = MigrationRunner::new(migrations).unwrap_err();
         assert!(matches!(err, StorageError::Migration { .. }));
+    }
+
+    #[test]
+    fn core_migrations_include_repo_tables() {
+        let migrations = core_migrations();
+        let sql = migrations
+            .iter()
+            .map(|migration| migration.sql)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(sql.contains("CREATE TABLE repo_announcement"));
+        assert!(sql.contains("CREATE TABLE repo_state"));
+    }
+
+    #[test]
+    fn core_migrations_have_expected_versions() {
+        let migrations = core_migrations();
+        let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
+        assert_eq!(versions, vec![1, 2]);
     }
 }
