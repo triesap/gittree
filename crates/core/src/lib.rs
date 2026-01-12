@@ -32,6 +32,7 @@ pub mod nip34_patches;
 pub mod nip34_proposals;
 pub mod nip34_status;
 pub mod nip34_events;
+pub mod git_refs;
 pub mod nip11;
 pub mod refs;
 pub mod tags;
@@ -56,6 +57,7 @@ pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip34_status::{StatusAppliedRef, StatusEvent};
 pub use nip34_events::Nip34Event;
+pub use git_refs::{is_branch_ref, is_pr_branch_ref, is_tag_ref, match_state_ref, StateRefMatch};
 pub use nip11::RelayInfoDocument;
 
 #[cfg(test)]
