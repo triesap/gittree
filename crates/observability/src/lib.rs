@@ -70,7 +70,11 @@ pub fn init(config: &ObservabilityConfig) -> Result<ObservabilityHandle, Observa
             .with_trace_config(
                 opentelemetry_sdk::trace::Config::default().with_resource(resource.clone()),
             )
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_endpoint(endpoint))
+            .with_exporter(
+                opentelemetry_otlp::new_exporter()
+                    .tonic()
+                    .with_endpoint(endpoint),
+            )
             .install_batch(opentelemetry_sdk::runtime::Tokio)
             .map_err(|err| ObservabilityError::TraceInit(err.to_string()))?;
 
@@ -104,8 +108,7 @@ pub fn init(config: &ObservabilityConfig) -> Result<ObservabilityHandle, Observa
             tracing::subscriber::set_global_default(subscriber)
                 .map_err(|err| ObservabilityError::SubscriberInit(err.to_string()))?;
         } else {
-            let fmt_layer =
-                tracing_subscriber::fmt::layer().with_filter(env_filter);
+            let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
             let subscriber = tracing_subscriber::registry().with(fmt_layer);
             tracing::subscriber::set_global_default(subscriber)
                 .map_err(|err| ObservabilityError::SubscriberInit(err.to_string()))?;

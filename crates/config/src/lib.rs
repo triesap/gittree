@@ -105,23 +105,17 @@ impl GittreeConfig {
     }
 
     pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
-        let parsed: TomlConfig = toml::from_str(input).map_err(|source| {
-            ConfigError::TomlParse {
-                path: None,
-                source,
-            }
-        })?;
+        let parsed: TomlConfig = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
 
         Ok(parsed.into_config())
     }
 
     pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let contents = std::fs::read_to_string(path).map_err(|source| {
-            ConfigError::ReadConfig {
-                path: path.to_path_buf(),
-                source,
-            }
+        let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadConfig {
+            path: path.to_path_buf(),
+            source,
         })?;
 
         Self::from_toml_str(&contents).map_err(|err| err.with_path(path))
@@ -155,9 +149,7 @@ impl GittreeConfig {
         Ok(config)
     }
 
-    pub fn from_env_validated_with_keys(
-        relay_bind_key: &str,
-    ) -> Result<Self, ConfigError> {
+    pub fn from_env_validated_with_keys(relay_bind_key: &str) -> Result<Self, ConfigError> {
         let config = Self::from_env_with_keys(relay_bind_key);
         config.validate()?;
         Ok(config)
@@ -350,8 +342,8 @@ mod tests {
 
     #[test]
     fn toml_str_parses_valid_config() {
-        let config = GittreeConfig::from_toml_str("relay_bind = \"127.0.0.1:9999\"")
-            .expect("parse config");
+        let config =
+            GittreeConfig::from_toml_str("relay_bind = \"127.0.0.1:9999\"").expect("parse config");
         assert_eq!(config.relay_bind, "127.0.0.1:9999");
     }
 
