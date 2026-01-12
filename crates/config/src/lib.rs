@@ -53,6 +53,14 @@ impl GittreeConfig {
             .map_err(|_| ConfigError::InvalidRelayBind(self.relay_bind.clone()))
     }
 
+    pub fn relay_bind_ip(&self) -> Result<std::net::IpAddr, ConfigError> {
+        self.relay_bind_addr().map(|addr| addr.ip())
+    }
+
+    pub fn relay_bind_port(&self) -> Result<u16, ConfigError> {
+        self.relay_bind_addr().map(|addr| addr.port())
+    }
+
     pub fn from_env_validated() -> Result<Self, ConfigError> {
         let config = Self::from_env();
         config.validate()?;
@@ -62,8 +70,10 @@ impl GittreeConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::GittreeConfig;
     use super::ConfigError;
+    use super::GittreeConfig;
+    use crate::DEFAULT_RELAY_BIND;
+    use crate::ENV_RELAY_BIND;
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -143,6 +153,27 @@ mod tests {
             config.relay_bind_addr(),
             Err(ConfigError::InvalidRelayBind("bad".to_string()))
         );
+    }
+
+    #[test]
+    fn relay_bind_ip_returns_ip() {
+        let config = GittreeConfig {
+            relay_bind: "127.0.0.1:9100".to_string(),
+        };
+        let ip = config.relay_bind_ip().expect("valid ip");
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().expect("parse ip")
+        );
+    }
+
+    #[test]
+    fn relay_bind_port_returns_port() {
+        let config = GittreeConfig {
+            relay_bind: "127.0.0.1:9100".to_string(),
+        };
+        let port = config.relay_bind_port().expect("valid port");
+        assert_eq!(port, 9100);
     }
 
     #[test]
