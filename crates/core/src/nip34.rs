@@ -114,12 +114,48 @@ impl RepoAnnouncement {
             return Err(CoreError::MissingField("d"));
         }
 
+        if let Some(commit) = &self.root_commit {
+            if !is_hex40(commit) {
+                return Err(CoreError::InvalidField {
+                    field: "r",
+                    value: commit.clone(),
+                });
+            }
+        }
+
         if self.clone.is_empty() {
             return Err(CoreError::MissingField("clone"));
         }
 
+        for clone in &self.clone {
+            if clone.trim().is_empty() {
+                return Err(CoreError::InvalidField {
+                    field: "clone",
+                    value: clone.clone(),
+                });
+            }
+        }
+
         if self.relays.is_empty() {
             return Err(CoreError::MissingField("relays"));
+        }
+
+        for relay in &self.relays {
+            if relay.trim().is_empty() {
+                return Err(CoreError::InvalidField {
+                    field: "relays",
+                    value: relay.clone(),
+                });
+            }
+        }
+
+        for maintainer in &self.maintainers {
+            if !is_hex64(maintainer) {
+                return Err(CoreError::InvalidField {
+                    field: "maintainers",
+                    value: maintainer.clone(),
+                });
+            }
         }
 
         Ok(())
@@ -210,6 +246,10 @@ fn is_hex40(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::RepoAnnouncement;
@@ -297,6 +337,48 @@ mod tests {
         assert!(matches!(
             announcement.validate(),
             Err(crate::CoreError::MissingField("relays"))
+        ));
+    }
+
+    #[test]
+    fn announcement_validation_rejects_bad_root_commit() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: Some("bad".to_string()),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        assert!(matches!(
+            announcement.validate(),
+            Err(crate::CoreError::InvalidField { field: "r", .. })
+        ));
+    }
+
+    #[test]
+    fn announcement_validation_rejects_bad_maintainer() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec!["npub1bad".to_string()],
+        };
+
+        assert!(matches!(
+            announcement.validate(),
+            Err(crate::CoreError::InvalidField { field: "maintainers", .. })
         ));
     }
 
