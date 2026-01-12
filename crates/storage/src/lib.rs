@@ -24,6 +24,7 @@ pub struct StorageConfig {
 pub enum StorageError {
     InvalidConnectionString { value: String, source: sqlx::Error },
     InvalidPoolConfig { field: &'static str, value: u32 },
+    InvalidField { field: &'static str, value: String },
     InvalidHex { field: &'static str, value: String },
     Serialization { field: &'static str, source: serde_json::Error },
     Migration { message: String },
@@ -38,6 +39,9 @@ impl std::fmt::Display for StorageError {
             }
             StorageError::InvalidPoolConfig { field, value } => {
                 write!(f, "invalid pool config {field}: {value}")
+            }
+            StorageError::InvalidField { field, value } => {
+                write!(f, "invalid {field}: {value}")
             }
             StorageError::InvalidHex { field, value } => {
                 write!(f, "invalid hex {field}: {value}")
@@ -56,6 +60,7 @@ impl std::error::Error for StorageError {
         match self {
             StorageError::InvalidConnectionString { source, .. } => Some(source),
             StorageError::InvalidPoolConfig { .. } => None,
+            StorageError::InvalidField { .. } => None,
             StorageError::InvalidHex { .. } => None,
             StorageError::Serialization { source, .. } => Some(source),
             StorageError::Migration { .. } => None,

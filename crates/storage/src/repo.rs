@@ -27,6 +27,10 @@ impl RepoAnnouncementRecord {
         created_at: i64,
         announcement: &RepoAnnouncement,
     ) -> Result<Self, StorageError> {
+        announcement.validate().map_err(|err| StorageError::InvalidField {
+            field: "announcement",
+            value: err.to_string(),
+        })?;
         Ok(Self {
             event_id: decode_hex_32("event_id", event_id)?,
             pubkey: decode_hex_32("pubkey", pubkey)?,
@@ -61,6 +65,10 @@ impl RepoStateRecord {
         created_at: i64,
         state: &RepoState,
     ) -> Result<Self, StorageError> {
+        state.validate().map_err(|err| StorageError::InvalidField {
+            field: "state",
+            value: err.to_string(),
+        })?;
         let state_json = serde_json::to_string(&state.state).map_err(|source| {
             StorageError::Serialization {
                 field: "state",
@@ -181,5 +189,41 @@ mod tests {
         let err = RepoAnnouncementRecord::new("abcd", &hex_32(0x55), 0, &announcement)
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidHex { field: "event_id", .. }));
+    }
+
+    #[test]
+    fn record_rejects_invalid_announcement() {
+        let mut announcement = sample_announcement();
+        announcement.clone.clear();
+        let err = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            0,
+            &announcement,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidField { field: "announcement", .. }
+        ));
+    }
+
+    #[test]
+    fn record_rejects_invalid_state() {
+        let mut state_map = std::collections::HashMap::new();
+        state_map.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+        let err = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 0, &state)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidField { field: "state", .. }
+        ));
     }
 }
