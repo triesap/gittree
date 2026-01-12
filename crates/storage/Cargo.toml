@@ -1,0 +1,10 @@
+[package]
+name = "gittree-storage"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
