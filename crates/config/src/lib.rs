@@ -5,12 +5,34 @@ pub struct GittreeConfig {
 
 const DEFAULT_RELAY_BIND: &str = "0.0.0.0:8080";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
-const ENV_RELAY_BIND_TEST1: &str = "GITTREE_RELAY_BIND_TEST1";
-const ENV_RELAY_BIND_TEST2: &str = "GITTREE_RELAY_BIND_TEST2";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlConfig {
+    relay_bind: Option<String>,
+}
+
+impl TomlConfig {
+    fn into_config(self) -> GittreeConfig {
+        GittreeConfig {
+            relay_bind: self
+                .relay_bind
+                .unwrap_or_else(|| DEFAULT_RELAY_BIND.to_string()),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum ConfigError {
     InvalidRelayBind(String),
+    ReadConfig {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    TomlParse {
+        path: Option<std::path::PathBuf>,
+        source: toml::de::Error,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -19,11 +41,45 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidRelayBind(value) => {
                 write!(f, "invalid relay bind address: {value}")
             }
+            ConfigError::ReadConfig { path, source } => {
+                write!(f, "failed to read config file {}: {source}", path.display())
+            }
+            ConfigError::TomlParse {
+                path: Some(path),
+                source,
+            } => write!(
+                f,
+                "failed to parse config file {}: {source}",
+                path.display()
+            ),
+            ConfigError::TomlParse { path: None, source } => {
+                write!(f, "failed to parse config: {source}")
+            }
         }
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConfigError::InvalidRelayBind(_) => None,
+            ConfigError::ReadConfig { source, .. } => Some(source),
+            ConfigError::TomlParse { source, .. } => Some(source),
+        }
+    }
+}
+
+impl ConfigError {
+    fn with_path(self, path: &std::path::Path) -> Self {
+        match self {
+            ConfigError::TomlParse { path: None, source } => ConfigError::TomlParse {
+                path: Some(path.to_path_buf()),
+                source,
+            },
+            other => other,
+        }
+    }
+}
 
 impl Default for GittreeConfig {
     fn default() -> Self {
@@ -46,6 +102,29 @@ impl GittreeConfig {
             std::env::var(relay_bind_key).unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_string());
 
         Self { relay_bind }
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlConfig = toml::from_str(input).map_err(|source| {
+            ConfigError::TomlParse {
+                path: None,
+                source,
+            }
+        })?;
+
+        Ok(parsed.into_config())
+    }
+
+    pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path).map_err(|source| {
+            ConfigError::ReadConfig {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+
+        Self::from_toml_str(&contents).map_err(|err| err.with_path(path))
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -83,6 +162,14 @@ impl GittreeConfig {
         config.validate()?;
         Ok(config)
     }
+
+    pub fn from_toml_file_validated(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, ConfigError> {
+        let config = Self::from_toml_file(path)?;
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 #[cfg(test)]
@@ -91,11 +178,25 @@ mod tests {
     use super::GittreeConfig;
     use crate::DEFAULT_RELAY_BIND;
     use crate::ENV_RELAY_BIND;
-    use crate::ENV_RELAY_BIND_TEST1;
-    use crate::ENV_RELAY_BIND_TEST2;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const ENV_RELAY_BIND_TEST1: &str = "GITTREE_RELAY_BIND_TEST1";
+    const ENV_RELAY_BIND_TEST2: &str = "GITTREE_RELAY_BIND_TEST2";
+
+    fn write_temp_config(contents: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "gittree-config-{nanos}-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).expect("write config file");
+        path
+    }
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -117,7 +218,7 @@ mod tests {
     #[test]
     fn default_config_has_relay_bind() {
         let config = GittreeConfig::default();
-        assert_eq!(config.relay_bind, "0.0.0.0:8080");
+        assert_eq!(config.relay_bind, DEFAULT_RELAY_BIND);
     }
 
     #[test]
@@ -145,7 +246,7 @@ mod tests {
         let config = GittreeConfig {
             relay_bind: "127.0.0.1:9000".to_string(),
         };
-        assert_eq!(config.validate(), Ok(()));
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -153,10 +254,10 @@ mod tests {
         let config = GittreeConfig {
             relay_bind: "not-an-addr".to_string(),
         };
-        assert_eq!(
+        assert!(matches!(
             config.validate(),
-            Err(ConfigError::InvalidRelayBind("not-an-addr".to_string()))
-        );
+            Err(ConfigError::InvalidRelayBind(value)) if value == "not-an-addr"
+        ));
     }
 
     #[test]
@@ -173,10 +274,10 @@ mod tests {
         let config = GittreeConfig {
             relay_bind: "bad".to_string(),
         };
-        assert_eq!(
+        assert!(matches!(
             config.relay_bind_addr(),
-            Err(ConfigError::InvalidRelayBind("bad".to_string()))
-        );
+            Err(ConfigError::InvalidRelayBind(value)) if value == "bad"
+        ));
     }
 
     #[test]
@@ -205,10 +306,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_BIND, "bad:addr", || {
             let result = GittreeConfig::from_env_validated();
-            assert_eq!(
+            assert!(matches!(
                 result,
-                Err(ConfigError::InvalidRelayBind("bad:addr".to_string()))
-            );
+                Err(ConfigError::InvalidRelayBind(value)) if value == "bad:addr"
+            ));
         });
     }
 
@@ -245,5 +346,48 @@ mod tests {
                 Ok(GittreeConfig { relay_bind }) if relay_bind == "127.0.0.1:8082"
             ));
         });
+    }
+
+    #[test]
+    fn toml_str_parses_valid_config() {
+        let config = GittreeConfig::from_toml_str("relay_bind = \"127.0.0.1:9999\"")
+            .expect("parse config");
+        assert_eq!(config.relay_bind, "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn toml_str_rejects_invalid_config() {
+        let result = GittreeConfig::from_toml_str("relay_bind = [");
+        assert!(matches!(result, Err(ConfigError::TomlParse { .. })));
+    }
+
+    #[test]
+    fn toml_file_reads_valid_config() {
+        let path = write_temp_config("relay_bind = \"127.0.0.1:9998\"");
+        let config = GittreeConfig::from_toml_file(&path).expect("read config");
+        assert_eq!(config.relay_bind, "127.0.0.1:9998");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn toml_file_reports_missing_file() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "gittree-config-missing-{}.toml",
+            std::process::id()
+        ));
+        let result = GittreeConfig::from_toml_file(&path);
+        assert!(matches!(result, Err(ConfigError::ReadConfig { .. })));
+    }
+
+    #[test]
+    fn toml_file_validated_rejects_invalid_bind() {
+        let path = write_temp_config("relay_bind = \"invalid\"");
+        let result = GittreeConfig::from_toml_file_validated(&path);
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidRelayBind(value)) if value == "invalid"
+        ));
+        let _ = std::fs::remove_file(&path);
     }
 }
