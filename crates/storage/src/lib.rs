@@ -3,6 +3,10 @@ use sqlx::postgres::PgConnectOptions;
 use sqlx::Postgres;
 use std::time::Duration;
 
+pub mod migrations;
+
+pub use migrations::{Migration, MigrationRunner};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {
     pub read_connection: String,
@@ -18,6 +22,8 @@ pub struct StorageConfig {
 pub enum StorageError {
     InvalidConnectionString { value: String, source: sqlx::Error },
     InvalidPoolConfig { field: &'static str, value: u32 },
+    Migration { message: String },
+    Database { source: sqlx::Error },
 }
 
 impl std::fmt::Display for StorageError {
@@ -29,6 +35,8 @@ impl std::fmt::Display for StorageError {
             StorageError::InvalidPoolConfig { field, value } => {
                 write!(f, "invalid pool config {field}: {value}")
             }
+            StorageError::Migration { message } => write!(f, "migration error: {message}"),
+            StorageError::Database { source } => write!(f, "database error: {source}"),
         }
     }
 }
@@ -38,7 +46,15 @@ impl std::error::Error for StorageError {
         match self {
             StorageError::InvalidConnectionString { source, .. } => Some(source),
             StorageError::InvalidPoolConfig { .. } => None,
+            StorageError::Migration { .. } => None,
+            StorageError::Database { source } => Some(source),
         }
+    }
+}
+
+impl From<sqlx::Error> for StorageError {
+    fn from(source: sqlx::Error) -> Self {
+        StorageError::Database { source }
     }
 }
 
