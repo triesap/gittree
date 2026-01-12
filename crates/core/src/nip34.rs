@@ -167,6 +167,34 @@ impl RepoState {
 
         tags
     }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.identifier.trim().is_empty() {
+            return Err(CoreError::MissingField("d"));
+        }
+
+        for (name, value) in &self.state {
+            if !is_state_ref(name) {
+                return Err(CoreError::InvalidTag {
+                    tag: "state",
+                    value: name.clone(),
+                });
+            }
+
+            if !is_state_value(value) {
+                return Err(CoreError::InvalidTag {
+                    tag: "state",
+                    value: value.clone(),
+                });
+            }
+        }
+
+        if !self.state.is_empty() && !self.state.contains_key("HEAD") {
+            return Err(CoreError::MissingField("HEAD"));
+        }
+
+        Ok(())
+    }
 }
 
 fn is_state_ref(name: &str) -> bool {
@@ -294,5 +322,70 @@ mod tests {
         let parsed = RepoState::from_tags(&tags).expect("parse tags");
 
         assert_eq!(parsed, repo_state);
+    }
+
+    #[test]
+    fn state_validation_requires_identifier() {
+        let repo_state = RepoState {
+            identifier: "".to_string(),
+            state: HashMap::new(),
+        };
+
+        assert!(matches!(
+            repo_state.validate(),
+            Err(crate::CoreError::MissingField("d"))
+        ));
+    }
+
+    #[test]
+    fn state_validation_requires_head_when_state_present() {
+        let mut state = HashMap::new();
+        state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+
+        assert!(matches!(
+            repo_state.validate(),
+            Err(crate::CoreError::MissingField("HEAD"))
+        ));
+    }
+
+    #[test]
+    fn state_validation_rejects_invalid_ref_name() {
+        let mut state = HashMap::new();
+        state.insert(
+            "refs/pull/1".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+
+        assert!(matches!(
+            repo_state.validate(),
+            Err(crate::CoreError::InvalidTag { .. })
+        ));
+    }
+
+    #[test]
+    fn state_validation_rejects_invalid_ref_value() {
+        let mut state = HashMap::new();
+        state.insert("refs/heads/main".to_string(), "invalid".to_string());
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+
+        assert!(matches!(
+            repo_state.validate(),
+            Err(crate::CoreError::InvalidTag { .. })
+        ));
     }
 }
