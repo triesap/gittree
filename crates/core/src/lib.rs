@@ -24,7 +24,9 @@ impl std::error::Error for CoreError {}
 
 pub mod grasp;
 pub mod kinds;
+pub mod nip34_common;
 pub mod nip34;
+pub mod nip34_patches;
 pub mod nip34_proposals;
 pub mod nip11;
 pub mod refs;
@@ -43,6 +45,7 @@ pub use kinds::{
 pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use nip34::RepoAnnouncement;
 pub use nip34::RepoState;
+pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip11::RelayInfoDocument;
 

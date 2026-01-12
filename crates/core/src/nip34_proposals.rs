@@ -1,9 +1,6 @@
+use crate::nip34_common::{is_hex_hash, is_hex_len, validate_repo_address, HEX_EVENT_ID_LEN, HEX_PUBKEY_LEN};
 use crate::tags::{extend_unique, join_tag_values, push_unique};
 use crate::{CoreError, Result};
-
-const REPO_ANNOUNCEMENT_KIND: &str = "30617";
-const HEX_EVENT_ID_LEN: usize = 64;
-const HEX_PUBKEY_LEN: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
@@ -332,41 +329,6 @@ impl PullRequestUpdate {
 
         Ok(())
     }
-}
-
-fn validate_repo_address(value: &str) -> Result<()> {
-    let mut parts = value.split(':');
-    let kind = parts.next().unwrap_or("");
-    let pubkey = parts.next().unwrap_or("");
-    let identifier = parts.next().unwrap_or("");
-
-    if kind != REPO_ANNOUNCEMENT_KIND
-        || pubkey.is_empty()
-        || identifier.is_empty()
-        || parts.next().is_some()
-    {
-        return Err(CoreError::InvalidField {
-            field: "a",
-            value: value.to_string(),
-        });
-    }
-
-    if !is_hex_len(pubkey, HEX_PUBKEY_LEN) {
-        return Err(CoreError::InvalidField {
-            field: "a",
-            value: value.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-fn is_hex_hash(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn is_hex_len(value: &str, len: usize) -> bool {
-    value.len() == len && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
