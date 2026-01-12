@@ -74,6 +74,9 @@ mod tests {
     use super::GittreeConfig;
     use crate::DEFAULT_RELAY_BIND;
     use crate::ENV_RELAY_BIND;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -100,6 +103,7 @@ mod tests {
 
     #[test]
     fn env_config_overrides_relay_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_BIND, "127.0.0.1:9000", || {
             let config = GittreeConfig::from_env();
             assert_eq!(config.relay_bind, "127.0.0.1:9000");
@@ -108,6 +112,7 @@ mod tests {
 
     #[test]
     fn env_config_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
         // SAFETY: this test controls the env var for its duration only.
         unsafe {
             std::env::remove_var(ENV_RELAY_BIND);
@@ -178,6 +183,7 @@ mod tests {
 
     #[test]
     fn from_env_validated_returns_error_for_invalid_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_BIND, "bad:addr", || {
             let result = GittreeConfig::from_env_validated();
             assert_eq!(
@@ -189,6 +195,7 @@ mod tests {
 
     #[test]
     fn from_env_validated_accepts_valid_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_BIND, "0.0.0.0:7000", || {
             let config = GittreeConfig::from_env_validated();
             assert!(matches!(
