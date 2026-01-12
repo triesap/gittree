@@ -1,3 +1,4 @@
+use crate::grasp::normalize_grasp_server_url;
 use crate::tags::{extend_unique, join_tag_values, push_unique};
 use crate::{CoreError, Result};
 use std::collections::HashMap;
@@ -107,6 +108,21 @@ impl RepoAnnouncement {
         }
 
         tags
+    }
+
+    pub fn lists_grasp_host(&self, host: &str) -> Result<bool> {
+        let host = normalize_grasp_host_for_compare(host)?;
+        let listed_in_clones = self
+            .clone
+            .iter()
+            .filter_map(|url| normalize_grasp_host_for_compare(url).ok())
+            .any(|normalized| normalized == host);
+        let listed_in_relays = self
+            .relays
+            .iter()
+            .filter_map(|url| normalize_grasp_host_for_compare(url).ok())
+            .any(|normalized| normalized == host);
+        Ok(listed_in_clones && listed_in_relays)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -250,6 +266,11 @@ fn is_hex64(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+fn normalize_grasp_host_for_compare(input: &str) -> Result<String> {
+    let normalized = normalize_grasp_server_url(input)?;
+    Ok(normalized.trim_start_matches("http://").to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::RepoAnnouncement;
@@ -380,6 +401,76 @@ mod tests {
             announcement.validate(),
             Err(crate::CoreError::InvalidField { field: "maintainers", .. })
         ));
+    }
+
+    #[test]
+    fn announcement_lists_grasp_host_when_clone_and_relay_present() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![
+                "https://gittr.ee/npub1example/repo.git".to_string(),
+            ],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let listed = announcement
+            .lists_grasp_host("gittr.ee")
+            .expect("host check");
+        assert!(listed);
+    }
+
+    #[test]
+    fn announcement_lists_grasp_host_requires_both_lists() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![
+                "https://gittr.ee/npub1example/repo.git".to_string(),
+            ],
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let listed = announcement
+            .lists_grasp_host("gittr.ee")
+            .expect("host check");
+        assert!(!listed);
+    }
+
+    #[test]
+    fn announcement_lists_grasp_host_ignores_invalid_urls() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![
+                "https://gittr.ee/npub1example/repo.git".to_string(),
+                "not-a-url".to_string(),
+            ],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let listed = announcement
+            .lists_grasp_host("gittr.ee")
+            .expect("host check");
+        assert!(listed);
     }
 
     #[test]
