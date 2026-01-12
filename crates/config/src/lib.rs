@@ -5,6 +5,8 @@ pub struct GittreeConfig {
 
 const DEFAULT_RELAY_BIND: &str = "0.0.0.0:8080";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
+const ENV_RELAY_BIND_TEST1: &str = "GITTREE_RELAY_BIND_TEST1";
+const ENV_RELAY_BIND_TEST2: &str = "GITTREE_RELAY_BIND_TEST2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
@@ -39,6 +41,13 @@ impl GittreeConfig {
         Self { relay_bind }
     }
 
+    pub fn from_env_with_keys(relay_bind_key: &str) -> Self {
+        let relay_bind =
+            std::env::var(relay_bind_key).unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_string());
+
+        Self { relay_bind }
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.relay_bind
             .parse::<std::net::SocketAddr>()
@@ -66,6 +75,14 @@ impl GittreeConfig {
         config.validate()?;
         Ok(config)
     }
+
+    pub fn from_env_validated_with_keys(
+        relay_bind_key: &str,
+    ) -> Result<Self, ConfigError> {
+        let config = Self::from_env_with_keys(relay_bind_key);
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +91,8 @@ mod tests {
     use super::GittreeConfig;
     use crate::DEFAULT_RELAY_BIND;
     use crate::ENV_RELAY_BIND;
+    use crate::ENV_RELAY_BIND_TEST1;
+    use crate::ENV_RELAY_BIND_TEST2;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -203,6 +222,27 @@ mod tests {
                 Ok(GittreeConfig {
                     relay_bind,
                 }) if relay_bind == "0.0.0.0:7000"
+            ));
+        });
+    }
+
+    #[test]
+    fn from_env_with_keys_reads_custom_key() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_BIND_TEST1, "127.0.0.1:8081", || {
+            let config = GittreeConfig::from_env_with_keys(ENV_RELAY_BIND_TEST1);
+            assert_eq!(config.relay_bind, "127.0.0.1:8081");
+        });
+    }
+
+    #[test]
+    fn from_env_validated_with_keys_accepts_valid_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_BIND_TEST2, "127.0.0.1:8082", || {
+            let config = GittreeConfig::from_env_validated_with_keys(ENV_RELAY_BIND_TEST2);
+            assert!(matches!(
+                config,
+                Ok(GittreeConfig { relay_bind }) if relay_bind == "127.0.0.1:8082"
             ));
         });
     }
