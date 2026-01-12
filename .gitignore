@@ -1,0 +1,28 @@
+/target
+
+# Debug
+logs/
+
+# Local env files
+.env
+.env.*
+!.env.example
+!.env.test
+
+# OS
+.DS_Store
+Thumbs.db
+
+# secrets
+*.pem
+*.crt
+*.key
+*.pem
+
+# local
+.local/
+notes*.txt
+.vscode/
+
+# goose
+src/**/*.rs.bak
