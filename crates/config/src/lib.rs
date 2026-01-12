@@ -43,6 +43,12 @@ impl GittreeConfig {
 
         Ok(())
     }
+
+    pub fn from_env_validated() -> Result<Self, ConfigError> {
+        let config = Self::from_env();
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 #[cfg(test)]
@@ -108,5 +114,29 @@ mod tests {
             config.validate(),
             Err(ConfigError::InvalidRelayBind("not-an-addr".to_string()))
         );
+    }
+
+    #[test]
+    fn from_env_validated_returns_error_for_invalid_bind() {
+        with_env_var("GITTREE_RELAY_BIND", "bad:addr", || {
+            let result = GittreeConfig::from_env_validated();
+            assert_eq!(
+                result,
+                Err(ConfigError::InvalidRelayBind("bad:addr".to_string()))
+            );
+        });
+    }
+
+    #[test]
+    fn from_env_validated_accepts_valid_bind() {
+        with_env_var("GITTREE_RELAY_BIND", "0.0.0.0:7000", || {
+            let config = GittreeConfig::from_env_validated();
+            assert!(matches!(
+                config,
+                Ok(GittreeConfig {
+                    relay_bind,
+                }) if relay_bind == "0.0.0.0:7000"
+            ));
+        });
     }
 }
