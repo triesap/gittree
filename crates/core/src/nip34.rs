@@ -108,6 +108,22 @@ impl RepoAnnouncement {
 
         tags
     }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.identifier.trim().is_empty() {
+            return Err(CoreError::MissingField("d"));
+        }
+
+        if self.clone.is_empty() {
+            return Err(CoreError::MissingField("clone"));
+        }
+
+        if self.relays.is_empty() {
+            return Err(CoreError::MissingField("relays"));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +207,69 @@ mod tests {
         let parsed = RepoAnnouncement::from_tags(&tags).expect("parse tags");
 
         assert_eq!(parsed, announcement);
+    }
+
+    #[test]
+    fn announcement_validation_requires_identifier() {
+        let announcement = RepoAnnouncement {
+            identifier: "".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        assert!(matches!(
+            announcement.validate(),
+            Err(crate::CoreError::MissingField("d"))
+        ));
+    }
+
+    #[test]
+    fn announcement_validation_requires_clone() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        assert!(matches!(
+            announcement.validate(),
+            Err(crate::CoreError::MissingField("clone"))
+        ));
+    }
+
+    #[test]
+    fn announcement_validation_requires_relays() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        assert!(matches!(
+            announcement.validate(),
+            Err(crate::CoreError::MissingField("relays"))
+        ));
     }
 
     #[test]
