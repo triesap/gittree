@@ -47,6 +47,12 @@ impl GittreeConfig {
         Ok(())
     }
 
+    pub fn relay_bind_addr(&self) -> Result<std::net::SocketAddr, ConfigError> {
+        self.relay_bind
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| ConfigError::InvalidRelayBind(self.relay_bind.clone()))
+    }
+
     pub fn from_env_validated() -> Result<Self, ConfigError> {
         let config = Self::from_env();
         config.validate()?;
@@ -116,6 +122,26 @@ mod tests {
         assert_eq!(
             config.validate(),
             Err(ConfigError::InvalidRelayBind("not-an-addr".to_string()))
+        );
+    }
+
+    #[test]
+    fn relay_bind_addr_parses_socket_addr() {
+        let config = GittreeConfig {
+            relay_bind: "127.0.0.1:9000".to_string(),
+        };
+        let addr = config.relay_bind_addr().expect("valid socket addr");
+        assert_eq!(addr, "127.0.0.1:9000".parse().expect("parse addr"));
+    }
+
+    #[test]
+    fn relay_bind_addr_reports_invalid_bind() {
+        let config = GittreeConfig {
+            relay_bind: "bad".to_string(),
+        };
+        assert_eq!(
+            config.relay_bind_addr(),
+            Err(ConfigError::InvalidRelayBind("bad".to_string()))
         );
     }
 
