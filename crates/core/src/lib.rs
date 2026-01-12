@@ -25,12 +25,14 @@ impl std::error::Error for CoreError {}
 pub mod grasp;
 pub mod nip34;
 pub mod nip11;
+pub mod refs;
 pub mod tags;
 
 pub use grasp::{
     extract_npub, format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
     is_grasp_server_clone_url, is_grasp_server_in_list, normalize_grasp_server_url,
 };
+pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use nip34::RepoAnnouncement;
 pub use nip34::RepoState;
 pub use nip11::RelayInfoDocument;
