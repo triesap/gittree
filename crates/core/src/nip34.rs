@@ -1,4 +1,4 @@
-use crate::grasp::normalize_grasp_server_url;
+use crate::grasp::{extract_npub, normalize_grasp_server_url};
 use crate::tags::{extend_unique, join_tag_values, push_unique};
 use crate::{CoreError, Result};
 use std::collections::HashMap;
@@ -123,6 +123,10 @@ impl RepoAnnouncement {
             .filter_map(|url| normalize_grasp_host_for_compare(url).ok())
             .any(|normalized| normalized == host);
         Ok(listed_in_clones && listed_in_relays)
+    }
+
+    pub fn grasp_servers(&self) -> Vec<String> {
+        detect_grasp_servers(&self.clone, &self.relays, &self.identifier)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -271,11 +275,52 @@ fn normalize_grasp_host_for_compare(input: &str) -> Result<String> {
     Ok(normalized.trim_start_matches("http://").to_string())
 }
 
+fn detect_grasp_servers(
+    clone_urls: &[String],
+    relay_urls: &[String],
+    identifier: &str,
+) -> Vec<String> {
+    let relays: Vec<String> = relay_urls
+        .iter()
+        .filter_map(|r| normalize_grasp_server_url(r).ok())
+        .collect();
+
+    let mut servers = Vec::new();
+    for url in clone_urls {
+        let Ok(normalized) = normalize_grasp_server_url(url) else {
+            continue;
+        };
+        if servers.contains(&normalized) {
+            continue;
+        }
+
+        let matches_identifier = if let Ok(npub) = extract_npub(url) {
+            url.contains(&format!("/{npub}/{identifier}.git"))
+        } else {
+            false
+        };
+        if !matches_identifier {
+            continue;
+        }
+
+        if !relays.iter().any(|r| r == &normalized) {
+            continue;
+        }
+
+        servers.push(normalized);
+    }
+
+    servers
+}
+
 #[cfg(test)]
 mod tests {
     use super::RepoAnnouncement;
     use super::RepoState;
     use std::collections::HashMap;
+
+    const SAMPLE_NPUB: &str =
+        "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
     #[test]
     fn announcement_round_trips_tags() {
@@ -471,6 +516,72 @@ mod tests {
             .lists_grasp_host("gittr.ee")
             .expect("host check");
         assert!(listed);
+    }
+
+    #[test]
+    fn announcement_grasp_servers_detects_matching_host() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![format!(
+                "https://gittr.ee/{}/repo.git",
+                SAMPLE_NPUB
+            )],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let servers = announcement.grasp_servers();
+        assert_eq!(servers, vec!["gittr.ee".to_string()]);
+    }
+
+    #[test]
+    fn announcement_grasp_servers_requires_relay_match() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![format!(
+                "https://gittr.ee/{}/repo.git",
+                SAMPLE_NPUB
+            )],
+            web: Vec::new(),
+            relays: vec!["wss://other.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let servers = announcement.grasp_servers();
+        assert!(servers.is_empty());
+    }
+
+    #[test]
+    fn announcement_grasp_servers_requires_identifier_match() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![format!(
+                "https://gittr.ee/{}/other.git",
+                SAMPLE_NPUB
+            )],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let servers = announcement.grasp_servers();
+        assert!(servers.is_empty());
     }
 
     #[test]
