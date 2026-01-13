@@ -34,6 +34,7 @@ pub mod nip34_status;
 pub mod nip34_events;
 pub mod git_refs;
 pub mod event_refs;
+pub mod event_filters;
 pub mod nip11;
 pub mod refs;
 pub mod tags;
@@ -62,6 +63,7 @@ pub use git_refs::{is_branch_ref, is_pr_branch_ref, is_tag_ref, match_state_ref,
 pub use event_refs::{
     collect_event_references, collect_event_references_with_self, EventReferences,
 };
+pub use event_filters::{build_related_event_filters, EventFilter};
 pub use nip11::RelayInfoDocument;
 
 #[cfg(test)]
