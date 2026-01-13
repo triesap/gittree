@@ -35,6 +35,7 @@ pub mod nip34_events;
 pub mod git_refs;
 pub mod event_refs;
 pub mod event_filters;
+pub mod admission;
 pub mod nip11;
 pub mod refs;
 pub mod tags;
@@ -64,6 +65,7 @@ pub use event_refs::{
     collect_event_references, collect_event_references_with_self, EventReferences,
 };
 pub use event_filters::{build_related_event_filters, EventFilter};
+pub use admission::{evaluate_admission, AdmissionDecision};
 pub use nip11::RelayInfoDocument;
 
 #[cfg(test)]
