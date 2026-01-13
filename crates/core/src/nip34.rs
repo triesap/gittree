@@ -281,6 +281,17 @@ impl RepoState {
             return Err(CoreError::MissingField("HEAD"));
         }
 
+        if let Some(head) = self.state.get("HEAD") {
+            if let Some(target) = parse_head_ref(head) {
+                if !self.state.contains_key(target) {
+                    return Err(CoreError::InvalidTag {
+                        tag: "state",
+                        value: head.clone(),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -771,6 +782,21 @@ mod tests {
     fn state_validation_rejects_invalid_ref_value() {
         let mut state = HashMap::new();
         state.insert("refs/heads/main".to_string(), "invalid".to_string());
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+
+        assert!(matches!(
+            repo_state.validate(),
+            Err(crate::CoreError::InvalidTag { .. })
+        ));
+    }
+
+    #[test]
+    fn state_validation_rejects_head_ref_missing_target() {
+        let mut state = HashMap::new();
         state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
         let repo_state = RepoState {
             identifier: "repo".to_string(),
