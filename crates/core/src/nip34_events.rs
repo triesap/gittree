@@ -51,6 +51,12 @@ impl Nip34Event {
         }
     }
 
+    pub fn parse_validated(kind: u32, tags: &[Vec<String>]) -> Result<Self, CoreError> {
+        let event = Self::parse(kind, tags)?;
+        event.validate()?;
+        Ok(event)
+    }
+
     pub fn kind(&self) -> NostrKind {
         match self {
             Nip34Event::RepoAnnouncement(_) => KIND_GIT_REPO_ANNOUNCEMENT,
@@ -74,6 +80,19 @@ impl Nip34Event {
             Nip34Event::Issue(event) => event.to_tags(),
             Nip34Event::Status { event, .. } => event.to_tags(),
             Nip34Event::UserGraspList(event) => event.to_tags(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), CoreError> {
+        match self {
+            Nip34Event::RepoAnnouncement(event) => event.validate(),
+            Nip34Event::RepoState(event) => event.validate(),
+            Nip34Event::Patch(event) => event.validate(),
+            Nip34Event::PullRequest(event) => event.validate(),
+            Nip34Event::PullRequestUpdate(event) => event.validate(),
+            Nip34Event::Issue(event) => event.validate(),
+            Nip34Event::Status { event, .. } => event.validate(),
+            Nip34Event::UserGraspList(event) => event.validate(),
         }
     }
 }
@@ -173,5 +192,35 @@ mod tests {
     fn rejects_unknown_kind() {
         let err = Nip34Event::parse(9999, &[]).unwrap_err();
         assert!(matches!(err, crate::CoreError::InvalidField { field: "kind", .. }));
+    }
+
+    #[test]
+    fn parse_validated_rejects_invalid_announcement() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let tags = announcement.to_tags();
+        let err =
+            Nip34Event::parse_validated(KIND_GIT_REPO_ANNOUNCEMENT.0, &tags).unwrap_err();
+        assert!(matches!(err, crate::CoreError::MissingField("clone")));
+    }
+
+    #[test]
+    fn parse_validated_accepts_grasp_list() {
+        let list = UserGraspList {
+            urls: vec!["wss://relay.example".to_string()],
+        };
+        let tags = list.to_tags();
+        let event = Nip34Event::parse_validated(KIND_USER_GRASP_LIST.0, &tags).expect("parse");
+        assert!(matches!(event, Nip34Event::UserGraspList(_)));
     }
 }
