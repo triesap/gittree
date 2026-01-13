@@ -232,6 +232,30 @@ impl RepoState {
         tags
     }
 
+    pub fn head_ref(&self) -> Option<String> {
+        let head = self.state.get("HEAD")?;
+        parse_head_ref(head).map(|value| value.to_string())
+    }
+
+    pub fn head_commit(&self) -> Option<String> {
+        let head = self.state.get("HEAD")?;
+        if let Some(target) = parse_head_ref(head) {
+            self.state.get(target).cloned()
+        } else if is_hex40(head) {
+            Some(head.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn ref_map(&self) -> HashMap<String, String> {
+        self.state
+            .iter()
+            .filter(|(key, _)| key.as_str() != "HEAD")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.identifier.trim().is_empty() {
             return Err(CoreError::MissingField("d"));
@@ -268,6 +292,16 @@ fn is_state_ref(name: &str) -> bool {
 
 fn is_state_value(value: &str) -> bool {
     is_hex40(value) || value.starts_with("ref: refs/")
+}
+
+fn parse_head_ref(value: &str) -> Option<&str> {
+    if let Some(rest) = value.strip_prefix("ref: ") {
+        Some(rest)
+    } else if value.starts_with("refs/") {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 fn is_hex40(value: &str) -> bool {
@@ -633,6 +667,55 @@ mod tests {
         let parsed = RepoState::from_tags(&tags).expect("parse tags");
 
         assert_eq!(parsed, repo_state);
+    }
+
+    #[test]
+    fn state_head_ref_parses_symbolic() {
+        let mut state = HashMap::new();
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+        assert_eq!(
+            repo_state.head_ref(),
+            Some("refs/heads/main".to_string())
+        );
+    }
+
+    #[test]
+    fn state_head_commit_resolves_symbolic() {
+        let mut state = HashMap::new();
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+        assert_eq!(
+            repo_state.head_commit(),
+            Some("0123456789abcdef0123456789abcdef01234567".to_string())
+        );
+    }
+
+    #[test]
+    fn state_ref_map_excludes_head() {
+        let mut state = HashMap::new();
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+        let refs = repo_state.ref_map();
+        assert!(!refs.contains_key("HEAD"));
+        assert!(refs.contains_key("refs/heads/main"));
     }
 
     #[test]
