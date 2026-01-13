@@ -1,5 +1,8 @@
 use crate::tags::push_unique;
 
+const ADDRESSABLE_KIND_START: u32 = 30000;
+const ADDRESSABLE_KIND_END: u32 = 40000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventReferences {
     pub event_ids: Vec<String>,
@@ -46,9 +49,46 @@ pub fn collect_event_references(tags: &[Vec<String>]) -> EventReferences {
     refs
 }
 
+pub fn collect_event_references_with_self(
+    kind: u32,
+    pubkey: &str,
+    event_id: &str,
+    tags: &[Vec<String>],
+) -> EventReferences {
+    let mut refs = collect_event_references(tags);
+
+    if is_addressable_kind(kind) {
+        let pointer = match find_d_tag(tags) {
+            Some(identifier) => format!("{kind}:{pubkey}:{identifier}"),
+            None => format!("{kind}:{pubkey}"),
+        };
+        push_unique(&mut refs.address_pointers, &pointer);
+    } else {
+        push_unique(&mut refs.event_ids, event_id);
+    }
+
+    refs
+}
+
+fn is_addressable_kind(kind: u32) -> bool {
+    kind >= ADDRESSABLE_KIND_START && kind < ADDRESSABLE_KIND_END
+}
+
+fn find_d_tag(tags: &[Vec<String>]) -> Option<&str> {
+    tags.iter()
+        .find_map(|tag| {
+            if tag.len() > 1 && tag[0] == "d" {
+                Some(tag[1].as_str())
+            } else {
+                None
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::collect_event_references;
+    use super::collect_event_references_with_self;
     use super::EventReferences;
 
     #[test]
@@ -90,5 +130,26 @@ mod tests {
         let refs = collect_event_references(&tags);
         assert_eq!(refs.event_ids, vec!["deadbeef".to_string()]);
         assert_eq!(refs.address_pointers, vec!["30617:pub:repo".to_string()]);
+    }
+
+    #[test]
+    fn adds_self_pointer_for_addressable_kind() {
+        let tags = vec![vec!["d".to_string(), "repo".to_string()]];
+        let refs = collect_event_references_with_self(30617, "pubkey", "event", &tags);
+        assert_eq!(refs.address_pointers, vec!["30617:pubkey:repo".to_string()]);
+        assert!(refs.event_ids.is_empty());
+    }
+
+    #[test]
+    fn adds_self_id_for_non_addressable_kind() {
+        let refs = collect_event_references_with_self(10317, "pubkey", "eventid", &[]);
+        assert_eq!(refs.event_ids, vec!["eventid".to_string()]);
+        assert!(refs.address_pointers.is_empty());
+    }
+
+    #[test]
+    fn adds_self_pointer_without_d_tag() {
+        let refs = collect_event_references_with_self(30617, "pubkey", "event", &[]);
+        assert_eq!(refs.address_pointers, vec!["30617:pubkey".to_string()]);
     }
 }

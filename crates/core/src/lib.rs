@@ -59,7 +59,9 @@ pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip34_status::{StatusAppliedRef, StatusEvent};
 pub use nip34_events::Nip34Event;
 pub use git_refs::{is_branch_ref, is_pr_branch_ref, is_tag_ref, match_state_ref, StateRefMatch};
-pub use event_refs::{collect_event_references, EventReferences};
+pub use event_refs::{
+    collect_event_references, collect_event_references_with_self, EventReferences,
+};
 pub use nip11::RelayInfoDocument;
 
 #[cfg(test)]
