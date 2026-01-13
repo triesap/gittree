@@ -129,6 +129,14 @@ impl RepoAnnouncement {
         detect_grasp_servers(&self.clone, &self.relays, &self.identifier)
     }
 
+    pub fn maintainer_keys(&self) -> Vec<String> {
+        if self.maintainers.is_empty() {
+            Vec::new()
+        } else {
+            self.maintainers.clone()
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.identifier.trim().is_empty() {
             return Err(CoreError::MissingField("d"));
@@ -582,6 +590,25 @@ mod tests {
 
         let servers = announcement.grasp_servers();
         assert!(servers.is_empty());
+    }
+
+    #[test]
+    fn announcement_maintainer_keys_returns_cloned_list() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec!["11".repeat(32)],
+        };
+
+        let keys = announcement.maintainer_keys();
+        assert_eq!(keys, vec!["11".repeat(32)]);
     }
 
     #[test]
