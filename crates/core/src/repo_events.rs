@@ -91,9 +91,50 @@ pub fn latest_state_from_maintainers(
     RepoState::from_tags(&latest.tags).ok()
 }
 
+pub fn collect_clone_urls(
+    events: &[NostrEvent],
+    maintainers: &[String],
+    identifier: &str,
+) -> Vec<String> {
+    if maintainers.is_empty() {
+        return Vec::new();
+    }
+
+    let maintainer_set: HashSet<&str> = maintainers.iter().map(String::as_str).collect();
+    let mut clones = Vec::new();
+
+    for event in events {
+        if event.kind != KIND_GIT_REPO_ANNOUNCEMENT.0 {
+            continue;
+        }
+        if !maintainer_set.contains(event.pubkey.as_str()) {
+            continue;
+        }
+        let Ok(announcement) = RepoAnnouncement::from_tags(&event.tags) else {
+            continue;
+        };
+        if announcement.identifier != identifier {
+            continue;
+        }
+
+        for clone in announcement.clone {
+            let trimmed = clone.trim_end_matches('/').to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !clones.iter().any(|existing| existing == &trimmed) {
+                clones.push(trimmed);
+            }
+        }
+    }
+
+    clones
+}
+
 #[cfg(test)]
 mod tests {
     use super::collect_maintainers;
+    use super::collect_clone_urls;
     use super::find_repo_announcement;
     use super::latest_state_from_maintainers;
     use super::NostrEvent;
@@ -219,5 +260,107 @@ mod tests {
             state.state.get("refs/heads/main").expect("ref"),
             &commit_new
         );
+    }
+
+    #[test]
+    fn collect_clone_urls_filters_by_maintainers_and_identifier() {
+        let alice = hex_of(0x11, 64);
+        let bob = hex_of(0x22, 64);
+
+        let events = vec![
+            NostrEvent::new(
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                alice.clone(),
+                0,
+                announcement("repo", vec![bob.clone()]).to_tags(),
+            ),
+            NostrEvent::new(
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                bob.clone(),
+                0,
+                RepoAnnouncement {
+                    identifier: "repo".to_string(),
+                    name: None,
+                    description: None,
+                    root_commit: None,
+                    clone: vec!["https://git.example/repo.git".to_string()],
+                    web: Vec::new(),
+                    relays: vec!["wss://gittr.ee".to_string()],
+                    blossoms: Vec::new(),
+                    hashtags: Vec::new(),
+                    maintainers: Vec::new(),
+                }
+                .to_tags(),
+            ),
+            NostrEvent::new(
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                bob.clone(),
+                0,
+                RepoAnnouncement {
+                    identifier: "other".to_string(),
+                    name: None,
+                    description: None,
+                    root_commit: None,
+                    clone: vec!["https://git.example/other.git".to_string()],
+                    web: Vec::new(),
+                    relays: vec!["wss://gittr.ee".to_string()],
+                    blossoms: Vec::new(),
+                    hashtags: Vec::new(),
+                    maintainers: Vec::new(),
+                }
+                .to_tags(),
+            ),
+        ];
+
+        let clones = collect_clone_urls(&events, &[alice, bob], "repo");
+        assert_eq!(
+            clones,
+            vec![
+                "https://gittr.ee/npub1example/repo.git".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_clone_urls_dedupes_and_trims() {
+        let alice = hex_of(0x11, 64);
+        let events = vec![NostrEvent::new(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            alice.clone(),
+            0,
+            RepoAnnouncement {
+                identifier: "repo".to_string(),
+                name: None,
+                description: None,
+                root_commit: None,
+                clone: vec![
+                    "https://git.example/repo.git/".to_string(),
+                    "https://git.example/repo.git".to_string(),
+                ],
+                web: Vec::new(),
+                relays: vec!["wss://gittr.ee".to_string()],
+                blossoms: Vec::new(),
+                hashtags: Vec::new(),
+                maintainers: Vec::new(),
+            }
+            .to_tags(),
+        )];
+
+        let clones = collect_clone_urls(&events, &[alice], "repo");
+        assert_eq!(clones, vec!["https://git.example/repo.git".to_string()]);
+    }
+
+    #[test]
+    fn collect_clone_urls_returns_empty_without_maintainers() {
+        let events = vec![NostrEvent::new(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            hex_of(0x11, 64),
+            0,
+            announcement("repo", Vec::new()).to_tags(),
+        )];
+
+        let clones = collect_clone_urls(&events, &[], "repo");
+        assert!(clones.is_empty());
     }
 }
