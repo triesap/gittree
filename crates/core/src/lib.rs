@@ -36,6 +36,7 @@ pub mod git_refs;
 pub mod event_refs;
 pub mod event_filters;
 pub mod admission;
+pub mod repo_events;
 pub mod nip11;
 pub mod refs;
 pub mod tags;
@@ -66,6 +67,9 @@ pub use event_refs::{
 };
 pub use event_filters::{build_related_event_filters, EventFilter};
 pub use admission::{evaluate_admission, AdmissionDecision};
+pub use repo_events::{
+    collect_maintainers, find_repo_announcement, latest_state_from_maintainers, NostrEvent,
+};
 pub use nip11::RelayInfoDocument;
 
 #[cfg(test)]
