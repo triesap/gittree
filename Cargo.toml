@@ -10,6 +10,7 @@ members = [
   "services/git-http",
   "services/relay",
   "services/state",
+  "services/sync",
 ]
 resolver = "2"
 
