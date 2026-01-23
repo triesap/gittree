@@ -5,6 +5,7 @@ use gittree_storage::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -172,6 +173,159 @@ pub struct MaintainersResponse {
     pub maintainers: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StateCacheConfig {
+    pub ttl: Option<Duration>,
+    pub max_entries: usize,
+}
+
+impl StateCacheConfig {
+    pub fn new(ttl: Option<Duration>, max_entries: usize) -> Self {
+        Self { ttl, max_entries }
+    }
+}
+
+impl Default for StateCacheConfig {
+    fn default() -> Self {
+        Self {
+            ttl: Some(Duration::from_secs(30)),
+            max_entries: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CacheEntry<T> {
+    value: T,
+    stored_at: Instant,
+}
+
+#[derive(Debug)]
+pub struct StateCache {
+    config: StateCacheConfig,
+    state_entries: std::sync::RwLock<HashMap<String, CacheEntry<StateResponse>>>,
+    maintainer_entries: std::sync::RwLock<HashMap<String, CacheEntry<MaintainersResponse>>>,
+}
+
+impl StateCache {
+    pub fn new(config: StateCacheConfig) -> Self {
+        Self {
+            config,
+            state_entries: std::sync::RwLock::new(HashMap::new()),
+            maintainer_entries: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn key(pubkey_hex: &str, identifier: &str) -> String {
+        format!("{pubkey_hex}:{identifier}")
+    }
+
+    fn cache_enabled(&self) -> bool {
+        self.config.max_entries > 0
+    }
+
+    fn is_fresh<T>(&self, entry: &CacheEntry<T>) -> bool {
+        match self.config.ttl {
+            Some(ttl) => entry.stored_at.elapsed() < ttl,
+            None => true,
+        }
+    }
+
+    fn evict_if_needed<K, V>(&self, map: &mut HashMap<K, CacheEntry<V>>)
+    where
+        K: Clone + Eq + std::hash::Hash,
+    {
+        let max_entries = self.config.max_entries;
+        if max_entries == 0 {
+            map.clear();
+            return;
+        }
+
+        while map.len() > max_entries {
+            let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, entry)| entry.stored_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            map.remove(&oldest);
+        }
+    }
+
+    pub fn get_state(&self, key: &str) -> Option<StateResponse> {
+        if !self.cache_enabled() {
+            return None;
+        }
+        let cached = {
+            let entries = self.state_entries.read().ok()?;
+            entries.get(key).cloned()
+        };
+        match cached {
+            Some(entry) if self.is_fresh(&entry) => Some(entry.value),
+            Some(_) => {
+                if let Ok(mut entries) = self.state_entries.write() {
+                    entries.remove(key);
+                }
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn insert_state(&self, key: String, value: StateResponse) {
+        if !self.cache_enabled() {
+            return;
+        }
+        if let Ok(mut entries) = self.state_entries.write() {
+            entries.insert(
+                key,
+                CacheEntry {
+                    value,
+                    stored_at: Instant::now(),
+                },
+            );
+            self.evict_if_needed(&mut entries);
+        }
+    }
+
+    pub fn get_maintainers(&self, key: &str) -> Option<MaintainersResponse> {
+        if !self.cache_enabled() {
+            return None;
+        }
+        let cached = {
+            let entries = self.maintainer_entries.read().ok()?;
+            entries.get(key).cloned()
+        };
+        match cached {
+            Some(entry) if self.is_fresh(&entry) => Some(entry.value),
+            Some(_) => {
+                if let Ok(mut entries) = self.maintainer_entries.write() {
+                    entries.remove(key);
+                }
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn insert_maintainers(&self, key: String, value: MaintainersResponse) {
+        if !self.cache_enabled() {
+            return;
+        }
+        if let Ok(mut entries) = self.maintainer_entries.write() {
+            entries.insert(
+                key,
+                CacheEntry {
+                    value,
+                    stored_at: Instant::now(),
+                },
+            );
+            self.evict_if_needed(&mut entries);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum StateServiceError {
     InvalidInput { field: &'static str, value: String },
@@ -240,6 +394,24 @@ where
     })
 }
 
+pub async fn latest_state_cached<S>(
+    storage: &S,
+    cache: &StateCache,
+    pubkey_hex: &str,
+    identifier: &str,
+) -> Result<StateResponse, StateServiceError>
+where
+    S: StateRepository,
+{
+    let key = StateCache::key(pubkey_hex, identifier);
+    if let Some(value) = cache.get_state(&key) {
+        return Ok(value);
+    }
+    let response = latest_state(storage, pubkey_hex, identifier).await?;
+    cache.insert_state(key, response.clone());
+    Ok(response)
+}
+
 pub async fn resolve_maintainers<S>(
     storage: &S,
     pubkey_hex: &str,
@@ -292,14 +464,36 @@ where
     })
 }
 
+pub async fn resolve_maintainers_cached<S>(
+    storage: &S,
+    cache: &StateCache,
+    pubkey_hex: &str,
+    identifier: &str,
+) -> Result<MaintainersResponse, StateServiceError>
+where
+    S: AnnouncementRepository,
+{
+    let key = StateCache::key(pubkey_hex, identifier);
+    if let Some(value) = cache.get_maintainers(&key) {
+        return Ok(value);
+    }
+    let response = resolve_maintainers(storage, pubkey_hex, identifier).await?;
+    cache.insert_maintainers(key, response.clone());
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
+    use super::StateCache;
+    use super::StateCacheConfig;
     use super::StateConfig;
     use super::StateServiceError;
     use super::StorageConfigError;
     use super::latest_state;
+    use super::latest_state_cached;
     use super::resolve_maintainers;
+    use super::resolve_maintainers_cached;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
     use gittree_storage::AnnouncementRepository;
@@ -308,6 +502,7 @@ mod tests {
     use gittree_storage::StateRepository;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -466,5 +661,76 @@ mod tests {
             response.maintainers,
             vec!["11".repeat(32), "22".repeat(32), "33".repeat(32)]
         );
+    }
+
+    #[tokio::test]
+    async fn cache_returns_state_response() {
+        let repo = InMemoryRepositories::default();
+        let cache = StateCache::new(StateCacheConfig::new(None, 10));
+        let mut state_map = HashMap::new();
+        state_map.insert("refs/heads/main".to_string(), "a".repeat(40));
+        state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+        let record =
+            gittree_storage::RepoStateRecord::new(&"11".repeat(32), &"22".repeat(32), 100, &state)
+                .expect("record");
+        repo.insert_state(record).await.expect("insert");
+
+        let first = latest_state_cached(&repo, &cache, &"22".repeat(32), "repo")
+            .await
+            .expect("first");
+        let second = latest_state_cached(&repo, &cache, &"22".repeat(32), "repo")
+            .await
+            .expect("second");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cache_respects_ttl() {
+        let cache = StateCache::new(StateCacheConfig::new(Some(Duration::from_millis(1)), 10));
+        let response = super::StateResponse {
+            event_id: "aa".to_string(),
+            pubkey: "bb".to_string(),
+            identifier: "repo".to_string(),
+            created_at: 1,
+            state: HashMap::new(),
+        };
+        let key = StateCache::key("bb", "repo");
+        cache.insert_state(key.clone(), response);
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(cache.get_state(&key).is_none());
+    }
+
+    #[tokio::test]
+    async fn cache_returns_maintainers_response() {
+        let repo = InMemoryRepositories::default();
+        let cache = StateCache::new(StateCacheConfig::new(None, 10));
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &"11".repeat(32), 10, &announcement)
+                .expect("record");
+        repo.insert_announcement(record).await.expect("insert root");
+
+        let first = resolve_maintainers_cached(&repo, &cache, &"11".repeat(32), "repo")
+            .await
+            .expect("first");
+        let second = resolve_maintainers_cached(&repo, &cache, &"11".repeat(32), "repo")
+            .await
+            .expect("second");
+        assert_eq!(first, second);
     }
 }
