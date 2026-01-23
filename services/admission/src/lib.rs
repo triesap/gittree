@@ -1,6 +1,8 @@
 use gittree_config::{ConfigError, ServicesConfig};
+use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{CoreError, EventFilter};
 use gittree_observability::ObservabilityError;
+use gittree_storage::{AnnouncementRepository, StateRepository, StorageError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionConfig {
@@ -161,6 +163,86 @@ pub fn evaluate_request(request: &AdmissionRequest) -> Result<AdmissionDecision,
     })
 }
 
+pub async fn evaluate_request_with_storage<S>(
+    request: &AdmissionRequest,
+    storage: &S,
+) -> Result<AdmissionDecision, AdmissionError>
+where
+    S: AnnouncementRepository + StateRepository,
+{
+    let decision = evaluate_request(request)?;
+    let AdmissionDecision::RequiresRelatedEvents { filters } = decision else {
+        return Ok(decision);
+    };
+
+    let address =
+        repo_address_from_filters(&filters).or_else(|| repo_address_from_tags(&request.tags).ok());
+    let Some(address) = address else {
+        return Ok(AdmissionDecision::Reject {
+            reason: "missing repo address for related event checks".to_string(),
+        });
+    };
+
+    match repo_exists(storage, &address).await {
+        Ok(true) => Ok(AdmissionDecision::RequiresRelatedEvents { filters }),
+        Ok(false) => Ok(AdmissionDecision::Reject {
+            reason: "repository not found for related event checks".to_string(),
+        }),
+        Err(err) => Ok(AdmissionDecision::Reject {
+            reason: format!("storage error: {err}"),
+        }),
+    }
+}
+
+fn repo_address_from_tags(tags: &[Vec<String>]) -> Result<RepoAddress, CoreError> {
+    for tag in tags {
+        let Some((kind, rest)) = tag.split_first() else {
+            continue;
+        };
+        if kind == "a" || kind == "A" {
+            let Some(value) = rest.first() else {
+                return Err(CoreError::InvalidTag {
+                    tag: "a",
+                    value: String::new(),
+                });
+            };
+            return RepoAddress::parse(value);
+        }
+    }
+    Err(CoreError::MissingField("a"))
+}
+
+fn repo_address_from_filters(filters: &[EventFilter]) -> Option<RepoAddress> {
+    for filter in filters {
+        if let Some(addresses) = filter.tags.get("a") {
+            for value in addresses {
+                if let Ok(address) = RepoAddress::parse(value) {
+                    return Some(address);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn repo_exists<S>(storage: &S, address: &RepoAddress) -> Result<bool, StorageError>
+where
+    S: AnnouncementRepository + StateRepository,
+{
+    let pubkey = hex::decode(&address.pubkey).map_err(|_| StorageError::InvalidHex {
+        field: "pubkey",
+        value: address.pubkey.clone(),
+    })?;
+    let announcement = storage
+        .latest_announcement(&pubkey, &address.identifier)
+        .await?;
+    if announcement.is_some() {
+        return Ok(true);
+    }
+    let state = storage.latest_state(&pubkey, &address.identifier).await?;
+    Ok(state.is_some())
+}
+
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -200,9 +282,14 @@ mod tests {
     use super::AdmissionDecision;
     use super::AdmissionRequest;
     use super::evaluate_request;
+    use super::evaluate_request_with_storage;
+    use async_trait::async_trait;
     use gittree_config::ServicesConfig;
     use gittree_core::EventFilter;
+    use gittree_core::RepoAnnouncement;
     use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE};
+    use gittree_storage::{AnnouncementRepository, StateRepository, StorageError};
+    use gittree_storage::{InMemoryRepositories, RepoAnnouncementRecord};
 
     #[test]
     fn config_loads_from_env() {
@@ -316,5 +403,153 @@ mod tests {
         .expect("request");
         let err = evaluate_request(&request).unwrap_err();
         assert!(matches!(err, super::AdmissionError::Request(_)));
+    }
+
+    fn hex_32(byte: u8) -> String {
+        format!("{:02x}", byte).repeat(32)
+    }
+
+    fn sample_announcement(identifier: &str) -> RepoAnnouncement {
+        RepoAnnouncement {
+            identifier: identifier.to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_integration_rejects_missing_repo() {
+        let storage = InMemoryRepositories::new();
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("relay".to_string()),
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage(&request, &storage)
+            .await
+            .expect("decision");
+        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_keeps_related_when_repo_exists() {
+        let storage = InMemoryRepositories::new();
+        let pubkey = hex_32(0x11);
+        let event_id = hex_32(0x22);
+        let announcement = sample_announcement("repo");
+        let record =
+            RepoAnnouncementRecord::new(&event_id, &pubkey, 10, &announcement).expect("record");
+        storage.insert_announcement(record).await.expect("insert");
+
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("relay".to_string()),
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage(&request, &storage)
+            .await
+            .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[derive(Debug)]
+    struct FailingStorage;
+
+    #[async_trait]
+    impl AnnouncementRepository for FailingStorage {
+        async fn insert_announcement(
+            &self,
+            _record: RepoAnnouncementRecord,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Internal {
+                message: "fail".to_string(),
+            })
+        }
+
+        async fn list_announcements(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Vec<RepoAnnouncementRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "fail".to_string(),
+            })
+        }
+
+        async fn latest_announcement(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoAnnouncementRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "fail".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl StateRepository for FailingStorage {
+        async fn insert_state(
+            &self,
+            _record: gittree_storage::RepoStateRecord,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Internal {
+                message: "fail".to_string(),
+            })
+        }
+
+        async fn latest_state(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<gittree_storage::RepoStateRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "fail".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_integration_rejects_on_error() {
+        let storage = FailingStorage;
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("relay".to_string()),
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage(&request, &storage)
+            .await
+            .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason } if reason.contains("storage error")
+        ));
     }
 }

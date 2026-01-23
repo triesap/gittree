@@ -504,9 +504,13 @@ dependencies = [
 name = "gittree-admission"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
+ "gittree-storage",
+ "hex",
+ "tokio",
  "tracing",
 ]
 
