@@ -1,0 +1,9 @@
+[package]
+name = "gittree-admission"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gittree-config = { path = "../../crates/config" }
+gittree-observability = { path = "../../crates/observability" }
+tracing = "0.1"

@@ -4,6 +4,7 @@ members = [
   "crates/observability",
   "crates/core",
   "crates/storage",
+  "services/admission",
 ]
 resolver = "2"
 

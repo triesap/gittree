@@ -501,6 +501,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-admission"
+version = "0.1.0"
+dependencies = [
+ "gittree-config",
+ "gittree-observability",
+ "tracing",
+]
+
+[[package]]
 name = "gittree-config"
 version = "0.1.0"
 dependencies = [
