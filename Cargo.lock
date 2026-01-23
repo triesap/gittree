@@ -527,10 +527,12 @@ dependencies = [
 name = "gittree-storage"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "gittree-core",
  "hex",
  "serde_json",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -1939,6 +1941,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2 0.6.1",
+ "tokio-macros",
  "windows-sys 0.61.2",
 ]
 
@@ -1950,6 +1953,17 @@ checksum = "0bd86198d9ee903fedd2f9a2e72014287c0d9167e4ae43b5853007205dda1b76"
 dependencies = [
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af407857209536a95c8e56f8231ef2c2e2aff839b22e07a1ffcbc617e9db9fa5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
