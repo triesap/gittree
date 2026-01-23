@@ -1,7 +1,7 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
 use gittree_storage::StorageConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -392,6 +392,93 @@ fn run_with_timeout(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SyncScheduleConfig {
+    pub interval: Duration,
+    pub max_backoff: Duration,
+    pub max_concurrent: usize,
+}
+
+impl Default for SyncScheduleConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(60),
+            max_backoff: Duration::from_secs(300),
+            max_concurrent: 4,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SyncScheduler {
+    config: SyncScheduleConfig,
+    failure_streak: u32,
+    limiter: SyncLimiter,
+}
+
+impl SyncScheduler {
+    pub fn new(config: SyncScheduleConfig) -> Self {
+        let limiter = SyncLimiter::new(config.max_concurrent);
+        Self {
+            config,
+            failure_streak: 0,
+            limiter,
+        }
+    }
+
+    pub fn next_delay(&mut self, last_success: bool) -> Duration {
+        if last_success {
+            self.failure_streak = 0;
+            return self.config.interval;
+        }
+
+        self.failure_streak = self.failure_streak.saturating_add(1);
+        let base = self.config.interval.as_secs_f64();
+        let multiplier = 2f64.powi(self.failure_streak as i32);
+        let backoff = base * multiplier;
+        let capped = backoff.min(self.config.max_backoff.as_secs_f64());
+        Duration::from_secs_f64(capped)
+    }
+
+    pub fn try_start_repo(&mut self, repo_key: &str) -> bool {
+        self.limiter.try_start(repo_key)
+    }
+
+    pub fn finish_repo(&mut self, repo_key: &str) {
+        self.limiter.finish(repo_key);
+    }
+}
+
+#[derive(Debug)]
+struct SyncLimiter {
+    max_concurrent: usize,
+    active: HashSet<String>,
+}
+
+impl SyncLimiter {
+    fn new(max_concurrent: usize) -> Self {
+        Self {
+            max_concurrent: max_concurrent.max(1),
+            active: HashSet::new(),
+        }
+    }
+
+    fn try_start(&mut self, repo_key: &str) -> bool {
+        if self.active.contains(repo_key) {
+            return false;
+        }
+        if self.active.len() >= self.max_concurrent {
+            return false;
+        }
+        self.active.insert(repo_key.to_string());
+        true
+    }
+
+    fn finish(&mut self, repo_key: &str) {
+        self.active.remove(repo_key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
@@ -401,6 +488,8 @@ mod tests {
     use super::RefUpdatePlan;
     use super::SyncConfig;
     use super::SyncPlan;
+    use super::SyncScheduleConfig;
+    use super::SyncScheduler;
     use super::build_sync_plan;
     use super::execute_sync_plan;
     use gittree_core::NostrEvent;
@@ -592,5 +681,36 @@ mod tests {
                 error: None,
             }]
         );
+    }
+
+    #[test]
+    fn scheduler_backoff_increases_and_caps() {
+        let mut scheduler = SyncScheduler::new(SyncScheduleConfig {
+            interval: std::time::Duration::from_secs(10),
+            max_backoff: std::time::Duration::from_secs(25),
+            max_concurrent: 2,
+        });
+        let first = scheduler.next_delay(false);
+        let second = scheduler.next_delay(false);
+        let third = scheduler.next_delay(false);
+        assert!(first >= std::time::Duration::from_secs(10));
+        assert!(second > first);
+        assert_eq!(third, std::time::Duration::from_secs(25));
+        let reset = scheduler.next_delay(true);
+        assert_eq!(reset, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn scheduler_limits_concurrency_per_repo() {
+        let mut scheduler = SyncScheduler::new(SyncScheduleConfig {
+            interval: std::time::Duration::from_secs(1),
+            max_backoff: std::time::Duration::from_secs(5),
+            max_concurrent: 1,
+        });
+        assert!(scheduler.try_start_repo("repo-a"));
+        assert!(!scheduler.try_start_repo("repo-a"));
+        assert!(!scheduler.try_start_repo("repo-b"));
+        scheduler.finish_repo("repo-a");
+        assert!(scheduler.try_start_repo("repo-b"));
     }
 }
