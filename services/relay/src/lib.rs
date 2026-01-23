@@ -1,7 +1,7 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::RelayInfoDocument;
 use gittree_core::nip11::RelayLimitation;
-use gittree_observability::ObservabilityError;
+use gittree_observability::{ObservabilityError, ObservabilityHandle};
 use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, StorageError};
 
 mod admission_client;
@@ -157,13 +157,13 @@ impl std::error::Error for RelayError {
 
 pub type RelayRepositories = CachedRepositories<PostgresRepositories>;
 
-pub fn init_observability() -> Result<(), RelayError> {
+pub fn init_observability() -> Result<ObservabilityHandle, RelayError> {
     let config = gittree_observability::ObservabilityConfig {
         service_name: "gittree-relay".to_string(),
         ..gittree_observability::ObservabilityConfig::default()
     };
-    gittree_observability::init(&config).map_err(RelayError::Observability)?;
-    Ok(())
+    let handle = gittree_observability::init(&config).map_err(RelayError::Observability)?;
+    Ok(handle)
 }
 
 pub fn build_repositories(config: &RelayConfig) -> Result<RelayRepositories, RelayError> {
@@ -229,14 +229,18 @@ pub fn build_nip11_document(config: &RelayConfig) -> RelayInfoDocument {
 mod tests {
     use super::ENV_STORAGE_APP_NAME;
     use super::ENV_STORAGE_READ_URL;
+    use super::ObservabilityHandle;
     use super::RelayConfig;
     use super::RelayError;
     use super::StorageConfigError;
     use super::build_nip11_document;
     use super::build_repositories;
+    use super::init_observability;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -337,5 +341,11 @@ mod tests {
 
         let err = build_repositories(&config).unwrap_err();
         assert!(matches!(err, RelayError::Storage(_)));
+    }
+
+    #[test]
+    fn observability_init_returns_registry() {
+        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        assert!(handle.prometheus_registry().is_some());
     }
 }

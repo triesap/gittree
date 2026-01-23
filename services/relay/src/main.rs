@@ -9,7 +9,7 @@ fn main() {
 
 fn run() -> Result<(), RelayError> {
     let config = RelayConfig::from_env().map_err(RelayError::Config)?;
-    init_observability()?;
+    let _observability = init_observability()?;
     tracing::info!(bind = %config.bind, "relay service configured");
     Ok(())
 }
