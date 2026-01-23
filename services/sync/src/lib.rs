@@ -2,6 +2,8 @@ use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
 use gittree_storage::StorageConfig;
 use std::collections::HashMap;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -193,12 +195,214 @@ pub fn build_sync_plan(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    pub remote_results: Vec<RemoteFetchResult>,
+    pub update_results: Vec<RefChangeResult>,
+    pub delete_results: Vec<RefChangeResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFetchResult {
+    pub url: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefChangeResult {
+    pub reference: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+pub trait GitExecutor {
+    fn fetch(&self, repo_path: &Path, remote: &str, timeout: Duration) -> Result<(), GitExecError>;
+    fn update_ref(
+        &self,
+        repo_path: &Path,
+        reference: &str,
+        target: &str,
+    ) -> Result<(), GitExecError>;
+    fn delete_ref(&self, repo_path: &Path, reference: &str) -> Result<(), GitExecError>;
+}
+
+pub struct CommandGitExecutor;
+
+impl GitExecutor for CommandGitExecutor {
+    fn fetch(&self, repo_path: &Path, remote: &str, timeout: Duration) -> Result<(), GitExecError> {
+        let repo_path = path_to_str(repo_path)?;
+        let mut command = std::process::Command::new("git");
+        command
+            .arg("-C")
+            .arg(repo_path)
+            .arg("fetch")
+            .arg(remote)
+            .arg("--prune");
+        run_with_timeout(command, timeout)
+    }
+
+    fn update_ref(
+        &self,
+        repo_path: &Path,
+        reference: &str,
+        target: &str,
+    ) -> Result<(), GitExecError> {
+        let repo_path = path_to_str(repo_path)?;
+        let mut command = std::process::Command::new("git");
+        command
+            .arg("-C")
+            .arg(repo_path)
+            .arg("update-ref")
+            .arg(reference)
+            .arg(target);
+        run_with_timeout(command, Duration::from_secs(5))
+    }
+
+    fn delete_ref(&self, repo_path: &Path, reference: &str) -> Result<(), GitExecError> {
+        let repo_path = path_to_str(repo_path)?;
+        let mut command = std::process::Command::new("git");
+        command
+            .arg("-C")
+            .arg(repo_path)
+            .arg("update-ref")
+            .arg("-d")
+            .arg(reference);
+        run_with_timeout(command, Duration::from_secs(5))
+    }
+}
+
+#[derive(Debug)]
+pub enum GitExecError {
+    Io(std::io::Error),
+    Timeout,
+    InvalidPath(String),
+    CommandFailed(String),
+}
+
+impl std::fmt::Display for GitExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitExecError::Io(err) => write!(f, "git io error: {err}"),
+            GitExecError::Timeout => write!(f, "git command timed out"),
+            GitExecError::InvalidPath(message) => write!(f, "{message}"),
+            GitExecError::CommandFailed(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for GitExecError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GitExecError::Io(err) => Some(err),
+            GitExecError::Timeout => None,
+            GitExecError::InvalidPath(_) => None,
+            GitExecError::CommandFailed(_) => None,
+        }
+    }
+}
+
+pub fn execute_sync_plan<E: GitExecutor>(
+    executor: &E,
+    repo_path: &Path,
+    plan: &SyncPlan,
+    timeout: Duration,
+) -> SyncReport {
+    let mut remote_results = Vec::new();
+    for remote in &plan.clone_urls {
+        match executor.fetch(repo_path, remote, timeout) {
+            Ok(()) => remote_results.push(RemoteFetchResult {
+                url: remote.clone(),
+                success: true,
+                error: None,
+            }),
+            Err(err) => remote_results.push(RemoteFetchResult {
+                url: remote.clone(),
+                success: false,
+                error: Some(err.to_string()),
+            }),
+        }
+    }
+
+    let mut update_results = Vec::new();
+    for update in &plan.updates {
+        match executor.update_ref(repo_path, &update.reference, &update.target) {
+            Ok(()) => update_results.push(RefChangeResult {
+                reference: update.reference.clone(),
+                success: true,
+                error: None,
+            }),
+            Err(err) => update_results.push(RefChangeResult {
+                reference: update.reference.clone(),
+                success: false,
+                error: Some(err.to_string()),
+            }),
+        }
+    }
+
+    let mut delete_results = Vec::new();
+    for reference in &plan.deletions {
+        match executor.delete_ref(repo_path, reference) {
+            Ok(()) => delete_results.push(RefChangeResult {
+                reference: reference.clone(),
+                success: true,
+                error: None,
+            }),
+            Err(err) => delete_results.push(RefChangeResult {
+                reference: reference.clone(),
+                success: false,
+                error: Some(err.to_string()),
+            }),
+        }
+    }
+
+    SyncReport {
+        remote_results,
+        update_results,
+        delete_results,
+    }
+}
+
+fn path_to_str(path: &Path) -> Result<&str, GitExecError> {
+    path.to_str()
+        .ok_or_else(|| GitExecError::InvalidPath("repo path is not utf-8".to_string()))
+}
+
+fn run_with_timeout(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Result<(), GitExecError> {
+    let mut child = command.spawn().map_err(GitExecError::Io)?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(GitExecError::Io)? {
+            if status.success() {
+                return Ok(());
+            }
+            return Err(GitExecError::CommandFailed(format!(
+                "git command failed with status {status}"
+            )));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GitExecError::Timeout);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
+    use super::GitExecError;
+    use super::GitExecutor;
+    use super::RefChangeResult;
     use super::RefUpdatePlan;
     use super::SyncConfig;
+    use super::SyncPlan;
     use super::build_sync_plan;
+    use super::execute_sync_plan;
     use gittree_core::NostrEvent;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
@@ -290,5 +494,103 @@ mod tests {
             reference: "refs/heads/main".to_string(),
             target: "11".repeat(20),
         }));
+    }
+
+    struct MockGitExecutor {
+        fetch_fail: Vec<String>,
+        update_fail: Vec<String>,
+        delete_fail: Vec<String>,
+    }
+
+    impl GitExecutor for MockGitExecutor {
+        fn fetch(
+            &self,
+            _repo_path: &std::path::Path,
+            remote: &str,
+            _timeout: std::time::Duration,
+        ) -> Result<(), GitExecError> {
+            if self.fetch_fail.iter().any(|value| value == remote) {
+                Err(GitExecError::CommandFailed("fetch failed".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn update_ref(
+            &self,
+            _repo_path: &std::path::Path,
+            reference: &str,
+            _target: &str,
+        ) -> Result<(), GitExecError> {
+            if self.update_fail.iter().any(|value| value == reference) {
+                Err(GitExecError::CommandFailed("update failed".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn delete_ref(
+            &self,
+            _repo_path: &std::path::Path,
+            reference: &str,
+        ) -> Result<(), GitExecError> {
+            if self.delete_fail.iter().any(|value| value == reference) {
+                Err(GitExecError::CommandFailed("delete failed".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn executor_records_remote_errors() {
+        let plan = SyncPlan {
+            identifier: "repo".to_string(),
+            clone_urls: vec!["https://good".to_string(), "https://bad".to_string()],
+            updates: vec![RefUpdatePlan {
+                reference: "refs/heads/main".to_string(),
+                target: "11".repeat(20),
+            }],
+            deletions: vec!["refs/heads/old".to_string()],
+        };
+        let executor = MockGitExecutor {
+            fetch_fail: vec!["https://bad".to_string()],
+            update_fail: vec!["refs/heads/main".to_string()],
+            delete_fail: Vec::new(),
+        };
+        let report = execute_sync_plan(
+            &executor,
+            std::path::Path::new("/tmp"),
+            &plan,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(
+            report
+                .remote_results
+                .iter()
+                .any(|result| result.url == "https://bad" && !result.success)
+        );
+        assert!(
+            report
+                .remote_results
+                .iter()
+                .any(|result| result.url == "https://good" && result.success)
+        );
+        assert_eq!(
+            report.update_results,
+            vec![RefChangeResult {
+                reference: "refs/heads/main".to_string(),
+                success: false,
+                error: Some("update failed".to_string()),
+            }]
+        );
+        assert_eq!(
+            report.delete_results,
+            vec![RefChangeResult {
+                reference: "refs/heads/old".to_string(),
+                success: true,
+                error: None,
+            }]
+        );
     }
 }
