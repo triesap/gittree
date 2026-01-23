@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 gittree-config = { path = "../../crates/config" }
+gittree-core = { path = "../../crates/core" }
 url = "2"

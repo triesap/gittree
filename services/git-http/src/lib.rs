@@ -1,4 +1,5 @@
 use gittree_config::{ConfigError, ServicesConfig};
+use std::path::Path;
 use std::time::Duration;
 
 const ENV_UPSTREAM_URL: &str = "GITTREE_GIT_HTTP_UPSTREAM_URL";
@@ -111,7 +112,30 @@ impl<'a> GitHttpRequest<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHttpRoute {
+    InfoRefs {
+        repo: NormalizedRepo,
+        service: GitHttpService,
+    },
+    UploadPack {
+        repo: NormalizedRepo,
+    },
+    ReceivePack {
+        repo: NormalizedRepo,
+    },
     NotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitHttpService {
+    UploadPack,
+    ReceivePack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedRepo {
+    pub npub: String,
+    pub identifier: String,
+    pub canonical_path: String,
 }
 
 #[derive(Debug, Default)]
@@ -122,9 +146,95 @@ impl GitHttpRouter {
         Self
     }
 
-    pub fn route(&self, _request: &GitHttpRequest<'_>) -> GitHttpRoute {
-        GitHttpRoute::NotFound
+    pub fn route(&self, request: &GitHttpRequest<'_>) -> GitHttpRoute {
+        route_request(request)
     }
+}
+
+pub fn route_request(request: &GitHttpRequest<'_>) -> GitHttpRoute {
+    let (npub, repo_segment, rest) = match split_repo_segments(request.path) {
+        Some(parts) => parts,
+        None => return GitHttpRoute::NotFound,
+    };
+    if !repo_segment.ends_with(".git") {
+        return GitHttpRoute::NotFound;
+    }
+    let repo = match normalize_repo_path(&npub, &repo_segment) {
+        Ok(repo) => repo,
+        Err(_) => return GitHttpRoute::NotFound,
+    };
+    if rest.len() == 2 && rest[0] == "info" && rest[1] == "refs" && is_get(request.method) {
+        let service = match parse_service(request.query) {
+            Ok(service) => service,
+            Err(_) => return GitHttpRoute::NotFound,
+        };
+        return GitHttpRoute::InfoRefs { repo, service };
+    }
+    if rest.len() == 1 && rest[0] == "git-upload-pack" && is_post(request.method) {
+        return GitHttpRoute::UploadPack { repo };
+    }
+    if rest.len() == 1 && rest[0] == "git-receive-pack" && is_post(request.method) {
+        return GitHttpRoute::ReceivePack { repo };
+    }
+    GitHttpRoute::NotFound
+}
+
+fn split_repo_segments(path: &str) -> Option<(String, String, Vec<String>)> {
+    let trimmed = path.trim_start_matches('/');
+    let mut parts = trimmed.split('/').filter(|segment| !segment.is_empty());
+    let npub = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    let rest = parts.map(|segment| segment.to_string()).collect::<Vec<_>>();
+    if rest.is_empty() {
+        return None;
+    }
+    Some((npub, repo, rest))
+}
+
+fn normalize_repo_path(
+    npub: &str,
+    repo_segment: &str,
+) -> Result<NormalizedRepo, GitHttpRouteError> {
+    let path = Path::new("/").join(npub).join(repo_segment);
+    let parsed = gittree_core::parse_repo_path(&path)
+        .map_err(|err| GitHttpRouteError::InvalidRepo(err.to_string()))?;
+    Ok(NormalizedRepo {
+        canonical_path: format!("/{}/{}.git", parsed.npub, parsed.identifier),
+        identifier: parsed.identifier,
+        npub: parsed.npub,
+    })
+}
+
+fn parse_service(query: Option<&str>) -> Result<GitHttpService, GitHttpRouteError> {
+    let query = query.ok_or(GitHttpRouteError::MissingService)?;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        if parts.next() != Some("service") {
+            continue;
+        }
+        let value = parts.next().unwrap_or("");
+        return match value {
+            "git-upload-pack" => Ok(GitHttpService::UploadPack),
+            "git-receive-pack" => Ok(GitHttpService::ReceivePack),
+            _ => Err(GitHttpRouteError::InvalidService(value.to_string())),
+        };
+    }
+    Err(GitHttpRouteError::MissingService)
+}
+
+fn is_get(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
+}
+
+fn is_post(method: &str) -> bool {
+    method.eq_ignore_ascii_case("POST")
+}
+
+#[derive(Debug)]
+pub enum GitHttpRouteError {
+    InvalidRepo(String),
+    MissingService,
+    InvalidService(String),
 }
 
 #[cfg(test)]
@@ -132,6 +242,10 @@ mod tests {
     use super::ENV_TIMEOUT_SECS;
     use super::ENV_UPSTREAM_URL;
     use super::GitHttpConfig;
+    use super::GitHttpRequest;
+    use super::GitHttpRoute;
+    use super::GitHttpService;
+    use super::route_request;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -167,5 +281,44 @@ mod tests {
                 });
             });
         });
+    }
+
+    #[test]
+    fn route_request_handles_info_refs() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
+            Some("service=git-upload-pack"),
+        );
+        let route = route_request(&request);
+        assert!(matches!(
+            route,
+            GitHttpRoute::InfoRefs {
+                service: GitHttpService::UploadPack,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn route_request_handles_receive_pack() {
+        let request = GitHttpRequest::new(
+            "POST",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/git-receive-pack",
+            None,
+        );
+        let route = route_request(&request);
+        assert!(matches!(route, GitHttpRoute::ReceivePack { .. }));
+    }
+
+    #[test]
+    fn route_request_rejects_missing_git_suffix() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo/info/refs",
+            Some("service=git-upload-pack"),
+        );
+        let route = route_request(&request);
+        assert!(matches!(route, GitHttpRoute::NotFound));
     }
 }
