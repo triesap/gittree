@@ -1,4 +1,6 @@
-use crate::nip34_common::{is_hex_hash, is_hex_len, validate_repo_address, HEX_EVENT_ID_LEN, HEX_PUBKEY_LEN};
+use crate::nip34_common::{
+    HEX_EVENT_ID_LEN, HEX_PUBKEY_LEN, is_hex_hash, is_hex_len, validate_repo_address,
+};
 use crate::tags::{extend_unique, join_tag_values, push_unique};
 use crate::{CoreError, Result};
 

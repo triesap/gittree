@@ -1,4 +1,6 @@
-use crate::nip34_common::{is_hex_hash, is_hex_len, validate_repo_address, HEX_EVENT_ID_LEN, HEX_PUBKEY_LEN};
+use crate::nip34_common::{
+    HEX_EVENT_ID_LEN, HEX_PUBKEY_LEN, is_hex_hash, is_hex_len, validate_repo_address,
+};
 use crate::tags::push_unique;
 use crate::{CoreError, Result};
 
@@ -82,9 +84,7 @@ impl Patch {
                 [t, value, ..] if t == "r" => push_unique(&mut repo_refs, value),
                 [t, value, ..] if t == "p" => push_unique(&mut mentions, value),
                 [t, value, ..] if t == "t" && value == "root" => is_root = true,
-                [t, value, ..] if t == "t" && value == "root-revision" => {
-                    is_root_revision = true
-                }
+                [t, value, ..] if t == "t" && value == "root-revision" => is_root_revision = true,
                 [t, value, ..] if t == "commit" => commit = Some(value.clone()),
                 [t, value, ..] if t == "parent-commit" => parent_commit = Some(value.clone()),
                 [t, value, ..] if t == "commit-pgp-sig" => commit_pgp_sig = Some(value.clone()),

@@ -61,7 +61,8 @@ mod tests {
 
     #[test]
     fn parse_nostr_ref_rejects_extra_path() {
-        let name = "refs/nostr/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/extra";
+        let name =
+            "refs/nostr/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/extra";
         assert!(parse_nostr_ref(name).is_err());
         assert!(!is_nostr_ref_name(name));
     }

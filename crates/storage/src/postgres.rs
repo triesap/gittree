@@ -1,5 +1,5 @@
-use crate::{RepoAnnouncementRecord, RepoStateRecord, StorageError};
 use crate::repositories::{AnnouncementRepository, StateRepository};
+use crate::{RepoAnnouncementRecord, RepoStateRecord, StorageError};
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
@@ -15,11 +15,9 @@ impl PostgresRepositories {
     }
 
     fn to_offset_datetime(created_at: i64) -> Result<OffsetDateTime, StorageError> {
-        OffsetDateTime::from_unix_timestamp(created_at).map_err(|_| {
-            StorageError::InvalidField {
-                field: "created_at",
-                value: created_at.to_string(),
-            }
+        OffsetDateTime::from_unix_timestamp(created_at).map_err(|_| StorageError::InvalidField {
+            field: "created_at",
+            value: created_at.to_string(),
         })
     }
 
@@ -257,7 +255,10 @@ mod tests {
         let err = PostgresRepositories::to_offset_datetime(i64::MIN).unwrap_err();
         assert!(matches!(
             err,
-            StorageError::InvalidField { field: "created_at", .. }
+            StorageError::InvalidField {
+                field: "created_at",
+                ..
+            }
         ));
     }
 }

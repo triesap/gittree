@@ -49,8 +49,7 @@ impl RepoAnnouncement {
             }
         }
 
-        let identifier =
-            identifier.ok_or(CoreError::MissingField("d"))?;
+        let identifier = identifier.ok_or(CoreError::MissingField("d"))?;
 
         Ok(Self {
             identifier,
@@ -372,8 +371,7 @@ mod tests {
     use super::RepoState;
     use std::collections::HashMap;
 
-    const SAMPLE_NPUB: &str =
-        "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+    const SAMPLE_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
     #[test]
     fn announcement_round_trips_tags() {
@@ -387,7 +385,9 @@ mod tests {
             relays: vec!["wss://relay.example".to_string()],
             blossoms: vec!["https://blossom.example".to_string()],
             hashtags: vec!["nostr".to_string(), "git".to_string()],
-            maintainers: vec!["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()],
+            maintainers: vec![
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ],
         };
 
         let tags = announcement.to_tags();
@@ -497,7 +497,10 @@ mod tests {
 
         assert!(matches!(
             announcement.validate(),
-            Err(crate::CoreError::InvalidField { field: "maintainers", .. })
+            Err(crate::CoreError::InvalidField {
+                field: "maintainers",
+                ..
+            })
         ));
     }
 
@@ -508,9 +511,7 @@ mod tests {
             name: None,
             description: None,
             root_commit: None,
-            clone: vec![
-                "https://gittr.ee/npub1example/repo.git".to_string(),
-            ],
+            clone: vec!["https://gittr.ee/npub1example/repo.git".to_string()],
             web: Vec::new(),
             relays: vec!["wss://gittr.ee".to_string()],
             blossoms: Vec::new(),
@@ -531,9 +532,7 @@ mod tests {
             name: None,
             description: None,
             root_commit: None,
-            clone: vec![
-                "https://gittr.ee/npub1example/repo.git".to_string(),
-            ],
+            clone: vec!["https://gittr.ee/npub1example/repo.git".to_string()],
             web: Vec::new(),
             relays: Vec::new(),
             blossoms: Vec::new(),
@@ -578,10 +577,7 @@ mod tests {
             name: None,
             description: None,
             root_commit: None,
-            clone: vec![format!(
-                "https://gittr.ee/{}/repo.git",
-                SAMPLE_NPUB
-            )],
+            clone: vec![format!("https://gittr.ee/{}/repo.git", SAMPLE_NPUB)],
             web: Vec::new(),
             relays: vec!["wss://gittr.ee".to_string()],
             blossoms: Vec::new(),
@@ -600,10 +596,7 @@ mod tests {
             name: None,
             description: None,
             root_commit: None,
-            clone: vec![format!(
-                "https://gittr.ee/{}/repo.git",
-                SAMPLE_NPUB
-            )],
+            clone: vec![format!("https://gittr.ee/{}/repo.git", SAMPLE_NPUB)],
             web: Vec::new(),
             relays: vec!["wss://other.example".to_string()],
             blossoms: Vec::new(),
@@ -622,10 +615,7 @@ mod tests {
             name: None,
             description: None,
             root_commit: None,
-            clone: vec![format!(
-                "https://gittr.ee/{}/other.git",
-                SAMPLE_NPUB
-            )],
+            clone: vec![format!("https://gittr.ee/{}/other.git", SAMPLE_NPUB)],
             web: Vec::new(),
             relays: vec!["wss://gittr.ee".to_string()],
             blossoms: Vec::new(),
@@ -688,10 +678,7 @@ mod tests {
             identifier: "repo".to_string(),
             state,
         };
-        assert_eq!(
-            repo_state.head_ref(),
-            Some("refs/heads/main".to_string())
-        );
+        assert_eq!(repo_state.head_ref(), Some("refs/heads/main".to_string()));
     }
 
     #[test]

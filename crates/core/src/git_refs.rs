@@ -59,12 +59,12 @@ fn resolve_ref_value<'a>(
 
 #[cfg(test)]
 mod tests {
+    use super::StateRefMatch;
     use super::is_branch_ref;
     use super::is_head_ref;
     use super::is_pr_branch_ref;
     use super::is_tag_ref;
     use super::match_state_ref;
-    use super::StateRefMatch;
     use crate::RepoState;
     use std::collections::HashMap;
 

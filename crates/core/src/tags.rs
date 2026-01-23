@@ -7,11 +7,7 @@ pub fn tag_value(tag: &[String]) -> Option<&str> {
 }
 
 pub fn tag_values(tag: &[String]) -> &[String] {
-    if tag.len() <= 1 {
-        &[]
-    } else {
-        &tag[1..]
-    }
+    if tag.len() <= 1 { &[] } else { &tag[1..] }
 }
 
 pub fn collect_tag_values(tags: &[Vec<String>], name: &str) -> Vec<String> {
@@ -97,7 +93,10 @@ mod tests {
     fn join_tag_values_formats_tag() {
         let tag = join_tag_values(
             "relays",
-            &["wss://relay.example".to_string(), "wss://relay.two".to_string()],
+            &[
+                "wss://relay.example".to_string(),
+                "wss://relay.two".to_string(),
+            ],
         );
         assert_eq!(
             tag,

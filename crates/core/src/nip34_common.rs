@@ -71,9 +71,9 @@ pub fn is_hex_len(value: &str, len: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::RepoAddress;
     use super::is_hex_hash;
     use super::is_hex_len;
-    use super::RepoAddress;
     use super::validate_repo_address;
 
     #[test]

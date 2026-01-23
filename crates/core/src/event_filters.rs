@@ -118,8 +118,8 @@ fn related_kinds(kind: u32) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_related_event_filters;
     use super::EventFilter;
+    use super::build_related_event_filters;
     use crate::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE};
     use std::collections::BTreeMap;
 
@@ -179,29 +179,33 @@ mod tests {
         expected.push(pointer_filter.with_limit(1));
 
         let mut ref_filter = EventFilter::new();
-        ref_filter
-            .tags
-            .insert("e".to_string(), vec!["aaaa".to_string(), "eventid".to_string()]);
-        ref_filter
-            .tags
-            .insert("E".to_string(), vec!["aaaa".to_string(), "eventid".to_string()]);
+        ref_filter.tags.insert(
+            "e".to_string(),
+            vec!["aaaa".to_string(), "eventid".to_string()],
+        );
+        ref_filter.tags.insert(
+            "E".to_string(),
+            vec!["aaaa".to_string(), "eventid".to_string()],
+        );
         expected.push(ref_filter.with_limit(1));
 
         let mut address_filter = EventFilter::new();
-        address_filter.tags.insert(
-            "a".to_string(),
-            vec!["30617:other:repo".to_string()],
-        );
-        address_filter.tags.insert(
-            "A".to_string(),
-            vec!["30617:other:repo".to_string()],
-        );
+        address_filter
+            .tags
+            .insert("a".to_string(), vec!["30617:other:repo".to_string()]);
+        address_filter
+            .tags
+            .insert("A".to_string(), vec!["30617:other:repo".to_string()]);
         expected.push(address_filter.with_limit(1));
 
         let mut q_filter = EventFilter::new();
         q_filter.tags.insert(
             "q".to_string(),
-            vec!["30617:other:repo".to_string(), "aaaa".to_string(), "eventid".to_string()],
+            vec![
+                "30617:other:repo".to_string(),
+                "aaaa".to_string(),
+                "eventid".to_string(),
+            ],
         );
         expected.push(q_filter.with_limit(1));
 

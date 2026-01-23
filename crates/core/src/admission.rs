@@ -1,4 +1,4 @@
-use crate::event_filters::{build_related_event_filters, EventFilter};
+use crate::event_filters::{EventFilter, build_related_event_filters};
 use crate::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE};
 use crate::{CoreError, RepoAnnouncement};
 
@@ -43,10 +43,10 @@ pub fn evaluate_admission(
 
 #[cfg(test)]
 mod tests {
-    use super::evaluate_admission;
     use super::AdmissionDecision;
-    use crate::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE};
+    use super::evaluate_admission;
     use crate::RepoAnnouncement;
+    use crate::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE};
 
     #[test]
     fn admission_accepts_state_events() {
@@ -123,27 +123,17 @@ mod tests {
             maintainers: Vec::new(),
         };
         let tags = announcement.to_tags();
-        let decision = evaluate_admission(
-            KIND_GIT_REPO_ANNOUNCEMENT.0,
-            "pubkey",
-            "event",
-            &tags,
-            None,
-        )
-        .expect("decision");
+        let decision =
+            evaluate_admission(KIND_GIT_REPO_ANNOUNCEMENT.0, "pubkey", "event", &tags, None)
+                .expect("decision");
         assert!(matches!(decision, AdmissionDecision::Reject { .. }));
     }
 
     #[test]
     fn admission_requires_related_filters_for_other_kinds() {
-        let decision = evaluate_admission(
-            KIND_GIT_PATCH.0,
-            "pubkey",
-            "eventid",
-            &[],
-            Some("relay"),
-        )
-        .expect("decision");
+        let decision =
+            evaluate_admission(KIND_GIT_PATCH.0, "pubkey", "eventid", &[], Some("relay"))
+                .expect("decision");
         match decision {
             AdmissionDecision::RequiresRelatedEvents { filters } => {
                 assert!(!filters.is_empty());

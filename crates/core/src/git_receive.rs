@@ -1,6 +1,6 @@
-use crate::git_refs::{is_pr_branch_ref, match_state_ref, StateRefMatch};
-use crate::refs::is_nostr_ref_name;
 use crate::RepoState;
+use crate::git_refs::{StateRefMatch, is_pr_branch_ref, match_state_ref};
+use crate::refs::is_nostr_ref_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefUpdate<'a> {
@@ -57,7 +57,10 @@ pub fn evaluate_ref_update(update: &RefUpdate<'_>, state: Option<&RepoState>) ->
     match match_state_ref(update.ref_name, update.new_rev, state) {
         StateRefMatch::Match => UpdateDecision::Accept,
         StateRefMatch::Missing => UpdateDecision::Reject {
-            reason: format!("{ref_name} not found in nostr state event", ref_name = update.ref_name),
+            reason: format!(
+                "{ref_name} not found in nostr state event",
+                ref_name = update.ref_name
+            ),
         },
         StateRefMatch::Mismatch { expected } => UpdateDecision::Reject {
             reason: format!(
@@ -73,10 +76,7 @@ pub fn evaluate_ref_update(update: &RefUpdate<'_>, state: Option<&RepoState>) ->
     }
 }
 
-pub fn evaluate_updates(
-    updates: &[RefUpdate<'_>],
-    state: Option<&RepoState>,
-) -> UpdateDecision {
+pub fn evaluate_updates(updates: &[RefUpdate<'_>], state: Option<&RepoState>) -> UpdateDecision {
     let validated_state = match state {
         Some(state) => {
             if let Err(err) = state.validate() {
@@ -106,10 +106,10 @@ fn short_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::evaluate_ref_update;
-    use super::evaluate_updates;
     use super::RefUpdate;
     use super::UpdateDecision;
+    use super::evaluate_ref_update;
+    use super::evaluate_updates;
     use crate::RepoState;
     use std::collections::HashMap;
 

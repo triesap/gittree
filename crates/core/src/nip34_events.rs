@@ -1,7 +1,8 @@
 use crate::kinds::{
     KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST, KIND_GIT_PULL_REQUEST_UPDATE,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_APPLIED, KIND_GIT_STATUS_CLOSED,
-    KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_USER_GRASP_LIST, NostrKind,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_APPLIED,
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_USER_GRASP_LIST,
+    NostrKind,
 };
 use crate::{
     CoreError, Issue, Patch, PullRequest, PullRequestUpdate, RepoAnnouncement, RepoState,
@@ -23,16 +24,16 @@ pub enum Nip34Event {
 impl Nip34Event {
     pub fn parse(kind: u32, tags: &[Vec<String>]) -> Result<Self, CoreError> {
         match kind {
-            k if k == KIND_GIT_REPO_ANNOUNCEMENT.0 => {
-                Ok(Nip34Event::RepoAnnouncement(RepoAnnouncement::from_tags(tags)?))
-            }
+            k if k == KIND_GIT_REPO_ANNOUNCEMENT.0 => Ok(Nip34Event::RepoAnnouncement(
+                RepoAnnouncement::from_tags(tags)?,
+            )),
             k if k == KIND_GIT_REPO_STATE.0 => {
                 Ok(Nip34Event::RepoState(RepoState::from_tags(tags)?))
             }
             k if k == KIND_GIT_PATCH.0 => Ok(Nip34Event::Patch(Patch::from_tags(tags)?)),
-            k if k == KIND_GIT_PULL_REQUEST.0 => Ok(Nip34Event::PullRequest(
-                PullRequest::from_tags(tags)?,
-            )),
+            k if k == KIND_GIT_PULL_REQUEST.0 => {
+                Ok(Nip34Event::PullRequest(PullRequest::from_tags(tags)?))
+            }
             k if k == KIND_GIT_PULL_REQUEST_UPDATE.0 => Ok(Nip34Event::PullRequestUpdate(
                 PullRequestUpdate::from_tags(tags)?,
             )),
@@ -132,8 +133,7 @@ mod tests {
             maintainers: Vec::new(),
         };
         let tags = announcement.to_tags();
-        let event =
-            Nip34Event::parse(KIND_GIT_REPO_ANNOUNCEMENT.0, &tags).expect("parse");
+        let event = Nip34Event::parse(KIND_GIT_REPO_ANNOUNCEMENT.0, &tags).expect("parse");
         assert_eq!(event.kind(), KIND_GIT_REPO_ANNOUNCEMENT);
         assert!(matches!(event, Nip34Event::RepoAnnouncement(_)));
     }
@@ -191,7 +191,10 @@ mod tests {
     #[test]
     fn rejects_unknown_kind() {
         let err = Nip34Event::parse(9999, &[]).unwrap_err();
-        assert!(matches!(err, crate::CoreError::InvalidField { field: "kind", .. }));
+        assert!(matches!(
+            err,
+            crate::CoreError::InvalidField { field: "kind", .. }
+        ));
     }
 
     #[test]
@@ -209,8 +212,7 @@ mod tests {
             maintainers: Vec::new(),
         };
         let tags = announcement.to_tags();
-        let err =
-            Nip34Event::parse_validated(KIND_GIT_REPO_ANNOUNCEMENT.0, &tags).unwrap_err();
+        let err = Nip34Event::parse_validated(KIND_GIT_REPO_ANNOUNCEMENT.0, &tags).unwrap_err();
         assert!(matches!(err, crate::CoreError::MissingField("clone")));
     }
 

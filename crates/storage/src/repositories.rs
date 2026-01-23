@@ -5,10 +5,8 @@ use std::sync::RwLock;
 
 #[async_trait]
 pub trait AnnouncementRepository: Send + Sync {
-    async fn insert_announcement(
-        &self,
-        record: RepoAnnouncementRecord,
-    ) -> Result<(), StorageError>;
+    async fn insert_announcement(&self, record: RepoAnnouncementRecord)
+    -> Result<(), StorageError>;
     async fn list_announcements(
         &self,
         pubkey: &[u8],
@@ -94,12 +92,9 @@ impl AnnouncementRepository for InMemoryRepositories {
 impl StateRepository for InMemoryRepositories {
     async fn insert_state(&self, record: RepoStateRecord) -> Result<(), StorageError> {
         let key = Self::key(&record.pubkey, &record.identifier);
-        let mut map = self
-            .states
-            .write()
-            .map_err(|_| StorageError::Internal {
-                message: "state store poisoned".to_string(),
-            })?;
+        let mut map = self.states.write().map_err(|_| StorageError::Internal {
+            message: "state store poisoned".to_string(),
+        })?;
         map.entry(key).or_default().push(record);
         Ok(())
     }
@@ -110,12 +105,9 @@ impl StateRepository for InMemoryRepositories {
         identifier: &str,
     ) -> Result<Option<RepoStateRecord>, StorageError> {
         let key = Self::key(pubkey, identifier);
-        let map = self
-            .states
-            .read()
-            .map_err(|_| StorageError::Internal {
-                message: "state store poisoned".to_string(),
-            })?;
+        let map = self.states.read().map_err(|_| StorageError::Internal {
+            message: "state store poisoned".to_string(),
+        })?;
         let mut records = map.get(&key).cloned().unwrap_or_default();
         records.sort_by_key(|record| record.created_at);
         Ok(records.pop())
@@ -188,23 +180,16 @@ mod tests {
         let store = InMemoryRepositories::new();
         let announcement = sample_announcement("repo");
 
-        let older = RepoAnnouncementRecord::new(
-            &hex_32(0x11),
-            &hex_32(0x22),
-            10,
-            &announcement,
-        )
-        .expect("older");
-        let newer = RepoAnnouncementRecord::new(
-            &hex_32(0x11),
-            &hex_32(0x22),
-            20,
-            &announcement,
-        )
-        .expect("newer");
+        let older = RepoAnnouncementRecord::new(&hex_32(0x11), &hex_32(0x22), 10, &announcement)
+            .expect("older");
+        let newer = RepoAnnouncementRecord::new(&hex_32(0x11), &hex_32(0x22), 20, &announcement)
+            .expect("newer");
 
         store.insert_announcement(older).await.expect("insert");
-        store.insert_announcement(newer.clone()).await.expect("insert");
+        store
+            .insert_announcement(newer.clone())
+            .await
+            .expect("insert");
 
         let latest = store
             .latest_announcement(&newer.pubkey, "repo")
@@ -218,10 +203,8 @@ mod tests {
         let store = InMemoryRepositories::new();
         let state = sample_state("repo");
 
-        let older = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 10, &state)
-            .expect("older");
-        let newer = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 20, &state)
-            .expect("newer");
+        let older = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 10, &state).expect("older");
+        let newer = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 20, &state).expect("newer");
 
         store.insert_state(older).await.expect("insert");
         store.insert_state(newer.clone()).await.expect("insert");

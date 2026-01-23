@@ -15,10 +15,7 @@ pub fn parse_repo_path(path: impl AsRef<Path>) -> Result<RepoPath> {
         .and_then(|name| name.to_str())
         .ok_or(CoreError::MissingField("repo_path"))?;
 
-    let identifier = name
-        .strip_suffix(".git")
-        .unwrap_or(name)
-        .to_string();
+    let identifier = name.strip_suffix(".git").unwrap_or(name).to_string();
     if identifier.trim().is_empty() {
         return Err(CoreError::MissingField("identifier"));
     }
@@ -71,8 +68,7 @@ mod tests {
     use super::parse_repo_path;
     use std::path::Path;
 
-    const SAMPLE_NPUB: &str =
-        "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+    const SAMPLE_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
     #[test]
     fn parse_repo_path_handles_git_suffix() {
@@ -88,9 +84,7 @@ mod tests {
 
     #[test]
     fn parse_repo_path_handles_no_git_suffix() {
-        let path = Path::new("/var/lib/gittree")
-            .join(SAMPLE_NPUB)
-            .join("repo");
+        let path = Path::new("/var/lib/gittree").join(SAMPLE_NPUB).join("repo");
         let parsed = parse_repo_path(&path).expect("parse repo path");
         assert_eq!(parsed.identifier, "repo");
     }
@@ -111,9 +105,7 @@ mod tests {
 
     #[test]
     fn parse_repo_path_rejects_empty_identifier() {
-        let path = Path::new("/var/lib/gittree")
-            .join(SAMPLE_NPUB)
-            .join(".git");
+        let path = Path::new("/var/lib/gittree").join(SAMPLE_NPUB).join(".git");
         assert!(parse_repo_path(&path).is_err());
     }
 }

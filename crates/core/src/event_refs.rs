@@ -75,21 +75,20 @@ fn is_addressable_kind(kind: u32) -> bool {
 }
 
 fn find_d_tag(tags: &[Vec<String>]) -> Option<&str> {
-    tags.iter()
-        .find_map(|tag| {
-            if tag.len() > 1 && tag[0] == "d" {
-                Some(tag[1].as_str())
-            } else {
-                None
-            }
-        })
+    tags.iter().find_map(|tag| {
+        if tag.len() > 1 && tag[0] == "d" {
+            Some(tag[1].as_str())
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::EventReferences;
     use super::collect_event_references;
     use super::collect_event_references_with_self;
-    use super::EventReferences;
 
     #[test]
     fn collects_event_and_address_refs() {
@@ -106,7 +105,11 @@ mod tests {
         assert_eq!(
             refs,
             EventReferences {
-                event_ids: vec!["deadbeef".to_string(), "feedface".to_string(), "cafebabe".to_string()],
+                event_ids: vec![
+                    "deadbeef".to_string(),
+                    "feedface".to_string(),
+                    "cafebabe".to_string()
+                ],
                 address_pointers: vec!["30617:pub:repo".to_string(), "30000:pub:other".to_string()],
             }
         );

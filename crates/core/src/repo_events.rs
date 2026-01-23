@@ -133,11 +133,11 @@ pub fn collect_clone_urls(
 
 #[cfg(test)]
 mod tests {
-    use super::collect_maintainers;
+    use super::NostrEvent;
     use super::collect_clone_urls;
+    use super::collect_maintainers;
     use super::find_repo_announcement;
     use super::latest_state_from_maintainers;
-    use super::NostrEvent;
     use crate::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE};
     use crate::{RepoAnnouncement, RepoState};
     use std::collections::HashMap;

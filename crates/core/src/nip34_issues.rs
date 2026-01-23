@@ -1,4 +1,4 @@
-use crate::nip34_common::{is_hex_len, validate_repo_address, HEX_PUBKEY_LEN};
+use crate::nip34_common::{HEX_PUBKEY_LEN, is_hex_len, validate_repo_address};
 use crate::tags::push_unique;
 use crate::{CoreError, Result};
 

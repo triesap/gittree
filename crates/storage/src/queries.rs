@@ -42,6 +42,12 @@ mod tests {
     #[test]
     fn repo_filter_rejects_invalid_hex() {
         let err = RepoFilter::from_hex("zz", "repo").unwrap_err();
-        assert!(matches!(err, StorageError::InvalidHex { field: "pubkey", .. }));
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "pubkey",
+                ..
+            }
+        ));
     }
 }

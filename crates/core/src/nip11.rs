@@ -177,9 +177,6 @@ mod tests {
         };
 
         let value = serde_json::to_value(&doc).expect("serialize nip-11");
-        assert_eq!(
-            value.get("self"),
-            Some(&Value::String("abc".to_string()))
-        );
+        assert_eq!(value.get("self"), Some(&Value::String("abc".to_string())));
     }
 }

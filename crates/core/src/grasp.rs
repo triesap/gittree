@@ -9,12 +9,11 @@ pub fn normalize_grasp_server_url(input: &str) -> Result<String> {
         })?;
 
     if parsed.host_str().is_none() {
-        parsed = url::Url::parse(&format!("https://{input}")).map_err(|_| {
-            CoreError::InvalidField {
+        parsed =
+            url::Url::parse(&format!("https://{input}")).map_err(|_| CoreError::InvalidField {
                 field: "grasp_url",
                 value: input.to_string(),
-            }
-        })?;
+            })?;
     }
 
     let scheme = parsed.scheme();
@@ -119,7 +118,9 @@ pub fn format_grasp_server_url_as_clone_url(
     } else {
         "https://"
     };
-    Ok(format!("{prefix}{grasp_server_url}/{npub}/{identifier}.git"))
+    Ok(format!(
+        "{prefix}{grasp_server_url}/{npub}/{identifier}.git"
+    ))
 }
 
 pub fn format_grasp_server_url_as_blossom_url(url: &str) -> Result<String> {
@@ -148,8 +149,7 @@ fn validate_npub(npub: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    const SAMPLE_NPUB: &str =
-        "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+    const SAMPLE_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
     #[test]
     fn normalize_grasp_server_url_all_checks() -> Result<()> {
@@ -217,11 +217,8 @@ mod tests {
 
     #[test]
     fn format_grasp_server_url_as_clone_url_handles_https() -> Result<()> {
-        let clone = format_grasp_server_url_as_clone_url(
-            "https://gittr.ee",
-            SAMPLE_NPUB,
-            "repo",
-        )?;
+        let clone =
+            format_grasp_server_url_as_clone_url("https://gittr.ee", SAMPLE_NPUB, "repo")?;
         assert_eq!(
             clone,
             format!("https://gittr.ee/{SAMPLE_NPUB}/repo.git")
@@ -231,11 +228,8 @@ mod tests {
 
     #[test]
     fn format_grasp_server_url_as_clone_url_handles_http() -> Result<()> {
-        let clone = format_grasp_server_url_as_clone_url(
-            "http://localhost:8080",
-            SAMPLE_NPUB,
-            "repo",
-        )?;
+        let clone =
+            format_grasp_server_url_as_clone_url("http://localhost:8080", SAMPLE_NPUB, "repo")?;
         assert_eq!(
             clone,
             format!("http://localhost:8080/{SAMPLE_NPUB}/repo.git")
@@ -308,9 +302,7 @@ mod tests {
 
     #[test]
     fn invalid_npub_not_in_path() {
-        let url = format!(
-            "https://gittr.ee/my-repo.git?npub={SAMPLE_NPUB}"
-        );
+        let url = format!("https://gittr.ee/my-repo.git?npub={SAMPLE_NPUB}");
         assert!(!is_grasp_server_clone_url(&url));
     }
 

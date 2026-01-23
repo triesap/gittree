@@ -113,12 +113,12 @@ fn env_or_default(key: &str, default: &str) -> String {
 }
 
 fn validate_service_bind(service: &'static str, value: &str) -> Result<(), ConfigError> {
-    value.parse::<std::net::SocketAddr>().map_err(|_| {
-        ConfigError::InvalidServiceBind {
+    value
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| ConfigError::InvalidServiceBind {
             service,
             value: value.to_string(),
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -142,30 +142,18 @@ impl TomlServicesRoot {
     fn into_services(self) -> ServicesConfig {
         let services = self.services.unwrap_or_default();
         ServicesConfig {
-            relay: ServiceConfig::new(bind_or_default(
-                services.relay,
-                DEFAULT_RELAY_BIND,
-            )),
+            relay: ServiceConfig::new(bind_or_default(services.relay, DEFAULT_RELAY_BIND)),
             admission: ServiceConfig::new(bind_or_default(
                 services.admission,
                 DEFAULT_ADMISSION_BIND,
             )),
-            state: ServiceConfig::new(bind_or_default(
-                services.state,
-                DEFAULT_STATE_BIND,
-            )),
+            state: ServiceConfig::new(bind_or_default(services.state, DEFAULT_STATE_BIND)),
             coordinator: ServiceConfig::new(bind_or_default(
                 services.coordinator,
                 DEFAULT_COORDINATOR_BIND,
             )),
-            sync: ServiceConfig::new(bind_or_default(
-                services.sync,
-                DEFAULT_SYNC_BIND,
-            )),
-            git_http: ServiceConfig::new(bind_or_default(
-                services.git_http,
-                DEFAULT_GIT_HTTP_BIND,
-            )),
+            sync: ServiceConfig::new(bind_or_default(services.sync, DEFAULT_SYNC_BIND)),
+            git_http: ServiceConfig::new(bind_or_default(services.git_http, DEFAULT_GIT_HTTP_BIND)),
         }
     }
 }
@@ -202,7 +190,10 @@ struct TomlServiceConfig {
 #[derive(Debug)]
 pub enum ConfigError {
     InvalidRelayBind(String),
-    InvalidServiceBind { service: &'static str, value: String },
+    InvalidServiceBind {
+        service: &'static str,
+        value: String,
+    },
     ReadConfig {
         path: std::path::PathBuf,
         source: std::io::Error,
@@ -351,18 +342,18 @@ mod tests {
     use super::ConfigError;
     use super::GittreeConfig;
     use super::ServicesConfig;
-    use crate::DEFAULT_RELAY_BIND;
     use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
     use crate::DEFAULT_GIT_HTTP_BIND;
-    use crate::ENV_RELAY_BIND;
+    use crate::DEFAULT_RELAY_BIND;
+    use crate::DEFAULT_STATE_BIND;
+    use crate::DEFAULT_SYNC_BIND;
     use crate::ENV_ADMISSION_BIND;
     use crate::ENV_COORDINATOR_BIND;
     use crate::ENV_GIT_HTTP_BIND;
+    use crate::ENV_RELAY_BIND;
     use crate::ENV_STATE_BIND;
     use crate::ENV_SYNC_BIND;
-    use crate::DEFAULT_STATE_BIND;
-    use crate::DEFAULT_SYNC_BIND;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -658,7 +649,10 @@ bind = "127.0.0.1:9101"
         let err = services.validate().unwrap_err();
         assert!(matches!(
             err,
-            ConfigError::InvalidServiceBind { service: "state", .. }
+            ConfigError::InvalidServiceBind {
+                service: "state",
+                ..
+            }
         ));
     }
 
@@ -669,7 +663,10 @@ bind = "127.0.0.1:9101"
             let err = ServicesConfig::from_env_validated().unwrap_err();
             assert!(matches!(
                 err,
-                ConfigError::InvalidServiceBind { service: "state", .. }
+                ConfigError::InvalidServiceBind {
+                    service: "state",
+                    ..
+                }
             ));
         });
     }
@@ -684,7 +681,10 @@ bind = "bad"
         let result = ServicesConfig::from_toml_file_validated(&path);
         assert!(matches!(
             result,
-            Err(ConfigError::InvalidServiceBind { service: "coordinator", .. })
+            Err(ConfigError::InvalidServiceBind {
+                service: "coordinator",
+                ..
+            })
         ));
         let _ = std::fs::remove_file(&path);
     }

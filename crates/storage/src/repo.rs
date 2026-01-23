@@ -28,10 +28,12 @@ impl RepoAnnouncementRecord {
         created_at: i64,
         announcement: &RepoAnnouncement,
     ) -> Result<Self, StorageError> {
-        announcement.validate().map_err(|err| StorageError::InvalidField {
-            field: "announcement",
-            value: err.to_string(),
-        })?;
+        announcement
+            .validate()
+            .map_err(|err| StorageError::InvalidField {
+                field: "announcement",
+                value: err.to_string(),
+            })?;
         Ok(Self {
             event_id: decode_hex_32("event_id", event_id)?,
             pubkey: decode_hex_32("pubkey", pubkey)?,
@@ -70,12 +72,11 @@ impl RepoStateRecord {
             field: "state",
             value: err.to_string(),
         })?;
-        let state_json = serde_json::to_string(&state.state).map_err(|source| {
-            StorageError::Serialization {
+        let state_json =
+            serde_json::to_string(&state.state).map_err(|source| StorageError::Serialization {
                 field: "state",
                 source,
-            }
-        })?;
+            })?;
 
         Ok(Self {
             event_id: decode_hex_32("event_id", event_id)?,
@@ -132,8 +133,9 @@ mod tests {
             relays: vec!["wss://relay.example".to_string()],
             blossoms: vec!["https://blossom.example".to_string()],
             hashtags: vec!["nostr".to_string()],
-            maintainers: vec!["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string()],
+            maintainers: vec![
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ],
         }
     }
 
@@ -144,13 +146,8 @@ mod tests {
         let created_at = 1234;
         let announcement = sample_announcement();
 
-        let record = RepoAnnouncementRecord::new(
-            &event_id,
-            &pubkey,
-            created_at,
-            &announcement,
-        )
-        .expect("record");
+        let record = RepoAnnouncementRecord::new(&event_id, &pubkey, created_at, &announcement)
+            .expect("record");
 
         assert_eq!(record.event_id, hex::decode(&event_id).expect("event"));
         assert_eq!(record.pubkey, hex::decode(&pubkey).expect("pubkey"));
@@ -176,11 +173,9 @@ mod tests {
             state,
         };
 
-        let record = RepoStateRecord::new(&event_id, &pubkey, created_at, &state)
-            .expect("record");
+        let record = RepoStateRecord::new(&event_id, &pubkey, created_at, &state).expect("record");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&record.state_json).expect("json");
+        let parsed: serde_json::Value = serde_json::from_str(&record.state_json).expect("json");
         let expected = serde_json::json!({
             "HEAD": "ref: refs/heads/main",
             "refs/heads/main": "0123456789abcdef0123456789abcdef01234567",
@@ -207,8 +202,7 @@ mod tests {
             state,
         };
 
-        let record = RepoStateRecord::new(&event_id, &pubkey, created_at, &state)
-            .expect("record");
+        let record = RepoStateRecord::new(&event_id, &pubkey, created_at, &state).expect("record");
         let parsed = record.state_map().expect("state map");
         assert!(parsed.contains_key("HEAD"));
         assert!(parsed.contains_key("refs/heads/main"));
@@ -217,25 +211,28 @@ mod tests {
     #[test]
     fn record_rejects_short_hex() {
         let announcement = sample_announcement();
-        let err = RepoAnnouncementRecord::new("abcd", &hex_32(0x55), 0, &announcement)
-            .unwrap_err();
-        assert!(matches!(err, StorageError::InvalidHex { field: "event_id", .. }));
+        let err = RepoAnnouncementRecord::new("abcd", &hex_32(0x55), 0, &announcement).unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "event_id",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn record_rejects_invalid_announcement() {
         let mut announcement = sample_announcement();
         announcement.clone.clear();
-        let err = RepoAnnouncementRecord::new(
-            &hex_32(0x11),
-            &hex_32(0x22),
-            0,
-            &announcement,
-        )
-        .unwrap_err();
+        let err = RepoAnnouncementRecord::new(&hex_32(0x11), &hex_32(0x22), 0, &announcement)
+            .unwrap_err();
         assert!(matches!(
             err,
-            StorageError::InvalidField { field: "announcement", .. }
+            StorageError::InvalidField {
+                field: "announcement",
+                ..
+            }
         ));
     }
 
@@ -250,8 +247,7 @@ mod tests {
             identifier: "repo".to_string(),
             state: state_map,
         };
-        let err = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 0, &state)
-            .unwrap_err();
+        let err = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 0, &state).unwrap_err();
         assert!(matches!(
             err,
             StorageError::InvalidField { field: "state", .. }

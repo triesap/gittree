@@ -22,60 +22,60 @@ impl std::fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
+pub mod admission;
+pub mod event_filters;
+pub mod event_refs;
+pub mod git_receive;
+pub mod git_refs;
 pub mod grasp;
 pub mod kinds;
-pub mod nip34_common;
+pub mod nip11;
 pub mod nip34;
+pub mod nip34_common;
+pub mod nip34_events;
 pub mod nip34_grasp_list;
 pub mod nip34_issues;
 pub mod nip34_patches;
 pub mod nip34_proposals;
 pub mod nip34_status;
-pub mod nip34_events;
-pub mod git_refs;
-pub mod event_refs;
-pub mod event_filters;
-pub mod admission;
-pub mod repo_events;
-pub mod git_receive;
-pub mod repo_path;
-pub mod nip11;
 pub mod refs;
+pub mod repo_events;
+pub mod repo_path;
 pub mod tags;
 
+pub use admission::{AdmissionDecision, evaluate_admission};
+pub use event_filters::{EventFilter, build_related_event_filters};
+pub use event_refs::{
+    EventReferences, collect_event_references, collect_event_references_with_self,
+};
+pub use git_receive::{RefUpdate, UpdateDecision, evaluate_ref_update, evaluate_updates};
+pub use git_refs::{StateRefMatch, is_branch_ref, is_pr_branch_ref, is_tag_ref, match_state_ref};
 pub use grasp::{
-    extract_npub, format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
-    format_grasp_server_url_as_blossom_url, is_grasp_server_clone_url, is_grasp_server_in_list,
+    extract_npub, format_grasp_server_url_as_blossom_url, format_grasp_server_url_as_clone_url,
+    format_grasp_server_url_as_relay_url, is_grasp_server_clone_url, is_grasp_server_in_list,
     normalize_grasp_server_url,
 };
 pub use kinds::{
-    status_kinds, NostrKind, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST,
-    KIND_GIT_PULL_REQUEST_UPDATE, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_APPLIED, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN,
-    KIND_USER_GRASP_LIST,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST, KIND_GIT_PULL_REQUEST_UPDATE,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_APPLIED,
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_USER_GRASP_LIST,
+    NostrKind, status_kinds,
 };
-pub use refs::{is_nostr_ref_name, parse_nostr_ref};
+pub use nip11::RelayInfoDocument;
 pub use nip34::RepoAnnouncement;
 pub use nip34::RepoState;
+pub use nip34_events::Nip34Event;
 pub use nip34_grasp_list::UserGraspList;
 pub use nip34_issues::Issue;
 pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip34_status::{StatusAppliedRef, StatusEvent};
-pub use nip34_events::Nip34Event;
-pub use git_refs::{is_branch_ref, is_pr_branch_ref, is_tag_ref, match_state_ref, StateRefMatch};
-pub use event_refs::{
-    collect_event_references, collect_event_references_with_self, EventReferences,
-};
-pub use event_filters::{build_related_event_filters, EventFilter};
-pub use admission::{evaluate_admission, AdmissionDecision};
+pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use repo_events::{
-    collect_clone_urls, collect_maintainers, find_repo_announcement, latest_state_from_maintainers,
-    NostrEvent,
+    NostrEvent, collect_clone_urls, collect_maintainers, find_repo_announcement,
+    latest_state_from_maintainers,
 };
-pub use git_receive::{evaluate_ref_update, evaluate_updates, RefUpdate, UpdateDecision};
-pub use repo_path::{parse_repo_path, RepoPath};
-pub use nip11::RelayInfoDocument;
+pub use repo_path::{RepoPath, parse_repo_path};
 
 #[cfg(test)]
 mod tests {
