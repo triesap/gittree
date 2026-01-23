@@ -67,6 +67,21 @@ impl ServicesConfig {
             git_http: ServiceConfig::new(env_or_default(ENV_GIT_HTTP_BIND, DEFAULT_GIT_HTTP_BIND)),
         }
     }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlServicesRoot = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        Ok(parsed.into_services())
+    }
+
+    pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadConfig {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_toml_str(&contents).map_err(|err| err.with_path(path))
+    }
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -87,6 +102,67 @@ impl TomlConfig {
                 .unwrap_or_else(|| DEFAULT_RELAY_BIND.to_string()),
         }
     }
+}
+
+impl TomlServicesRoot {
+    fn into_services(self) -> ServicesConfig {
+        let services = self.services.unwrap_or_default();
+        ServicesConfig {
+            relay: ServiceConfig::new(bind_or_default(
+                services.relay,
+                DEFAULT_RELAY_BIND,
+            )),
+            admission: ServiceConfig::new(bind_or_default(
+                services.admission,
+                DEFAULT_ADMISSION_BIND,
+            )),
+            state: ServiceConfig::new(bind_or_default(
+                services.state,
+                DEFAULT_STATE_BIND,
+            )),
+            coordinator: ServiceConfig::new(bind_or_default(
+                services.coordinator,
+                DEFAULT_COORDINATOR_BIND,
+            )),
+            sync: ServiceConfig::new(bind_or_default(
+                services.sync,
+                DEFAULT_SYNC_BIND,
+            )),
+            git_http: ServiceConfig::new(bind_or_default(
+                services.git_http,
+                DEFAULT_GIT_HTTP_BIND,
+            )),
+        }
+    }
+}
+
+fn bind_or_default(config: Option<TomlServiceConfig>, default: &str) -> String {
+    config
+        .and_then(|entry| entry.bind)
+        .unwrap_or_else(|| default.to_string())
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlServicesRoot {
+    services: Option<TomlServicesConfig>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlServicesConfig {
+    relay: Option<TomlServiceConfig>,
+    admission: Option<TomlServiceConfig>,
+    state: Option<TomlServiceConfig>,
+    coordinator: Option<TomlServiceConfig>,
+    sync: Option<TomlServiceConfig>,
+    git_http: Option<TomlServiceConfig>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlServiceConfig {
+    bind: Option<String>,
 }
 
 #[derive(Debug)]
@@ -500,5 +576,39 @@ mod tests {
             let services = ServicesConfig::from_env();
             assert_eq!(services.admission.bind, "127.0.0.1:9091");
         });
+    }
+
+    #[test]
+    fn services_toml_parses_overrides() {
+        let toml = r#"
+[services.relay]
+bind = "127.0.0.1:9010"
+
+[services.admission]
+bind = "127.0.0.1:9011"
+"#;
+        let services = ServicesConfig::from_toml_str(toml).expect("parse services");
+        assert_eq!(services.relay.bind, "127.0.0.1:9010");
+        assert_eq!(services.admission.bind, "127.0.0.1:9011");
+        assert_eq!(services.state.bind, DEFAULT_STATE_BIND);
+        assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
+    }
+
+    #[test]
+    fn services_toml_rejects_invalid_config() {
+        let result = ServicesConfig::from_toml_str("services = [");
+        assert!(matches!(result, Err(ConfigError::TomlParse { .. })));
+    }
+
+    #[test]
+    fn services_toml_file_reads_valid_config() {
+        let toml = r#"
+[services.state]
+bind = "127.0.0.1:9101"
+"#;
+        let path = write_temp_config(toml);
+        let services = ServicesConfig::from_toml_file(&path).expect("read services");
+        assert_eq!(services.state.bind, "127.0.0.1:9101");
+        let _ = std::fs::remove_file(&path);
     }
 }
