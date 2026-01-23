@@ -651,6 +651,7 @@ name = "gittree-sync"
 version = "0.1.0"
 dependencies = [
  "gittree-config",
+ "gittree-core",
  "gittree-storage",
 ]
 

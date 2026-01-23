@@ -1,5 +1,7 @@
 use gittree_config::{ConfigError, ServicesConfig};
+use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
 use gittree_storage::StorageConfig;
+use std::collections::HashMap;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -140,10 +142,68 @@ impl std::error::Error for SyncError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncPlan {
+    pub identifier: String,
+    pub clone_urls: Vec<String>,
+    pub updates: Vec<RefUpdatePlan>,
+    pub deletions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefUpdatePlan {
+    pub reference: String,
+    pub target: String,
+}
+
+pub fn build_sync_plan(
+    state: &RepoState,
+    local_refs: &HashMap<String, String>,
+    events: &[NostrEvent],
+    maintainers: &[String],
+) -> SyncPlan {
+    let desired = state.ref_map();
+    let mut updates = Vec::new();
+    for (reference, target) in &desired {
+        match local_refs.get(reference) {
+            Some(existing) if existing == target => {}
+            _ => updates.push(RefUpdatePlan {
+                reference: reference.clone(),
+                target: target.clone(),
+            }),
+        }
+    }
+
+    let mut deletions = Vec::new();
+    for reference in local_refs.keys() {
+        if reference == "HEAD" {
+            continue;
+        }
+        if !desired.contains_key(reference) {
+            deletions.push(reference.clone());
+        }
+    }
+
+    let clone_urls = collect_clone_urls(events, maintainers, &state.identifier);
+    SyncPlan {
+        identifier: state.identifier.clone(),
+        clone_urls,
+        updates,
+        deletions,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
+    use super::RefUpdatePlan;
     use super::SyncConfig;
+    use super::build_sync_plan;
+    use gittree_core::NostrEvent;
+    use gittree_core::RepoAnnouncement;
+    use gittree_core::RepoState;
+    use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -182,5 +242,53 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn plan_builder_selects_updates_and_deletions() {
+        let mut state_map = HashMap::new();
+        state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state_map.insert("refs/heads/main".to_string(), "11".repeat(20));
+        state_map.insert("refs/tags/v1".to_string(), "22".repeat(20));
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+
+        let mut local_refs = HashMap::new();
+        local_refs.insert("refs/heads/main".to_string(), "11".repeat(20));
+        local_refs.insert("refs/heads/old".to_string(), "33".repeat(20));
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://gittr.ee/npub1example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let maintainer = "aa".repeat(32);
+        let event = NostrEvent::new(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            maintainer.clone(),
+            0,
+            announcement.to_tags(),
+        );
+        let plan = build_sync_plan(&state, &local_refs, &[event], &[maintainer]);
+        assert_eq!(plan.identifier, "repo");
+        assert_eq!(plan.clone_urls.len(), 1);
+        assert!(plan.deletions.contains(&"refs/heads/old".to_string()));
+        assert!(plan.updates.contains(&RefUpdatePlan {
+            reference: "refs/tags/v1".to_string(),
+            target: "22".repeat(20),
+        }));
+        assert!(!plan.updates.contains(&RefUpdatePlan {
+            reference: "refs/heads/main".to_string(),
+            target: "11".repeat(20),
+        }));
     }
 }
