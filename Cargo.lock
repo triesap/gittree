@@ -572,6 +572,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-git-http"
+version = "0.1.0"
+dependencies = [
+ "gittree-config",
+ "url",
+]
+
+[[package]]
 name = "gittree-observability"
 version = "0.1.0"
 dependencies = [
