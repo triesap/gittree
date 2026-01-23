@@ -1,4 +1,6 @@
 use gittree_config::{ConfigError, ServicesConfig};
+use gittree_core::RelayInfoDocument;
+use gittree_core::nip11::RelayLimitation;
 use gittree_observability::ObservabilityError;
 use gittree_storage::StorageConfig;
 
@@ -153,11 +155,61 @@ pub fn init_observability() -> Result<(), RelayError> {
     Ok(())
 }
 
+pub fn build_nip11_document(config: &RelayConfig) -> RelayInfoDocument {
+    let name = config
+        .storage
+        .application_name
+        .clone()
+        .or_else(|| Some("gittree".to_string()));
+
+    RelayInfoDocument {
+        name,
+        description: None,
+        banner: None,
+        icon: None,
+        pubkey: None,
+        self_pubkey: None,
+        contact: None,
+        supported_nips: Some(vec![1, 11, 34]),
+        software: Some("https://github.com/triesap/gittree".to_string()),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        privacy_policy: None,
+        terms_of_service: None,
+        limitation: Some(RelayLimitation {
+            max_message_length: None,
+            max_subscriptions: None,
+            max_limit: None,
+            max_subid_length: None,
+            max_event_tags: None,
+            max_content_length: None,
+            min_pow_difficulty: None,
+            auth_required: None,
+            payment_required: None,
+            restricted_writes: Some(true),
+            created_at_lower_limit: None,
+            created_at_upper_limit: None,
+            default_limit: None,
+        }),
+        retention: None,
+        relay_countries: None,
+        language_tags: None,
+        tags: None,
+        posting_policy: None,
+        payments_url: None,
+        fees: None,
+        supported_grasps: Some(vec!["GRASP-01".to_string()]),
+        repo_acceptance_criteria: Some("requires clone and relays tags".to_string()),
+        curation: Some("no additional curation".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::ENV_STORAGE_APP_NAME;
     use super::ENV_STORAGE_READ_URL;
     use super::RelayConfig;
     use super::StorageConfigError;
+    use super::build_nip11_document;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -207,6 +259,27 @@ mod tests {
                     config.storage.read_connection,
                     "postgres://user:pass@localhost:5432/gittree"
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn nip11_builder_sets_expected_fields() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_STORAGE_APP_NAME, "gittree-relay", || {
+                    let config = RelayConfig::from_env().expect("config");
+                    let doc = build_nip11_document(&config);
+                    assert_eq!(doc.name, Some("gittree-relay".to_string()));
+                    assert!(doc.supported_nips.as_ref().unwrap().contains(&34));
+                    assert_eq!(
+                        doc.limitation.as_ref().unwrap().restricted_writes,
+                        Some(true)
+                    );
+                });
             },
         );
     }
