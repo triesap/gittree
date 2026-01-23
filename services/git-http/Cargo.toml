@@ -6,4 +6,7 @@ edition = "2024"
 [dependencies]
 gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
+gittree-observability = { path = "../../crates/observability" }
+opentelemetry = { version = "0.23", features = ["metrics"] }
+tracing = "0.1"
 url = "2"

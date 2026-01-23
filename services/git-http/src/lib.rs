@@ -1,4 +1,7 @@
 use gittree_config::{ConfigError, ServicesConfig};
+use gittree_observability::{ObservabilityError, ObservabilityHandle};
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Histogram};
 use std::path::Path;
 use std::time::Duration;
 
@@ -75,12 +78,14 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, GitHttpConfigError> {
 #[derive(Debug)]
 pub enum GitHttpError {
     Config(GitHttpConfigError),
+    Observability(ObservabilityError),
 }
 
 impl std::fmt::Display for GitHttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GitHttpError::Config(err) => write!(f, "git-http error: {err}"),
+            GitHttpError::Observability(err) => write!(f, "git-http observability error: {err}"),
         }
     }
 }
@@ -89,7 +94,57 @@ impl std::error::Error for GitHttpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             GitHttpError::Config(err) => Some(err),
+            GitHttpError::Observability(err) => Some(err),
         }
+    }
+}
+
+pub fn init_observability() -> Result<ObservabilityHandle, GitHttpError> {
+    let config = gittree_observability::ObservabilityConfig {
+        service_name: "gittree-git-http".to_string(),
+        ..gittree_observability::ObservabilityConfig::default()
+    };
+    let handle = gittree_observability::init(&config).map_err(GitHttpError::Observability)?;
+    Ok(handle)
+}
+
+#[derive(Debug, Clone)]
+pub struct GitHttpMetrics {
+    request_duration: Histogram<f64>,
+    request_total: Counter<u64>,
+}
+
+impl GitHttpMetrics {
+    pub fn new() -> Self {
+        let meter = opentelemetry::global::meter("gittree-git-http");
+        let request_duration = meter
+            .f64_histogram("gittree_git_http_request_duration_seconds")
+            .with_description("Duration of git-http requests in seconds")
+            .init();
+        let request_total = meter
+            .u64_counter("gittree_git_http_request_total")
+            .with_description("Total number of git-http requests")
+            .init();
+        Self {
+            request_duration,
+            request_total,
+        }
+    }
+
+    pub fn record(&self, route: &GitHttpRoute, status: u16, duration: Duration) {
+        let labels = [
+            KeyValue::new("route", route_label(route)),
+            KeyValue::new("status", status.to_string()),
+        ];
+        self.request_duration
+            .record(duration.as_secs_f64(), &labels);
+        self.request_total.add(1, &labels);
+        tracing::info!(
+            route = route_label(route),
+            status,
+            duration_ms = duration.as_millis(),
+            "git-http request handled"
+        );
     }
 }
 
@@ -148,6 +203,15 @@ impl GitHttpRouter {
 
     pub fn route(&self, request: &GitHttpRequest<'_>) -> GitHttpRoute {
         route_request(request)
+    }
+}
+
+fn route_label(route: &GitHttpRoute) -> &'static str {
+    match route {
+        GitHttpRoute::InfoRefs { .. } => "info_refs",
+        GitHttpRoute::UploadPack { .. } => "upload_pack",
+        GitHttpRoute::ReceivePack { .. } => "receive_pack",
+        GitHttpRoute::NotFound => "not_found",
     }
 }
 
@@ -242,14 +306,19 @@ mod tests {
     use super::ENV_TIMEOUT_SECS;
     use super::ENV_UPSTREAM_URL;
     use super::GitHttpConfig;
+    use super::GitHttpMetrics;
     use super::GitHttpRequest;
     use super::GitHttpRoute;
     use super::GitHttpService;
+    use super::ObservabilityHandle;
+    use super::init_observability;
     use super::route_request;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -320,5 +389,19 @@ mod tests {
         );
         let route = route_request(&request);
         assert!(matches!(route, GitHttpRoute::NotFound));
+    }
+
+    #[test]
+    fn observability_init_returns_registry() {
+        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        assert!(handle.prometheus_registry().is_some());
+    }
+
+    #[test]
+    fn metrics_record_accepts_requests() {
+        let _handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        let metrics = GitHttpMetrics::new();
+        let route = GitHttpRoute::NotFound;
+        metrics.record(&route, 200, Duration::from_millis(5));
     }
 }

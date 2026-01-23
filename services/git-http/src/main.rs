@@ -1,4 +1,4 @@
-use gittree_git_http::{GitHttpConfig, GitHttpError};
+use gittree_git_http::{GitHttpConfig, GitHttpError, GitHttpMetrics, init_observability};
 
 fn main() {
     if let Err(err) = run() {
@@ -9,6 +9,8 @@ fn main() {
 
 fn run() -> Result<(), GitHttpError> {
     let config = GitHttpConfig::from_env().map_err(GitHttpError::Config)?;
-    println!("git-http configured on {}", config.bind);
+    let _observability = init_observability()?;
+    let _metrics = GitHttpMetrics::new();
+    tracing::info!(bind = %config.bind, "git-http configured");
     Ok(())
 }
