@@ -1,4 +1,5 @@
 use gittree_config::{ConfigError, ServicesConfig};
+use gittree_core::EventFilter;
 use gittree_observability::ObservabilityError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +21,115 @@ pub enum AdmissionError {
     Config(ConfigError),
     Observability(ObservabilityError),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionRequest {
+    pub kind: u64,
+    pub pubkey: String,
+    pub event_id: String,
+    pub tags: Vec<Vec<String>>,
+    pub relay_url: Option<String>,
+}
+
+impl AdmissionRequest {
+    pub fn new(
+        kind: u64,
+        pubkey: impl Into<String>,
+        event_id: impl Into<String>,
+        tags: Vec<Vec<String>>,
+        relay_url: Option<String>,
+    ) -> Result<Self, AdmissionRequestError> {
+        let pubkey = pubkey.into();
+        if pubkey.is_empty() {
+            return Err(AdmissionRequestError::MissingField("pubkey"));
+        }
+
+        let event_id = event_id.into();
+        if event_id.is_empty() {
+            return Err(AdmissionRequestError::MissingField("event_id"));
+        }
+
+        if tags.iter().any(|tag| tag.is_empty()) {
+            return Err(AdmissionRequestError::InvalidTag);
+        }
+
+        Ok(Self {
+            kind,
+            pubkey,
+            event_id,
+            tags,
+            relay_url,
+        })
+    }
+
+    pub fn relay_host(&self) -> Option<&str> {
+        self.relay_url.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionDecision {
+    Accept,
+    Reject { reason: String },
+    RequiresRelatedEvents { filters: Vec<EventFilter> },
+}
+
+impl AdmissionDecision {
+    pub fn reject(reason: impl Into<String>) -> Result<Self, AdmissionDecisionError> {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(AdmissionDecisionError::MissingReason);
+        }
+        Ok(Self::Reject { reason })
+    }
+
+    pub fn requires_related(filters: Vec<EventFilter>) -> Result<Self, AdmissionDecisionError> {
+        if filters.is_empty() {
+            return Err(AdmissionDecisionError::MissingFilters);
+        }
+        Ok(Self::RequiresRelatedEvents { filters })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionRequestError {
+    MissingField(&'static str),
+    InvalidTag,
+}
+
+impl std::fmt::Display for AdmissionRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdmissionRequestError::MissingField(field) => {
+                write!(f, "missing admission field {field}")
+            }
+            AdmissionRequestError::InvalidTag => write!(f, "invalid admission tag"),
+        }
+    }
+}
+
+impl std::error::Error for AdmissionRequestError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionDecisionError {
+    MissingReason,
+    MissingFilters,
+}
+
+impl std::fmt::Display for AdmissionDecisionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdmissionDecisionError::MissingReason => {
+                write!(f, "missing admission rejection reason")
+            }
+            AdmissionDecisionError::MissingFilters => {
+                write!(f, "missing related event filters")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdmissionDecisionError {}
 
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -53,12 +163,77 @@ pub fn init_observability() -> Result<(), AdmissionError> {
 #[cfg(test)]
 mod tests {
     use super::AdmissionConfig;
+    use super::AdmissionDecision;
+    use super::AdmissionRequest;
     use gittree_config::ServicesConfig;
+    use gittree_core::EventFilter;
 
     #[test]
     fn config_loads_from_env() {
         let config = AdmissionConfig::from_env().expect("config");
         let services = ServicesConfig::from_env_validated().expect("services");
         assert_eq!(config.bind, services.admission.bind);
+    }
+
+    #[test]
+    fn request_rejects_missing_pubkey() {
+        let err =
+            AdmissionRequest::new(1, "", "event", vec![vec!["d".to_string()]], None).unwrap_err();
+        assert!(matches!(
+            err,
+            super::AdmissionRequestError::MissingField("pubkey")
+        ));
+    }
+
+    #[test]
+    fn request_rejects_missing_event_id() {
+        let err = AdmissionRequest::new(1, "pubkey", "", vec![], None).unwrap_err();
+        assert!(matches!(
+            err,
+            super::AdmissionRequestError::MissingField("event_id")
+        ));
+    }
+
+    #[test]
+    fn request_rejects_empty_tag() {
+        let err = AdmissionRequest::new(1, "pubkey", "event", vec![vec![]], None).unwrap_err();
+        assert!(matches!(err, super::AdmissionRequestError::InvalidTag));
+    }
+
+    #[test]
+    fn request_accepts_valid_payload() {
+        let request = AdmissionRequest::new(
+            1,
+            "pubkey",
+            "event",
+            vec![vec!["d".to_string(), "repo".to_string()]],
+            Some("wss://relay.example".to_string()),
+        )
+        .expect("request");
+        assert_eq!(request.relay_host(), Some("wss://relay.example"));
+    }
+
+    #[test]
+    fn decision_reject_requires_reason() {
+        let err = AdmissionDecision::reject(" ").unwrap_err();
+        assert!(matches!(err, super::AdmissionDecisionError::MissingReason));
+    }
+
+    #[test]
+    fn decision_requires_filters() {
+        let err = AdmissionDecision::requires_related(Vec::new()).unwrap_err();
+        assert!(matches!(err, super::AdmissionDecisionError::MissingFilters));
+    }
+
+    #[test]
+    fn decision_accepts_related_filters() {
+        let mut filter = EventFilter::new();
+        filter.kinds = vec![1];
+        let filters = vec![filter];
+        let decision = AdmissionDecision::requires_related(filters.clone()).expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { filters } if filters.len() == 1
+        ));
     }
 }
