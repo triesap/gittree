@@ -565,6 +565,9 @@ name = "gittree-git-hook"
 version = "0.1.0"
 dependencies = [
  "gittree-config",
+ "gittree-core",
+ "reqwest",
+ "serde",
  "tracing",
 ]
 
