@@ -1,0 +1,15 @@
+[Unit]
+Description=Gittree State
+After=network.target
+
+[Service]
+Type=simple
+User=gittree
+Group=gittree
+EnvironmentFile=/etc/gittree/gittree.env
+ExecStart=/usr/local/bin/gittree-state
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
