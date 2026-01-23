@@ -6,10 +6,12 @@ use std::time::Duration;
 pub mod migrations;
 pub mod repo;
 pub mod repositories;
+pub mod postgres;
 
 pub use migrations::{Migration, MigrationRunner};
 pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
 pub use repositories::{AnnouncementRepository, InMemoryRepositories, StateRepository};
+pub use postgres::PostgresRepositories;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {
