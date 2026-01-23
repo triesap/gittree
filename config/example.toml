@@ -1,0 +1,19 @@
+relay_bind = "0.0.0.0:8080"
+
+[services.relay]
+bind = "0.0.0.0:8080"
+
+[services.admission]
+bind = "127.0.0.1:8081"
+
+[services.state]
+bind = "127.0.0.1:8082"
+
+[services.coordinator]
+bind = "127.0.0.1:8083"
+
+[services.sync]
+bind = "127.0.0.1:8084"
+
+[services.git_http]
+bind = "127.0.0.1:8085"
