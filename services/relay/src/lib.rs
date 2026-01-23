@@ -5,10 +5,12 @@ use gittree_observability::{ObservabilityError, ObservabilityHandle};
 use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, StorageError};
 
 mod admission_client;
+mod cli;
 
 pub use admission_client::{
     AdmissionFallback, AdmissionHookClient, AdmissionHookConfig, AdmissionHookError, RelayEvent,
 };
+pub use cli::{RelayCli, RelayCliError};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -27,6 +29,16 @@ pub struct RelayConfig {
 impl RelayConfig {
     pub fn from_env() -> Result<Self, RelayConfigError> {
         let services = ServicesConfig::from_env_validated().map_err(RelayConfigError::Config)?;
+        let storage = storage_from_env()?;
+        Ok(Self {
+            bind: services.relay.bind,
+            storage,
+        })
+    }
+
+    pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, RelayConfigError> {
+        let services =
+            ServicesConfig::from_toml_file_validated(path).map_err(RelayConfigError::Config)?;
         let storage = storage_from_env()?;
         Ok(Self {
             bind: services.relay.bind,
@@ -130,6 +142,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, RelayConfigError> {
 
 #[derive(Debug)]
 pub enum RelayError {
+    Cli(RelayCliError),
     Config(RelayConfigError),
     Observability(ObservabilityError),
     Storage(StorageError),
@@ -138,6 +151,7 @@ pub enum RelayError {
 impl std::fmt::Display for RelayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RelayError::Cli(err) => write!(f, "relay cli error: {err}"),
             RelayError::Config(err) => write!(f, "relay config error: {err}"),
             RelayError::Observability(err) => write!(f, "relay observability error: {err}"),
             RelayError::Storage(err) => write!(f, "relay storage error: {err}"),
@@ -148,6 +162,7 @@ impl std::fmt::Display for RelayError {
 impl std::error::Error for RelayError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            RelayError::Cli(err) => Some(err),
             RelayError::Config(err) => Some(err),
             RelayError::Observability(err) => Some(err),
             RelayError::Storage(err) => Some(err),

@@ -1,4 +1,4 @@
-use gittree_relay::{RelayConfig, RelayError, init_observability};
+use gittree_relay::{RelayCli, RelayConfig, RelayError, init_observability};
 
 fn main() {
     if let Err(err) = run() {
@@ -8,7 +8,21 @@ fn main() {
 }
 
 fn run() -> Result<(), RelayError> {
-    let config = RelayConfig::from_env().map_err(RelayError::Config)?;
+    let cli = RelayCli::parse(std::env::args_os()).map_err(RelayError::Cli)?;
+    if cli.help {
+        println!("{}", RelayCli::help_text());
+        return Ok(());
+    }
+
+    let mut config = match cli.config_path {
+        Some(path) => RelayConfig::from_toml_file(path).map_err(RelayError::Config)?,
+        None => RelayConfig::from_env().map_err(RelayError::Config)?,
+    };
+
+    if let Some(bind) = cli.bind {
+        config.bind = bind;
+    }
+
     let _observability = init_observability()?;
     tracing::info!(bind = %config.bind, "relay service configured");
     Ok(())
