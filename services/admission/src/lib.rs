@@ -150,6 +150,117 @@ impl Default for AdmissionCache {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub per_ip: u32,
+    pub per_pubkey: u32,
+    pub window: Duration,
+}
+
+impl RateLimitConfig {
+    pub fn new(per_ip: u32, per_pubkey: u32, window: Duration) -> Self {
+        Self {
+            per_ip,
+            per_pubkey,
+            window,
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_ip: 120,
+            per_pubkey: 60,
+            window: Duration::from_secs(60),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitCounter {
+    count: u32,
+    window_start: Instant,
+}
+
+#[derive(Debug)]
+pub struct RateLimiter {
+    config: RateLimitConfig,
+    ip_counters: RwLock<HashMap<String, RateLimitCounter>>,
+    pubkey_counters: RwLock<HashMap<String, RateLimitCounter>>,
+}
+
+impl RateLimiter {
+    pub fn new(config: RateLimitConfig) -> Self {
+        Self {
+            config,
+            ip_counters: RwLock::new(HashMap::new()),
+            pubkey_counters: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn check(&self, request: &AdmissionRequest) -> Option<AdmissionDecision> {
+        if let Some(ip) = request.source_ip() {
+            if self.hit_limit(&self.ip_counters, ip, self.config.per_ip) {
+                return Some(AdmissionDecision::Reject {
+                    reason: "rate limit exceeded for ip".to_string(),
+                });
+            }
+        }
+
+        if self.hit_limit(
+            &self.pubkey_counters,
+            &request.pubkey,
+            self.config.per_pubkey,
+        ) {
+            return Some(AdmissionDecision::Reject {
+                reason: "rate limit exceeded for pubkey".to_string(),
+            });
+        }
+
+        None
+    }
+
+    fn hit_limit(
+        &self,
+        counters: &RwLock<HashMap<String, RateLimitCounter>>,
+        key: &str,
+        limit: u32,
+    ) -> bool {
+        if limit == 0 {
+            return false;
+        }
+
+        let now = Instant::now();
+        let mut counters = match counters.write() {
+            Ok(counters) => counters,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let entry = counters.entry(key.to_string()).or_insert(RateLimitCounter {
+            count: 0,
+            window_start: now,
+        });
+
+        if now.duration_since(entry.window_start) >= self.config.window {
+            entry.count = 0;
+            entry.window_start = now;
+        }
+
+        if entry.count >= limit {
+            return true;
+        }
+
+        entry.count += 1;
+        false
+    }
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new(RateLimitConfig::default())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionRequest {
     pub kind: u64,
@@ -157,6 +268,7 @@ pub struct AdmissionRequest {
     pub event_id: String,
     pub tags: Vec<Vec<String>>,
     pub relay_url: Option<String>,
+    pub source_ip: Option<String>,
 }
 
 impl AdmissionRequest {
@@ -166,6 +278,7 @@ impl AdmissionRequest {
         event_id: impl Into<String>,
         tags: Vec<Vec<String>>,
         relay_url: Option<String>,
+        source_ip: Option<String>,
     ) -> Result<Self, AdmissionRequestError> {
         let pubkey = pubkey.into();
         if pubkey.is_empty() {
@@ -187,11 +300,16 @@ impl AdmissionRequest {
             event_id,
             tags,
             relay_url,
+            source_ip,
         })
     }
 
     pub fn relay_host(&self) -> Option<&str> {
         self.relay_url.as_deref()
+    }
+
+    pub fn source_ip(&self) -> Option<&str> {
+        self.source_ip.as_deref()
     }
 
     pub fn kind_u32(&self) -> Result<u32, AdmissionRequestError> {
@@ -425,6 +543,8 @@ mod tests {
     use super::AdmissionConfig;
     use super::AdmissionDecision;
     use super::AdmissionRequest;
+    use super::RateLimitConfig;
+    use super::RateLimiter;
     use super::evaluate_request;
     use super::evaluate_request_cached;
     use super::evaluate_request_with_storage;
@@ -447,8 +567,8 @@ mod tests {
 
     #[test]
     fn request_rejects_missing_pubkey() {
-        let err =
-            AdmissionRequest::new(1, "", "event", vec![vec!["d".to_string()]], None).unwrap_err();
+        let err = AdmissionRequest::new(1, "", "event", vec![vec!["d".to_string()]], None, None)
+            .unwrap_err();
         assert!(matches!(
             err,
             super::AdmissionRequestError::MissingField("pubkey")
@@ -457,7 +577,7 @@ mod tests {
 
     #[test]
     fn request_rejects_missing_event_id() {
-        let err = AdmissionRequest::new(1, "pubkey", "", vec![], None).unwrap_err();
+        let err = AdmissionRequest::new(1, "pubkey", "", vec![], None, None).unwrap_err();
         assert!(matches!(
             err,
             super::AdmissionRequestError::MissingField("event_id")
@@ -466,7 +586,8 @@ mod tests {
 
     #[test]
     fn request_rejects_empty_tag() {
-        let err = AdmissionRequest::new(1, "pubkey", "event", vec![vec![]], None).unwrap_err();
+        let err =
+            AdmissionRequest::new(1, "pubkey", "event", vec![vec![]], None, None).unwrap_err();
         assert!(matches!(err, super::AdmissionRequestError::InvalidTag));
     }
 
@@ -478,6 +599,7 @@ mod tests {
             "event",
             vec![vec!["d".to_string(), "repo".to_string()]],
             Some("wss://relay.example".to_string()),
+            None,
         )
         .expect("request");
         assert_eq!(request.relay_host(), Some("wss://relay.example"));
@@ -508,6 +630,41 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_rejects_ip_over_limit() {
+        let limiter = RateLimiter::new(RateLimitConfig::new(1, 0, Duration::from_secs(60)));
+        let request = AdmissionRequest::new(
+            1,
+            "pubkey",
+            "event",
+            Vec::new(),
+            None,
+            Some("127.0.0.1".to_string()),
+        )
+        .expect("request");
+
+        assert!(limiter.check(&request).is_none());
+        let decision = limiter.check(&request).expect("reject");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason } if reason.contains("ip")
+        ));
+    }
+
+    #[test]
+    fn rate_limiter_rejects_pubkey_over_limit() {
+        let limiter = RateLimiter::new(RateLimitConfig::new(0, 1, Duration::from_secs(60)));
+        let request =
+            AdmissionRequest::new(1, "pubkey", "event", Vec::new(), None, None).expect("request");
+
+        assert!(limiter.check(&request).is_none());
+        let decision = limiter.check(&request).expect("reject");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason } if reason.contains("pubkey")
+        ));
+    }
+
+    #[test]
     fn evaluate_request_accepts_state() {
         let request = AdmissionRequest::new(
             KIND_GIT_REPO_STATE.0 as u64,
@@ -515,6 +672,7 @@ mod tests {
             "event",
             Vec::new(),
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
         let decision = evaluate_request(&request).expect("decision");
@@ -529,6 +687,7 @@ mod tests {
             "event",
             Vec::new(),
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
         let decision = evaluate_request(&request).expect("decision");
@@ -546,6 +705,7 @@ mod tests {
             "event",
             Vec::new(),
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
         let err = evaluate_request(&request).unwrap_err();
@@ -582,6 +742,7 @@ mod tests {
             "event",
             vec![vec!["a".to_string(), address]],
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
 
@@ -608,6 +769,7 @@ mod tests {
             "event",
             vec![vec!["a".to_string(), address]],
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
 
@@ -688,6 +850,7 @@ mod tests {
             "event",
             vec![vec!["a".to_string(), address]],
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
 
@@ -770,6 +933,7 @@ mod tests {
             "event",
             vec![vec!["a".to_string(), address]],
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
 
@@ -801,6 +965,7 @@ mod tests {
             "event",
             vec![vec!["a".to_string(), address]],
             Some("relay".to_string()),
+            None,
         )
         .expect("request");
 
