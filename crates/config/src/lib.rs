@@ -4,7 +4,46 @@ pub struct GittreeConfig {
 }
 
 const DEFAULT_RELAY_BIND: &str = "0.0.0.0:8080";
+const DEFAULT_ADMISSION_BIND: &str = "127.0.0.1:8081";
+const DEFAULT_STATE_BIND: &str = "127.0.0.1:8082";
+const DEFAULT_COORDINATOR_BIND: &str = "127.0.0.1:8083";
+const DEFAULT_SYNC_BIND: &str = "127.0.0.1:8084";
+const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceConfig {
+    pub bind: String,
+}
+
+impl ServiceConfig {
+    pub fn new(bind: impl Into<String>) -> Self {
+        Self { bind: bind.into() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServicesConfig {
+    pub relay: ServiceConfig,
+    pub admission: ServiceConfig,
+    pub state: ServiceConfig,
+    pub coordinator: ServiceConfig,
+    pub sync: ServiceConfig,
+    pub git_http: ServiceConfig,
+}
+
+impl Default for ServicesConfig {
+    fn default() -> Self {
+        Self {
+            relay: ServiceConfig::new(DEFAULT_RELAY_BIND),
+            admission: ServiceConfig::new(DEFAULT_ADMISSION_BIND),
+            state: ServiceConfig::new(DEFAULT_STATE_BIND),
+            coordinator: ServiceConfig::new(DEFAULT_COORDINATOR_BIND),
+            sync: ServiceConfig::new(DEFAULT_SYNC_BIND),
+            git_http: ServiceConfig::new(DEFAULT_GIT_HTTP_BIND),
+        }
+    }
+}
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -168,8 +207,14 @@ impl GittreeConfig {
 mod tests {
     use super::ConfigError;
     use super::GittreeConfig;
+    use super::ServicesConfig;
     use crate::DEFAULT_RELAY_BIND;
+    use crate::DEFAULT_ADMISSION_BIND;
+    use crate::DEFAULT_COORDINATOR_BIND;
+    use crate::DEFAULT_GIT_HTTP_BIND;
     use crate::ENV_RELAY_BIND;
+    use crate::DEFAULT_STATE_BIND;
+    use crate::DEFAULT_SYNC_BIND;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -381,5 +426,16 @@ mod tests {
             Err(ConfigError::InvalidRelayBind(value)) if value == "invalid"
         ));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn services_config_has_expected_defaults() {
+        let services = ServicesConfig::default();
+        assert_eq!(services.relay.bind, DEFAULT_RELAY_BIND);
+        assert_eq!(services.admission.bind, DEFAULT_ADMISSION_BIND);
+        assert_eq!(services.state.bind, DEFAULT_STATE_BIND);
+        assert_eq!(services.coordinator.bind, DEFAULT_COORDINATOR_BIND);
+        assert_eq!(services.sync.bind, DEFAULT_SYNC_BIND);
+        assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
     }
 }
