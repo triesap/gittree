@@ -6,6 +6,7 @@ members = [
   "crates/storage",
   "services/admission",
   "services/relay",
+  "services/state",
 ]
 resolver = "2"
 
