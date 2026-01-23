@@ -10,7 +10,7 @@ pub mod queries;
 pub mod repo;
 pub mod repositories;
 
-pub use cache::CachedRepositories;
+pub use cache::{CacheConfig, CachedRepositories};
 pub use migrations::{Migration, MigrationRunner};
 pub use postgres::PostgresRepositories;
 pub use queries::RepoFilter;
