@@ -1,5 +1,5 @@
 use gittree_config::{ConfigError, ServicesConfig};
-use gittree_core::{RepoAnnouncement, parse_repo_path};
+use gittree_core::{Nip34Event, RepoAnnouncement, extract_npub, parse_repo_path};
 use gittree_storage::StorageConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -399,15 +399,98 @@ fn ensure_executable(path: &Path) -> Result<(), HookInstallError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayEvent {
+    pub kind: u32,
+    pub pubkey: String,
+    pub tags: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorAction {
+    Provisioned { repo_path: PathBuf },
+    SkippedExisting { repo_path: PathBuf },
+    Ignored,
+}
+
+#[derive(Debug)]
+pub enum CoordinatorEventError {
+    Parse(String),
+    MissingNpub,
+    Plan(ProvisionPlanError),
+    Init(RepoInitError),
+    Hooks(HookInstallError),
+}
+
+impl std::fmt::Display for CoordinatorEventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CoordinatorEventError::Parse(message) => write!(f, "{message}"),
+            CoordinatorEventError::MissingNpub => write!(f, "missing npub in clone urls"),
+            CoordinatorEventError::Plan(err) => write!(f, "{err}"),
+            CoordinatorEventError::Init(err) => write!(f, "{err}"),
+            CoordinatorEventError::Hooks(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for CoordinatorEventError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CoordinatorEventError::Parse(_) => None,
+            CoordinatorEventError::MissingNpub => None,
+            CoordinatorEventError::Plan(err) => Some(err),
+            CoordinatorEventError::Init(err) => Some(err),
+            CoordinatorEventError::Hooks(err) => Some(err),
+        }
+    }
+}
+
+pub fn handle_announcement_event(
+    root: impl AsRef<Path>,
+    hooks: &HookInstallConfig,
+    event: &RelayEvent,
+) -> Result<CoordinatorAction, CoordinatorEventError> {
+    let parsed = Nip34Event::parse_validated(event.kind, &event.tags)
+        .map_err(|err| CoordinatorEventError::Parse(err.to_string()))?;
+    let Nip34Event::RepoAnnouncement(announcement) = parsed else {
+        return Ok(CoordinatorAction::Ignored);
+    };
+
+    let npub = announcement
+        .clone
+        .iter()
+        .find_map(|url| extract_npub(url).ok().map(|value| value.to_string()))
+        .ok_or(CoordinatorEventError::MissingNpub)?;
+    let plan =
+        build_provision_plan(root, &npub, &announcement).map_err(CoordinatorEventError::Plan)?;
+
+    if plan.repo_path.exists() {
+        return Ok(CoordinatorAction::SkippedExisting {
+            repo_path: plan.repo_path,
+        });
+    }
+
+    init_repo(&plan).map_err(CoordinatorEventError::Init)?;
+    install_hooks(&plan, hooks).map_err(CoordinatorEventError::Hooks)?;
+    Ok(CoordinatorAction::Provisioned {
+        repo_path: plan.repo_path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::CoordinatorAction;
     use super::CoordinatorConfig;
     use super::ENV_STORAGE_READ_URL;
     use super::HookInstallConfig;
+    use super::RelayEvent;
     use super::RepoAnnouncement;
     use super::build_provision_plan;
+    use super::handle_announcement_event;
     use super::init_repo;
     use super::install_hooks;
+    use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use std::fs;
     use std::sync::Mutex;
 
@@ -547,6 +630,45 @@ mod tests {
         }
         let second = install_hooks(&plan, &config).expect("install again");
         assert_eq!(second.installed, 2);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn handle_event_provisions_repo() {
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![format!("https://gittr.ee/{npub}/repo.git")],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let event = RelayEvent {
+            kind: KIND_GIT_REPO_ANNOUNCEMENT.0,
+            pubkey: "11".repeat(32),
+            tags: announcement.to_tags(),
+        };
+        let temp_dir = temp_dir("gittree-event");
+        let bin_dir = temp_dir.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let pre_source = bin_dir.join("pre-receive");
+        let post_source = bin_dir.join("post-receive");
+        fs::write(&pre_source, "#!/bin/sh\necho pre\n").expect("pre hook");
+        fs::write(&post_source, "#!/bin/sh\necho post\n").expect("post hook");
+        let hooks = HookInstallConfig {
+            pre_receive_source: pre_source,
+            post_receive_source: post_source,
+        };
+        let repo_root = temp_dir.join("repos");
+        let action = handle_announcement_event(&repo_root, &hooks, &event).expect("handle");
+        assert!(matches!(action, CoordinatorAction::Provisioned { .. }));
+        let again = handle_announcement_event(&repo_root, &hooks, &event).expect("handle");
+        assert!(matches!(again, CoordinatorAction::SkippedExisting { .. }));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
