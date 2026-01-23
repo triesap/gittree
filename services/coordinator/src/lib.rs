@@ -323,13 +323,91 @@ fn apply_git_config(path: &Path, entry: &GitConfigEntry) -> Result<(), RepoInitE
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookInstallConfig {
+    pub pre_receive_source: PathBuf,
+    pub post_receive_source: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookInstallReport {
+    pub installed: usize,
+}
+
+#[derive(Debug)]
+pub enum HookInstallError {
+    Io(std::io::Error),
+    MissingSource(String),
+}
+
+impl std::fmt::Display for HookInstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookInstallError::Io(err) => write!(f, "hook install io error: {err}"),
+            HookInstallError::MissingSource(path) => write!(f, "missing hook source: {path}"),
+        }
+    }
+}
+
+impl std::error::Error for HookInstallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            HookInstallError::Io(err) => Some(err),
+            HookInstallError::MissingSource(_) => None,
+        }
+    }
+}
+
+pub fn install_hooks(
+    plan: &RepoProvisionPlan,
+    config: &HookInstallConfig,
+) -> Result<HookInstallReport, HookInstallError> {
+    ensure_source_exists(&config.pre_receive_source)?;
+    ensure_source_exists(&config.post_receive_source)?;
+
+    std::fs::create_dir_all(&plan.hooks_dir).map_err(HookInstallError::Io)?;
+    install_hook(&config.pre_receive_source, &plan.pre_receive_hook)?;
+    install_hook(&config.post_receive_source, &plan.post_receive_hook)?;
+
+    Ok(HookInstallReport { installed: 2 })
+}
+
+fn ensure_source_exists(path: &Path) -> Result<(), HookInstallError> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(HookInstallError::MissingSource(path.display().to_string()))
+    }
+}
+
+fn install_hook(source: &Path, destination: &Path) -> Result<(), HookInstallError> {
+    std::fs::copy(source, destination).map_err(HookInstallError::Io)?;
+    ensure_executable(destination)?;
+    Ok(())
+}
+
+fn ensure_executable(path: &Path) -> Result<(), HookInstallError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)
+            .map_err(HookInstallError::Io)?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).map_err(HookInstallError::Io)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::CoordinatorConfig;
     use super::ENV_STORAGE_READ_URL;
+    use super::HookInstallConfig;
     use super::RepoAnnouncement;
     use super::build_provision_plan;
     use super::init_repo;
+    use super::install_hooks;
     use std::fs;
     use std::sync::Mutex;
 
@@ -417,6 +495,58 @@ mod tests {
         assert!(plan.repo_path.join("HEAD").exists());
         let second = init_repo(&plan).expect("init again");
         assert!(!second.created);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn install_hooks_is_idempotent() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let temp_dir = temp_dir("gittree-hooks");
+        let bin_dir = temp_dir.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let pre_source = bin_dir.join("pre-receive");
+        let post_source = bin_dir.join("post-receive");
+        fs::write(&pre_source, "#!/bin/sh\necho pre\n").expect("pre hook");
+        fs::write(&post_source, "#!/bin/sh\necho post\n").expect("post hook");
+
+        let repo_root = temp_dir.join("repos");
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let plan = build_provision_plan(&repo_root, npub, &announcement).expect("plan");
+        let config = HookInstallConfig {
+            pre_receive_source: pre_source,
+            post_receive_source: post_source,
+        };
+        let report = install_hooks(&plan, &config).expect("install hooks");
+        assert_eq!(report.installed, 2);
+        assert!(plan.pre_receive_hook.exists());
+        assert!(plan.post_receive_hook.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let pre_mode = fs::metadata(&plan.pre_receive_hook)
+                .expect("pre metadata")
+                .permissions()
+                .mode();
+            let post_mode = fs::metadata(&plan.post_receive_hook)
+                .expect("post metadata")
+                .permissions()
+                .mode();
+            assert!(pre_mode & 0o111 != 0);
+            assert!(post_mode & 0o111 != 0);
+        }
+        let second = install_hooks(&plan, &config).expect("install again");
+        assert_eq!(second.installed, 2);
         let _ = fs::remove_dir_all(temp_dir);
     }
 
