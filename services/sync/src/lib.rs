@@ -1,5 +1,6 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
+use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::StorageConfig;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -126,12 +127,18 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, SyncConfigError> {
 #[derive(Debug)]
 pub enum SyncError {
     Config(SyncConfigError),
+    ObservabilityConfig(ObservabilityConfigError),
+    Observability(ObservabilityError),
 }
 
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::Config(err) => write!(f, "sync error: {err}"),
+            SyncError::ObservabilityConfig(err) => {
+                write!(f, "sync observability config error: {err}")
+            }
+            SyncError::Observability(err) => write!(f, "sync observability error: {err}"),
         }
     }
 }
@@ -140,8 +147,17 @@ impl std::error::Error for SyncError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SyncError::Config(err) => Some(err),
+            SyncError::ObservabilityConfig(err) => Some(err),
+            SyncError::Observability(err) => Some(err),
         }
     }
+}
+
+pub fn init_observability() -> Result<ObservabilityHandle, SyncError> {
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-sync")
+        .map_err(SyncError::ObservabilityConfig)?;
+    let handle = gittree_observability::init(&config).map_err(SyncError::Observability)?;
+    Ok(handle)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,6 +500,7 @@ mod tests {
     use super::ENV_STORAGE_READ_URL;
     use super::GitExecError;
     use super::GitExecutor;
+    use super::ObservabilityHandle;
     use super::RefChangeResult;
     use super::RefUpdatePlan;
     use super::SyncConfig;
@@ -492,14 +509,17 @@ mod tests {
     use super::SyncScheduler;
     use super::build_sync_plan;
     use super::execute_sync_plan;
+    use super::init_observability;
     use gittree_core::NostrEvent;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -712,5 +732,11 @@ mod tests {
         assert!(!scheduler.try_start_repo("repo-b"));
         scheduler.finish_repo("repo-a");
         assert!(scheduler.try_start_repo("repo-b"));
+    }
+
+    #[test]
+    fn observability_init_returns_registry() {
+        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        assert!(handle.prometheus_registry().is_some());
     }
 }

@@ -1,5 +1,6 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{Nip34Event, RepoAnnouncement, extract_npub, parse_repo_path};
+use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::StorageConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -126,12 +127,20 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, CoordinatorConfigError> {
 #[derive(Debug)]
 pub enum CoordinatorError {
     Config(CoordinatorConfigError),
+    ObservabilityConfig(ObservabilityConfigError),
+    Observability(ObservabilityError),
 }
 
 impl std::fmt::Display for CoordinatorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoordinatorError::Config(err) => write!(f, "coordinator error: {err}"),
+            CoordinatorError::ObservabilityConfig(err) => {
+                write!(f, "coordinator observability config error: {err}")
+            }
+            CoordinatorError::Observability(err) => {
+                write!(f, "coordinator observability error: {err}")
+            }
         }
     }
 }
@@ -140,8 +149,17 @@ impl std::error::Error for CoordinatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CoordinatorError::Config(err) => Some(err),
+            CoordinatorError::ObservabilityConfig(err) => Some(err),
+            CoordinatorError::Observability(err) => Some(err),
         }
     }
+}
+
+pub fn init_observability() -> Result<ObservabilityHandle, CoordinatorError> {
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-coordinator")
+        .map_err(CoordinatorError::ObservabilityConfig)?;
+    let handle = gittree_observability::init(&config).map_err(CoordinatorError::Observability)?;
+    Ok(handle)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,17 +502,21 @@ mod tests {
     use super::CoordinatorConfig;
     use super::ENV_STORAGE_READ_URL;
     use super::HookInstallConfig;
+    use super::ObservabilityHandle;
     use super::RelayEvent;
     use super::RepoAnnouncement;
     use super::build_provision_plan;
     use super::handle_announcement_event;
+    use super::init_observability;
     use super::init_repo;
     use super::install_hooks;
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use std::fs;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -670,6 +692,12 @@ mod tests {
         let again = handle_announcement_event(&repo_root, &hooks, &event).expect("handle");
         assert!(matches!(again, CoordinatorAction::SkippedExisting { .. }));
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn observability_init_returns_registry() {
+        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        assert!(handle.prometheus_registry().is_some());
     }
 
     fn temp_dir(prefix: &str) -> std::path::PathBuf {

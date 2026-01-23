@@ -1,7 +1,7 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{CoreError, EventFilter};
-use gittree_observability::ObservabilityError;
+use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{AnnouncementRepository, StateRepository, StorageError};
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -27,6 +27,7 @@ pub enum AdmissionError {
     Config(ConfigError),
     Request(AdmissionRequestError),
     Core(CoreError),
+    ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
 }
 
@@ -509,6 +510,9 @@ impl std::fmt::Display for AdmissionError {
             AdmissionError::Config(err) => write!(f, "admission config error: {err}"),
             AdmissionError::Request(err) => write!(f, "admission request error: {err}"),
             AdmissionError::Core(err) => write!(f, "admission core error: {err}"),
+            AdmissionError::ObservabilityConfig(err) => {
+                write!(f, "admission observability config error: {err}")
+            }
             AdmissionError::Observability(err) => {
                 write!(f, "admission observability error: {err}")
             }
@@ -522,18 +526,17 @@ impl std::error::Error for AdmissionError {
             AdmissionError::Config(err) => Some(err),
             AdmissionError::Request(err) => Some(err),
             AdmissionError::Core(err) => Some(err),
+            AdmissionError::ObservabilityConfig(err) => Some(err),
             AdmissionError::Observability(err) => Some(err),
         }
     }
 }
 
-pub fn init_observability() -> Result<(), AdmissionError> {
-    let config = gittree_observability::ObservabilityConfig {
-        service_name: "gittree-admission".to_string(),
-        ..gittree_observability::ObservabilityConfig::default()
-    };
-    gittree_observability::init(&config).map_err(AdmissionError::Observability)?;
-    Ok(())
+pub fn init_observability() -> Result<ObservabilityHandle, AdmissionError> {
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-admission")
+        .map_err(AdmissionError::ObservabilityConfig)?;
+    let handle = gittree_observability::init(&config).map_err(AdmissionError::Observability)?;
+    Ok(handle)
 }
 
 #[cfg(test)]

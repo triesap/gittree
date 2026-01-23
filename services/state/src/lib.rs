@@ -1,5 +1,5 @@
 use gittree_config::{ConfigError, ServicesConfig};
-use gittree_observability::{ObservabilityError, ObservabilityHandle};
+use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
     AnnouncementRepository, RepoFilter, StateRepository, StorageConfig, StorageError,
 };
@@ -128,6 +128,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, StateConfigError> {
 #[derive(Debug)]
 pub enum StateError {
     Config(StateConfigError),
+    ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
 }
 
@@ -135,6 +136,9 @@ impl std::fmt::Display for StateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StateError::Config(err) => write!(f, "state config error: {err}"),
+            StateError::ObservabilityConfig(err) => {
+                write!(f, "state observability config error: {err}")
+            }
             StateError::Observability(err) => write!(f, "state observability error: {err}"),
         }
     }
@@ -144,16 +148,15 @@ impl std::error::Error for StateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             StateError::Config(err) => Some(err),
+            StateError::ObservabilityConfig(err) => Some(err),
             StateError::Observability(err) => Some(err),
         }
     }
 }
 
 pub fn init_observability() -> Result<ObservabilityHandle, StateError> {
-    let config = gittree_observability::ObservabilityConfig {
-        service_name: "gittree-state".to_string(),
-        ..gittree_observability::ObservabilityConfig::default()
-    };
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-state")
+        .map_err(StateError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(StateError::Observability)?;
     Ok(handle)
 }

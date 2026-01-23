@@ -1,4 +1,4 @@
-use gittree_coordinator::{CoordinatorConfig, CoordinatorError};
+use gittree_coordinator::{CoordinatorConfig, CoordinatorError, init_observability};
 
 fn main() {
     if let Err(err) = run() {
@@ -9,6 +9,7 @@ fn main() {
 
 fn run() -> Result<(), CoordinatorError> {
     let config = CoordinatorConfig::from_env().map_err(CoordinatorError::Config)?;
-    println!("coordinator configured on {}", config.bind);
+    let _observability = init_observability()?;
+    tracing::info!(bind = %config.bind, "coordinator configured");
     Ok(())
 }

@@ -1,4 +1,4 @@
-use gittree_sync::{SyncConfig, SyncError};
+use gittree_sync::{SyncConfig, SyncError, init_observability};
 
 fn main() {
     if let Err(err) = run() {
@@ -9,6 +9,7 @@ fn main() {
 
 fn run() -> Result<(), SyncError> {
     let config = SyncConfig::from_env().map_err(SyncError::Config)?;
-    println!("sync configured on {}", config.bind);
+    let _observability = init_observability()?;
+    tracing::info!(bind = %config.bind, "sync configured");
     Ok(())
 }

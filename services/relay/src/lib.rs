@@ -1,7 +1,7 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::RelayInfoDocument;
 use gittree_core::nip11::RelayLimitation;
-use gittree_observability::{ObservabilityError, ObservabilityHandle};
+use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, StorageError};
 
 mod admission_client;
@@ -144,6 +144,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, RelayConfigError> {
 pub enum RelayError {
     Cli(RelayCliError),
     Config(RelayConfigError),
+    ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
     Storage(StorageError),
 }
@@ -153,6 +154,9 @@ impl std::fmt::Display for RelayError {
         match self {
             RelayError::Cli(err) => write!(f, "relay cli error: {err}"),
             RelayError::Config(err) => write!(f, "relay config error: {err}"),
+            RelayError::ObservabilityConfig(err) => {
+                write!(f, "relay observability config error: {err}")
+            }
             RelayError::Observability(err) => write!(f, "relay observability error: {err}"),
             RelayError::Storage(err) => write!(f, "relay storage error: {err}"),
         }
@@ -164,6 +168,7 @@ impl std::error::Error for RelayError {
         match self {
             RelayError::Cli(err) => Some(err),
             RelayError::Config(err) => Some(err),
+            RelayError::ObservabilityConfig(err) => Some(err),
             RelayError::Observability(err) => Some(err),
             RelayError::Storage(err) => Some(err),
         }
@@ -173,10 +178,8 @@ impl std::error::Error for RelayError {
 pub type RelayRepositories = CachedRepositories<PostgresRepositories>;
 
 pub fn init_observability() -> Result<ObservabilityHandle, RelayError> {
-    let config = gittree_observability::ObservabilityConfig {
-        service_name: "gittree-relay".to_string(),
-        ..gittree_observability::ObservabilityConfig::default()
-    };
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-relay")
+        .map_err(RelayError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(RelayError::Observability)?;
     Ok(handle)
 }

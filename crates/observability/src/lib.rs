@@ -1,6 +1,10 @@
 use opentelemetry_otlp::WithExportConfig;
 use tracing_subscriber::prelude::*;
 
+const ENV_OTLP_ENDPOINT: &str = "GITTREE_OTLP_ENDPOINT";
+const ENV_LOG_JSON: &str = "GITTREE_LOG_JSON";
+const ENV_METRICS_ENABLED: &str = "GITTREE_METRICS_ENABLED";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservabilityConfig {
     pub service_name: String,
@@ -17,6 +21,54 @@ impl Default for ObservabilityConfig {
             log_json: false,
             metrics_enabled: true,
         }
+    }
+}
+
+impl ObservabilityConfig {
+    pub fn from_env(service_name: impl Into<String>) -> Result<Self, ObservabilityConfigError> {
+        let otlp_endpoint = std::env::var(ENV_OTLP_ENDPOINT).ok();
+        let log_json = env_bool(ENV_LOG_JSON)?.unwrap_or(false);
+        let metrics_enabled = env_bool(ENV_METRICS_ENABLED)?.unwrap_or(true);
+        Ok(Self {
+            service_name: service_name.into(),
+            otlp_endpoint,
+            log_json,
+            metrics_enabled,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum ObservabilityConfigError {
+    InvalidEnv { key: &'static str, value: String },
+}
+
+impl std::fmt::Display for ObservabilityConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObservabilityConfigError::InvalidEnv { key, value } => {
+                write!(f, "invalid env {key}: {value}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ObservabilityConfigError {}
+
+fn env_bool(key: &'static str) -> Result<Option<bool>, ObservabilityConfigError> {
+    match std::env::var(key) {
+        Ok(value) => parse_bool(&value)
+            .map(Some)
+            .ok_or(ObservabilityConfigError::InvalidEnv { key, value }),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
     }
 }
 
@@ -141,6 +193,26 @@ pub fn init(config: &ObservabilityConfig) -> Result<ObservabilityHandle, Observa
 #[cfg(test)]
 mod tests {
     use super::ObservabilityConfig;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        f();
+        match previous {
+            Some(old) => unsafe {
+                std::env::set_var(key, old);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+    }
 
     #[test]
     fn default_config_has_expected_defaults() {
@@ -149,6 +221,34 @@ mod tests {
         assert!(config.otlp_endpoint.is_none());
         assert!(!config.log_json);
         assert!(config.metrics_enabled);
+    }
+
+    #[test]
+    fn env_config_reads_flags() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_OTLP_ENDPOINT", "http://localhost:4317", || {
+            with_env_var("GITTREE_LOG_JSON", "true", || {
+                with_env_var("GITTREE_METRICS_ENABLED", "false", || {
+                    let config = ObservabilityConfig::from_env("svc").expect("config");
+                    assert_eq!(config.service_name, "svc");
+                    assert_eq!(
+                        config.otlp_endpoint.as_deref(),
+                        Some("http://localhost:4317")
+                    );
+                    assert!(config.log_json);
+                    assert!(!config.metrics_enabled);
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn env_config_rejects_invalid_bool() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_JSON", "maybe", || {
+            let err = ObservabilityConfig::from_env("svc").expect_err("invalid");
+            assert!(err.to_string().contains("GITTREE_LOG_JSON"));
+        });
     }
 
     #[test]

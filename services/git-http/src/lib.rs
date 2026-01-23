@@ -1,5 +1,5 @@
 use gittree_config::{ConfigError, ServicesConfig};
-use gittree_observability::{ObservabilityError, ObservabilityHandle};
+use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 use std::path::Path;
@@ -78,6 +78,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, GitHttpConfigError> {
 #[derive(Debug)]
 pub enum GitHttpError {
     Config(GitHttpConfigError),
+    ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
 }
 
@@ -85,6 +86,9 @@ impl std::fmt::Display for GitHttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GitHttpError::Config(err) => write!(f, "git-http error: {err}"),
+            GitHttpError::ObservabilityConfig(err) => {
+                write!(f, "git-http observability config error: {err}")
+            }
             GitHttpError::Observability(err) => write!(f, "git-http observability error: {err}"),
         }
     }
@@ -94,16 +98,15 @@ impl std::error::Error for GitHttpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             GitHttpError::Config(err) => Some(err),
+            GitHttpError::ObservabilityConfig(err) => Some(err),
             GitHttpError::Observability(err) => Some(err),
         }
     }
 }
 
 pub fn init_observability() -> Result<ObservabilityHandle, GitHttpError> {
-    let config = gittree_observability::ObservabilityConfig {
-        service_name: "gittree-git-http".to_string(),
-        ..gittree_observability::ObservabilityConfig::default()
-    };
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-git-http")
+        .map_err(GitHttpError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(GitHttpError::Observability)?;
     Ok(handle)
 }
