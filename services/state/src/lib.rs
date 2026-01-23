@@ -1,6 +1,8 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_observability::{ObservabilityError, ObservabilityHandle};
-use gittree_storage::{RepoFilter, StateRepository, StorageConfig, StorageError};
+use gittree_storage::{
+    AnnouncementRepository, RepoFilter, StateRepository, StorageConfig, StorageError,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -164,6 +166,12 @@ pub struct StateResponse {
     pub state: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MaintainersResponse {
+    pub identifier: String,
+    pub maintainers: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum StateServiceError {
     InvalidInput { field: &'static str, value: String },
@@ -232,6 +240,58 @@ where
     })
 }
 
+pub async fn resolve_maintainers<S>(
+    storage: &S,
+    pubkey_hex: &str,
+    identifier: &str,
+) -> Result<MaintainersResponse, StateServiceError>
+where
+    S: AnnouncementRepository,
+{
+    if identifier.trim().is_empty() {
+        return Err(StateServiceError::InvalidInput {
+            field: "identifier",
+            value: identifier.to_string(),
+        });
+    }
+
+    let mut pending = vec![pubkey_hex.to_string()];
+    let mut seen = std::collections::HashSet::new();
+
+    while let Some(pubkey) = pending.pop() {
+        if seen.contains(&pubkey) {
+            continue;
+        }
+
+        let filter =
+            RepoFilter::from_hex(&pubkey, identifier).map_err(StateServiceError::Storage)?;
+        let announcement = storage
+            .latest_announcement(&filter.pubkey, &filter.identifier)
+            .await
+            .map_err(StateServiceError::Storage)?;
+
+        let Some(announcement) = announcement else {
+            continue;
+        };
+
+        seen.insert(pubkey);
+
+        for maintainer in announcement.maintainers {
+            if !seen.contains(&maintainer) {
+                pending.push(maintainer);
+            }
+        }
+    }
+
+    let mut maintainers: Vec<String> = seen.into_iter().collect();
+    maintainers.sort();
+
+    Ok(MaintainersResponse {
+        identifier: identifier.to_string(),
+        maintainers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
@@ -239,8 +299,12 @@ mod tests {
     use super::StateServiceError;
     use super::StorageConfigError;
     use super::latest_state;
+    use super::resolve_maintainers;
+    use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
+    use gittree_storage::AnnouncementRepository;
     use gittree_storage::InMemoryRepositories;
+    use gittree_storage::RepoAnnouncementRecord;
     use gittree_storage::StateRepository;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -338,5 +402,69 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StateServiceError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn resolve_maintainers_recurses() {
+        let repo = InMemoryRepositories::default();
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec!["22".repeat(32)],
+        };
+        let record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &"11".repeat(32), 10, &announcement)
+                .expect("record");
+        repo.insert_announcement(record).await.expect("insert root");
+
+        let secondary = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec!["33".repeat(32)],
+        };
+        let record =
+            RepoAnnouncementRecord::new(&"bb".repeat(32), &"22".repeat(32), 11, &secondary)
+                .expect("record");
+        repo.insert_announcement(record)
+            .await
+            .expect("insert maintainer");
+
+        let tertiary = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let record = RepoAnnouncementRecord::new(&"cc".repeat(32), &"33".repeat(32), 12, &tertiary)
+            .expect("record");
+        repo.insert_announcement(record).await.expect("insert leaf");
+
+        let response = resolve_maintainers(&repo, &"11".repeat(32), "repo")
+            .await
+            .expect("maintainers");
+        assert_eq!(
+            response.maintainers,
+            vec!["11".repeat(32), "22".repeat(32), "33".repeat(32)]
+        );
     }
 }
