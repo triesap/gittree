@@ -1,0 +1,89 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gittree
+      POSTGRES_PASSWORD: gittree
+      POSTGRES_DB: gittree
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  relay:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.relay
+    environment:
+      GITTREE_RELAY_BIND: 0.0.0.0:8080
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    depends_on:
+      - postgres
+
+  admission:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.admission
+    environment:
+      GITTREE_ADMISSION_BIND: 0.0.0.0:8081
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    depends_on:
+      - postgres
+
+  state:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.state
+    environment:
+      GITTREE_STATE_BIND: 0.0.0.0:8082
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    depends_on:
+      - postgres
+
+  git-http:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.git-http
+    environment:
+      GITTREE_GIT_HTTP_BIND: 0.0.0.0:8085
+      GITTREE_GIT_HTTP_UPSTREAM_URL: http://git-backend:9418
+    depends_on:
+      - relay
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.coordinator
+    environment:
+      GITTREE_COORDINATOR_BIND: 0.0.0.0:8083
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    depends_on:
+      - postgres
+
+  sync:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.sync
+    environment:
+      GITTREE_SYNC_BIND: 0.0.0.0:8084
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    depends_on:
+      - postgres
+
+  nginx:
+    image: nginx:1.27
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - relay
+      - git-http
+
+volumes:
+  pgdata: {}

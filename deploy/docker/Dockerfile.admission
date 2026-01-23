@@ -1,0 +1,12 @@
+FROM rust:1.85-bookworm AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY services ./services
+RUN cargo build -p gittree-admission --release
+
+FROM debian:bookworm-slim
+RUN useradd -m -u 10001 gittree
+COPY --from=builder /app/target/release/gittree-admission /usr/local/bin/gittree-admission
+USER gittree
+ENTRYPOINT ["/usr/local/bin/gittree-admission"]
