@@ -7,6 +7,7 @@ edition = "2024"
 gittree-config = { path = "../../crates/config" }
 gittree-observability = { path = "../../crates/observability" }
 gittree-storage = { path = "../../crates/storage" }
+dotenvy = "0.15"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"

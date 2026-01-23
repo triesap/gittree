@@ -6,6 +6,7 @@ use std::io::Read;
 use std::time::Duration;
 
 fn main() {
+    dotenvy::dotenv().ok();
     if let Err(err) = run() {
         eprintln!("git hook failed: {err}");
         std::process::exit(1);

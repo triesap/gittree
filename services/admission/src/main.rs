@@ -1,6 +1,7 @@
 use gittree_admission::{AdmissionConfig, AdmissionError, init_observability};
 
 fn main() {
+    dotenvy::dotenv().ok();
     if let Err(err) = run() {
         eprintln!("admission service failed: {err}");
         std::process::exit(1);

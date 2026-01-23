@@ -1,6 +1,7 @@
 use gittree_git_http::{GitHttpConfig, GitHttpError, GitHttpMetrics, init_observability};
 
 fn main() {
+    dotenvy::dotenv().ok();
     if let Err(err) = run() {
         eprintln!("git-http service failed: {err}");
         std::process::exit(1);

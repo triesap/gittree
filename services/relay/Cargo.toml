@@ -8,6 +8,7 @@ gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
 gittree-observability = { path = "../../crates/observability" }
 gittree-storage = { path = "../../crates/storage" }
+dotenvy = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"

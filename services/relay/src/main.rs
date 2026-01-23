@@ -1,6 +1,7 @@
 use gittree_relay::{RelayCli, RelayConfig, RelayError, init_observability};
 
 fn main() {
+    dotenvy::dotenv().ok();
     if let Err(err) = run() {
         eprintln!("relay service failed: {err}");
         std::process::exit(1);

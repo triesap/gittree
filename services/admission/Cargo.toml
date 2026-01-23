@@ -8,6 +8,7 @@ gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
 gittree-observability = { path = "../../crates/observability" }
 gittree-storage = { path = "../../crates/storage" }
+dotenvy = "0.15"
 hex = "0.4"
 tracing = "0.1"
 

@@ -1,6 +1,7 @@
 use gittree_coordinator::{CoordinatorConfig, CoordinatorError, init_observability};
 
 fn main() {
+    dotenvy::dotenv().ok();
     if let Err(err) = run() {
         eprintln!("coordinator service failed: {err}");
         std::process::exit(1);

@@ -533,6 +533,7 @@ name = "gittree-admission"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dotenvy",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
@@ -554,6 +555,7 @@ dependencies = [
 name = "gittree-coordinator"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
@@ -575,6 +577,7 @@ dependencies = [
 name = "gittree-git-hook"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "gittree-config",
  "gittree-core",
  "reqwest",
@@ -586,6 +589,7 @@ dependencies = [
 name = "gittree-git-http"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
@@ -612,6 +616,7 @@ dependencies = [
 name = "gittree-relay"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
@@ -625,6 +630,7 @@ dependencies = [
 name = "gittree-state"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
@@ -652,6 +658,7 @@ dependencies = [
 name = "gittree-sync"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "gittree-config",
  "gittree-core",
  "gittree-observability",

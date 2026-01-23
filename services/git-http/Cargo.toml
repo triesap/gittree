@@ -7,6 +7,7 @@ edition = "2024"
 gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
 gittree-observability = { path = "../../crates/observability" }
+dotenvy = "0.15"
 opentelemetry = { version = "0.23", features = ["metrics"] }
 tracing = "0.1"
 url = "2"

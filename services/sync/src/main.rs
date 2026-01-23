@@ -1,6 +1,7 @@
 use gittree_sync::{SyncConfig, SyncError, init_observability};
 
 fn main() {
+    dotenvy::dotenv().ok();
     if let Err(err) = run() {
         eprintln!("sync service failed: {err}");
         std::process::exit(1);
