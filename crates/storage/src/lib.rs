@@ -1,19 +1,21 @@
+use sqlx::Postgres;
 use sqlx::pool::PoolOptions;
 use sqlx::postgres::PgConnectOptions;
-use sqlx::Postgres;
 use std::time::Duration;
 
+pub mod cache;
 pub mod migrations;
-pub mod repo;
-pub mod repositories;
 pub mod postgres;
 pub mod queries;
+pub mod repo;
+pub mod repositories;
 
+pub use cache::CachedRepositories;
 pub use migrations::{Migration, MigrationRunner};
-pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
-pub use repositories::{AnnouncementRepository, InMemoryRepositories, StateRepository};
 pub use postgres::PostgresRepositories;
 pub use queries::RepoFilter;
+pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
+pub use repositories::{AnnouncementRepository, InMemoryRepositories, StateRepository};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {
@@ -28,14 +30,35 @@ pub struct StorageConfig {
 
 #[derive(Debug)]
 pub enum StorageError {
-    InvalidConnectionString { value: String, source: sqlx::Error },
-    InvalidPoolConfig { field: &'static str, value: u32 },
-    InvalidField { field: &'static str, value: String },
-    InvalidHex { field: &'static str, value: String },
-    Serialization { field: &'static str, source: serde_json::Error },
-    Internal { message: String },
-    Migration { message: String },
-    Database { source: sqlx::Error },
+    InvalidConnectionString {
+        value: String,
+        source: sqlx::Error,
+    },
+    InvalidPoolConfig {
+        field: &'static str,
+        value: u32,
+    },
+    InvalidField {
+        field: &'static str,
+        value: String,
+    },
+    InvalidHex {
+        field: &'static str,
+        value: String,
+    },
+    Serialization {
+        field: &'static str,
+        source: serde_json::Error,
+    },
+    Internal {
+        message: String,
+    },
+    Migration {
+        message: String,
+    },
+    Database {
+        source: sqlx::Error,
+    },
 }
 
 impl std::fmt::Display for StorageError {
@@ -104,13 +127,12 @@ impl StorageConfig {
     }
 
     pub fn read_connect_options(&self) -> Result<PgConnectOptions, StorageError> {
-        let options: PgConnectOptions = self
-            .read_connection
-            .parse()
-            .map_err(|source| StorageError::InvalidConnectionString {
+        let options: PgConnectOptions = self.read_connection.parse().map_err(|source| {
+            StorageError::InvalidConnectionString {
                 value: self.read_connection.clone(),
                 source,
-            })?;
+            }
+        })?;
         Ok(self.apply_connect_options(options))
     }
 
@@ -119,12 +141,13 @@ impl StorageConfig {
             .write_connection
             .as_ref()
             .unwrap_or(&self.read_connection);
-        let options: PgConnectOptions = connection
-            .parse()
-            .map_err(|source| StorageError::InvalidConnectionString {
-                value: connection.clone(),
-                source,
-            })?;
+        let options: PgConnectOptions =
+            connection
+                .parse()
+                .map_err(|source| StorageError::InvalidConnectionString {
+                    value: connection.clone(),
+                    source,
+                })?;
         Ok(self.apply_connect_options(options))
     }
 
@@ -135,12 +158,8 @@ impl StorageConfig {
             .max_connections(self.max_connections)
             .min_connections(self.min_connections);
 
-        options = options.idle_timeout(
-            self.idle_timeout_secs.map(Duration::from_secs),
-        );
-        options = options.max_lifetime(
-            self.max_lifetime_secs.map(Duration::from_secs),
-        );
+        options = options.idle_timeout(self.idle_timeout_secs.map(Duration::from_secs));
+        options = options.max_lifetime(self.max_lifetime_secs.map(Duration::from_secs));
 
         Ok(options)
     }
@@ -236,10 +255,7 @@ mod tests {
         let mut config = sample_config();
         config.read_connection = "not-a-url".to_string();
         let err = config.read_connect_options().unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::InvalidConnectionString { .. }
-        ));
+        assert!(matches!(err, StorageError::InvalidConnectionString { .. }));
     }
 
     #[test]
