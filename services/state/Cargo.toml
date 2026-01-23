@@ -7,4 +7,10 @@ edition = "2024"
 gittree-config = { path = "../../crates/config" }
 gittree-observability = { path = "../../crates/observability" }
 gittree-storage = { path = "../../crates/storage" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
+
+[dev-dependencies]
+gittree-core = { path = "../../crates/core" }
+tokio = { version = "1", features = ["macros", "rt"] }

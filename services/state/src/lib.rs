@@ -1,6 +1,8 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_observability::{ObservabilityError, ObservabilityHandle};
-use gittree_storage::StorageConfig;
+use gittree_storage::{RepoFilter, StateRepository, StorageConfig, StorageError};
+use serde::Serialize;
+use std::collections::HashMap;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -153,11 +155,94 @@ pub fn init_observability() -> Result<ObservabilityHandle, StateError> {
     Ok(handle)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateResponse {
+    pub event_id: String,
+    pub pubkey: String,
+    pub identifier: String,
+    pub created_at: i64,
+    pub state: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+pub enum StateServiceError {
+    InvalidInput { field: &'static str, value: String },
+    NotFound { pubkey: String, identifier: String },
+    Storage(StorageError),
+}
+
+impl std::fmt::Display for StateServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StateServiceError::InvalidInput { field, value } => {
+                write!(f, "invalid {field}: {value}")
+            }
+            StateServiceError::NotFound { pubkey, identifier } => {
+                write!(f, "state not found for {pubkey}:{identifier}")
+            }
+            StateServiceError::Storage(err) => write!(f, "storage error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for StateServiceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StateServiceError::Storage(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+pub async fn latest_state<S>(
+    storage: &S,
+    pubkey_hex: &str,
+    identifier: &str,
+) -> Result<StateResponse, StateServiceError>
+where
+    S: StateRepository,
+{
+    if identifier.trim().is_empty() {
+        return Err(StateServiceError::InvalidInput {
+            field: "identifier",
+            value: identifier.to_string(),
+        });
+    }
+
+    let filter =
+        RepoFilter::from_hex(pubkey_hex, identifier).map_err(StateServiceError::Storage)?;
+    let record = storage
+        .latest_state(&filter.pubkey, &filter.identifier)
+        .await
+        .map_err(StateServiceError::Storage)?;
+
+    let record = record.ok_or_else(|| StateServiceError::NotFound {
+        pubkey: pubkey_hex.to_string(),
+        identifier: identifier.to_string(),
+    })?;
+
+    let state = record.state_map().map_err(StateServiceError::Storage)?;
+
+    Ok(StateResponse {
+        event_id: hex::encode(record.event_id),
+        pubkey: hex::encode(record.pubkey),
+        identifier: record.identifier,
+        created_at: record.created_at,
+        state,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
     use super::StateConfig;
+    use super::StateServiceError;
     use super::StorageConfigError;
+    use super::latest_state;
+    use gittree_core::RepoState;
+    use gittree_storage::InMemoryRepositories;
+    use gittree_storage::StateRepository;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -221,5 +306,37 @@ mod tests {
                 super::StateConfigError::Storage(StorageConfigError::MissingEnv(_))
             ));
         });
+    }
+
+    #[tokio::test]
+    async fn latest_state_returns_record() {
+        let repo = InMemoryRepositories::default();
+        let mut state_map = HashMap::new();
+        state_map.insert("refs/heads/main".to_string(), "a".repeat(40));
+        state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+        let record =
+            gittree_storage::RepoStateRecord::new(&"11".repeat(32), &"22".repeat(32), 100, &state)
+                .expect("record");
+        repo.insert_state(record).await.expect("insert");
+
+        let response = latest_state(&repo, &"22".repeat(32), "repo")
+            .await
+            .expect("response");
+        assert_eq!(response.identifier, "repo");
+        assert_eq!(response.created_at, 100);
+        assert!(response.state.contains_key("refs/heads/main"));
+    }
+
+    #[tokio::test]
+    async fn latest_state_reports_missing() {
+        let repo = InMemoryRepositories::default();
+        let err = latest_state(&repo, &"22".repeat(32), "repo")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StateServiceError::NotFound { .. }));
     }
 }
