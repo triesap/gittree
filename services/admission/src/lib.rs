@@ -1,5 +1,5 @@
 use gittree_config::{ConfigError, ServicesConfig};
-use gittree_core::EventFilter;
+use gittree_core::{CoreError, EventFilter};
 use gittree_observability::ObservabilityError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,8 @@ impl AdmissionConfig {
 #[derive(Debug)]
 pub enum AdmissionError {
     Config(ConfigError),
+    Request(AdmissionRequestError),
+    Core(CoreError),
     Observability(ObservabilityError),
 }
 
@@ -65,6 +67,10 @@ impl AdmissionRequest {
     pub fn relay_host(&self) -> Option<&str> {
         self.relay_url.as_deref()
     }
+
+    pub fn kind_u32(&self) -> Result<u32, AdmissionRequestError> {
+        u32::try_from(self.kind).map_err(|_| AdmissionRequestError::InvalidKind(self.kind))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +101,7 @@ impl AdmissionDecision {
 pub enum AdmissionRequestError {
     MissingField(&'static str),
     InvalidTag,
+    InvalidKind(u64),
 }
 
 impl std::fmt::Display for AdmissionRequestError {
@@ -104,6 +111,9 @@ impl std::fmt::Display for AdmissionRequestError {
                 write!(f, "missing admission field {field}")
             }
             AdmissionRequestError::InvalidTag => write!(f, "invalid admission tag"),
+            AdmissionRequestError::InvalidKind(kind) => {
+                write!(f, "invalid admission kind {kind}")
+            }
         }
     }
 }
@@ -131,10 +141,32 @@ impl std::fmt::Display for AdmissionDecisionError {
 
 impl std::error::Error for AdmissionDecisionError {}
 
+pub fn evaluate_request(request: &AdmissionRequest) -> Result<AdmissionDecision, AdmissionError> {
+    let kind = request.kind_u32().map_err(AdmissionError::Request)?;
+    let decision = gittree_core::evaluate_admission(
+        kind,
+        &request.pubkey,
+        &request.event_id,
+        &request.tags,
+        request.relay_host(),
+    )
+    .map_err(AdmissionError::Core)?;
+
+    Ok(match decision {
+        gittree_core::AdmissionDecision::Accept => AdmissionDecision::Accept,
+        gittree_core::AdmissionDecision::Reject { reason } => AdmissionDecision::Reject { reason },
+        gittree_core::AdmissionDecision::RequiresRelatedEvents { filters } => {
+            AdmissionDecision::RequiresRelatedEvents { filters }
+        }
+    })
+}
+
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AdmissionError::Config(err) => write!(f, "admission config error: {err}"),
+            AdmissionError::Request(err) => write!(f, "admission request error: {err}"),
+            AdmissionError::Core(err) => write!(f, "admission core error: {err}"),
             AdmissionError::Observability(err) => {
                 write!(f, "admission observability error: {err}")
             }
@@ -146,6 +178,8 @@ impl std::error::Error for AdmissionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AdmissionError::Config(err) => Some(err),
+            AdmissionError::Request(err) => Some(err),
+            AdmissionError::Core(err) => Some(err),
             AdmissionError::Observability(err) => Some(err),
         }
     }
@@ -165,8 +199,10 @@ mod tests {
     use super::AdmissionConfig;
     use super::AdmissionDecision;
     use super::AdmissionRequest;
+    use super::evaluate_request;
     use gittree_config::ServicesConfig;
     use gittree_core::EventFilter;
+    use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE};
 
     #[test]
     fn config_loads_from_env() {
@@ -235,5 +271,50 @@ mod tests {
             decision,
             AdmissionDecision::RequiresRelatedEvents { filters } if filters.len() == 1
         ));
+    }
+
+    #[test]
+    fn evaluate_request_accepts_state() {
+        let request = AdmissionRequest::new(
+            KIND_GIT_REPO_STATE.0 as u64,
+            "pubkey",
+            "event",
+            Vec::new(),
+            Some("relay".to_string()),
+        )
+        .expect("request");
+        let decision = evaluate_request(&request).expect("decision");
+        assert!(matches!(decision, AdmissionDecision::Accept));
+    }
+
+    #[test]
+    fn evaluate_request_requires_related() {
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            Vec::new(),
+            Some("relay".to_string()),
+        )
+        .expect("request");
+        let decision = evaluate_request(&request).expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[test]
+    fn evaluate_request_rejects_invalid_kind() {
+        let request = AdmissionRequest::new(
+            u64::from(u32::MAX) + 1,
+            "pubkey",
+            "event",
+            Vec::new(),
+            Some("relay".to_string()),
+        )
+        .expect("request");
+        let err = evaluate_request(&request).unwrap_err();
+        assert!(matches!(err, super::AdmissionError::Request(_)));
     }
 }
