@@ -2,7 +2,7 @@ use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::RelayInfoDocument;
 use gittree_core::nip11::RelayLimitation;
 use gittree_observability::ObservabilityError;
-use gittree_storage::StorageConfig;
+use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, StorageError};
 
 mod admission_client;
 
@@ -132,6 +132,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, RelayConfigError> {
 pub enum RelayError {
     Config(RelayConfigError),
     Observability(ObservabilityError),
+    Storage(StorageError),
 }
 
 impl std::fmt::Display for RelayError {
@@ -139,6 +140,7 @@ impl std::fmt::Display for RelayError {
         match self {
             RelayError::Config(err) => write!(f, "relay config error: {err}"),
             RelayError::Observability(err) => write!(f, "relay observability error: {err}"),
+            RelayError::Storage(err) => write!(f, "relay storage error: {err}"),
         }
     }
 }
@@ -148,9 +150,12 @@ impl std::error::Error for RelayError {
         match self {
             RelayError::Config(err) => Some(err),
             RelayError::Observability(err) => Some(err),
+            RelayError::Storage(err) => Some(err),
         }
     }
 }
+
+pub type RelayRepositories = CachedRepositories<PostgresRepositories>;
 
 pub fn init_observability() -> Result<(), RelayError> {
     let config = gittree_observability::ObservabilityConfig {
@@ -159,6 +164,17 @@ pub fn init_observability() -> Result<(), RelayError> {
     };
     gittree_observability::init(&config).map_err(RelayError::Observability)?;
     Ok(())
+}
+
+pub fn build_repositories(config: &RelayConfig) -> Result<RelayRepositories, RelayError> {
+    let pool_options = config.storage.pool_options().map_err(RelayError::Storage)?;
+    let connect_options = config
+        .storage
+        .read_connect_options()
+        .map_err(RelayError::Storage)?;
+    let pool = pool_options.connect_lazy_with(connect_options);
+    let repos = PostgresRepositories::new(pool);
+    Ok(CachedRepositories::new(repos))
 }
 
 pub fn build_nip11_document(config: &RelayConfig) -> RelayInfoDocument {
@@ -214,8 +230,10 @@ mod tests {
     use super::ENV_STORAGE_APP_NAME;
     use super::ENV_STORAGE_READ_URL;
     use super::RelayConfig;
+    use super::RelayError;
     use super::StorageConfigError;
     use super::build_nip11_document;
+    use super::build_repositories;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -302,4 +320,22 @@ mod tests {
         });
     }
 
+    #[test]
+    fn repository_builder_rejects_invalid_connection() {
+        let config = RelayConfig {
+            bind: "0.0.0.0:8080".to_string(),
+            storage: gittree_storage::StorageConfig {
+                read_connection: "not-a-url".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: Some("gittree".to_string()),
+            },
+        };
+
+        let err = build_repositories(&config).unwrap_err();
+        assert!(matches!(err, RelayError::Storage(_)));
+    }
 }
