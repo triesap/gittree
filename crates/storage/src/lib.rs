@@ -31,6 +31,7 @@ pub enum StorageError {
     InvalidField { field: &'static str, value: String },
     InvalidHex { field: &'static str, value: String },
     Serialization { field: &'static str, source: serde_json::Error },
+    Internal { message: String },
     Migration { message: String },
     Database { source: sqlx::Error },
 }
@@ -53,6 +54,7 @@ impl std::fmt::Display for StorageError {
             StorageError::Serialization { field, source } => {
                 write!(f, "invalid {field}: {source}")
             }
+            StorageError::Internal { message } => write!(f, "internal error: {message}"),
             StorageError::Migration { message } => write!(f, "migration error: {message}"),
             StorageError::Database { source } => write!(f, "database error: {source}"),
         }
@@ -67,6 +69,7 @@ impl std::error::Error for StorageError {
             StorageError::InvalidField { .. } => None,
             StorageError::InvalidHex { .. } => None,
             StorageError::Serialization { source, .. } => Some(source),
+            StorageError::Internal { .. } => None,
             StorageError::Migration { .. } => None,
             StorageError::Database { source } => Some(source),
         }
@@ -235,5 +238,13 @@ mod tests {
             err,
             StorageError::InvalidConnectionString { .. }
         ));
+    }
+
+    #[test]
+    fn internal_error_formats_message() {
+        let err = StorageError::Internal {
+            message: "lock".to_string(),
+        };
+        assert_eq!(err.to_string(), "internal error: lock");
     }
 }

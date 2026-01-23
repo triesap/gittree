@@ -57,7 +57,7 @@ impl AnnouncementRepository for InMemoryRepositories {
         let mut map = self
             .announcements
             .write()
-            .map_err(|_| StorageError::Migration {
+            .map_err(|_| StorageError::Internal {
                 message: "announcement store poisoned".to_string(),
             })?;
         map.entry(key).or_default().push(record);
@@ -73,7 +73,7 @@ impl AnnouncementRepository for InMemoryRepositories {
         let map = self
             .announcements
             .read()
-            .map_err(|_| StorageError::Migration {
+            .map_err(|_| StorageError::Internal {
                 message: "announcement store poisoned".to_string(),
             })?;
         Ok(map.get(&key).cloned().unwrap_or_default())
@@ -97,7 +97,7 @@ impl StateRepository for InMemoryRepositories {
         let mut map = self
             .states
             .write()
-            .map_err(|_| StorageError::Migration {
+            .map_err(|_| StorageError::Internal {
                 message: "state store poisoned".to_string(),
             })?;
         map.entry(key).or_default().push(record);
@@ -113,7 +113,7 @@ impl StateRepository for InMemoryRepositories {
         let map = self
             .states
             .read()
-            .map_err(|_| StorageError::Migration {
+            .map_err(|_| StorageError::Internal {
                 message: "state store poisoned".to_string(),
             })?;
         let mut records = map.get(&key).cloned().unwrap_or_default();
