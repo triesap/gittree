@@ -2,6 +2,7 @@ use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{RepoAnnouncement, parse_repo_path};
 use gittree_storage::StorageConfig;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -215,12 +216,121 @@ fn default_repo_config() -> Vec<GitConfigEntry> {
     ]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoInitReport {
+    pub created: bool,
+    pub configured: usize,
+}
+
+#[derive(Debug)]
+pub enum RepoInitError {
+    Io(std::io::Error),
+    InvalidRepo(String),
+    InvalidPath(String),
+    Git(String),
+}
+
+impl std::fmt::Display for RepoInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RepoInitError::Io(err) => write!(f, "repo init io error: {err}"),
+            RepoInitError::InvalidRepo(message) => write!(f, "{message}"),
+            RepoInitError::InvalidPath(message) => write!(f, "{message}"),
+            RepoInitError::Git(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for RepoInitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RepoInitError::Io(err) => Some(err),
+            RepoInitError::InvalidRepo(_) => None,
+            RepoInitError::InvalidPath(_) => None,
+            RepoInitError::Git(_) => None,
+        }
+    }
+}
+
+pub fn init_repo(plan: &RepoProvisionPlan) -> Result<RepoInitReport, RepoInitError> {
+    let mut created = false;
+    if plan.repo_path.exists() {
+        if !plan.repo_path.is_dir() {
+            return Err(RepoInitError::InvalidRepo(format!(
+                "repo path is not a directory: {}",
+                plan.repo_path.display()
+            )));
+        }
+        let head = plan.repo_path.join("HEAD");
+        if !head.exists() {
+            return Err(RepoInitError::InvalidRepo(format!(
+                "repo path missing HEAD: {}",
+                plan.repo_path.display()
+            )));
+        }
+    } else {
+        create_bare_repo(&plan.repo_path)?;
+        created = true;
+    }
+
+    for entry in &plan.git_config {
+        apply_git_config(&plan.repo_path, entry)?;
+    }
+
+    Ok(RepoInitReport {
+        created,
+        configured: plan.git_config.len(),
+    })
+}
+
+fn create_bare_repo(path: &Path) -> Result<(), RepoInitError> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| RepoInitError::InvalidPath("repo path is not utf-8".to_string()))?;
+    let output = Command::new("git")
+        .arg("init")
+        .arg("--bare")
+        .arg(path_str)
+        .output()
+        .map_err(RepoInitError::Io)?;
+    if !output.status.success() {
+        return Err(RepoInitError::Git(format!(
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
+fn apply_git_config(path: &Path, entry: &GitConfigEntry) -> Result<(), RepoInitError> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| RepoInitError::InvalidPath("repo path is not utf-8".to_string()))?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path_str)
+        .arg("config")
+        .arg(&entry.key)
+        .arg(&entry.value)
+        .output()
+        .map_err(RepoInitError::Io)?;
+    if !output.status.success() {
+        return Err(RepoInitError::Git(format!(
+            "git config failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::CoordinatorConfig;
     use super::ENV_STORAGE_READ_URL;
     use super::RepoAnnouncement;
     use super::build_provision_plan;
+    use super::init_repo;
+    use std::fs;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -283,5 +393,41 @@ mod tests {
         assert_eq!(plan.pre_receive_hook, plan.hooks_dir.join("pre-receive"));
         assert_eq!(plan.post_receive_hook, plan.hooks_dir.join("post-receive"));
         assert!(plan.git_config.iter().any(|entry| entry.key == "core.bare"));
+    }
+
+    #[test]
+    fn init_repo_creates_bare_repo() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let temp_dir = temp_dir("gittree-init-repo");
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let plan = build_provision_plan(&temp_dir, npub, &announcement).expect("plan");
+        let report = init_repo(&plan).expect("init");
+        assert!(report.created);
+        assert!(plan.repo_path.join("HEAD").exists());
+        let second = init_repo(&plan).expect("init again");
+        assert!(!second.created);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("{prefix}-{nanos}-{}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 }
