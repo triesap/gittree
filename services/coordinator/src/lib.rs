@@ -1,5 +1,7 @@
 use gittree_config::{ConfigError, ServicesConfig};
+use gittree_core::{RepoAnnouncement, parse_repo_path};
 use gittree_storage::StorageConfig;
+use std::path::{Path, PathBuf};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -141,10 +143,84 @@ impl std::error::Error for CoordinatorError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoProvisionPlan {
+    pub npub: String,
+    pub identifier: String,
+    pub repo_path: PathBuf,
+    pub hooks_dir: PathBuf,
+    pub pre_receive_hook: PathBuf,
+    pub post_receive_hook: PathBuf,
+    pub git_config: Vec<GitConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitConfigEntry {
+    pub key: String,
+    pub value: String,
+}
+
+impl GitConfigEntry {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ProvisionPlanError {
+    InvalidRepo(String),
+}
+
+impl std::fmt::Display for ProvisionPlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProvisionPlanError::InvalidRepo(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for ProvisionPlanError {}
+
+pub fn build_provision_plan(
+    root: impl AsRef<Path>,
+    npub: &str,
+    announcement: &RepoAnnouncement,
+) -> Result<RepoProvisionPlan, ProvisionPlanError> {
+    let repo_path = root
+        .as_ref()
+        .join(npub)
+        .join(format!("{}.git", announcement.identifier));
+    parse_repo_path(&repo_path).map_err(|err| ProvisionPlanError::InvalidRepo(err.to_string()))?;
+    let hooks_dir = repo_path.join("hooks");
+    let pre_receive_hook = hooks_dir.join("pre-receive");
+    let post_receive_hook = hooks_dir.join("post-receive");
+    Ok(RepoProvisionPlan {
+        npub: npub.to_string(),
+        identifier: announcement.identifier.clone(),
+        repo_path,
+        hooks_dir,
+        pre_receive_hook,
+        post_receive_hook,
+        git_config: default_repo_config(),
+    })
+}
+
+fn default_repo_config() -> Vec<GitConfigEntry> {
+    vec![
+        GitConfigEntry::new("core.bare", "true"),
+        GitConfigEntry::new("receive.advertisePushOptions", "true"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::CoordinatorConfig;
     use super::ENV_STORAGE_READ_URL;
+    use super::RepoAnnouncement;
+    use super::build_provision_plan;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -183,5 +259,29 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn plan_builds_repo_paths() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let root = std::path::Path::new("/var/lib/gittree");
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let plan = build_provision_plan(root, npub, &announcement).expect("plan");
+        assert_eq!(plan.repo_path, root.join(npub).join("repo.git"));
+        assert_eq!(plan.hooks_dir, plan.repo_path.join("hooks"));
+        assert_eq!(plan.pre_receive_hook, plan.hooks_dir.join("pre-receive"));
+        assert_eq!(plan.post_receive_hook, plan.hooks_dir.join("post-receive"));
+        assert!(plan.git_config.iter().any(|entry| entry.key == "core.bare"));
     }
 }
