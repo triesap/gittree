@@ -38,6 +38,7 @@ pub mod event_filters;
 pub mod admission;
 pub mod repo_events;
 pub mod git_receive;
+pub mod repo_path;
 pub mod nip11;
 pub mod refs;
 pub mod tags;
@@ -73,6 +74,7 @@ pub use repo_events::{
     NostrEvent,
 };
 pub use git_receive::{evaluate_ref_update, evaluate_updates, RefUpdate, UpdateDecision};
+pub use repo_path::{parse_repo_path, RepoPath};
 pub use nip11::RelayInfoDocument;
 
 #[cfg(test)]
