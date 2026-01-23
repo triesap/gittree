@@ -10,6 +10,11 @@ const DEFAULT_COORDINATOR_BIND: &str = "127.0.0.1:8083";
 const DEFAULT_SYNC_BIND: &str = "127.0.0.1:8084";
 const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
+const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
+const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
+const ENV_COORDINATOR_BIND: &str = "GITTREE_COORDINATOR_BIND";
+const ENV_SYNC_BIND: &str = "GITTREE_SYNC_BIND";
+const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -43,6 +48,29 @@ impl Default for ServicesConfig {
             git_http: ServiceConfig::new(DEFAULT_GIT_HTTP_BIND),
         }
     }
+}
+
+impl ServicesConfig {
+    pub fn from_env() -> Self {
+        Self {
+            relay: ServiceConfig::new(env_or_default(ENV_RELAY_BIND, DEFAULT_RELAY_BIND)),
+            admission: ServiceConfig::new(env_or_default(
+                ENV_ADMISSION_BIND,
+                DEFAULT_ADMISSION_BIND,
+            )),
+            state: ServiceConfig::new(env_or_default(ENV_STATE_BIND, DEFAULT_STATE_BIND)),
+            coordinator: ServiceConfig::new(env_or_default(
+                ENV_COORDINATOR_BIND,
+                DEFAULT_COORDINATOR_BIND,
+            )),
+            sync: ServiceConfig::new(env_or_default(ENV_SYNC_BIND, DEFAULT_SYNC_BIND)),
+            git_http: ServiceConfig::new(env_or_default(ENV_GIT_HTTP_BIND, DEFAULT_GIT_HTTP_BIND)),
+        }
+    }
+}
+
+fn env_or_default(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -213,6 +241,11 @@ mod tests {
     use crate::DEFAULT_COORDINATOR_BIND;
     use crate::DEFAULT_GIT_HTTP_BIND;
     use crate::ENV_RELAY_BIND;
+    use crate::ENV_ADMISSION_BIND;
+    use crate::ENV_COORDINATOR_BIND;
+    use crate::ENV_GIT_HTTP_BIND;
+    use crate::ENV_STATE_BIND;
+    use crate::ENV_SYNC_BIND;
     use crate::DEFAULT_STATE_BIND;
     use crate::DEFAULT_SYNC_BIND;
     use std::sync::Mutex;
@@ -437,5 +470,35 @@ mod tests {
         assert_eq!(services.coordinator.bind, DEFAULT_COORDINATOR_BIND);
         assert_eq!(services.sync.bind, DEFAULT_SYNC_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
+    }
+
+    #[test]
+    fn services_config_from_env_uses_defaults_when_unset() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::remove_var(ENV_RELAY_BIND);
+            std::env::remove_var(ENV_ADMISSION_BIND);
+            std::env::remove_var(ENV_STATE_BIND);
+            std::env::remove_var(ENV_COORDINATOR_BIND);
+            std::env::remove_var(ENV_SYNC_BIND);
+            std::env::remove_var(ENV_GIT_HTTP_BIND);
+        }
+
+        let services = ServicesConfig::from_env();
+        assert_eq!(services.relay.bind, DEFAULT_RELAY_BIND);
+        assert_eq!(services.admission.bind, DEFAULT_ADMISSION_BIND);
+        assert_eq!(services.state.bind, DEFAULT_STATE_BIND);
+        assert_eq!(services.coordinator.bind, DEFAULT_COORDINATOR_BIND);
+        assert_eq!(services.sync.bind, DEFAULT_SYNC_BIND);
+        assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
+    }
+
+    #[test]
+    fn services_config_from_env_overrides_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_ADMISSION_BIND, "127.0.0.1:9091", || {
+            let services = ServicesConfig::from_env();
+            assert_eq!(services.admission.bind, "127.0.0.1:9091");
+        });
     }
 }
