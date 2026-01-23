@@ -4,6 +4,12 @@ use gittree_core::nip11::RelayLimitation;
 use gittree_observability::ObservabilityError;
 use gittree_storage::StorageConfig;
 
+mod admission_client;
+
+pub use admission_client::{
+    AdmissionFallback, AdmissionHookClient, AdmissionHookConfig, AdmissionHookError, RelayEvent,
+};
+
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
 const ENV_STORAGE_MAX_CONNECTIONS: &str = "GITTREE_STORAGE_MAX_CONNECTIONS";
@@ -295,4 +301,5 @@ mod tests {
             ));
         });
     }
+
 }
