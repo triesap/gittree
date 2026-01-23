@@ -551,6 +551,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-coordinator"
+version = "0.1.0"
+dependencies = [
+ "gittree-config",
+ "gittree-storage",
+]
+
+[[package]]
 name = "gittree-core"
 version = "0.1.0"
 dependencies = [
