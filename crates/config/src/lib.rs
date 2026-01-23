@@ -82,10 +82,44 @@ impl ServicesConfig {
         })?;
         Self::from_toml_str(&contents).map_err(|err| err.with_path(path))
     }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        validate_service_bind("relay", &self.relay.bind)?;
+        validate_service_bind("admission", &self.admission.bind)?;
+        validate_service_bind("state", &self.state.bind)?;
+        validate_service_bind("coordinator", &self.coordinator.bind)?;
+        validate_service_bind("sync", &self.sync.bind)?;
+        validate_service_bind("git_http", &self.git_http.bind)?;
+        Ok(())
+    }
+
+    pub fn from_env_validated() -> Result<Self, ConfigError> {
+        let config = Self::from_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_file_validated(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, ConfigError> {
+        let config = Self::from_toml_file(path)?;
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn validate_service_bind(service: &'static str, value: &str) -> Result<(), ConfigError> {
+    value.parse::<std::net::SocketAddr>().map_err(|_| {
+        ConfigError::InvalidServiceBind {
+            service,
+            value: value.to_string(),
+        }
+    })?;
+    Ok(())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -168,6 +202,7 @@ struct TomlServiceConfig {
 #[derive(Debug)]
 pub enum ConfigError {
     InvalidRelayBind(String),
+    InvalidServiceBind { service: &'static str, value: String },
     ReadConfig {
         path: std::path::PathBuf,
         source: std::io::Error,
@@ -183,6 +218,9 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::InvalidRelayBind(value) => {
                 write!(f, "invalid relay bind address: {value}")
+            }
+            ConfigError::InvalidServiceBind { service, value } => {
+                write!(f, "invalid {service} bind address: {value}")
             }
             ConfigError::ReadConfig { path, source } => {
                 write!(f, "failed to read config file {}: {source}", path.display())
@@ -206,6 +244,7 @@ impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ConfigError::InvalidRelayBind(_) => None,
+            ConfigError::InvalidServiceBind { .. } => None,
             ConfigError::ReadConfig { source, .. } => Some(source),
             ConfigError::TomlParse { source, .. } => Some(source),
         }
@@ -609,6 +648,44 @@ bind = "127.0.0.1:9101"
         let path = write_temp_config(toml);
         let services = ServicesConfig::from_toml_file(&path).expect("read services");
         assert_eq!(services.state.bind, "127.0.0.1:9101");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn services_config_validate_rejects_invalid_bind() {
+        let mut services = ServicesConfig::default();
+        services.state.bind = "bad".to_string();
+        let err = services.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidServiceBind { service: "state", .. }
+        ));
+    }
+
+    #[test]
+    fn services_config_from_env_validated_reports_invalid_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_STATE_BIND, "bad", || {
+            let err = ServicesConfig::from_env_validated().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidServiceBind { service: "state", .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn services_toml_file_validated_rejects_invalid_bind() {
+        let toml = r#"
+[services.coordinator]
+bind = "bad"
+"#;
+        let path = write_temp_config(toml);
+        let result = ServicesConfig::from_toml_file_validated(&path);
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidServiceBind { service: "coordinator", .. })
+        ));
         let _ = std::fs::remove_file(&path);
     }
 }
