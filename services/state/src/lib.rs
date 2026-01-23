@@ -485,11 +485,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
+    use super::ObservabilityHandle;
     use super::StateCache;
     use super::StateCacheConfig;
     use super::StateConfig;
     use super::StateServiceError;
     use super::StorageConfigError;
+    use super::init_observability;
     use super::latest_state;
     use super::latest_state_cached;
     use super::resolve_maintainers;
@@ -502,9 +504,11 @@ mod tests {
     use gittree_storage::StateRepository;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -732,5 +736,11 @@ mod tests {
             .await
             .expect("second");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn observability_init_returns_registry() {
+        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        assert!(handle.prometheus_registry().is_some());
     }
 }
