@@ -1,5 +1,6 @@
 use crate::StorageError;
 use gittree_core::{RepoAnnouncement, RepoState};
+use std::collections::HashMap;
 
 const HEX_LEN: usize = 64;
 
@@ -82,6 +83,13 @@ impl RepoStateRecord {
             identifier: state.identifier.clone(),
             created_at,
             state_json,
+        })
+    }
+
+    pub fn state_map(&self) -> Result<HashMap<String, String>, StorageError> {
+        serde_json::from_str(&self.state_json).map_err(|source| StorageError::Serialization {
+            field: "state",
+            source,
         })
     }
 }
@@ -181,6 +189,29 @@ mod tests {
         assert_eq!(parsed, expected);
         assert_eq!(record.identifier, "repo");
         assert_eq!(record.created_at, created_at);
+    }
+
+    #[test]
+    fn state_record_parses_json_map() {
+        let event_id = hex_32(0x33);
+        let pubkey = hex_32(0x44);
+        let created_at = 5678;
+        let mut state = HashMap::new();
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+
+        let record = RepoStateRecord::new(&event_id, &pubkey, created_at, &state)
+            .expect("record");
+        let parsed = record.state_map().expect("state map");
+        assert!(parsed.contains_key("HEAD"));
+        assert!(parsed.contains_key("refs/heads/main"));
     }
 
     #[test]
