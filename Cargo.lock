@@ -561,6 +561,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-git-hook"
+version = "0.1.0"
+dependencies = [
+ "gittree-config",
+ "tracing",
+]
+
+[[package]]
 name = "gittree-observability"
 version = "0.1.0"
 dependencies = [
@@ -584,6 +592,20 @@ dependencies = [
  "gittree-storage",
  "reqwest",
  "serde",
+ "tracing",
+]
+
+[[package]]
+name = "gittree-state"
+version = "0.1.0"
+dependencies = [
+ "gittree-config",
+ "gittree-core",
+ "gittree-observability",
+ "gittree-storage",
+ "hex",
+ "serde",
+ "tokio",
  "tracing",
 ]
 
