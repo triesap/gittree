@@ -1,0 +1,8 @@
+[package]
+name = "gittree-git-hook"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gittree-config = { path = "../../crates/config" }
+tracing = "0.1"
