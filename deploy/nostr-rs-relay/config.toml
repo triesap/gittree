@@ -1,0 +1,16 @@
+[info]
+relay_url = "ws://localhost:7080/"
+name = "gittree-nostr-test-relay"
+description = "Canonical nostr-rs-relay for gittree development."
+
+[database]
+engine = "sqlite"
+data_directory = "/usr/src/app/db"
+
+[logging]
+folder_path = "/usr/src/app/logs"
+file_prefix = "nostr-rs-relay"
+
+[network]
+address = "0.0.0.0"
+port = 8080

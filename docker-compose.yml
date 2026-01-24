@@ -6,7 +6,7 @@ services:
     command:
       - "sh"
       - "-c"
-      - "mkdir -p /logs/forgejo /logs/postgres /logs/nginx /logs/gittree && chmod -R 0777 /logs"
+      - "mkdir -p /logs/forgejo /logs/postgres /logs/nginx /logs/gittree /logs/nostr-rs-relay && chmod -R 0777 /logs"
     volumes:
       - ./logs:/logs
     restart: "no"
@@ -225,6 +225,21 @@ services:
       log-init:
         condition: service_completed_successfully
 
+  nostr-rs-relay:
+    image: scsibug/nostr-rs-relay:latest
+    environment:
+      RUST_LOG: "info,nostr_rs_relay=debug"
+    ports:
+      - "7080:8080"
+    volumes:
+      - nostr-rs-relay-db:/usr/src/app/db
+      - ./deploy/nostr-rs-relay/config.toml:/usr/src/app/config.toml:ro
+      - ./logs/nostr-rs-relay:/usr/src/app/logs
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+    restart: "no"
+
   nginx:
     image: nginx:1.27
     volumes:
@@ -243,3 +258,4 @@ services:
 volumes:
   pgdata: {}
   forgejo-data: {}
+  nostr-rs-relay-db: {}
