@@ -235,8 +235,10 @@ services:
     depends_on:
       log-init:
         condition: service_completed_successfully
-      - relay
-      - git-http
+      relay:
+        condition: service_started
+      git-http:
+        condition: service_started
 
 volumes:
   pgdata: {}
