@@ -7,6 +7,16 @@ services:
       POSTGRES_USER: gittree
       POSTGRES_PASSWORD: gittree
       POSTGRES_DB: gittree
+    command:
+      - "postgres"
+      - "-c"
+      - "logging_collector=on"
+      - "-c"
+      - "log_directory=/var/log/postgresql"
+      - "-c"
+      - "log_filename=postgresql-%Y-%m-%d.log"
+      - "-c"
+      - "log_rotation_age=1d"
     ports:
       - "5432:5432"
     healthcheck:
@@ -16,6 +26,7 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./logs/postgres:/var/log/postgresql
 
   migrate:
     build:
@@ -26,10 +37,14 @@ services:
     environment:
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
     depends_on:
       postgres:
         condition: service_healthy
     restart: "no"
+    volumes:
+      - ./logs:/var/log/gittree
 
   relay:
     build:
@@ -41,6 +56,8 @@ services:
       GITTREE_RELAY_BIND: 0.0.0.0:8080
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
     ports:
       - "8080:8080"
     depends_on:
@@ -48,6 +65,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/var/log/gittree
 
   admission:
     build:
@@ -59,6 +78,8 @@ services:
       GITTREE_ADMISSION_BIND: 0.0.0.0:8081
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
     ports:
       - "8081:8081"
     depends_on:
@@ -66,6 +87,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/var/log/gittree
 
   state:
     build:
@@ -77,6 +100,8 @@ services:
       GITTREE_STATE_BIND: 0.0.0.0:8082
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
     ports:
       - "8082:8082"
     depends_on:
@@ -84,6 +109,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/var/log/gittree
 
   coordinator:
     build:
@@ -95,6 +122,8 @@ services:
       GITTREE_COORDINATOR_BIND: 0.0.0.0:8083
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
     ports:
       - "8083:8083"
     depends_on:
@@ -102,6 +131,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/var/log/gittree
 
   sync:
     build:
@@ -113,6 +144,8 @@ services:
       GITTREE_SYNC_BIND: 0.0.0.0:8084
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
     ports:
       - "8084:8084"
     depends_on:
@@ -120,6 +153,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/var/log/gittree
 
   git-http:
     build:
@@ -130,17 +165,24 @@ services:
     environment:
       GITTREE_GIT_HTTP_BIND: 0.0.0.0:8085
       GITTREE_GIT_HTTP_UPSTREAM_URL: http://forgejo:3000/
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
     ports:
       - "8085:8085"
     depends_on:
       - relay
       - forgejo
+    volumes:
+      - ./logs:/var/log/gittree
 
   forgejo:
     image: codeberg.org/forgejo/forgejo:1.21
     environment:
       FORGEJO__database__DB_TYPE: sqlite3
       FORGEJO__database__PATH: /data/forgejo.db
+      FORGEJO__log__MODE: file
+      FORGEJO__log__ROOT_PATH: /var/log/forgejo
+      FORGEJO__log__LEVEL: Info
       FORGEJO__server__ROOT_URL: http://localhost:3000/
       FORGEJO__server__DOMAIN: localhost
       FORGEJO__server__HTTP_PORT: 3000
@@ -151,11 +193,13 @@ services:
       - "2222:22"
     volumes:
       - forgejo-data:/data
+      - ./logs/forgejo:/var/log/forgejo
 
   nginx:
     image: nginx:1.27
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx:/var/log/nginx
     ports:
       - "80:80"
     depends_on:
