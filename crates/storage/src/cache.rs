@@ -1,5 +1,6 @@
 use crate::{
-    AnnouncementRepository, RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
+    AnnouncementRepository, RelayCompatibilityRecord, RelayCompatibilityRepository,
+    RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -46,6 +47,7 @@ struct CacheStore {
     announcements: RwLock<HashMap<String, CacheEntry<Vec<RepoAnnouncementRecord>>>>,
     latest_announcements: RwLock<HashMap<String, CacheEntry<RepoAnnouncementRecord>>>,
     latest_states: RwLock<HashMap<String, CacheEntry<RepoStateRecord>>>,
+    relay_compatibility: RwLock<HashMap<String, CacheEntry<RelayCompatibilityRecord>>>,
 }
 
 #[derive(Debug)]
@@ -415,15 +417,111 @@ where
     }
 }
 
+#[async_trait]
+impl<R> RelayCompatibilityRepository for CachedRepositories<R>
+where
+    R: RelayCompatibilityRepository,
+{
+    async fn upsert_relay_compatibility(
+        &self,
+        record: RelayCompatibilityRecord,
+    ) -> Result<(), StorageError> {
+        if !self.cache_enabled() {
+            return self.inner.upsert_relay_compatibility(record).await;
+        }
+
+        self.inner
+            .upsert_relay_compatibility(record.clone())
+            .await?;
+        let key = record.relay_url.clone();
+        let now = Instant::now();
+        let mut entries = self
+            .cache
+            .relay_compatibility
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "relay compatibility cache poisoned".to_string(),
+            })?;
+        entries.insert(
+            key,
+            CacheEntry {
+                value: record,
+                stored_at: now,
+            },
+        );
+        self.evict_if_needed(&mut entries);
+        Ok(())
+    }
+
+    async fn relay_compatibility(
+        &self,
+        relay_url: &str,
+    ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
+        if !self.cache_enabled() {
+            return self.inner.relay_compatibility(relay_url).await;
+        }
+
+        let (cached, stale) = {
+            let entries = self
+                .cache
+                .relay_compatibility
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "relay compatibility cache poisoned".to_string(),
+                })?;
+            match entries.get(relay_url) {
+                Some(entry) if self.is_fresh(entry) => (Some(entry.value.clone()), false),
+                Some(_) => (None, true),
+                None => (None, false),
+            }
+        };
+        if stale {
+            let mut entries =
+                self.cache
+                    .relay_compatibility
+                    .write()
+                    .map_err(|_| StorageError::Internal {
+                        message: "relay compatibility cache poisoned".to_string(),
+                    })?;
+            entries.remove(relay_url);
+        }
+        if let Some(cached) = cached {
+            return Ok(Some(cached));
+        }
+
+        let record = self.inner.relay_compatibility(relay_url).await?;
+        if let Some(record) = record.clone() {
+            let now = Instant::now();
+            let mut entries =
+                self.cache
+                    .relay_compatibility
+                    .write()
+                    .map_err(|_| StorageError::Internal {
+                        message: "relay compatibility cache poisoned".to_string(),
+                    })?;
+            entries.insert(
+                relay_url.to_string(),
+                CacheEntry {
+                    value: record,
+                    stored_at: now,
+                },
+            );
+            self.evict_if_needed(&mut entries);
+        }
+
+        Ok(record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CacheConfig, CachedRepositories};
     use crate::{
-        AnnouncementRepository, RepoAnnouncementRecord, RepoStateRecord, StateRepository,
-        StorageError,
+        AnnouncementRepository, RelayCompatibilityRecord, RelayCompatibilityRepository,
+        RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
     };
     use async_trait::async_trait;
-    use gittree_core::{RepoAnnouncement, RepoState};
+    use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
@@ -433,9 +531,11 @@ mod tests {
     struct CountingRepo {
         announcements: RwLock<HashMap<String, Vec<RepoAnnouncementRecord>>>,
         states: RwLock<HashMap<String, Vec<RepoStateRecord>>>,
+        relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
         list_calls: AtomicUsize,
         latest_announcement_calls: AtomicUsize,
         latest_state_calls: AtomicUsize,
+        relay_compatibility_calls: AtomicUsize,
     }
 
     impl CountingRepo {
@@ -445,6 +545,10 @@ mod tests {
 
         fn key(pubkey: &[u8], identifier: &str) -> String {
             format!("{}:{}", hex::encode(pubkey), identifier)
+        }
+
+        fn relay_key(relay_url: &str) -> String {
+            relay_url.to_string()
         }
     }
 
@@ -521,6 +625,39 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl RelayCompatibilityRepository for Arc<CountingRepo> {
+        async fn upsert_relay_compatibility(
+            &self,
+            record: RelayCompatibilityRecord,
+        ) -> Result<(), StorageError> {
+            let key = CountingRepo::relay_key(&record.relay_url);
+            let mut map =
+                self.relay_compatibility
+                    .write()
+                    .map_err(|_| StorageError::Internal {
+                        message: "relay compatibility store poisoned".to_string(),
+                    })?;
+            map.insert(key, record);
+            Ok(())
+        }
+
+        async fn relay_compatibility(
+            &self,
+            relay_url: &str,
+        ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
+            self.relay_compatibility_calls
+                .fetch_add(1, Ordering::SeqCst);
+            let map =
+                self.relay_compatibility
+                    .read()
+                    .map_err(|_| StorageError::Internal {
+                        message: "relay compatibility store poisoned".to_string(),
+                    })?;
+            Ok(map.get(relay_url).cloned())
+        }
+    }
+
     fn hex_32(byte: u8) -> String {
         format!("{:02x}", byte).repeat(32)
     }
@@ -551,6 +688,16 @@ mod tests {
             identifier: identifier.to_string(),
             state,
         }
+    }
+
+    fn sample_relay_compatibility(relay_url: &str) -> RelayCompatibilityRecord {
+        let report = RelayCompatibilityReport {
+            relay_url: relay_url.to_string(),
+            supported: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        };
+        RelayCompatibilityRecord::new(&report, 10).expect("record")
     }
 
     #[tokio::test]
@@ -698,5 +845,52 @@ mod tests {
             .expect("latest");
 
         assert_eq!(inner.latest_state_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn relay_compatibility_uses_cache() {
+        let inner = Arc::new(CountingRepo::new());
+        let cached = CachedRepositories::new(inner.clone());
+        let record = sample_relay_compatibility("wss://relay.example");
+
+        inner
+            .upsert_relay_compatibility(record)
+            .await
+            .expect("insert");
+
+        cached
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("first");
+        cached
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("second");
+
+        assert_eq!(inner.relay_compatibility_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn relay_compatibility_ttl_expires() {
+        let inner = Arc::new(CountingRepo::new());
+        let config = CacheConfig::new(Some(Duration::from_secs(0)), 16);
+        let cached = CachedRepositories::with_config(inner.clone(), config);
+        let record = sample_relay_compatibility("wss://relay.example");
+
+        inner
+            .upsert_relay_compatibility(record)
+            .await
+            .expect("insert");
+
+        cached
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("first");
+        cached
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("second");
+
+        assert_eq!(inner.relay_compatibility_calls.load(Ordering::SeqCst), 2);
     }
 }
