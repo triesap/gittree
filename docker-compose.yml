@@ -195,8 +195,10 @@ services:
     depends_on:
       log-init:
         condition: service_completed_successfully
-      - relay
-      - forgejo
+      relay:
+        condition: service_started
+      forgejo:
+        condition: service_started
     volumes:
       - ./logs:/var/log/gittree
 
