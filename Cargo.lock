@@ -529,6 +529,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-admin"
+version = "0.1.0"
+dependencies = [
+ "dotenvy",
+ "gittree-core",
+ "gittree-storage",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "gittree-admission"
 version = "0.1.0"
 dependencies = [

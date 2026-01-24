@@ -1,0 +1,11 @@
+[package]
+name = "gittree-admin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotenvy = "0.15"
+gittree-core = { path = "../../crates/core" }
+gittree-storage = { path = "../../crates/storage" }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
