@@ -671,11 +671,14 @@ dependencies = [
 name = "gittree-relay-probe"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "gittree-core",
+ "gittree-relay-adapter",
  "once_cell",
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "url",
 ]
 

@@ -1,6 +1,7 @@
 use gittree_core::{
     RelayCapabilitySet, RelayCompatibilityReport, RelayInfoDocument, capabilities_from_nip11,
 };
+use gittree_relay_adapter::RelayAdapter;
 use serde::Serialize;
 use url::Url;
 
@@ -11,6 +12,8 @@ pub struct RelayProbeResult {
     pub report: RelayCompatibilityReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nip11: Option<RelayInfoDocument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_probe: Option<ActiveProbeResult>,
     pub warnings: Vec<String>,
 }
 
@@ -35,6 +38,13 @@ impl std::error::Error for RelayProbeError {}
 
 pub trait RelayProbeClient {
     fn fetch_nip11(&self, url: &str) -> Result<Option<String>, RelayProbeError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveProbeResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -127,13 +137,40 @@ pub fn probe_relay(
         nip11_url: Some(nip11_url),
         report,
         nip11,
+        active_probe: None,
         warnings,
     })
 }
 
+pub async fn probe_relay_with_adapter(
+    relay_url: &str,
+    client: &dyn RelayProbeClient,
+    adapter: &dyn RelayAdapter,
+) -> Result<RelayProbeResult, RelayProbeError> {
+    let mut result = probe_relay(relay_url, client)?;
+    match adapter.probe_write_read().await {
+        Ok(()) => {
+            result.active_probe = Some(ActiveProbeResult { ok: true, error: None });
+        }
+        Err(err) => {
+            result.active_probe = Some(ActiveProbeResult {
+                ok: false,
+                error: Some(err.to_string()),
+            });
+        }
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RelayProbeClient, RelayProbeError, probe_relay, resolve_nip11_url};
+    use super::{
+        RelayProbeClient, RelayProbeError, probe_relay, probe_relay_with_adapter,
+        resolve_nip11_url,
+    };
+    use async_trait::async_trait;
+    use gittree_core::RelayInfoDocument;
+    use gittree_relay_adapter::{RelayAdapter, RelayAdapterError};
     use once_cell::sync::Lazy;
 
     struct StubProbeClient {
@@ -163,5 +200,30 @@ mod tests {
         let result = probe_relay("wss://relay.example", &client).expect("probe");
         assert!(result.report.is_compatible());
         assert!(result.warnings.is_empty());
+    }
+
+    struct OkAdapter;
+
+    #[async_trait]
+    impl RelayAdapter for OkAdapter {
+        async fn relay_info(&self) -> Result<Option<RelayInfoDocument>, RelayAdapterError> {
+            Ok(None)
+        }
+
+        async fn probe_write_read(&self) -> Result<(), RelayAdapterError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_relay_with_adapter_records_active_success() {
+        let client = StubProbeClient {
+            response: Some(&NIP11_BODY),
+        };
+        let result = probe_relay_with_adapter("wss://relay.example", &client, &OkAdapter)
+            .await
+            .expect("probe");
+        assert!(result.active_probe.is_some());
+        assert!(result.active_probe.unwrap().ok);
     }
 }
