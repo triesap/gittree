@@ -295,6 +295,13 @@ impl AdmissionRequest {
             return Err(AdmissionRequestError::InvalidTag);
         }
 
+        if relay_url
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(AdmissionRequestError::InvalidRelayUrl);
+        }
+
         Ok(Self {
             kind,
             pubkey,
@@ -347,6 +354,7 @@ pub enum AdmissionRequestError {
     MissingField(&'static str),
     InvalidTag,
     InvalidKind(u64),
+    InvalidRelayUrl,
 }
 
 impl std::fmt::Display for AdmissionRequestError {
@@ -358,6 +366,9 @@ impl std::fmt::Display for AdmissionRequestError {
             AdmissionRequestError::InvalidTag => write!(f, "invalid admission tag"),
             AdmissionRequestError::InvalidKind(kind) => {
                 write!(f, "invalid admission kind {kind}")
+            }
+            AdmissionRequestError::InvalidRelayUrl => {
+                write!(f, "invalid admission relay url")
             }
         }
     }
@@ -592,6 +603,20 @@ mod tests {
         let err =
             AdmissionRequest::new(1, "pubkey", "event", vec![vec![]], None, None).unwrap_err();
         assert!(matches!(err, super::AdmissionRequestError::InvalidTag));
+    }
+
+    #[test]
+    fn request_rejects_empty_relay_url() {
+        let err = AdmissionRequest::new(
+            1,
+            "pubkey",
+            "event",
+            vec![vec!["d".to_string(), "repo".to_string()]],
+            Some("  ".to_string()),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, super::AdmissionRequestError::InvalidRelayUrl));
     }
 
     #[test]
