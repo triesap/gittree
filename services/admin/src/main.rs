@@ -1,5 +1,6 @@
 use gittree_admin::{AdminCli, AdminCliError, AdminCommand};
 use gittree_core::{ForgejoRepo, RepoMapping};
+use gittree_observability::ObservabilityHandle;
 use gittree_storage::{
     PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
 };
@@ -12,9 +13,22 @@ const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 
+fn init_observability() -> Result<ObservabilityHandle, String> {
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-admin")
+        .map_err(|err| err.to_string())?;
+    gittree_observability::init(&config).map_err(|err| err.to_string())
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
+    let _observability = match init_observability() {
+        Ok(handle) => handle,
+        Err(err) => {
+            eprintln!("admin observability failed: {err}");
+            std::process::exit(1);
+        }
+    };
     if let Err(err) = run().await {
         eprintln!("gittree-admin failed: {err}");
         std::process::exit(1);
@@ -38,6 +52,13 @@ async fn run() -> Result<(), AdminError> {
             identifier,
         } => {
             let forgejo = ForgejoRepo::parse(&forgejo).map_err(AdminError::Core)?;
+            tracing::info!(
+                owner = %forgejo.owner,
+                name = %forgejo.name,
+                pubkey = %pubkey,
+                identifier = %identifier,
+                "upserting repo mapping"
+            );
             let mapping = RepoMapping::new(forgejo.owner, forgejo.name, pubkey, identifier)
                 .map_err(AdminError::Core)?;
             let record = RepoMappingRecord::new(&mapping).map_err(AdminError::Storage)?;
@@ -56,6 +77,11 @@ async fn run() -> Result<(), AdminError> {
             repo.upsert_mapping(record)
                 .await
                 .map_err(AdminError::Storage)?;
+            tracing::info!(
+                owner = %mapping.forgejo.owner,
+                name = %mapping.forgejo.name,
+                "repo mapping stored"
+            );
         }
     }
 

@@ -534,9 +534,11 @@ version = "0.1.0"
 dependencies = [
  "dotenvy",
  "gittree-core",
+ "gittree-observability",
  "gittree-storage",
  "sqlx",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -591,6 +593,7 @@ dependencies = [
  "dotenvy",
  "gittree-config",
  "gittree-core",
+ "gittree-observability",
  "hex",
  "hmac",
  "reqwest",
@@ -618,9 +621,11 @@ name = "gittree-migrate"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "gittree-observability",
  "gittree-storage",
  "sqlx",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

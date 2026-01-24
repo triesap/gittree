@@ -5,8 +5,21 @@ use gittree_git_hook::{
 use std::io::Read;
 use std::time::Duration;
 
+fn init_observability() -> Result<gittree_observability::ObservabilityHandle, String> {
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-git-hook")
+        .map_err(|err| err.to_string())?;
+    gittree_observability::init(&config).map_err(|err| err.to_string())
+}
+
 fn main() {
     dotenvy::dotenv().ok();
+    let _observability = match init_observability() {
+        Ok(handle) => handle,
+        Err(err) => {
+            eprintln!("git hook observability failed: {err}");
+            std::process::exit(1);
+        }
+    };
     if let Err(err) = run() {
         eprintln!("git hook failed: {err}");
         std::process::exit(1);
@@ -15,6 +28,7 @@ fn main() {
 
 fn run() -> Result<(), HookServiceError> {
     let config = HookConfig::from_env().map_err(HookServiceError::Config)?;
+    tracing::info!(mode = ?config.mode, "git hook configured");
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok();
     let updates = match parse_updates(&input) {

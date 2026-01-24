@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
+gittree-observability = { path = "../../crates/observability" }
 dotenvy = "0.15"
 hex = "0.4"
 hmac = "0.12"
