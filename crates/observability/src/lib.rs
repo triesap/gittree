@@ -9,6 +9,10 @@ const ENV_LOG_DIR: &str = "GITTREE_LOG_DIR";
 const ENV_LOG_STDOUT: &str = "GITTREE_LOG_STDOUT";
 const ENV_METRICS_ENABLED: &str = "GITTREE_METRICS_ENABLED";
 
+pub const LOG_FIELD_RELAY_URL: &str = "relay_url";
+pub const LOG_FIELD_RELAY_PROBE_STATUS: &str = "relay_probe_status";
+pub const LOG_FIELD_RELAY_PROBE_DETAIL: &str = "relay_probe_detail";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservabilityConfig {
     pub service_name: String,
@@ -380,5 +384,12 @@ mod tests {
         let config = ObservabilityConfig::default();
         let handle = super::init(&config).expect("init");
         assert!(handle.prometheus_registry().is_some());
+    }
+
+    #[test]
+    fn relay_probe_log_fields_are_non_empty() {
+        assert!(!super::LOG_FIELD_RELAY_URL.is_empty());
+        assert!(!super::LOG_FIELD_RELAY_PROBE_STATUS.is_empty());
+        assert!(!super::LOG_FIELD_RELAY_PROBE_DETAIL.is_empty());
     }
 }
