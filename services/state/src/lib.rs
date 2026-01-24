@@ -1,7 +1,8 @@
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
-    AnnouncementRepository, RepoFilter, StateRepository, StorageConfig, StorageError,
+    AnnouncementRepository, RelayCompatibilityRepository, RepoFilter, StateRepository,
+    StorageConfig, StorageError,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -188,6 +189,16 @@ pub struct MaintainersResponse {
     pub maintainers: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelayCompatibilityResponse {
+    pub relay_url: String,
+    pub compatible: bool,
+    pub supported_capabilities: Vec<String>,
+    pub missing_required: Vec<String>,
+    pub missing_optional: Vec<String>,
+    pub checked_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct StateCacheConfig {
     pub ttl: Option<Duration>,
@@ -220,6 +231,7 @@ pub struct StateCache {
     config: StateCacheConfig,
     state_entries: std::sync::RwLock<HashMap<String, CacheEntry<StateResponse>>>,
     maintainer_entries: std::sync::RwLock<HashMap<String, CacheEntry<MaintainersResponse>>>,
+    relay_entries: std::sync::RwLock<HashMap<String, CacheEntry<RelayCompatibilityResponse>>>,
 }
 
 impl StateCache {
@@ -228,11 +240,16 @@ impl StateCache {
             config,
             state_entries: std::sync::RwLock::new(HashMap::new()),
             maintainer_entries: std::sync::RwLock::new(HashMap::new()),
+            relay_entries: std::sync::RwLock::new(HashMap::new()),
         }
     }
 
     pub fn key(pubkey_hex: &str, identifier: &str) -> String {
         format!("{pubkey_hex}:{identifier}")
+    }
+
+    pub fn relay_key(relay_url: &str) -> String {
+        relay_url.to_string()
     }
 
     fn cache_enabled(&self) -> bool {
@@ -339,12 +356,49 @@ impl StateCache {
             self.evict_if_needed(&mut entries);
         }
     }
+
+    pub fn get_relay_compatibility(&self, key: &str) -> Option<RelayCompatibilityResponse> {
+        if !self.cache_enabled() {
+            return None;
+        }
+        let cached = {
+            let entries = self.relay_entries.read().ok()?;
+            entries.get(key).cloned()
+        };
+        match cached {
+            Some(entry) if self.is_fresh(&entry) => Some(entry.value),
+            Some(_) => {
+                if let Ok(mut entries) = self.relay_entries.write() {
+                    entries.remove(key);
+                }
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn insert_relay_compatibility(&self, key: String, value: RelayCompatibilityResponse) {
+        if !self.cache_enabled() {
+            return;
+        }
+        if let Ok(mut entries) = self.relay_entries.write() {
+            entries.insert(
+                key,
+                CacheEntry {
+                    value,
+                    stored_at: Instant::now(),
+                },
+            );
+            self.evict_if_needed(&mut entries);
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum StateServiceError {
     InvalidInput { field: &'static str, value: String },
     NotFound { pubkey: String, identifier: String },
+    RelayNotFound { relay_url: String },
     Storage(StorageError),
 }
 
@@ -356,6 +410,9 @@ impl std::fmt::Display for StateServiceError {
             }
             StateServiceError::NotFound { pubkey, identifier } => {
                 write!(f, "state not found for {pubkey}:{identifier}")
+            }
+            StateServiceError::RelayNotFound { relay_url } => {
+                write!(f, "relay compatibility not found for {relay_url}")
             }
             StateServiceError::Storage(err) => write!(f, "storage error: {err}"),
         }
@@ -497,6 +554,55 @@ where
     Ok(response)
 }
 
+pub async fn relay_compatibility<S>(
+    storage: &S,
+    relay_url: &str,
+) -> Result<RelayCompatibilityResponse, StateServiceError>
+where
+    S: RelayCompatibilityRepository,
+{
+    if relay_url.trim().is_empty() {
+        return Err(StateServiceError::InvalidInput {
+            field: "relay_url",
+            value: relay_url.to_string(),
+        });
+    }
+
+    let record = storage
+        .relay_compatibility(relay_url)
+        .await
+        .map_err(StateServiceError::Storage)?;
+    let record = record.ok_or_else(|| StateServiceError::RelayNotFound {
+        relay_url: relay_url.to_string(),
+    })?;
+
+    Ok(RelayCompatibilityResponse {
+        relay_url: record.relay_url,
+        compatible: record.compatible,
+        supported_capabilities: record.supported_capabilities,
+        missing_required: record.missing_required,
+        missing_optional: record.missing_optional,
+        checked_at: record.checked_at,
+    })
+}
+
+pub async fn relay_compatibility_cached<S>(
+    storage: &S,
+    cache: &StateCache,
+    relay_url: &str,
+) -> Result<RelayCompatibilityResponse, StateServiceError>
+where
+    S: RelayCompatibilityRepository,
+{
+    let key = StateCache::relay_key(relay_url);
+    if let Some(value) = cache.get_relay_compatibility(&key) {
+        return Ok(value);
+    }
+    let response = relay_compatibility(storage, relay_url).await?;
+    cache.insert_relay_compatibility(key, response.clone());
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
@@ -509,12 +615,17 @@ mod tests {
     use super::init_observability;
     use super::latest_state;
     use super::latest_state_cached;
+    use super::relay_compatibility;
+    use super::relay_compatibility_cached;
     use super::resolve_maintainers;
     use super::resolve_maintainers_cached;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
+    use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_storage::AnnouncementRepository;
     use gittree_storage::InMemoryRepositories;
+    use gittree_storage::RelayCompatibilityRecord;
+    use gittree_storage::RelayCompatibilityRepository;
     use gittree_storage::RepoAnnouncementRecord;
     use gittree_storage::StateRepository;
     use std::collections::HashMap;
@@ -555,6 +666,16 @@ mod tests {
             },
             None => {}
         }
+    }
+
+    fn sample_compat_record(relay_url: &str) -> RelayCompatibilityRecord {
+        let report = RelayCompatibilityReport {
+            relay_url: relay_url.to_string(),
+            supported: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        };
+        RelayCompatibilityRecord::new(&report, 123).expect("record")
     }
 
     #[test]
@@ -643,6 +764,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_compatibility_returns_record() {
+        let repo = InMemoryRepositories::default();
+        let record = sample_compat_record("wss://relay.example");
+        repo.upsert_relay_compatibility(record).await.expect("upsert");
+
+        let response = relay_compatibility(&repo, "wss://relay.example")
+            .await
+            .expect("response");
+        assert_eq!(response.relay_url, "wss://relay.example");
+        assert!(response.compatible);
+        assert_eq!(response.checked_at, 123);
+    }
+
+    #[tokio::test]
+    async fn relay_compatibility_reports_missing() {
+        let repo = InMemoryRepositories::default();
+        let err = relay_compatibility(&repo, "wss://relay.example")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StateServiceError::RelayNotFound { .. }));
+    }
+
+    #[tokio::test]
     async fn resolve_maintainers_recurses() {
         let repo = InMemoryRepositories::default();
         let announcement = RepoAnnouncement {
@@ -726,6 +870,22 @@ mod tests {
             .await
             .expect("first");
         let second = latest_state_cached(&repo, &cache, &"22".repeat(32), "repo")
+            .await
+            .expect("second");
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn cache_returns_relay_compatibility() {
+        let repo = InMemoryRepositories::default();
+        let cache = StateCache::new(StateCacheConfig::new(None, 10));
+        let record = sample_compat_record("wss://relay.example");
+        repo.upsert_relay_compatibility(record).await.expect("upsert");
+
+        let first = relay_compatibility_cached(&repo, &cache, "wss://relay.example")
+            .await
+            .expect("first");
+        let second = relay_compatibility_cached(&repo, &cache, "wss://relay.example")
             .await
             .expect("second");
         assert_eq!(first, second);
