@@ -59,7 +59,7 @@ impl MigrationRunner {
         let mut applied = current;
 
         for migration in self.migrations.iter().filter(|m| m.version > current) {
-            sqlx::query(migration.sql).execute(&mut *executor).await?;
+            sqlx::raw_sql(migration.sql).execute(&mut *executor).await?;
             sqlx::query("INSERT INTO migrations (serial_number) VALUES ($1)")
                 .bind(migration.version)
                 .execute(&mut *executor)
