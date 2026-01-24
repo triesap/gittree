@@ -72,7 +72,9 @@ pub use nip34_issues::Issue;
 pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip34_status::{StatusAppliedRef, StatusEvent};
-pub use relay_compat::{RelayCapability, RelayCapabilitySet, RelayCompatibilityReport};
+pub use relay_compat::{
+    RelayCapability, RelayCapabilitySet, RelayCompatibilityReport, capabilities_from_nip11,
+};
 pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use repo_events::{
     NostrEvent, collect_clone_urls, collect_maintainers, find_repo_announcement,
