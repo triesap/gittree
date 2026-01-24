@@ -4,6 +4,7 @@ members = [
   "crates/observability",
   "crates/core",
   "crates/storage",
+  "crates/migrate",
   "services/admission",
   "services/coordinator",
   "services/git-hook",

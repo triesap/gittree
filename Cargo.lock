@@ -599,6 +599,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-migrate"
+version = "0.1.0"
+dependencies = [
+ "dotenvy",
+ "gittree-storage",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "gittree-observability"
 version = "0.1.0"
 dependencies = [
