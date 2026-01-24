@@ -1,5 +1,10 @@
-use crate::repositories::{AnnouncementRepository, RepoMappingRepository, StateRepository};
-use crate::{RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError};
+use crate::repositories::{
+    AnnouncementRepository, RelayCompatibilityRepository, RepoMappingRepository, StateRepository,
+};
+use crate::{
+    RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord,
+    StorageError,
+};
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
@@ -333,10 +338,91 @@ LIMIT 1
     }
 }
 
+#[async_trait]
+impl RelayCompatibilityRepository for PostgresRepositories {
+    async fn upsert_relay_compatibility(
+        &self,
+        record: RelayCompatibilityRecord,
+    ) -> Result<(), StorageError> {
+        let checked_at = Self::to_offset_datetime(record.checked_at)?;
+        sqlx::query(
+            r#"
+INSERT INTO relay_compatibility (
+    relay_url,
+    compatible,
+    supported_capabilities,
+    missing_required,
+    missing_optional,
+    report,
+    checked_at
+)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+ON CONFLICT (relay_url)
+DO UPDATE SET
+    compatible = EXCLUDED.compatible,
+    supported_capabilities = EXCLUDED.supported_capabilities,
+    missing_required = EXCLUDED.missing_required,
+    missing_optional = EXCLUDED.missing_optional,
+    report = EXCLUDED.report,
+    checked_at = EXCLUDED.checked_at
+"#,
+        )
+        .bind(record.relay_url)
+        .bind(record.compatible)
+        .bind(record.supported_capabilities)
+        .bind(record.missing_required)
+        .bind(record.missing_optional)
+        .bind(record.report_json)
+        .bind(checked_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn relay_compatibility(
+        &self,
+        relay_url: &str,
+    ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+    relay_url,
+    compatible,
+    supported_capabilities,
+    missing_required,
+    missing_optional,
+    report::text AS report_json,
+    checked_at
+FROM relay_compatibility
+WHERE relay_url = $1
+LIMIT 1
+"#,
+        )
+        .bind(relay_url)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let checked_at: OffsetDateTime = row.try_get("checked_at")?;
+        Ok(Some(RelayCompatibilityRecord {
+            relay_url: row.try_get("relay_url")?,
+            compatible: row.try_get("compatible")?,
+            supported_capabilities: row.try_get("supported_capabilities")?,
+            missing_required: row.try_get("missing_required")?,
+            missing_optional: row.try_get("missing_optional")?,
+            report_json: row.try_get("report_json")?,
+            checked_at: Self::from_offset_datetime(checked_at),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PostgresRepositories;
-    use crate::repositories::RepoMappingRepository;
+    use crate::repositories::{RelayCompatibilityRepository, RepoMappingRepository};
     use crate::StorageError;
 
     #[test]
@@ -354,6 +440,12 @@ mod tests {
     #[test]
     fn postgres_repos_implements_repo_mapping_repo() {
         fn assert_impl<T: RepoMappingRepository>() {}
+        assert_impl::<PostgresRepositories>();
+    }
+
+    #[test]
+    fn postgres_repos_implements_relay_compat_repo() {
+        fn assert_impl<T: RelayCompatibilityRepository>() {}
         assert_impl::<PostgresRepositories>();
     }
 }

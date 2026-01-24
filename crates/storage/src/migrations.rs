@@ -15,7 +15,11 @@ pub struct MigrationRunner {
 }
 
 pub fn core_migrations() -> Vec<Migration> {
-    vec![migration_repo_init(), migration_repo_mapping()]
+    vec![
+        migration_repo_init(),
+        migration_repo_mapping(),
+        migration_relay_compatibility(),
+    ]
 }
 
 impl MigrationRunner {
@@ -109,6 +113,16 @@ fn migration_repo_mapping() -> Migration {
     }
 }
 
+fn migration_relay_compatibility() -> Migration {
+    const RELAY_COMPATIBILITY_SQL: &str =
+        include_str!("../../../migrations/0003_relay_compatibility.sql");
+    Migration {
+        version: 3,
+        description: "relay compatibility cache",
+        sql: RELAY_COMPATIBILITY_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -175,12 +189,13 @@ mod tests {
         assert!(sql.contains("CREATE TABLE repo_announcement"));
         assert!(sql.contains("CREATE TABLE repo_state"));
         assert!(sql.contains("CREATE TABLE repo_mapping"));
+        assert!(sql.contains("CREATE TABLE relay_compatibility"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, vec![1, 2, 3]);
     }
 }

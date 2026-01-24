@@ -1,4 +1,7 @@
-use crate::{RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError};
+use crate::{
+    RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord,
+    StorageError,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -44,12 +47,25 @@ pub trait RepoMappingRepository: Send + Sync {
     ) -> Result<Option<RepoMappingRecord>, StorageError>;
 }
 
+#[async_trait]
+pub trait RelayCompatibilityRepository: Send + Sync {
+    async fn upsert_relay_compatibility(
+        &self,
+        record: RelayCompatibilityRecord,
+    ) -> Result<(), StorageError>;
+    async fn relay_compatibility(
+        &self,
+        relay_url: &str,
+    ) -> Result<Option<RelayCompatibilityRecord>, StorageError>;
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryRepositories {
     announcements: RwLock<HashMap<String, Vec<RepoAnnouncementRecord>>>,
     states: RwLock<HashMap<String, Vec<RepoStateRecord>>>,
     mappings_by_forgejo: RwLock<HashMap<String, RepoMappingRecord>>,
     mappings_by_repo: RwLock<HashMap<String, RepoMappingRecord>>,
+    relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
 }
 
 impl InMemoryRepositories {
@@ -188,13 +204,45 @@ impl RepoMappingRepository for InMemoryRepositories {
     }
 }
 
+#[async_trait]
+impl RelayCompatibilityRepository for InMemoryRepositories {
+    async fn upsert_relay_compatibility(
+        &self,
+        record: RelayCompatibilityRecord,
+    ) -> Result<(), StorageError> {
+        let key = record.relay_url.clone();
+        let mut map =
+            self.relay_compatibility
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "relay compatibility store poisoned".to_string(),
+                })?;
+        map.insert(key, record);
+        Ok(())
+    }
+
+    async fn relay_compatibility(
+        &self,
+        relay_url: &str,
+    ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
+        let map =
+            self.relay_compatibility
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "relay compatibility store poisoned".to_string(),
+                })?;
+        Ok(map.get(relay_url).cloned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AnnouncementRepository, InMemoryRepositories, RepoMappingRepository, StateRepository,
+        AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRepository,
+        RepoMappingRepository, StateRepository,
     };
-    use crate::{RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord};
-    use gittree_core::{RepoAnnouncement, RepoState};
+    use crate::{RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord};
+    use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
     use std::collections::HashMap;
 
@@ -234,6 +282,15 @@ mod tests {
         let mapping =
             RepoMapping::new("owner", "repo", hex_32(0x11), identifier).expect("mapping");
         RepoMappingRecord::new(&mapping).expect("record")
+    }
+
+    fn sample_compat_report() -> RelayCompatibilityReport {
+        RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        }
     }
 
     #[tokio::test]
@@ -318,6 +375,23 @@ mod tests {
         store.upsert_mapping(record.clone()).await.expect("upsert");
         let found = store
             .mapping_by_repo(&record.pubkey, &record.identifier)
+            .await
+            .expect("lookup");
+        assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_upserts_relay_compatibility() {
+        let store = InMemoryRepositories::new();
+        let report = sample_compat_report();
+        let record = RelayCompatibilityRecord::new(&report, 42).expect("record");
+
+        store
+            .upsert_relay_compatibility(record.clone())
+            .await
+            .expect("upsert");
+        let found = store
+            .relay_compatibility(&report.relay_url)
             .await
             .expect("lookup");
         assert_eq!(found, Some(record));
