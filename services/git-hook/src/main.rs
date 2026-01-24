@@ -4,6 +4,7 @@ use gittree_git_hook::{
     handle_post_receive, parse_updates,
 };
 use std::io::Read;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
@@ -36,6 +37,7 @@ fn run() -> Result<(), HookServiceError> {
     let cli = HookCli::parse();
     let config = HookRunConfig::from_env(cli).map_err(HookServiceError::Config)?;
     tracing::info!(mode = ?config.hook.mode, "git hook configured");
+    validate_input_source(std::io::stdin().is_terminal(), config.stdin_file.as_deref())?;
     let input = read_input(config.stdin_file.as_deref())?;
     let updates = match parse_updates(&input) {
         Ok(updates) => updates,
@@ -93,9 +95,21 @@ fn read_input(stdin_file: Option<&Path>) -> Result<String, HookServiceError> {
     }
 }
 
+fn validate_input_source(
+    stdin_is_tty: bool,
+    stdin_file: Option<&Path>,
+) -> Result<(), HookServiceError> {
+    if stdin_is_tty && stdin_file.is_none() {
+        return Err(HookServiceError::Core(
+            "refusing to run interactively; provide --stdin-file or pipe hook input".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::read_input;
+    use super::{read_input, validate_input_source};
     use std::io::Write;
 
     #[test]
@@ -111,5 +125,16 @@ mod tests {
         let contents = read_input(Some(&path)).expect("read input");
         assert!(contents.contains("refs/heads/main"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_input_source_rejects_tty_without_file() {
+        assert!(validate_input_source(true, None).is_err());
+    }
+
+    #[test]
+    fn validate_input_source_accepts_file_or_pipe() {
+        assert!(validate_input_source(false, None).is_ok());
+        assert!(validate_input_source(true, Some(std::path::Path::new("input.txt"))).is_ok());
     }
 }
