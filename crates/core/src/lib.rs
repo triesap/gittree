@@ -40,6 +40,7 @@ pub mod nip34_proposals;
 pub mod nip34_status;
 pub mod refs;
 pub mod repo_events;
+pub mod repo_mapping;
 pub mod repo_path;
 pub mod tags;
 
@@ -75,6 +76,7 @@ pub use repo_events::{
     NostrEvent, collect_clone_urls, collect_maintainers, find_repo_announcement,
     latest_state_from_maintainers,
 };
+pub use repo_mapping::{ForgejoRepo, RepoMapping};
 pub use repo_path::{RepoPath, parse_repo_path};
 
 #[cfg(test)]
