@@ -1,4 +1,4 @@
-use gittree_config::{ConfigError, ServicesConfig};
+use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
     AnnouncementRepository, RepoFilter, StateRepository, StorageConfig, StorageError,
@@ -19,15 +19,19 @@ const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 pub struct StateConfig {
     pub bind: String,
     pub storage: StorageConfig,
+    pub relay_urls: Vec<String>,
 }
 
 impl StateConfig {
     pub fn from_env() -> Result<Self, StateConfigError> {
         let services = ServicesConfig::from_env_validated().map_err(StateConfigError::Config)?;
         let storage = storage_from_env()?;
+        let relay_targets =
+            RelayTargetsConfig::from_env_validated().map_err(StateConfigError::Config)?;
         Ok(Self {
             bind: services.state.bind,
             storage,
+            relay_urls: relay_targets.relay_urls,
         })
     }
 }
@@ -560,12 +564,18 @@ mod tests {
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
             || {
-                let config = StateConfig::from_env().expect("config");
-                assert_eq!(config.bind, "127.0.0.1:8082");
-                assert_eq!(
-                    config.storage.read_connection,
-                    "postgres://user:pass@localhost:5432/gittree"
-                );
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    let config = StateConfig::from_env().expect("config");
+                    assert_eq!(config.bind, "127.0.0.1:8082");
+                    assert_eq!(
+                        config.storage.read_connection,
+                        "postgres://user:pass@localhost:5432/gittree"
+                    );
+                    assert_eq!(
+                        config.relay_urls,
+                        vec!["wss://relay.example".to_string()]
+                    );
+                });
             },
         );
     }

@@ -1,4 +1,4 @@
-use gittree_config::{ConfigError, ServicesConfig};
+use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::StorageConfig;
@@ -18,15 +18,19 @@ const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 pub struct SyncConfig {
     pub bind: String,
     pub storage: StorageConfig,
+    pub relay_urls: Vec<String>,
 }
 
 impl SyncConfig {
     pub fn from_env() -> Result<Self, SyncConfigError> {
         let services = ServicesConfig::from_env_validated().map_err(SyncConfigError::Config)?;
         let storage = storage_from_env()?;
+        let relay_targets =
+            RelayTargetsConfig::from_env_validated().map_err(SyncConfigError::Config)?;
         Ok(Self {
             bind: services.sync.bind,
             storage,
+            relay_urls: relay_targets.relay_urls,
         })
     }
 }
@@ -554,12 +558,18 @@ mod tests {
             "postgres://user:pass@localhost:5432/gittree",
             || {
                 with_env_var("GITTREE_SYNC_BIND", "127.0.0.1:9092", || {
-                    let config = SyncConfig::from_env().expect("config");
-                    assert_eq!(config.bind, "127.0.0.1:9092");
-                    assert_eq!(
-                        config.storage.read_connection,
-                        "postgres://user:pass@localhost:5432/gittree"
-                    );
+                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                        let config = SyncConfig::from_env().expect("config");
+                        assert_eq!(config.bind, "127.0.0.1:9092");
+                        assert_eq!(
+                            config.storage.read_connection,
+                            "postgres://user:pass@localhost:5432/gittree"
+                        );
+                        assert_eq!(
+                            config.relay_urls,
+                            vec!["wss://relay.example".to_string()]
+                        );
+                    });
                 });
             },
         );
