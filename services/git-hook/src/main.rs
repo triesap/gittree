@@ -1,9 +1,14 @@
+use clap::Parser;
 use gittree_git_hook::{
-    HookConfig, HookMode, HookServiceError, HttpPostReceiveNotifier, HttpStateFetcher,
-    evaluate_pre_receive, handle_post_receive, parse_updates,
+    HookMode, HookServiceError, HttpPostReceiveNotifier, HttpStateFetcher, evaluate_pre_receive,
+    handle_post_receive, parse_updates,
 };
 use std::io::Read;
 use std::time::Duration;
+
+mod cli;
+
+use cli::{HookCli, HookRunConfig};
 
 fn init_observability() -> Result<gittree_observability::ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env("gittree-git-hook")
@@ -27,14 +32,15 @@ fn main() {
 }
 
 fn run() -> Result<(), HookServiceError> {
-    let config = HookConfig::from_env().map_err(HookServiceError::Config)?;
-    tracing::info!(mode = ?config.mode, "git hook configured");
+    let cli = HookCli::parse();
+    let config = HookRunConfig::from_env(cli).map_err(HookServiceError::Config)?;
+    tracing::info!(mode = ?config.hook.mode, "git hook configured");
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok();
     let updates = match parse_updates(&input) {
         Ok(updates) => updates,
         Err(err) => {
-            if matches!(config.mode, HookMode::PostReceive) {
+            if matches!(config.hook.mode, HookMode::PostReceive) {
                 eprintln!("post-receive parse failed: {err}");
                 return Ok(());
             }
@@ -47,16 +53,16 @@ fn run() -> Result<(), HookServiceError> {
             .unwrap_or(std::env::current_dir().map_err(|err| {
                 HookServiceError::Core(format!("failed to read repo path: {err}"))
             })?);
-    match config.mode {
+    match config.hook.mode {
         HookMode::PreReceive => {
-            let fetcher = HttpStateFetcher::new(config.state_url, Duration::from_secs(5))?;
+            let fetcher = HttpStateFetcher::new(config.hook.state_url, Duration::from_secs(5))?;
             let decision = evaluate_pre_receive(&fetcher, repo_path, &updates)?;
             if let gittree_core::UpdateDecision::Reject { reason } = decision {
                 return Err(HookServiceError::Reject(reason));
             }
         }
         HookMode::PostReceive => {
-            let sync_url = config.sync_url.ok_or_else(|| {
+            let sync_url = config.hook.sync_url.ok_or_else(|| {
                 HookServiceError::Config(gittree_git_hook::HookConfigError::MissingEnv(
                     "GITTREE_SYNC_URL",
                 ))

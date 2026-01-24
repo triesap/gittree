@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
 gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
 gittree-observability = { path = "../../crates/observability" }

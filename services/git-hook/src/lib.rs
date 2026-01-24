@@ -18,11 +18,20 @@ pub struct HookConfig {
 
 impl HookConfig {
     pub fn from_env() -> Result<Self, HookConfigError> {
+        Self::from_env_with_overrides(None, None, None)
+    }
+
+    pub fn from_env_with_overrides(
+        mode: Option<HookMode>,
+        state_url: Option<String>,
+        sync_url: Option<String>,
+    ) -> Result<Self, HookConfigError> {
         let _services = ServicesConfig::from_env_validated().map_err(HookConfigError::Config)?;
-        let state_url =
-            std::env::var(ENV_STATE_URL).map_err(|_| HookConfigError::MissingEnv(ENV_STATE_URL))?;
-        let mode = HookMode::from_env()?;
-        let sync_url = std::env::var(ENV_SYNC_URL).ok();
+        let state_url = state_url
+            .or_else(|| std::env::var(ENV_STATE_URL).ok())
+            .ok_or(HookConfigError::MissingEnv(ENV_STATE_URL))?;
+        let mode = mode.unwrap_or(HookMode::from_env()?);
+        let sync_url = sync_url.or_else(|| std::env::var(ENV_SYNC_URL).ok());
         if matches!(mode, HookMode::PostReceive) && sync_url.is_none() {
             return Err(HookConfigError::MissingEnv(ENV_SYNC_URL));
         }
