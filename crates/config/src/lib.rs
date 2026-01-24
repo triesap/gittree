@@ -10,6 +10,7 @@ const DEFAULT_COORDINATOR_BIND: &str = "127.0.0.1:8083";
 const DEFAULT_SYNC_BIND: &str = "127.0.0.1:8084";
 const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
+const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
 const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
 const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
 const ENV_COORDINATOR_BIND: &str = "GITTREE_COORDINATOR_BIND";
@@ -35,6 +36,49 @@ pub struct ServicesConfig {
     pub coordinator: ServiceConfig,
     pub sync: ServiceConfig,
     pub git_http: ServiceConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayTargetsConfig {
+    pub relay_urls: Vec<String>,
+}
+
+impl RelayTargetsConfig {
+    pub fn from_env() -> Self {
+        let relay_urls = parse_relay_urls(std::env::var(ENV_RELAY_URLS).unwrap_or_default());
+        Self { relay_urls }
+    }
+
+    pub fn from_env_validated() -> Result<Self, ConfigError> {
+        let config = Self::from_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlRelayTargets = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let relay_urls = parsed.relay_urls.unwrap_or_default();
+        let config = Self { relay_urls };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadConfig {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_toml_str(&contents).map_err(|err| err.with_path(path))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        for url in &self.relay_urls {
+            validate_relay_url(url)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for ServicesConfig {
@@ -122,6 +166,22 @@ fn validate_service_bind(service: &'static str, value: &str) -> Result<(), Confi
     Ok(())
 }
 
+fn parse_relay_urls(raw: String) -> Vec<String> {
+    raw.split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+fn validate_relay_url(value: &str) -> Result<(), ConfigError> {
+    let parsed = url::Url::parse(value)
+        .map_err(|_| ConfigError::InvalidRelayUrl(value.to_string()))?;
+    match parsed.scheme() {
+        "ws" | "wss" | "http" | "https" => Ok(()),
+        _ => Err(ConfigError::InvalidRelayUrl(value.to_string())),
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlConfig {
@@ -170,6 +230,12 @@ struct TomlServicesRoot {
     services: Option<TomlServicesConfig>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlRelayTargets {
+    relay_urls: Option<Vec<String>>,
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlServicesConfig {
@@ -190,6 +256,7 @@ struct TomlServiceConfig {
 #[derive(Debug)]
 pub enum ConfigError {
     InvalidRelayBind(String),
+    InvalidRelayUrl(String),
     InvalidServiceBind {
         service: &'static str,
         value: String,
@@ -209,6 +276,9 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::InvalidRelayBind(value) => {
                 write!(f, "invalid relay bind address: {value}")
+            }
+            ConfigError::InvalidRelayUrl(value) => {
+                write!(f, "invalid relay url: {value}")
             }
             ConfigError::InvalidServiceBind { service, value } => {
                 write!(f, "invalid {service} bind address: {value}")
@@ -235,6 +305,7 @@ impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ConfigError::InvalidRelayBind(_) => None,
+            ConfigError::InvalidRelayUrl(_) => None,
             ConfigError::InvalidServiceBind { .. } => None,
             ConfigError::ReadConfig { source, .. } => Some(source),
             ConfigError::TomlParse { source, .. } => Some(source),
@@ -341,6 +412,7 @@ impl GittreeConfig {
 mod tests {
     use super::ConfigError;
     use super::GittreeConfig;
+    use super::RelayTargetsConfig;
     use super::ServicesConfig;
     use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
@@ -352,6 +424,7 @@ mod tests {
     use crate::ENV_COORDINATOR_BIND;
     use crate::ENV_GIT_HTTP_BIND;
     use crate::ENV_RELAY_BIND;
+    use crate::ENV_RELAY_URLS;
     use crate::ENV_STATE_BIND;
     use crate::ENV_SYNC_BIND;
     use std::sync::Mutex;
@@ -415,6 +488,38 @@ mod tests {
         }
         let config = GittreeConfig::from_env();
         assert_eq!(config.relay_bind, DEFAULT_RELAY_BIND);
+    }
+
+    #[test]
+    fn relay_targets_env_parses_list() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_URLS, "wss://relay.one, wss://relay.two ,", || {
+            let config = RelayTargetsConfig::from_env_validated().expect("relay targets");
+            assert_eq!(
+                config.relay_urls,
+                vec!["wss://relay.one".to_string(), "wss://relay.two".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn relay_targets_env_rejects_invalid_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_URLS, "ftp://relay.example", || {
+            let err = RelayTargetsConfig::from_env_validated().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayUrl(value) if value == "ftp://relay.example"
+            ));
+        });
+    }
+
+    #[test]
+    fn relay_targets_toml_parses_urls() {
+        let config =
+            RelayTargetsConfig::from_toml_str("relay_urls = [\"wss://relay.example\"]")
+                .expect("relay targets");
+        assert_eq!(config.relay_urls, vec!["wss://relay.example".to_string()]);
     }
 
     #[test]
