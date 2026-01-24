@@ -5,6 +5,7 @@ members = [
   "crates/core",
   "crates/storage",
   "crates/relay-adapter",
+  "crates/relay-probe",
   "crates/migrate",
   "services/admin",
   "services/admission",

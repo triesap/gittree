@@ -668,6 +668,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-relay-probe"
+version = "0.1.0"
+dependencies = [
+ "gittree-core",
+ "once_cell",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "gittree-state"
 version = "0.1.0"
 dependencies = [
