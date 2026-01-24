@@ -659,6 +659,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-relay-adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gittree-core",
+ "tokio",
+]
+
+[[package]]
 name = "gittree-state"
 version = "0.1.0"
 dependencies = [

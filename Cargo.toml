@@ -4,6 +4,7 @@ members = [
   "crates/observability",
   "crates/core",
   "crates/storage",
+  "crates/relay-adapter",
   "crates/migrate",
   "services/admin",
   "services/admission",
