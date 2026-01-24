@@ -181,7 +181,7 @@ services:
       FORGEJO__database__DB_TYPE: sqlite3
       FORGEJO__database__PATH: /data/forgejo.db
       FORGEJO__log__MODE: file
-      FORGEJO__log__ROOT_PATH: /var/log/forgejo
+      FORGEJO__log__ROOT_PATH: /data/gitea/log
       FORGEJO__log__LEVEL: Info
       FORGEJO__server__ROOT_URL: http://localhost:3000/
       FORGEJO__server__DOMAIN: localhost
@@ -193,7 +193,7 @@ services:
       - "2222:22"
     volumes:
       - forgejo-data:/data
-      - ./logs/forgejo:/var/log/forgejo
+      - ./logs/forgejo:/data/gitea/log
 
   nginx:
     image: nginx:1.27
