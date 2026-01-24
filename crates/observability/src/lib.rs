@@ -1,8 +1,12 @@
 use opentelemetry_otlp::WithExportConfig;
+use std::path::PathBuf;
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::prelude::*;
 
 const ENV_OTLP_ENDPOINT: &str = "GITTREE_OTLP_ENDPOINT";
 const ENV_LOG_JSON: &str = "GITTREE_LOG_JSON";
+const ENV_LOG_DIR: &str = "GITTREE_LOG_DIR";
+const ENV_LOG_STDOUT: &str = "GITTREE_LOG_STDOUT";
 const ENV_METRICS_ENABLED: &str = "GITTREE_METRICS_ENABLED";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +14,8 @@ pub struct ObservabilityConfig {
     pub service_name: String,
     pub otlp_endpoint: Option<String>,
     pub log_json: bool,
+    pub log_dir: Option<PathBuf>,
+    pub log_stdout: bool,
     pub metrics_enabled: bool,
 }
 
@@ -19,6 +25,8 @@ impl Default for ObservabilityConfig {
             service_name: "gittree".to_string(),
             otlp_endpoint: None,
             log_json: false,
+            log_dir: Some(PathBuf::from("logs")),
+            log_stdout: true,
             metrics_enabled: true,
         }
     }
@@ -26,15 +34,16 @@ impl Default for ObservabilityConfig {
 
 impl ObservabilityConfig {
     pub fn from_env(service_name: impl Into<String>) -> Result<Self, ObservabilityConfigError> {
-        let otlp_endpoint = std::env::var(ENV_OTLP_ENDPOINT).ok();
-        let log_json = env_bool(ENV_LOG_JSON)?.unwrap_or(false);
-        let metrics_enabled = env_bool(ENV_METRICS_ENABLED)?.unwrap_or(true);
-        Ok(Self {
-            service_name: service_name.into(),
-            otlp_endpoint,
-            log_json,
-            metrics_enabled,
-        })
+        let mut config = ObservabilityConfig::default();
+        config.service_name = service_name.into();
+        config.otlp_endpoint = env_string(ENV_OTLP_ENDPOINT);
+        config.log_json = env_bool(ENV_LOG_JSON)?.unwrap_or(config.log_json);
+        config.log_stdout = env_bool(ENV_LOG_STDOUT)?.unwrap_or(config.log_stdout);
+        config.metrics_enabled = env_bool(ENV_METRICS_ENABLED)?.unwrap_or(config.metrics_enabled);
+        if let Some(log_dir) = env_log_dir(ENV_LOG_DIR) {
+            config.log_dir = log_dir;
+        }
+        Ok(config)
     }
 }
 
@@ -57,10 +66,36 @@ impl std::error::Error for ObservabilityConfigError {}
 
 fn env_bool(key: &'static str) -> Result<Option<bool>, ObservabilityConfigError> {
     match std::env::var(key) {
-        Ok(value) => parse_bool(&value)
-            .map(Some)
-            .ok_or(ObservabilityConfigError::InvalidEnv { key, value }),
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            parse_bool(&value)
+                .map(Some)
+                .ok_or(ObservabilityConfigError::InvalidEnv { key, value })
+        }
         Err(_) => Ok(None),
+    }
+}
+
+fn env_string(key: &'static str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(value) if value.trim().is_empty() => None,
+        Ok(value) => Some(value),
+        Err(_) => None,
+    }
+}
+
+fn env_log_dir(key: &'static str) -> Option<Option<PathBuf>> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                Some(None)
+            } else {
+                Some(Some(PathBuf::from(value)))
+            }
+        }
+        Err(_) => None,
     }
 }
 
@@ -72,14 +107,26 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-#[derive(Debug)]
 pub struct ObservabilityHandle {
     prometheus_registry: Option<prometheus::Registry>,
+    log_guard: Option<WorkerGuard>,
+}
+
+impl std::fmt::Debug for ObservabilityHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObservabilityHandle")
+            .field("prometheus_registry", &self.prometheus_registry)
+            .finish()
+    }
 }
 
 impl ObservabilityHandle {
     pub fn prometheus_registry(&self) -> Option<&prometheus::Registry> {
         self.prometheus_registry.as_ref()
+    }
+
+    pub fn log_guard(&self) -> Option<&WorkerGuard> {
+        self.log_guard.as_ref()
     }
 }
 
@@ -88,6 +135,7 @@ pub enum ObservabilityError {
     TraceInit(String),
     MetricsInit(String),
     SubscriberInit(String),
+    LogInit(String),
 }
 
 impl std::fmt::Display for ObservabilityError {
@@ -102,21 +150,40 @@ impl std::fmt::Display for ObservabilityError {
             ObservabilityError::SubscriberInit(message) => {
                 write!(f, "observability subscriber init failed: {message}")
             }
+            ObservabilityError::LogInit(message) => {
+                write!(f, "observability log init failed: {message}")
+            }
         }
     }
 }
 
 impl std::error::Error for ObservabilityError {}
 
+fn build_file_writer(
+    config: &ObservabilityConfig,
+) -> Result<(Option<NonBlocking>, Option<WorkerGuard>), ObservabilityError> {
+    let Some(base_dir) = &config.log_dir else {
+        return Ok((None, None));
+    };
+    let service_dir = base_dir.join(&config.service_name);
+    std::fs::create_dir_all(&service_dir)
+        .map_err(|err| ObservabilityError::LogInit(err.to_string()))?;
+    let file_name = format!("{}.log", config.service_name);
+    let appender = tracing_appender::rolling::daily(service_dir, file_name);
+    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+    Ok((Some(non_blocking), Some(guard)))
+}
+
 pub fn init(config: &ObservabilityConfig) -> Result<ObservabilityHandle, ObservabilityError> {
     let resource = opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
         "service.name",
         config.service_name.clone(),
     )]);
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let (file_writer, log_guard) = build_file_writer(config)?;
 
     if let Some(endpoint) = &config.otlp_endpoint {
-        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_trace_config(
@@ -131,37 +198,75 @@ pub fn init(config: &ObservabilityConfig) -> Result<ObservabilityHandle, Observa
             .map_err(|err| ObservabilityError::TraceInit(err.to_string()))?;
 
         if config.log_json {
-            let fmt_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_filter(env_filter.clone());
+            let stdout_layer = config.log_stdout.then(|| {
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_filter(env_filter.clone())
+            });
+            let file_layer = file_writer.as_ref().map(|writer| {
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(writer.clone())
+                    .with_ansi(false)
+                    .with_filter(env_filter.clone())
+            });
             let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
             let subscriber = tracing_subscriber::registry()
-                .with(fmt_layer)
+                .with(stdout_layer)
+                .with(file_layer)
                 .with(otel_layer);
             tracing::subscriber::set_global_default(subscriber)
                 .map_err(|err| ObservabilityError::SubscriberInit(err.to_string()))?;
         } else {
-            let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
+            let stdout_layer = config
+                .log_stdout
+                .then(|| tracing_subscriber::fmt::layer().with_filter(env_filter.clone()));
+            let file_layer = file_writer.as_ref().map(|writer| {
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer.clone())
+                    .with_ansi(false)
+                    .with_filter(env_filter.clone())
+            });
             let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
             let subscriber = tracing_subscriber::registry()
-                .with(fmt_layer)
+                .with(stdout_layer)
+                .with(file_layer)
                 .with(otel_layer);
             tracing::subscriber::set_global_default(subscriber)
                 .map_err(|err| ObservabilityError::SubscriberInit(err.to_string()))?;
         }
     } else {
-        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
         if config.log_json {
-            let fmt_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_filter(env_filter.clone());
-            let subscriber = tracing_subscriber::registry().with(fmt_layer);
+            let stdout_layer = config.log_stdout.then(|| {
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_filter(env_filter.clone())
+            });
+            let file_layer = file_writer.as_ref().map(|writer| {
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(writer.clone())
+                    .with_ansi(false)
+                    .with_filter(env_filter.clone())
+            });
+            let subscriber = tracing_subscriber::registry()
+                .with(stdout_layer)
+                .with(file_layer);
             tracing::subscriber::set_global_default(subscriber)
                 .map_err(|err| ObservabilityError::SubscriberInit(err.to_string()))?;
         } else {
-            let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
-            let subscriber = tracing_subscriber::registry().with(fmt_layer);
+            let stdout_layer = config
+                .log_stdout
+                .then(|| tracing_subscriber::fmt::layer().with_filter(env_filter.clone()));
+            let file_layer = file_writer.as_ref().map(|writer| {
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer.clone())
+                    .with_ansi(false)
+                    .with_filter(env_filter.clone())
+            });
+            let subscriber = tracing_subscriber::registry()
+                .with(stdout_layer)
+                .with(file_layer);
             tracing::subscriber::set_global_default(subscriber)
                 .map_err(|err| ObservabilityError::SubscriberInit(err.to_string()))?;
         }
@@ -169,6 +274,7 @@ pub fn init(config: &ObservabilityConfig) -> Result<ObservabilityHandle, Observa
 
     let mut handle = ObservabilityHandle {
         prometheus_registry: None,
+        log_guard,
     };
 
     if config.metrics_enabled {
@@ -193,6 +299,7 @@ pub fn init(config: &ObservabilityConfig) -> Result<ObservabilityHandle, Observa
 #[cfg(test)]
 mod tests {
     use super::ObservabilityConfig;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -220,6 +327,8 @@ mod tests {
         assert_eq!(config.service_name, "gittree");
         assert!(config.otlp_endpoint.is_none());
         assert!(!config.log_json);
+        assert_eq!(config.log_dir, Some(PathBuf::from("logs")));
+        assert!(config.log_stdout);
         assert!(config.metrics_enabled);
     }
 
@@ -228,17 +337,32 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_OTLP_ENDPOINT", "http://localhost:4317", || {
             with_env_var("GITTREE_LOG_JSON", "true", || {
-                with_env_var("GITTREE_METRICS_ENABLED", "false", || {
-                    let config = ObservabilityConfig::from_env("svc").expect("config");
-                    assert_eq!(config.service_name, "svc");
-                    assert_eq!(
-                        config.otlp_endpoint.as_deref(),
-                        Some("http://localhost:4317")
-                    );
-                    assert!(config.log_json);
-                    assert!(!config.metrics_enabled);
+                with_env_var("GITTREE_LOG_DIR", "logs-test", || {
+                    with_env_var("GITTREE_LOG_STDOUT", "false", || {
+                        with_env_var("GITTREE_METRICS_ENABLED", "false", || {
+                            let config = ObservabilityConfig::from_env("svc").expect("config");
+                            assert_eq!(config.service_name, "svc");
+                            assert_eq!(
+                                config.otlp_endpoint.as_deref(),
+                                Some("http://localhost:4317")
+                            );
+                            assert!(config.log_json);
+                            assert_eq!(config.log_dir, Some(PathBuf::from("logs-test")));
+                            assert!(!config.log_stdout);
+                            assert!(!config.metrics_enabled);
+                        });
+                    });
                 });
             });
+        });
+    }
+
+    #[test]
+    fn env_config_allows_empty_log_dir() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_DIR", "", || {
+            let config = ObservabilityConfig::from_env("svc").expect("config");
+            assert_eq!(config.log_dir, None);
         });
     }
 
