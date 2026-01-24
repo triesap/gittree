@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use gittree_git_hook::{HookConfig, HookConfigError, HookMode};
 
+const ENV_HOOK_STDIN_FILE: &str = "GITTREE_HOOK_STDIN_FILE";
+
 #[derive(Debug, Parser)]
 #[command(name = "gittree-git-hook", version, about = "Gittree git hook runner")]
 pub struct HookCli {
@@ -44,11 +46,20 @@ impl HookRunConfig {
             cli.state_url,
             cli.sync_url,
         )?;
+        let stdin_file = cli.stdin_file.or_else(|| env_path(ENV_HOOK_STDIN_FILE));
         Ok(Self {
             hook,
-            stdin_file: cli.stdin_file,
+            stdin_file,
         })
     }
+}
+
+fn env_path(key: &str) -> Option<PathBuf> {
+    let value = std::env::var(key).ok()?;
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value))
 }
 
 #[cfg(test)]
@@ -97,6 +108,21 @@ mod tests {
             let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
             let config = HookRunConfig::from_env(cli).expect("config");
             assert_eq!(config.hook.state_url, "http://127.0.0.1:8082");
+        });
+    }
+
+    #[test]
+    fn run_config_reads_stdin_file_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", || {
+            with_env_var("GITTREE_HOOK_STDIN_FILE", "fixtures.txt", || {
+                let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
+                let config = HookRunConfig::from_env(cli).expect("config");
+                assert_eq!(
+                    config.stdin_file.as_deref(),
+                    Some(std::path::Path::new("fixtures.txt"))
+                );
+            });
         });
     }
 }

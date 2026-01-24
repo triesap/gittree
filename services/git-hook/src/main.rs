@@ -12,6 +12,8 @@ mod cli;
 
 use cli::{HookCli, HookRunConfig};
 
+const ENV_HOOK_REPO_PATH: &str = "GITTREE_HOOK_REPO_PATH";
+
 fn init_observability() -> Result<gittree_observability::ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env("gittree-git-hook")
         .map_err(|err| err.to_string())?;
@@ -49,12 +51,12 @@ fn run() -> Result<(), HookServiceError> {
             return Err(HookServiceError::Parse(err));
         }
     };
-    let repo_path =
-        std::env::var_os("GIT_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or(std::env::current_dir().map_err(|err| {
-                HookServiceError::Core(format!("failed to read repo path: {err}"))
-            })?);
+    let repo_path = std::env::var_os(ENV_HOOK_REPO_PATH)
+        .or_else(|| std::env::var_os("GIT_DIR"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(|err| {
+            HookServiceError::Core(format!("failed to read repo path: {err}"))
+        })?);
     match config.hook.mode {
         HookMode::PreReceive => {
             let fetcher = HttpStateFetcher::new(config.hook.state_url, Duration::from_secs(5))?;
