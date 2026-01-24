@@ -129,17 +129,28 @@ services:
       - .env
     environment:
       GITTREE_GIT_HTTP_BIND: 0.0.0.0:8085
-      GITTREE_GIT_HTTP_UPSTREAM_URL: http://git-backend:80
+      GITTREE_GIT_HTTP_UPSTREAM_URL: http://forgejo:3000/
     ports:
       - "8085:8085"
     depends_on:
       - relay
-      - git-backend
+      - forgejo
 
-  git-backend:
-    image: nginx:1.27
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:1.21
+    environment:
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__database__PATH: /data/forgejo.db
+      FORGEJO__server__ROOT_URL: http://localhost:3000/
+      FORGEJO__server__DOMAIN: localhost
+      FORGEJO__server__HTTP_PORT: 3000
+      FORGEJO__server__SSH_DOMAIN: localhost
+      FORGEJO__server__SSH_PORT: 2222
     ports:
-      - "8086:80"
+      - "3000:3000"
+      - "2222:22"
+    volumes:
+      - forgejo-data:/data
 
   nginx:
     image: nginx:1.27
@@ -153,3 +164,4 @@ services:
 
 volumes:
   pgdata: {}
+  forgejo-data: {}
