@@ -38,6 +38,7 @@ pub mod nip34_issues;
 pub mod nip34_patches;
 pub mod nip34_proposals;
 pub mod nip34_status;
+pub mod relay_compat;
 pub mod refs;
 pub mod repo_events;
 pub mod repo_mapping;
@@ -71,6 +72,7 @@ pub use nip34_issues::Issue;
 pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip34_status::{StatusAppliedRef, StatusEvent};
+pub use relay_compat::{RelayCapability, RelayCapabilitySet, RelayCompatibilityReport};
 pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use repo_events::{
     NostrEvent, collect_clone_urls, collect_maintainers, find_repo_announcement,
