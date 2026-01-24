@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 dotenvy = "0.15"
+gittree-config = { path = "../config" }
 gittree-core = { path = "../core" }
 gittree-relay-adapter = { path = "../relay-adapter" }
 gittree-storage = { path = "../storage" }

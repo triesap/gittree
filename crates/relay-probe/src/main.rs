@@ -1,3 +1,4 @@
+use gittree_config::RelayTargetsConfig;
 use gittree_relay_probe::{HttpRelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay};
 use gittree_storage::{
     PostgresRepositories, RelayCompatibilityRecord, RelayCompatibilityRepository, StorageConfig,
@@ -6,8 +7,10 @@ use gittree_storage::{
 use std::process::exit;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug)]
 struct ProbeCli {
-    relay: String,
+    relay: Option<String>,
+    all: bool,
     json: bool,
     store: bool,
 }
@@ -19,6 +22,7 @@ impl ProbeCli {
         T: Into<std::ffi::OsString>,
     {
         let mut relay: Option<String> = None;
+        let mut all = false;
         let mut json = false;
         let mut store = false;
 
@@ -26,6 +30,7 @@ impl ProbeCli {
         iter.next();
         while let Some(value) = iter.next() {
             match value.as_str() {
+                "--all" => all = true,
                 "--json" => json = true,
                 "--store" => store = true,
                 "--relay" => {
@@ -49,14 +54,28 @@ impl ProbeCli {
             }
         }
 
-        let relay = relay.ok_or_else(|| RelayProbeError::InvalidRelayUrl("missing --relay".into()))?;
-        Ok(Self { relay, json, store })
+        if all && relay.is_some() {
+            return Err(RelayProbeError::InvalidRelayUrl(
+                "cannot combine --all with --relay".to_string(),
+            ));
+        }
+        if !all && relay.is_none() {
+            return Err(RelayProbeError::InvalidRelayUrl(
+                "missing --relay or --all".to_string(),
+            ));
+        }
+        Ok(Self {
+            relay,
+            all,
+            json,
+            store,
+        })
     }
 }
 
 fn print_help() {
     println!(
-        "gittree-relay-probe --relay <wss://relay> [--json] [--store]\n\nFlags:\n  --relay <url>  Relay URL to probe\n  --json         Output JSON report\n  --store        Persist compatibility result to storage\n  -h, --help     Show help\n"
+        "gittree-relay-probe --relay <wss://relay> [--json] [--store]\n       gittree-relay-probe --all [--json] [--store]\n\nFlags:\n  --relay <url>  Relay URL to probe\n  --all          Probe relay targets from GITTREE_RELAY_URLS\n  --json         Output JSON report\n  --store        Persist compatibility result to storage\n  -h, --help     Show help\n"
     );
 }
 
@@ -72,23 +91,35 @@ async fn main() {
 async fn run() -> Result<(), ProbeCommandError> {
     let cli = ProbeCli::parse(std::env::args_os()).map_err(ProbeCommandError::Cli)?;
     let client = HttpRelayProbeClient::new().map_err(ProbeCommandError::Cli)?;
-    let result = probe_relay(&cli.relay, &client).map_err(ProbeCommandError::Cli)?;
+    let targets = resolve_targets(&cli)?;
+    let mut results = Vec::with_capacity(targets.len());
 
-    if cli.store {
-        store_probe_result(&result).await?;
+    for relay_url in targets {
+        let result = probe_relay(&relay_url, &client).map_err(ProbeCommandError::Cli)?;
+        if cli.store {
+            store_probe_result(&result).await?;
+        }
+        results.push(result);
     }
 
     if cli.json {
-        let json = serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
-        println!("{json}");
-    } else {
-        println!("relay: {}", result.relay_url);
-        println!("compatible: {}", result.report.is_compatible());
-        if !result.report.missing_required.is_empty() {
-            println!("missing required: {:?}", result.report.missing_required);
+        if cli.all {
+            let json = serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string());
+            println!("{json}");
+        } else if let Some(result) = results.first() {
+            let json = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
+            println!("{json}");
         }
-        if !result.report.missing_optional.is_empty() {
-            println!("missing optional: {:?}", result.report.missing_optional);
+    } else {
+        for result in results {
+            println!("relay: {}", result.relay_url);
+            println!("compatible: {}", result.report.is_compatible());
+            if !result.report.missing_required.is_empty() {
+                println!("missing required: {:?}", result.report.missing_required);
+            }
+            if !result.report.missing_optional.is_empty() {
+                println!("missing optional: {:?}", result.report.missing_optional);
+            }
         }
     }
 
@@ -117,6 +148,22 @@ async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeComman
     Ok(())
 }
 
+fn resolve_targets(cli: &ProbeCli) -> Result<Vec<String>, ProbeCommandError> {
+    if cli.all {
+        let config = RelayTargetsConfig::from_env_validated().map_err(ProbeCommandError::Config)?;
+        if config.relay_urls.is_empty() {
+            return Err(ProbeCommandError::MissingTargets(
+                "GITTREE_RELAY_URLS is empty".to_string(),
+            ));
+        }
+        return Ok(config.relay_urls);
+    }
+    let relay = cli.relay.clone().ok_or_else(|| {
+        ProbeCommandError::MissingTargets("missing --relay value".to_string())
+    })?;
+    Ok(vec![relay])
+}
+
 fn now_unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -135,6 +182,8 @@ const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 #[derive(Debug)]
 enum ProbeCommandError {
     Cli(RelayProbeError),
+    Config(gittree_config::ConfigError),
+    MissingTargets(String),
     StorageConfig(StorageConfigError),
     Storage(StorageError),
 }
@@ -143,6 +192,8 @@ impl std::fmt::Display for ProbeCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProbeCommandError::Cli(err) => write!(f, "{err}"),
+            ProbeCommandError::Config(err) => write!(f, "relay probe config error: {err}"),
+            ProbeCommandError::MissingTargets(message) => write!(f, "{message}"),
             ProbeCommandError::StorageConfig(err) => {
                 write!(f, "relay probe storage config error: {err}")
             }
@@ -155,6 +206,8 @@ impl std::error::Error for ProbeCommandError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ProbeCommandError::Cli(err) => Some(err),
+            ProbeCommandError::Config(err) => Some(err),
+            ProbeCommandError::MissingTargets(_) => None,
             ProbeCommandError::StorageConfig(err) => Some(err),
             ProbeCommandError::Storage(err) => Some(err),
         }
@@ -241,7 +294,10 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, StorageConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeCli, StorageConfigError, storage_from_env};
+    use super::{
+        ProbeCli, ProbeCommandError, RelayProbeError, StorageConfigError, resolve_targets,
+        storage_from_env,
+    };
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -273,7 +329,32 @@ mod tests {
         ])
         .expect("cli");
         assert!(cli.store);
-        assert_eq!(cli.relay, "wss://relay.example");
+        assert!(!cli.all);
+        assert_eq!(cli.relay.as_deref(), Some("wss://relay.example"));
+    }
+
+    #[test]
+    fn parse_accepts_all_flag() {
+        let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+        assert!(cli.all);
+        assert!(cli.relay.is_none());
+    }
+
+    #[test]
+    fn parse_rejects_all_with_relay() {
+        let err = ProbeCli::parse(["probe", "--all", "--relay", "wss://relay.example"])
+            .unwrap_err();
+        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
+    }
+
+    #[test]
+    fn resolve_targets_requires_env_list() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_RELAY_URLS", "", || {
+            let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+            let err = resolve_targets(&cli).unwrap_err();
+            assert!(matches!(err, ProbeCommandError::MissingTargets(_)));
+        });
     }
 
     #[test]

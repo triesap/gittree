@@ -673,6 +673,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dotenvy",
+ "gittree-config",
  "gittree-core",
  "gittree-relay-adapter",
  "gittree-storage",
