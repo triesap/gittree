@@ -1,5 +1,5 @@
 use gittree_config::{ConfigError, ServicesConfig};
-use gittree_core::{RepoState, UpdateDecision};
+use gittree_core::{RepoMapping, RepoState, UpdateDecision};
 use hmac::Mac;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -370,6 +370,14 @@ pub trait PostReceiveNotifier {
     fn notify(&self, payload: PostReceivePayload) -> Result<(), HookServiceError>;
 }
 
+pub trait MappingResolver {
+    fn resolve_mapping(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<RepoMapping>, HookServiceError>;
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PostReceivePayload {
     pub pubkey: String,
@@ -452,18 +460,46 @@ where
     notifier.notify(payload)
 }
 
+pub fn handle_forgejo_push<R, N>(
+    resolver: &R,
+    notifier: &N,
+    payload: &str,
+) -> Result<(), HookServiceError>
+where
+    R: MappingResolver,
+    N: PostReceiveNotifier,
+{
+    let event = parse_forgejo_push(payload).map_err(HookServiceError::Parse)?;
+    let mapping = resolver
+        .resolve_mapping(&event.owner, &event.repo)?
+        .ok_or_else(|| HookServiceError::Reject("missing repo mapping".to_string()))?;
+    let payload = PostReceivePayload {
+        pubkey: mapping.pubkey,
+        identifier: mapping.identifier,
+        updates: vec![RefUpdatePayload {
+            old: event.before,
+            new: event.after,
+            reference: event.reference,
+        }],
+    };
+    notifier.notify(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::HookError;
+    use super::MappingResolver;
     use super::PostReceiveNotifier;
     use super::PostReceivePayload;
     use super::StateFetcher;
     use super::evaluate_pre_receive;
+    use super::handle_forgejo_push;
     use super::handle_post_receive;
     use super::parse_forgejo_push;
     use super::parse_updates;
     use super::verify_forgejo_signature;
     use hmac::Mac;
+    use gittree_core::RepoMapping;
     use gittree_core::RepoState;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -602,6 +638,20 @@ mod tests {
         }
     }
 
+    struct MockResolver {
+        mapping: Option<RepoMapping>,
+    }
+
+    impl MappingResolver for MockResolver {
+        fn resolve_mapping(
+            &self,
+            _owner: &str,
+            _repo: &str,
+        ) -> Result<Option<RepoMapping>, super::HookServiceError> {
+            Ok(self.mapping.clone())
+        }
+    }
+
     #[test]
     fn handle_post_receive_sends_payload() {
         let notifier = MockNotifier::new();
@@ -617,5 +667,52 @@ mod tests {
         let payloads = notifier.payloads.lock().expect("payload lock");
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].updates[0].reference, "refs/heads/main");
+    }
+
+    #[test]
+    fn handle_forgejo_push_resolves_mapping() {
+        let resolver = MockResolver {
+            mapping: Some(
+                RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping"),
+            ),
+        };
+        let notifier = MockNotifier::new();
+        let payload = r#"
+        {
+            "ref": "refs/heads/main",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "1111111111111111111111111111111111111111",
+            "repository": {
+                "name": "repo",
+                "full_name": "owner/repo",
+                "owner": { "username": "owner" }
+            }
+        }
+        "#;
+        handle_forgejo_push(&resolver, &notifier, payload).expect("handle");
+        let payloads = notifier.payloads.lock().expect("payload lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].identifier, "repo");
+        assert_eq!(payloads[0].updates[0].reference, "refs/heads/main");
+    }
+
+    #[test]
+    fn handle_forgejo_push_rejects_missing_mapping() {
+        let resolver = MockResolver { mapping: None };
+        let notifier = MockNotifier::new();
+        let payload = r#"
+        {
+            "ref": "refs/heads/main",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "1111111111111111111111111111111111111111",
+            "repository": {
+                "name": "repo",
+                "full_name": "owner/repo",
+                "owner": { "username": "owner" }
+            }
+        }
+        "#;
+        let err = handle_forgejo_push(&resolver, &notifier, payload).unwrap_err();
+        assert!(matches!(err, super::HookServiceError::Reject(_)));
     }
 }
