@@ -15,7 +15,7 @@ pub struct MigrationRunner {
 }
 
 pub fn core_migrations() -> Vec<Migration> {
-    vec![migration_repo_announcement(), migration_repo_state()]
+    vec![migration_repo_init()]
 }
 
 impl MigrationRunner {
@@ -91,10 +91,10 @@ where
     Ok(version.unwrap_or(0))
 }
 
-fn migration_repo_announcement() -> Migration {
+fn migration_repo_init() -> Migration {
     Migration {
         version: 1,
-        description: "repo announcements",
+        description: "repo announcements and state",
         sql: r#"
 CREATE TABLE repo_announcement (
     id BIGSERIAL PRIMARY KEY,
@@ -114,15 +114,6 @@ CREATE TABLE repo_announcement (
 );
 CREATE INDEX repo_announcement_lookup_idx
     ON repo_announcement (pubkey, identifier, created_at DESC);
-"#,
-    }
-}
-
-fn migration_repo_state() -> Migration {
-    Migration {
-        version: 2,
-        description: "repo state",
-        sql: r#"
 CREATE TABLE repo_state (
     id BIGSERIAL PRIMARY KEY,
     event_id BYTEA NOT NULL UNIQUE,
@@ -208,6 +199,6 @@ mod tests {
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, vec![1]);
     }
 }
