@@ -15,7 +15,7 @@ pub struct MigrationRunner {
 }
 
 pub fn core_migrations() -> Vec<Migration> {
-    vec![migration_repo_init()]
+    vec![migration_repo_init(), migration_repo_mapping()]
 }
 
 impl MigrationRunner {
@@ -100,6 +100,15 @@ fn migration_repo_init() -> Migration {
     }
 }
 
+fn migration_repo_mapping() -> Migration {
+    const REPO_MAPPING_SQL: &str = include_str!("../../../migrations/0002_repo_mapping.sql");
+    Migration {
+        version: 2,
+        description: "forgejo repo mapping",
+        sql: REPO_MAPPING_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -165,12 +174,13 @@ mod tests {
             .join("\n");
         assert!(sql.contains("CREATE TABLE repo_announcement"));
         assert!(sql.contains("CREATE TABLE repo_state"));
+        assert!(sql.contains("CREATE TABLE repo_mapping"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1]);
+        assert_eq!(versions, vec![1, 2]);
     }
 }
