@@ -1,5 +1,5 @@
-use crate::repositories::{AnnouncementRepository, StateRepository};
-use crate::{RepoAnnouncementRecord, RepoStateRecord, StorageError};
+use crate::repositories::{AnnouncementRepository, RepoMappingRepository, StateRepository};
+use crate::{RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError};
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
@@ -245,9 +245,98 @@ LIMIT 1
     }
 }
 
+#[async_trait]
+impl RepoMappingRepository for PostgresRepositories {
+    async fn upsert_mapping(&self, record: RepoMappingRecord) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+INSERT INTO repo_mapping (
+    forgejo_owner,
+    forgejo_repo,
+    pubkey,
+    identifier
+)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (forgejo_owner, forgejo_repo)
+DO UPDATE SET
+    pubkey = EXCLUDED.pubkey,
+    identifier = EXCLUDED.identifier
+"#,
+        )
+        .bind(record.forgejo_owner)
+        .bind(record.forgejo_repo)
+        .bind(record.pubkey)
+        .bind(record.identifier)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mapping_by_forgejo(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<RepoMappingRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+    forgejo_owner,
+    forgejo_repo,
+    pubkey,
+    identifier
+FROM repo_mapping
+WHERE forgejo_owner = $1 AND forgejo_repo = $2
+LIMIT 1
+"#,
+        )
+        .bind(owner)
+        .bind(repo)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| RepoMappingRecord {
+            forgejo_owner: row.get("forgejo_owner"),
+            forgejo_repo: row.get("forgejo_repo"),
+            pubkey: row.get("pubkey"),
+            identifier: row.get("identifier"),
+        }))
+    }
+
+    async fn mapping_by_repo(
+        &self,
+        pubkey: &[u8],
+        identifier: &str,
+    ) -> Result<Option<RepoMappingRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+    forgejo_owner,
+    forgejo_repo,
+    pubkey,
+    identifier
+FROM repo_mapping
+WHERE pubkey = $1 AND identifier = $2
+LIMIT 1
+"#,
+        )
+        .bind(pubkey)
+        .bind(identifier)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| RepoMappingRecord {
+            forgejo_owner: row.get("forgejo_owner"),
+            forgejo_repo: row.get("forgejo_repo"),
+            pubkey: row.get("pubkey"),
+            identifier: row.get("identifier"),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PostgresRepositories;
+    use crate::repositories::RepoMappingRepository;
     use crate::StorageError;
 
     #[test]
@@ -260,5 +349,11 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn postgres_repos_implements_repo_mapping_repo() {
+        fn assert_impl<T: RepoMappingRepository>() {}
+        assert_impl::<PostgresRepositories>();
     }
 }
