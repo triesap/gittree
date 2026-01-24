@@ -1,6 +1,8 @@
-use gittree_admin::{AdminCli, AdminCommand, AdminCliError};
+use gittree_admin::{AdminCli, AdminCliError, AdminCommand};
 use gittree_core::{ForgejoRepo, RepoMapping};
-use gittree_storage::{PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError};
+use gittree_storage::{
+    PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
+};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -51,7 +53,9 @@ async fn run() -> Result<(), AdminError> {
                 .map_err(StorageError::from)
                 .map_err(AdminError::Storage)?;
             let repo = PostgresRepositories::new(pool);
-            repo.upsert_mapping(record).await.map_err(AdminError::Storage)?;
+            repo.upsert_mapping(record)
+                .await
+                .map_err(AdminError::Storage)?;
         }
     }
 
@@ -110,8 +114,9 @@ impl std::fmt::Display for StorageConfigError {
 impl std::error::Error for StorageConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, AdminError> {
-    let read_connection = std::env::var(ENV_STORAGE_READ_URL)
-        .map_err(|_| AdminError::StorageConfig(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL)))?;
+    let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
+        AdminError::StorageConfig(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
+    })?;
     let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
     let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
     let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
@@ -129,33 +134,83 @@ fn storage_from_env() -> Result<StorageConfig, AdminError> {
         application_name,
     };
 
-    config
-        .validate()
-        .map_err(|err| AdminError::StorageConfig(StorageConfigError::InvalidConfig(err.to_string())))?;
+    config.validate().map_err(|err| {
+        AdminError::StorageConfig(StorageConfigError::InvalidConfig(err.to_string()))
+    })?;
 
     Ok(config)
 }
 
 fn env_u32(key: &'static str) -> Result<Option<u32>, AdminError> {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u32>()
-            .map(Some)
-            .map_err(|_| {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u32>().map(Some).map_err(|_| {
                 AdminError::StorageConfig(StorageConfigError::InvalidEnv { key, value })
-            }),
+            })
+        }
         Err(_) => Ok(None),
     }
 }
 
 fn env_u64(key: &'static str) -> Result<Option<u64>, AdminError> {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u64>().map(Some).map_err(|_| {
                 AdminError::StorageConfig(StorageConfigError::InvalidEnv { key, value })
-            }),
+            })
+        }
         Err(_) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ENV_STORAGE_IDLE_TIMEOUT_SECS;
+    use super::ENV_STORAGE_MAX_LIFETIME_SECS;
+    use super::ENV_STORAGE_READ_URL;
+    use super::storage_from_env;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        f();
+        match previous {
+            Some(old) => unsafe {
+                std::env::set_var(key, old);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+    }
+
+    #[test]
+    fn storage_config_ignores_empty_timeouts() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                        let config = storage_from_env().expect("config");
+                        assert_eq!(config.idle_timeout_secs, None);
+                        assert_eq!(config.max_lifetime_secs, None);
+                    });
+                });
+            },
+        );
     }
 }

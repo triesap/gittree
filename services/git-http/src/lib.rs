@@ -67,10 +67,15 @@ impl std::error::Error for GitHttpConfigError {
 
 fn env_u64(key: &'static str) -> Result<Option<u64>, GitHttpConfigError> {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| GitHttpConfigError::InvalidEnv { key, value }),
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| GitHttpConfigError::InvalidEnv { key, value })
+        }
         Err(_) => Ok(None),
     }
 }
@@ -351,6 +356,20 @@ mod tests {
                     assert_eq!(config.upstream_url, "https://git.example");
                     assert_eq!(config.timeout, Duration::from_secs(15));
                 });
+            });
+        });
+    }
+
+    #[test]
+    fn config_ignores_empty_timeout_override() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+            with_env_var(ENV_TIMEOUT_SECS, "", || {
+                let config = GitHttpConfig::from_env().expect("config");
+                assert_eq!(
+                    config.timeout,
+                    Duration::from_secs(super::DEFAULT_TIMEOUT_SECS)
+                );
             });
         });
     }

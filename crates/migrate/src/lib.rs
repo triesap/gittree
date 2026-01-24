@@ -81,10 +81,8 @@ async fn run_with_config(config: &MigrationConfig) -> Result<i64, MigrationError
         .await
         .map_err(StorageError::from)
         .map_err(MigrationError::Storage)?;
-    let runner =
-        MigrationRunner::new(gittree_storage::migrations::core_migrations()).map_err(
-            MigrationError::Storage,
-        )?;
+    let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())
+        .map_err(MigrationError::Storage)?;
     let version = runner
         .run(&mut connection)
         .await
@@ -121,20 +119,30 @@ fn storage_from_env() -> Result<StorageConfig, MigrationConfigError> {
 
 fn env_u32(key: &'static str) -> Result<Option<u32>, MigrationConfigError> {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u32>()
-            .map(Some)
-            .map_err(|_| MigrationConfigError::InvalidEnv { key, value }),
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| MigrationConfigError::InvalidEnv { key, value })
+        }
         Err(_) => Ok(None),
     }
 }
 
 fn env_u64(key: &'static str) -> Result<Option<u64>, MigrationConfigError> {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| MigrationConfigError::InvalidEnv { key, value }),
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| MigrationConfigError::InvalidEnv { key, value })
+        }
         Err(_) => Ok(None),
     }
 }
@@ -188,6 +196,30 @@ mod tests {
                 assert_eq!(config.storage.min_connections, 2);
                 assert_eq!(config.storage.idle_timeout_secs, None);
                 assert_eq!(config.storage.max_lifetime_secs, None);
+            },
+        );
+    }
+
+    #[test]
+    fn config_ignores_empty_optional_envs() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
+                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                                let config = MigrationConfig::from_env().expect("config");
+                                assert_eq!(config.storage.max_connections, 10);
+                                assert_eq!(config.storage.min_connections, 2);
+                                assert_eq!(config.storage.idle_timeout_secs, None);
+                                assert_eq!(config.storage.max_lifetime_secs, None);
+                            });
+                        });
+                    });
+                });
             },
         );
     }

@@ -106,20 +106,28 @@ fn storage_from_env() -> Result<StorageConfig, SyncConfigError> {
 
 fn env_u32(key: &'static str) -> Result<Option<u32>, SyncConfigError> {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u32>()
-            .map(Some)
-            .map_err(|_| SyncConfigError::Storage(StorageConfigError::InvalidEnv { key, value })),
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u32>().map(Some).map_err(|_| {
+                SyncConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
+            })
+        }
         Err(_) => Ok(None),
     }
 }
 
 fn env_u64(key: &'static str) -> Result<Option<u64>, SyncConfigError> {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| SyncConfigError::Storage(StorageConfigError::InvalidEnv { key, value })),
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u64>().map(Some).map_err(|_| {
+                SyncConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
+            })
+        }
         Err(_) => Ok(None),
     }
 }
@@ -552,6 +560,24 @@ mod tests {
                         config.storage.read_connection,
                         "postgres://user:pass@localhost:5432/gittree"
                     );
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_ignores_empty_pool_timeouts() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                        let config = SyncConfig::from_env().expect("config");
+                        assert_eq!(config.storage.idle_timeout_secs, None);
+                        assert_eq!(config.storage.max_lifetime_secs, None);
+                    });
                 });
             },
         );
