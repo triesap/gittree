@@ -87,12 +87,14 @@ pub struct RefUpdate {
 #[derive(Debug)]
 pub enum HookError {
     InvalidLine(String),
+    InvalidPayload(String),
 }
 
 impl std::fmt::Display for HookError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HookError::InvalidLine(line) => write!(f, "invalid ref line: {line}"),
+            HookError::InvalidPayload(message) => write!(f, "invalid payload: {message}"),
         }
     }
 }
@@ -156,6 +158,78 @@ pub fn parse_updates(input: &str) -> Result<Vec<RefUpdate>, HookError> {
         });
     }
     Ok(updates)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoPushEvent {
+    pub owner: String,
+    pub repo: String,
+    pub full_name: String,
+    pub reference: String,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoPushPayload {
+    #[serde(rename = "ref")]
+    reference: String,
+    before: String,
+    after: String,
+    repository: ForgejoRepoPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoRepoPayload {
+    name: String,
+    #[serde(default)]
+    full_name: Option<String>,
+    owner: ForgejoUserPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoUserPayload {
+    username: String,
+}
+
+pub fn parse_forgejo_push(payload: &str) -> Result<ForgejoPushEvent, HookError> {
+    let parsed: ForgejoPushPayload =
+        serde_json::from_str(payload).map_err(|err| HookError::InvalidPayload(err.to_string()))?;
+
+    ensure_non_empty("ref", &parsed.reference)?;
+    ensure_non_empty("before", &parsed.before)?;
+    ensure_non_empty("after", &parsed.after)?;
+    ensure_non_empty("repository.name", &parsed.repository.name)?;
+    ensure_non_empty("repository.owner.username", &parsed.repository.owner.username)?;
+
+    let full_name = parsed
+        .repository
+        .full_name
+        .unwrap_or_else(|| format!("{}/{}", parsed.repository.owner.username, parsed.repository.name));
+
+    if !full_name.contains('/') {
+        return Err(HookError::InvalidPayload(format!(
+            "invalid repository full_name: {full_name}"
+        )));
+    }
+
+    Ok(ForgejoPushEvent {
+        owner: parsed.repository.owner.username,
+        repo: parsed.repository.name,
+        full_name,
+        reference: parsed.reference,
+        before: parsed.before,
+        after: parsed.after,
+    })
+}
+
+fn ensure_non_empty(field: &str, value: &str) -> Result<(), HookError> {
+    if value.trim().is_empty() {
+        return Err(HookError::InvalidPayload(format!(
+            "missing required field: {field}"
+        )));
+    }
+    Ok(())
 }
 
 pub trait StateFetcher {
@@ -349,6 +423,7 @@ mod tests {
     use super::StateFetcher;
     use super::evaluate_pre_receive;
     use super::handle_post_receive;
+    use super::parse_forgejo_push;
     use super::parse_updates;
     use gittree_core::RepoState;
     use std::collections::HashMap;
@@ -367,6 +442,44 @@ mod tests {
     fn parse_updates_rejects_missing_fields() {
         let err = parse_updates("only-two parts").unwrap_err();
         assert!(matches!(err, HookError::InvalidLine(_)));
+    }
+
+    #[test]
+    fn parse_forgejo_push_accepts_payload() {
+        let payload = r#"
+        {
+            "ref": "refs/heads/main",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "1111111111111111111111111111111111111111",
+            "repository": {
+                "name": "repo",
+                "full_name": "owner/repo",
+                "owner": { "username": "owner" }
+            }
+        }
+        "#;
+        let event = parse_forgejo_push(payload).expect("event");
+        assert_eq!(event.owner, "owner");
+        assert_eq!(event.repo, "repo");
+        assert_eq!(event.full_name, "owner/repo");
+        assert_eq!(event.reference, "refs/heads/main");
+    }
+
+    #[test]
+    fn parse_forgejo_push_rejects_missing_fields() {
+        let payload = r#"
+        {
+            "ref": "",
+            "before": "0000",
+            "after": "1111",
+            "repository": {
+                "name": "repo",
+                "owner": { "username": "owner" }
+            }
+        }
+        "#;
+        let err = parse_forgejo_push(payload).unwrap_err();
+        assert!(matches!(err, HookError::InvalidPayload(_)));
     }
 
     struct MockFetcher {
