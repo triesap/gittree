@@ -580,9 +580,12 @@ dependencies = [
  "dotenvy",
  "gittree-config",
  "gittree-core",
+ "hex",
+ "hmac",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tracing",
 ]
 

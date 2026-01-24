@@ -1,5 +1,6 @@
 use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{RepoState, UpdateDecision};
+use hmac::Mac;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
@@ -88,6 +89,7 @@ pub struct RefUpdate {
 pub enum HookError {
     InvalidLine(String),
     InvalidPayload(String),
+    InvalidSignature(String),
 }
 
 impl std::fmt::Display for HookError {
@@ -95,6 +97,7 @@ impl std::fmt::Display for HookError {
         match self {
             HookError::InvalidLine(line) => write!(f, "invalid ref line: {line}"),
             HookError::InvalidPayload(message) => write!(f, "invalid payload: {message}"),
+            HookError::InvalidSignature(message) => write!(f, "invalid signature: {message}"),
         }
     }
 }
@@ -229,6 +232,40 @@ fn ensure_non_empty(field: &str, value: &str) -> Result<(), HookError> {
             "missing required field: {field}"
         )));
     }
+    Ok(())
+}
+
+pub fn verify_forgejo_signature(
+    secret: &str,
+    payload: &[u8],
+    signature_header: &str,
+) -> Result<(), HookError> {
+    if secret.is_empty() {
+        return Err(HookError::InvalidSignature(
+            "missing webhook secret".to_string(),
+        ));
+    }
+    let signature_header = signature_header.trim();
+    if signature_header.is_empty() {
+        return Err(HookError::InvalidSignature(
+            "missing signature header".to_string(),
+        ));
+    }
+    let signature = signature_header
+        .strip_prefix("sha256=")
+        .unwrap_or(signature_header);
+    let provided = hex::decode(signature).map_err(|_| {
+        HookError::InvalidSignature("invalid signature encoding".to_string())
+    })?;
+
+    let mut mac =
+        hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| {
+            HookError::InvalidSignature("invalid signature secret".to_string())
+        })?;
+    mac.update(payload);
+    mac.verify_slice(&provided).map_err(|_| {
+        HookError::InvalidSignature("signature mismatch".to_string())
+    })?;
     Ok(())
 }
 
@@ -425,6 +462,8 @@ mod tests {
     use super::handle_post_receive;
     use super::parse_forgejo_push;
     use super::parse_updates;
+    use super::verify_forgejo_signature;
+    use hmac::Mac;
     use gittree_core::RepoState;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -480,6 +519,24 @@ mod tests {
         "#;
         let err = parse_forgejo_push(payload).unwrap_err();
         assert!(matches!(err, HookError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn verify_forgejo_signature_accepts_valid() {
+        let secret = "secret";
+        let payload = b"{\"ok\":true}";
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("mac");
+        mac.update(payload);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let header = format!("sha256={signature}");
+        verify_forgejo_signature(secret, payload, &header).expect("valid signature");
+    }
+
+    #[test]
+    fn verify_forgejo_signature_rejects_invalid() {
+        let err = verify_forgejo_signature("secret", b"payload", "sha256=deadbeef").unwrap_err();
+        assert!(matches!(err, HookError::InvalidSignature(_)));
     }
 
     struct MockFetcher {
