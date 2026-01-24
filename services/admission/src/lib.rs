@@ -2,7 +2,9 @@ use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{CoreError, EventFilter};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
-use gittree_storage::{AnnouncementRepository, StateRepository, StorageError};
+use gittree_storage::{
+    AnnouncementRepository, RelayCompatibilityRepository, StateRepository, StorageError,
+};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::RwLock;
@@ -422,9 +424,24 @@ pub async fn evaluate_request_with_storage<S>(
     storage: &S,
 ) -> Result<AdmissionDecision, AdmissionError>
 where
-    S: AnnouncementRepository + StateRepository,
+    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
     let decision = evaluate_request(request)?;
+    if let Some(relay_url) = request.relay_host() {
+        match storage.relay_compatibility(relay_url).await {
+            Ok(Some(record)) if !record.compatible => {
+                return Ok(AdmissionDecision::Reject {
+                    reason: format!("relay incompatible: {relay_url}"),
+                });
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return Ok(AdmissionDecision::Reject {
+                    reason: format!("storage error: {err}"),
+                });
+            }
+        }
+    }
     let AdmissionDecision::RequiresRelatedEvents { filters } = decision else {
         return Ok(decision);
     };
@@ -454,7 +471,7 @@ pub async fn evaluate_request_cached<S>(
     cache: &AdmissionCache,
 ) -> Result<AdmissionDecision, AdmissionError>
 where
-    S: AnnouncementRepository + StateRepository,
+    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
     let key = cache.cache_key(request);
     if let Some(cached) = cache.get(&key) {
@@ -566,8 +583,12 @@ mod tests {
     use gittree_config::ServicesConfig;
     use gittree_core::EventFilter;
     use gittree_core::RepoAnnouncement;
+    use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE};
-    use gittree_storage::{AnnouncementRepository, InMemoryRepositories, RepoAnnouncementRecord};
+    use gittree_storage::{
+        AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRecord,
+        RelayCompatibilityRepository, RepoAnnouncementRecord,
+    };
     use gittree_storage::{StateRepository, StorageError};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -759,6 +780,21 @@ mod tests {
         }
     }
 
+    fn sample_compat_record(relay_url: &str, compatible: bool) -> RelayCompatibilityRecord {
+        let (supported, missing_required) = if compatible {
+            (vec![RelayCapability::Nip01, RelayCapability::Nip34], Vec::new())
+        } else {
+            (vec![RelayCapability::Nip01], vec![RelayCapability::Nip34])
+        };
+        let report = RelayCompatibilityReport {
+            relay_url: relay_url.to_string(),
+            supported,
+            missing_required,
+            missing_optional: Vec::new(),
+        };
+        RelayCompatibilityRecord::new(&report, 0).expect("record")
+    }
+
     #[tokio::test]
     async fn storage_integration_rejects_missing_repo() {
         let storage = InMemoryRepositories::new();
@@ -807,6 +843,36 @@ mod tests {
         assert!(matches!(
             decision,
             AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_rejects_incompatible_relay() {
+        let storage = InMemoryRepositories::new();
+        let record = sample_compat_record("wss://relay.example", false);
+        storage
+            .upsert_relay_compatibility(record)
+            .await
+            .expect("upsert");
+
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("wss://relay.example".to_string()),
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage(&request, &storage)
+            .await
+            .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason } if reason.contains("relay incompatible")
         ));
     }
 
@@ -861,6 +927,27 @@ mod tests {
             _pubkey: &[u8],
             _identifier: &str,
         ) -> Result<Option<gittree_storage::RepoStateRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "fail".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RelayCompatibilityRepository for FailingStorage {
+        async fn upsert_relay_compatibility(
+            &self,
+            _record: RelayCompatibilityRecord,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Internal {
+                message: "fail".to_string(),
+            })
+        }
+
+        async fn relay_compatibility(
+            &self,
+            _relay_url: &str,
+        ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
             Err(StorageError::Internal {
                 message: "fail".to_string(),
             })
@@ -943,6 +1030,24 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl RelayCompatibilityRepository for CountingStorage {
+        async fn upsert_relay_compatibility(
+            &self,
+            record: RelayCompatibilityRecord,
+        ) -> Result<(), StorageError> {
+            self.inner.upsert_relay_compatibility(record).await
+        }
+
+        async fn relay_compatibility(
+            &self,
+            relay_url: &str,
+        ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.relay_compatibility(relay_url).await
+        }
+    }
+
     #[tokio::test]
     async fn cache_returns_cached_decision() {
         let storage = CountingStorage::default();
@@ -972,7 +1077,7 @@ mod tests {
             .await
             .expect("second");
 
-        assert_eq!(storage.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1004,6 +1109,6 @@ mod tests {
             .await
             .expect("second");
 
-        assert!(storage.calls.load(Ordering::SeqCst) >= 2);
+        assert!(storage.calls.load(Ordering::SeqCst) >= 4);
     }
 }
