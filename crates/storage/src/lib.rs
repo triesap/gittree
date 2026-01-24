@@ -8,6 +8,7 @@ pub mod migrations;
 pub mod postgres;
 pub mod queries;
 pub mod repo;
+pub mod repo_mapping;
 pub mod repositories;
 
 pub use cache::{CacheConfig, CachedRepositories};
@@ -15,7 +16,10 @@ pub use migrations::{Migration, MigrationRunner};
 pub use postgres::PostgresRepositories;
 pub use queries::RepoFilter;
 pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
-pub use repositories::{AnnouncementRepository, InMemoryRepositories, StateRepository};
+pub use repo_mapping::RepoMappingRecord;
+pub use repositories::{
+    AnnouncementRepository, InMemoryRepositories, RepoMappingRepository, StateRepository,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {

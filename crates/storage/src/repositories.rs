@@ -1,4 +1,4 @@
-use crate::{RepoAnnouncementRecord, RepoStateRecord, StorageError};
+use crate::{RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -29,10 +29,27 @@ pub trait StateRepository: Send + Sync {
     ) -> Result<Option<RepoStateRecord>, StorageError>;
 }
 
+#[async_trait]
+pub trait RepoMappingRepository: Send + Sync {
+    async fn upsert_mapping(&self, record: RepoMappingRecord) -> Result<(), StorageError>;
+    async fn mapping_by_forgejo(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<RepoMappingRecord>, StorageError>;
+    async fn mapping_by_repo(
+        &self,
+        pubkey: &[u8],
+        identifier: &str,
+    ) -> Result<Option<RepoMappingRecord>, StorageError>;
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryRepositories {
     announcements: RwLock<HashMap<String, Vec<RepoAnnouncementRecord>>>,
     states: RwLock<HashMap<String, Vec<RepoStateRecord>>>,
+    mappings_by_forgejo: RwLock<HashMap<String, RepoMappingRecord>>,
+    mappings_by_repo: RwLock<HashMap<String, RepoMappingRecord>>,
 }
 
 impl InMemoryRepositories {
@@ -42,6 +59,10 @@ impl InMemoryRepositories {
 
     fn key(pubkey: &[u8], identifier: &str) -> String {
         format!("{}:{}", hex::encode(pubkey), identifier)
+    }
+
+    fn forgejo_key(owner: &str, repo: &str) -> String {
+        format!("{owner}/{repo}")
     }
 }
 
@@ -114,11 +135,67 @@ impl StateRepository for InMemoryRepositories {
     }
 }
 
+#[async_trait]
+impl RepoMappingRepository for InMemoryRepositories {
+    async fn upsert_mapping(&self, record: RepoMappingRecord) -> Result<(), StorageError> {
+        let forgejo_key = Self::forgejo_key(&record.forgejo_owner, &record.forgejo_repo);
+        let repo_key = Self::key(&record.pubkey, &record.identifier);
+        let mut forgejo_map =
+            self.mappings_by_forgejo
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "forgejo mapping store poisoned".to_string(),
+                })?;
+        let mut repo_map =
+            self.mappings_by_repo
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "repo mapping store poisoned".to_string(),
+                })?;
+        forgejo_map.insert(forgejo_key, record.clone());
+        repo_map.insert(repo_key, record);
+        Ok(())
+    }
+
+    async fn mapping_by_forgejo(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<RepoMappingRecord>, StorageError> {
+        let key = Self::forgejo_key(owner, repo);
+        let map =
+            self.mappings_by_forgejo
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "forgejo mapping store poisoned".to_string(),
+                })?;
+        Ok(map.get(&key).cloned())
+    }
+
+    async fn mapping_by_repo(
+        &self,
+        pubkey: &[u8],
+        identifier: &str,
+    ) -> Result<Option<RepoMappingRecord>, StorageError> {
+        let key = Self::key(pubkey, identifier);
+        let map =
+            self.mappings_by_repo
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "repo mapping store poisoned".to_string(),
+                })?;
+        Ok(map.get(&key).cloned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AnnouncementRepository, InMemoryRepositories, StateRepository};
-    use crate::{RepoAnnouncementRecord, RepoStateRecord};
+    use super::{
+        AnnouncementRepository, InMemoryRepositories, RepoMappingRepository, StateRepository,
+    };
+    use crate::{RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord};
     use gittree_core::{RepoAnnouncement, RepoState};
+    use gittree_core::RepoMapping;
     use std::collections::HashMap;
 
     fn hex_32(byte: u8) -> String {
@@ -151,6 +228,12 @@ mod tests {
             identifier: identifier.to_string(),
             state,
         }
+    }
+
+    fn sample_mapping(identifier: &str) -> RepoMappingRecord {
+        let mapping =
+            RepoMapping::new("owner", "repo", hex_32(0x11), identifier).expect("mapping");
+        RepoMappingRecord::new(&mapping).expect("record")
     }
 
     #[tokio::test]
@@ -214,5 +297,29 @@ mod tests {
             .await
             .expect("latest");
         assert_eq!(latest, Some(newer));
+    }
+
+    #[tokio::test]
+    async fn in_memory_returns_mapping_by_forgejo() {
+        let store = InMemoryRepositories::new();
+        let record = sample_mapping("repo");
+        store.upsert_mapping(record.clone()).await.expect("upsert");
+        let found = store
+            .mapping_by_forgejo("owner", "repo")
+            .await
+            .expect("lookup");
+        assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_returns_mapping_by_repo() {
+        let store = InMemoryRepositories::new();
+        let record = sample_mapping("repo");
+        store.upsert_mapping(record.clone()).await.expect("upsert");
+        let found = store
+            .mapping_by_repo(&record.pubkey, &record.identifier)
+            .await
+            .expect("lookup");
+        assert_eq!(found, Some(record));
     }
 }
