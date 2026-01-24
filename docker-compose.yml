@@ -1,6 +1,16 @@
 version: "3.9"
 
 services:
+  log-init:
+    image: alpine:3.20
+    command:
+      - "sh"
+      - "-c"
+      - "mkdir -p /logs/forgejo /logs/postgres /logs/nginx /logs/gittree && chmod -R 0777 /logs"
+    volumes:
+      - ./logs:/logs
+    restart: "no"
+
   postgres:
     image: postgres:16
     environment:
@@ -27,6 +37,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./logs/postgres:/var/log/postgresql
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
 
   migrate:
     build:
@@ -61,6 +74,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrate:
@@ -83,6 +98,8 @@ services:
     ports:
       - "8081:8081"
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrate:
@@ -105,6 +122,8 @@ services:
     ports:
       - "8082:8082"
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrate:
@@ -127,6 +146,8 @@ services:
     ports:
       - "8083:8083"
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrate:
@@ -149,6 +170,8 @@ services:
     ports:
       - "8084:8084"
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrate:
@@ -170,6 +193,8 @@ services:
     ports:
       - "8085:8085"
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       - relay
       - forgejo
     volumes:
@@ -194,6 +219,9 @@ services:
     volumes:
       - forgejo-data:/data
       - ./logs/forgejo:/data/gitea/log
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
 
   nginx:
     image: nginx:1.27
@@ -203,6 +231,8 @@ services:
     ports:
       - "80:80"
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       - relay
       - git-http
 
