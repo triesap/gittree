@@ -108,6 +108,20 @@ pub struct RelayInfoDocument {
     pub curation: Option<String>,
 }
 
+impl RelayInfoDocument {
+    pub fn from_json_str(input: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(input)
+    }
+
+    pub fn supported_nips_list(&self) -> &[u16] {
+        self.supported_nips.as_deref().unwrap_or(&[])
+    }
+
+    pub fn supports_nip(&self, nip: u16) -> bool {
+        self.supported_nips_list().iter().any(|value| *value == nip)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RelayInfoDocument;
@@ -178,5 +192,22 @@ mod tests {
 
         let value = serde_json::to_value(&doc).expect("serialize nip-11");
         assert_eq!(value.get("self"), Some(&Value::String("abc".to_string())));
+    }
+
+    #[test]
+    fn nip11_parses_from_json_and_detects_supported_nips() {
+        let json = r#"{"name":"relay","supported_nips":[1,11,34]}"#;
+        let doc = RelayInfoDocument::from_json_str(json).expect("parse nip-11");
+        assert!(doc.supports_nip(1));
+        assert!(doc.supports_nip(34));
+        assert_eq!(doc.supported_nips_list(), &[1, 11, 34]);
+    }
+
+    #[test]
+    fn nip11_reports_missing_supported_nips_as_empty() {
+        let json = r#"{"name":"relay"}"#;
+        let doc = RelayInfoDocument::from_json_str(json).expect("parse nip-11");
+        assert!(!doc.supports_nip(11));
+        assert!(doc.supported_nips_list().is_empty());
     }
 }
