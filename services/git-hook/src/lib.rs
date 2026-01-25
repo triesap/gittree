@@ -364,11 +364,18 @@ where
 {
     let repo = gittree_core::parse_repo_path(repo_path)
         .map_err(|err| HookServiceError::Core(err.to_string()))?;
-    let state = fetcher.latest_state(&repo.pubkey, &repo.identifier)?;
     let core_updates: Vec<gittree_core::RefUpdate<'_>> = updates
         .iter()
         .map(|update| gittree_core::RefUpdate::new(&update.old, &update.new, &update.reference))
         .collect();
+    let needs_state = core_updates
+        .iter()
+        .any(|update| !update.ref_name.starts_with("refs/nostr/"));
+    let state = if needs_state {
+        fetcher.latest_state(&repo.pubkey, &repo.identifier)?
+    } else {
+        None
+    };
     Ok(gittree_core::evaluate_updates(
         &core_updates,
         state.as_ref(),
@@ -598,6 +605,20 @@ mod tests {
         }
     }
 
+    struct FailingFetcher;
+
+    impl StateFetcher for FailingFetcher {
+        fn latest_state(
+            &self,
+            _pubkey: &str,
+            _identifier: &str,
+        ) -> Result<Option<RepoState>, super::HookServiceError> {
+            Err(super::HookServiceError::State(
+                "state service unavailable".to_string(),
+            ))
+        }
+    }
+
     #[test]
     fn evaluate_pre_receive_rejects_mismatch() {
         let mut state_map = HashMap::new();
@@ -625,6 +646,22 @@ mod tests {
             decision,
             gittree_core::UpdateDecision::Reject { .. }
         ));
+    }
+
+    #[test]
+    fn evaluate_pre_receive_accepts_nostr_without_state() {
+        let updates = vec![super::RefUpdate {
+            old: "0".repeat(40),
+            new: "1".repeat(40),
+            reference: "refs/nostr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+        }];
+        let repo_path = std::path::Path::new("/tmp")
+            .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
+            .join("repo.git");
+        let decision =
+            evaluate_pre_receive(&FailingFetcher, repo_path, &updates).expect("decision");
+        assert!(matches!(decision, gittree_core::UpdateDecision::Accept));
     }
 
     struct MockNotifier {
