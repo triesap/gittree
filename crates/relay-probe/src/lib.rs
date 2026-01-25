@@ -1,5 +1,6 @@
 use gittree_core::{
-    RelayCapabilitySet, RelayCompatibilityReport, RelayInfoDocument, capabilities_from_nip11,
+    ActiveProbeEvidence, RelayCapability, RelayCapabilitySet, RelayCompatibilityReport,
+    RelayInfoDocument, capabilities_from_nip11, merge_active_probe_evidence,
 };
 use gittree_relay_adapter::RelayAdapter;
 use serde::Serialize;
@@ -9,7 +10,10 @@ use url::Url;
 pub struct RelayProbeResult {
     pub relay_url: String,
     pub nip11_url: Option<String>,
+    pub nip11_available: bool,
     pub report: RelayCompatibilityReport,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub observed_capabilities: Vec<RelayCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nip11: Option<RelayInfoDocument>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +122,7 @@ pub fn probe_relay(
     let mut warnings = Vec::new();
     let mut nip11 = None;
     let mut supported = Vec::new();
+    let mut nip11_available = false;
 
     match client.fetch_nip11(&nip11_url)? {
         Some(body) => {
@@ -125,6 +130,7 @@ pub fn probe_relay(
                 .map_err(|err| RelayProbeError::Parse(err.to_string()))?;
             supported = capabilities_from_nip11(&doc);
             nip11 = Some(doc);
+            nip11_available = true;
         }
         None => {
             warnings.push("nip-11 unavailable; falling back to active probes".to_string());
@@ -135,7 +141,9 @@ pub fn probe_relay(
     Ok(RelayProbeResult {
         relay_url: relay_url.to_string(),
         nip11_url: Some(nip11_url),
+        nip11_available,
         report,
+        observed_capabilities: supported,
         nip11,
         active_probe: None,
         warnings,
@@ -151,12 +159,20 @@ pub async fn probe_relay_with_adapter(
     match adapter.probe_write_read().await {
         Ok(()) => {
             result.active_probe = Some(ActiveProbeResult { ok: true, error: None });
+            let mut supported = result.observed_capabilities.clone();
+            merge_active_probe_evidence(&mut supported, ActiveProbeEvidence::success());
+            result.report = RelayCapabilitySet::default().evaluate(relay_url, &supported);
+            result.observed_capabilities = supported;
         }
         Err(err) => {
             result.active_probe = Some(ActiveProbeResult {
                 ok: false,
                 error: Some(err.to_string()),
             });
+            merge_active_probe_evidence(
+                &mut result.observed_capabilities,
+                ActiveProbeEvidence::failure(),
+            );
         }
     }
     Ok(result)
@@ -200,6 +216,8 @@ mod tests {
         let result = probe_relay("wss://relay.example", &client).expect("probe");
         assert!(result.report.is_compatible());
         assert!(result.warnings.is_empty());
+        assert!(result.nip11_available);
+        assert!(result.observed_capabilities.contains(&gittree_core::RelayCapability::Nip34));
     }
 
     struct OkAdapter;
@@ -225,5 +243,6 @@ mod tests {
             .expect("probe");
         assert!(result.active_probe.is_some());
         assert!(result.active_probe.unwrap().ok);
+        assert!(result.report.is_compatible());
     }
 }
