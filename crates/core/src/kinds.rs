@@ -22,6 +22,25 @@ pub fn status_kinds() -> [NostrKind; 4] {
     ]
 }
 
+pub fn nip34_required_kinds() -> [NostrKind; 10] {
+    [
+        KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_GIT_REPO_STATE,
+        KIND_GIT_PATCH,
+        KIND_GIT_PULL_REQUEST,
+        KIND_GIT_PULL_REQUEST_UPDATE,
+        KIND_GIT_ISSUE,
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_APPLIED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+    ]
+}
+
+pub fn is_nip34_kind(kind: u32) -> bool {
+    nip34_required_kinds().iter().any(|entry| entry.0 == kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +71,29 @@ mod tests {
                 KIND_GIT_STATUS_DRAFT
             ]
         );
+    }
+
+    #[test]
+    fn nip34_required_kinds_include_core_events() {
+        let kinds = nip34_required_kinds();
+        assert!(kinds.contains(&KIND_GIT_REPO_ANNOUNCEMENT));
+        assert!(kinds.contains(&KIND_GIT_REPO_STATE));
+        assert!(kinds.contains(&KIND_GIT_PATCH));
+        assert!(kinds.contains(&KIND_GIT_PULL_REQUEST));
+        assert!(kinds.contains(&KIND_GIT_PULL_REQUEST_UPDATE));
+        assert!(kinds.contains(&KIND_GIT_ISSUE));
+        assert!(kinds.contains(&KIND_GIT_STATUS_OPEN));
+        assert!(kinds.contains(&KIND_GIT_STATUS_APPLIED));
+        assert!(kinds.contains(&KIND_GIT_STATUS_CLOSED));
+        assert!(kinds.contains(&KIND_GIT_STATUS_DRAFT));
+    }
+
+    #[test]
+    fn is_nip34_kind_matches_required_set() {
+        for kind in nip34_required_kinds() {
+            assert!(is_nip34_kind(kind.0));
+        }
+        assert!(!is_nip34_kind(1));
+        assert!(!is_nip34_kind(KIND_USER_GRASP_LIST.0));
     }
 }

@@ -61,7 +61,7 @@ pub use kinds::{
     KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST, KIND_GIT_PULL_REQUEST_UPDATE,
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_APPLIED,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_USER_GRASP_LIST,
-    NostrKind, status_kinds,
+    NostrKind, is_nip34_kind, nip34_required_kinds, status_kinds,
 };
 pub use nip11::RelayInfoDocument;
 pub use nip34::RepoAnnouncement;
