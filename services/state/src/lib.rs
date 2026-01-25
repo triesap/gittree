@@ -675,7 +675,8 @@ mod tests {
             missing_required: Vec::new(),
             missing_optional: Vec::new(),
         };
-        RelayCompatibilityRecord::new(&report, 123).expect("record")
+        RelayCompatibilityRecord::new(&report, 123, &gittree_storage::RelayProbeMetadata::default())
+            .expect("record")
     }
 
     #[test]

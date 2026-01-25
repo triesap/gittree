@@ -792,7 +792,8 @@ mod tests {
             missing_required,
             missing_optional: Vec::new(),
         };
-        RelayCompatibilityRecord::new(&report, 0).expect("record")
+        RelayCompatibilityRecord::new(&report, 0, &gittree_storage::RelayProbeMetadata::default())
+            .expect("record")
     }
 
     #[tokio::test]

@@ -414,6 +414,10 @@ LIMIT 1
             missing_required: row.try_get("missing_required")?,
             missing_optional: row.try_get("missing_optional")?,
             report_json: row.try_get("report_json")?,
+            nip11_url: None,
+            nip11_available: false,
+            active_probe_ok: None,
+            active_probe_error: None,
             checked_at: Self::from_offset_datetime(checked_at),
         }))
     }

@@ -518,7 +518,7 @@ mod tests {
     use super::{CacheConfig, CachedRepositories};
     use crate::{
         AnnouncementRepository, RelayCompatibilityRecord, RelayCompatibilityRepository,
-        RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
+        RelayProbeMetadata, RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
     };
     use async_trait::async_trait;
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
@@ -697,7 +697,8 @@ mod tests {
             missing_required: Vec::new(),
             missing_optional: Vec::new(),
         };
-        RelayCompatibilityRecord::new(&report, 10).expect("record")
+        RelayCompatibilityRecord::new(&report, 10, &RelayProbeMetadata::default())
+            .expect("record")
     }
 
     #[tokio::test]

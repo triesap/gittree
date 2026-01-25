@@ -18,7 +18,7 @@ pub use postgres::PostgresRepositories;
 pub use queries::RepoFilter;
 pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
 pub use repo_mapping::RepoMappingRecord;
-pub use relay_compat::RelayCompatibilityRecord;
+pub use relay_compat::{RelayCompatibilityRecord, RelayProbeMetadata};
 pub use repositories::{
     AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRepository,
     RepoMappingRepository, StateRepository,

@@ -241,7 +241,10 @@ mod tests {
         AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRepository,
         RepoMappingRepository, StateRepository,
     };
-    use crate::{RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord};
+    use crate::{
+        RelayCompatibilityRecord, RelayProbeMetadata, RepoAnnouncementRecord, RepoMappingRecord,
+        RepoStateRecord,
+    };
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
     use std::collections::HashMap;
@@ -384,7 +387,9 @@ mod tests {
     async fn in_memory_upserts_relay_compatibility() {
         let store = InMemoryRepositories::new();
         let report = sample_compat_report();
-        let record = RelayCompatibilityRecord::new(&report, 42).expect("record");
+        let record =
+            RelayCompatibilityRecord::new(&report, 42, &RelayProbeMetadata::default())
+                .expect("record");
 
         store
             .upsert_relay_compatibility(record.clone())

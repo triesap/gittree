@@ -1,8 +1,8 @@
 use gittree_config::RelayTargetsConfig;
 use gittree_relay_probe::{HttpRelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay};
 use gittree_storage::{
-    PostgresRepositories, RelayCompatibilityRecord, RelayCompatibilityRepository, StorageConfig,
-    StorageError,
+    PostgresRepositories, RelayCompatibilityRecord, RelayCompatibilityRepository,
+    RelayProbeMetadata, StorageConfig, StorageError,
 };
 use std::process::exit;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -127,9 +127,12 @@ async fn run() -> Result<(), ProbeCommandError> {
 }
 
 async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeCommandError> {
-    let record =
-        RelayCompatibilityRecord::new(&result.report, now_unix_timestamp())
-            .map_err(ProbeCommandError::Storage)?;
+    let record = RelayCompatibilityRecord::new(
+        &result.report,
+        now_unix_timestamp(),
+        &RelayProbeMetadata::default(),
+    )
+    .map_err(ProbeCommandError::Storage)?;
     let storage = storage_from_env().map_err(ProbeCommandError::StorageConfig)?;
     let options = storage
         .write_connect_options()
