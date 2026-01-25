@@ -354,9 +354,13 @@ INSERT INTO relay_compatibility (
     missing_required,
     missing_optional,
     report,
-    checked_at
+    checked_at,
+    nip11_url,
+    nip11_available,
+    active_probe_ok,
+    active_probe_error
 )
-VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11)
 ON CONFLICT (relay_url)
 DO UPDATE SET
     compatible = EXCLUDED.compatible,
@@ -364,7 +368,11 @@ DO UPDATE SET
     missing_required = EXCLUDED.missing_required,
     missing_optional = EXCLUDED.missing_optional,
     report = EXCLUDED.report,
-    checked_at = EXCLUDED.checked_at
+    checked_at = EXCLUDED.checked_at,
+    nip11_url = EXCLUDED.nip11_url,
+    nip11_available = EXCLUDED.nip11_available,
+    active_probe_ok = EXCLUDED.active_probe_ok,
+    active_probe_error = EXCLUDED.active_probe_error
 "#,
         )
         .bind(record.relay_url)
@@ -374,6 +382,10 @@ DO UPDATE SET
         .bind(record.missing_optional)
         .bind(record.report_json)
         .bind(checked_at)
+        .bind(record.nip11_url)
+        .bind(record.nip11_available)
+        .bind(record.active_probe_ok)
+        .bind(record.active_probe_error)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -392,7 +404,11 @@ SELECT
     missing_required,
     missing_optional,
     report::text AS report_json,
-    checked_at
+    checked_at,
+    nip11_url,
+    nip11_available,
+    active_probe_ok,
+    active_probe_error
 FROM relay_compatibility
 WHERE relay_url = $1
 LIMIT 1
@@ -414,10 +430,10 @@ LIMIT 1
             missing_required: row.try_get("missing_required")?,
             missing_optional: row.try_get("missing_optional")?,
             report_json: row.try_get("report_json")?,
-            nip11_url: None,
-            nip11_available: false,
-            active_probe_ok: None,
-            active_probe_error: None,
+            nip11_url: row.try_get("nip11_url")?,
+            nip11_available: row.try_get("nip11_available")?,
+            active_probe_ok: row.try_get("active_probe_ok")?,
+            active_probe_error: row.try_get("active_probe_error")?,
             checked_at: Self::from_offset_datetime(checked_at),
         }))
     }
