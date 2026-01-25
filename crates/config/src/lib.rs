@@ -11,11 +11,14 @@ const DEFAULT_SYNC_BIND: &str = "127.0.0.1:8084";
 const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
+const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
 const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
 const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
 const ENV_COORDINATOR_BIND: &str = "GITTREE_COORDINATOR_BIND";
 const ENV_SYNC_BIND: &str = "GITTREE_SYNC_BIND";
 const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
+
+const DEFAULT_RELAY_COMPAT_MODE: RelayCompatibilityMode = RelayCompatibilityMode::Strict;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -78,6 +81,60 @@ impl RelayTargetsConfig {
             validate_relay_url(url)?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayCompatibilityMode {
+    Strict,
+    Warn,
+    Allow,
+}
+
+impl RelayCompatibilityMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "strict" => Some(Self::Strict),
+            "warn" | "warning" => Some(Self::Warn),
+            "allow" => Some(Self::Allow),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelayCompatibilityMode::Strict => "strict",
+            RelayCompatibilityMode::Warn => "warn",
+            RelayCompatibilityMode::Allow => "allow",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayCompatibilityConfig {
+    pub mode: RelayCompatibilityMode,
+}
+
+impl Default for RelayCompatibilityConfig {
+    fn default() -> Self {
+        Self {
+            mode: DEFAULT_RELAY_COMPAT_MODE,
+        }
+    }
+}
+
+impl RelayCompatibilityConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let mode = env_or_default(ENV_RELAY_COMPAT_MODE, DEFAULT_RELAY_COMPAT_MODE.as_str());
+        let mode = RelayCompatibilityMode::parse(&mode)
+            .ok_or_else(|| ConfigError::InvalidRelayCompatibilityMode(mode))?;
+        Ok(Self { mode })
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlRelayCompatibilityRoot = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        parsed.into_config()
     }
 }
 
@@ -236,6 +293,30 @@ struct TomlRelayTargets {
     relay_urls: Option<Vec<String>>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlRelayCompatibilityRoot {
+    relay_compatibility: Option<TomlRelayCompatibility>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlRelayCompatibility {
+    mode: Option<String>,
+}
+
+impl TomlRelayCompatibilityRoot {
+    fn into_config(self) -> Result<RelayCompatibilityConfig, ConfigError> {
+        let mode = self
+            .relay_compatibility
+            .and_then(|value| value.mode)
+            .unwrap_or_else(|| DEFAULT_RELAY_COMPAT_MODE.as_str().to_string());
+        let mode = RelayCompatibilityMode::parse(&mode)
+            .ok_or_else(|| ConfigError::InvalidRelayCompatibilityMode(mode))?;
+        Ok(RelayCompatibilityConfig { mode })
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlServicesConfig {
@@ -257,6 +338,7 @@ struct TomlServiceConfig {
 pub enum ConfigError {
     InvalidRelayBind(String),
     InvalidRelayUrl(String),
+    InvalidRelayCompatibilityMode(String),
     InvalidServiceBind {
         service: &'static str,
         value: String,
@@ -279,6 +361,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidRelayUrl(value) => {
                 write!(f, "invalid relay url: {value}")
+            }
+            ConfigError::InvalidRelayCompatibilityMode(value) => {
+                write!(f, "invalid relay compatibility mode: {value}")
             }
             ConfigError::InvalidServiceBind { service, value } => {
                 write!(f, "invalid {service} bind address: {value}")
@@ -306,6 +391,7 @@ impl std::error::Error for ConfigError {
         match self {
             ConfigError::InvalidRelayBind(_) => None,
             ConfigError::InvalidRelayUrl(_) => None,
+            ConfigError::InvalidRelayCompatibilityMode(_) => None,
             ConfigError::InvalidServiceBind { .. } => None,
             ConfigError::ReadConfig { source, .. } => Some(source),
             ConfigError::TomlParse { source, .. } => Some(source),
@@ -412,6 +498,8 @@ impl GittreeConfig {
 mod tests {
     use super::ConfigError;
     use super::GittreeConfig;
+    use super::RelayCompatibilityConfig;
+    use super::RelayCompatibilityMode;
     use super::RelayTargetsConfig;
     use super::ServicesConfig;
     use crate::DEFAULT_ADMISSION_BIND;
@@ -424,6 +512,7 @@ mod tests {
     use crate::ENV_COORDINATOR_BIND;
     use crate::ENV_GIT_HTTP_BIND;
     use crate::ENV_RELAY_BIND;
+    use crate::ENV_RELAY_COMPAT_MODE;
     use crate::ENV_RELAY_URLS;
     use crate::ENV_STATE_BIND;
     use crate::ENV_SYNC_BIND;
@@ -520,6 +609,27 @@ mod tests {
             RelayTargetsConfig::from_toml_str("relay_urls = [\"wss://relay.example\"]")
                 .expect("relay targets");
         assert_eq!(config.relay_urls, vec!["wss://relay.example".to_string()]);
+    }
+
+    #[test]
+    fn relay_compat_mode_env_parses() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_COMPAT_MODE, "warn", || {
+            let config = RelayCompatibilityConfig::from_env().expect("compat config");
+            assert_eq!(config.mode, RelayCompatibilityMode::Warn);
+        });
+    }
+
+    #[test]
+    fn relay_compat_mode_env_rejects_invalid() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_COMPAT_MODE, "nope", || {
+            let err = RelayCompatibilityConfig::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayCompatibilityMode(value) if value == "nope"
+            ));
+        });
     }
 
     #[test]
