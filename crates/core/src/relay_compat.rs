@@ -30,6 +30,21 @@ pub struct RelayCapabilitySet {
     pub optional: Vec<RelayCapability>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveProbeEvidence {
+    pub write_read_ok: bool,
+}
+
+impl ActiveProbeEvidence {
+    pub fn success() -> Self {
+        Self { write_read_ok: true }
+    }
+
+    pub fn failure() -> Self {
+        Self { write_read_ok: false }
+    }
+}
+
 pub fn capabilities_from_nip11(doc: &RelayInfoDocument) -> Vec<RelayCapability> {
     let mut supported = Vec::new();
     if doc.supports_nip(1) {
@@ -52,6 +67,21 @@ pub fn capabilities_from_nip11(doc: &RelayInfoDocument) -> Vec<RelayCapability> 
         supported.push(RelayCapability::Grasp);
     }
     supported
+}
+
+pub fn merge_active_probe_evidence(
+    supported: &mut Vec<RelayCapability>,
+    evidence: ActiveProbeEvidence,
+) {
+    if !evidence.write_read_ok {
+        return;
+    }
+    if !supported.contains(&RelayCapability::Nip01) {
+        supported.push(RelayCapability::Nip01);
+    }
+    if !supported.contains(&RelayCapability::Nip34) {
+        supported.push(RelayCapability::Nip34);
+    }
 }
 
 impl RelayCapabilitySet {
@@ -117,7 +147,10 @@ impl RelayCompatibilityReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{RelayCapability, RelayCapabilitySet, capabilities_from_nip11};
+    use super::{
+        ActiveProbeEvidence, RelayCapability, RelayCapabilitySet, capabilities_from_nip11,
+        merge_active_probe_evidence,
+    };
     use crate::nip11::RelayInfoDocument;
 
     #[test]
@@ -175,5 +208,20 @@ mod tests {
         assert!(supported.contains(&RelayCapability::Nip34));
         assert!(supported.contains(&RelayCapability::Nip65));
         assert!(supported.contains(&RelayCapability::Grasp));
+    }
+
+    #[test]
+    fn active_probe_merges_required_capabilities_on_success() {
+        let mut supported = vec![RelayCapability::Nip11];
+        merge_active_probe_evidence(&mut supported, ActiveProbeEvidence::success());
+        assert!(supported.contains(&RelayCapability::Nip01));
+        assert!(supported.contains(&RelayCapability::Nip34));
+    }
+
+    #[test]
+    fn active_probe_does_not_modify_on_failure() {
+        let mut supported = vec![RelayCapability::Nip11];
+        merge_active_probe_evidence(&mut supported, ActiveProbeEvidence::failure());
+        assert_eq!(supported, vec![RelayCapability::Nip11]);
     }
 }

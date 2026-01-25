@@ -73,7 +73,8 @@ pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip34_status::{StatusAppliedRef, StatusEvent};
 pub use relay_compat::{
-    RelayCapability, RelayCapabilitySet, RelayCompatibilityReport, capabilities_from_nip11,
+    ActiveProbeEvidence, RelayCapability, RelayCapabilitySet, RelayCompatibilityReport,
+    capabilities_from_nip11, merge_active_probe_evidence,
 };
 pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use repo_events::{
