@@ -12,6 +12,9 @@ const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
 const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
+const ENV_RELAY_PROBE_ACTIVE: &str = "GITTREE_RELAY_PROBE_ACTIVE";
+const ENV_RELAY_PROBE_TIMEOUT_SECS: &str = "GITTREE_RELAY_PROBE_TIMEOUT_SECS";
+const ENV_RELAY_PROBE_SECRET_KEY: &str = "GITTREE_RELAY_PROBE_SECRET_KEY";
 const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
 const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
 const ENV_COORDINATOR_BIND: &str = "GITTREE_COORDINATOR_BIND";
@@ -19,6 +22,7 @@ const ENV_SYNC_BIND: &str = "GITTREE_SYNC_BIND";
 const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
 
 const DEFAULT_RELAY_COMPAT_MODE: RelayCompatibilityMode = RelayCompatibilityMode::Strict;
+const DEFAULT_RELAY_PROBE_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -138,6 +142,65 @@ impl RelayCompatibilityConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayProbeConfig {
+    pub active: bool,
+    pub timeout_secs: u64,
+    pub secret_key: Option<String>,
+}
+
+impl Default for RelayProbeConfig {
+    fn default() -> Self {
+        Self {
+            active: false,
+            timeout_secs: DEFAULT_RELAY_PROBE_TIMEOUT_SECS,
+            secret_key: None,
+        }
+    }
+}
+
+impl RelayProbeConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let active = env_bool(ENV_RELAY_PROBE_ACTIVE)?.unwrap_or(false);
+        let timeout_secs =
+            env_u64(ENV_RELAY_PROBE_TIMEOUT_SECS)?.unwrap_or(DEFAULT_RELAY_PROBE_TIMEOUT_SECS);
+        let secret_key = env_optional_string(ENV_RELAY_PROBE_SECRET_KEY);
+        let config = Self {
+            active,
+            timeout_secs,
+            secret_key,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlRelayProbeRoot = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let config = parsed.into_config();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.timeout_secs == 0 {
+            return Err(ConfigError::InvalidRelayProbeConfig {
+                field: "relay_probe.timeout_secs",
+                value: "0".to_string(),
+            });
+        }
+        if let Some(secret) = &self.secret_key {
+            if !is_hex_len(secret, 64) {
+                return Err(ConfigError::InvalidRelayProbeConfig {
+                    field: "relay_probe.secret_key",
+                    value: secret.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for ServicesConfig {
     fn default() -> Self {
         Self {
@@ -211,6 +274,57 @@ impl ServicesConfig {
 
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_optional_string(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(value) if value.trim().is_empty() => None,
+        Ok(value) => Some(value),
+        Err(_) => None,
+    }
+}
+
+fn env_bool(key: &'static str) -> Result<Option<bool>, ConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            parse_bool(&value)
+                .map(Some)
+                .ok_or_else(|| ConfigError::InvalidRelayProbeConfig { field: key, value })
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn env_u64(key: &'static str) -> Result<Option<u64>, ConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u64>().map(Some).map_err(|_| {
+                ConfigError::InvalidRelayProbeConfig {
+                    field: key,
+                    value,
+                }
+            })
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn is_hex_len(value: &str, len: usize) -> bool {
+    value.len() == len && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn validate_service_bind(service: &'static str, value: &str) -> Result<(), ConfigError> {
@@ -317,6 +431,37 @@ impl TomlRelayCompatibilityRoot {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlRelayProbeRoot {
+    relay_probe: Option<TomlRelayProbeConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlRelayProbeConfig {
+    active: Option<bool>,
+    timeout_secs: Option<u64>,
+    secret_key: Option<String>,
+}
+
+impl TomlRelayProbeRoot {
+    fn into_config(self) -> RelayProbeConfig {
+        let config = self.relay_probe.unwrap_or(TomlRelayProbeConfig {
+            active: None,
+            timeout_secs: None,
+            secret_key: None,
+        });
+        RelayProbeConfig {
+            active: config.active.unwrap_or(false),
+            timeout_secs: config
+                .timeout_secs
+                .unwrap_or(DEFAULT_RELAY_PROBE_TIMEOUT_SECS),
+            secret_key: config.secret_key,
+        }
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlServicesConfig {
@@ -339,6 +484,7 @@ pub enum ConfigError {
     InvalidRelayBind(String),
     InvalidRelayUrl(String),
     InvalidRelayCompatibilityMode(String),
+    InvalidRelayProbeConfig { field: &'static str, value: String },
     InvalidServiceBind {
         service: &'static str,
         value: String,
@@ -364,6 +510,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidRelayCompatibilityMode(value) => {
                 write!(f, "invalid relay compatibility mode: {value}")
+            }
+            ConfigError::InvalidRelayProbeConfig { field, value } => {
+                write!(f, "invalid relay probe config {field}: {value}")
             }
             ConfigError::InvalidServiceBind { service, value } => {
                 write!(f, "invalid {service} bind address: {value}")
@@ -392,6 +541,7 @@ impl std::error::Error for ConfigError {
             ConfigError::InvalidRelayBind(_) => None,
             ConfigError::InvalidRelayUrl(_) => None,
             ConfigError::InvalidRelayCompatibilityMode(_) => None,
+            ConfigError::InvalidRelayProbeConfig { .. } => None,
             ConfigError::InvalidServiceBind { .. } => None,
             ConfigError::ReadConfig { source, .. } => Some(source),
             ConfigError::TomlParse { source, .. } => Some(source),
@@ -500,6 +650,7 @@ mod tests {
     use super::GittreeConfig;
     use super::RelayCompatibilityConfig;
     use super::RelayCompatibilityMode;
+    use super::RelayProbeConfig;
     use super::RelayTargetsConfig;
     use super::ServicesConfig;
     use crate::DEFAULT_ADMISSION_BIND;
@@ -513,6 +664,9 @@ mod tests {
     use crate::ENV_GIT_HTTP_BIND;
     use crate::ENV_RELAY_BIND;
     use crate::ENV_RELAY_COMPAT_MODE;
+    use crate::ENV_RELAY_PROBE_ACTIVE;
+    use crate::ENV_RELAY_PROBE_SECRET_KEY;
+    use crate::ENV_RELAY_PROBE_TIMEOUT_SECS;
     use crate::ENV_RELAY_URLS;
     use crate::ENV_STATE_BIND;
     use crate::ENV_SYNC_BIND;
@@ -630,6 +784,67 @@ mod tests {
                 ConfigError::InvalidRelayCompatibilityMode(value) if value == "nope"
             ));
         });
+    }
+
+    #[test]
+    fn relay_probe_env_parses() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_PROBE_ACTIVE, "true", || {
+            with_env_var(ENV_RELAY_PROBE_TIMEOUT_SECS, "7", || {
+                with_env_var(ENV_RELAY_PROBE_SECRET_KEY, &"11".repeat(32), || {
+                    let config = RelayProbeConfig::from_env().expect("probe config");
+                    assert!(config.active);
+                    assert_eq!(config.timeout_secs, 7);
+                    assert_eq!(config.secret_key, Some("11".repeat(32)));
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn relay_probe_env_rejects_bad_secret() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_PROBE_SECRET_KEY, "bad", || {
+            let err = RelayProbeConfig::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayProbeConfig { field, .. } if field == "relay_probe.secret_key"
+            ));
+        });
+    }
+
+    #[test]
+    fn relay_probe_toml_parses() {
+        let config = RelayProbeConfig::from_toml_str(
+            r#"[relay_probe]
+active = true
+timeout_secs = 9
+secret_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#,
+        )
+        .expect("probe config");
+        assert!(config.active);
+        assert_eq!(config.timeout_secs, 9);
+        assert_eq!(
+            config.secret_key,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_probe_toml_rejects_bad_secret() {
+        let err = RelayProbeConfig::from_toml_str(
+            r#"[relay_probe]
+active = true
+timeout_secs = 9
+secret_key = "22"
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidRelayProbeConfig { field, .. } if field == "relay_probe.secret_key"
+        ));
     }
 
     #[test]
