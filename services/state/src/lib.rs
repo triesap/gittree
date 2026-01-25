@@ -1,12 +1,15 @@
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
     AnnouncementRepository, CachedRepositories, PostgresRepositories, RelayCompatibilityRepository,
     RepoFilter, StateRepository, StorageConfig, StorageError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -232,11 +235,70 @@ fn build_router<R>(state: StateAppState<R>) -> Router
 where
     R: AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync + 'static,
 {
-    Router::new().route("/health", get(health_handler)).with_state(state)
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/relay-compatibility", get(relay_compatibility_handler))
+        .with_state(state)
 }
 
 async fn health_handler() -> &'static str {
     "ok"
+}
+
+async fn relay_compatibility_handler<R>(
+    State(state): State<StateAppState<R>>,
+    Query(query): Query<RelayCompatQuery>,
+) -> Result<Json<RelayCompatibilityResponse>, StateHttpError>
+where
+    R: RelayCompatibilityRepository + Send + Sync,
+{
+    let response = relay_compatibility_cached(
+        state.repositories.as_ref(),
+        state.cache.as_ref(),
+        &query.relay_url,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug)]
+enum StateHttpError {
+    BadRequest(String),
+    NotFound(String),
+    Storage(String),
+}
+
+impl From<StateServiceError> for StateHttpError {
+    fn from(err: StateServiceError) -> Self {
+        match err {
+            StateServiceError::InvalidInput { field, value } => {
+                StateHttpError::BadRequest(format!("{field}: {value}"))
+            }
+            StateServiceError::NotFound { pubkey, identifier } => {
+                StateHttpError::NotFound(format!("{pubkey}:{identifier}"))
+            }
+            StateServiceError::RelayNotFound { relay_url } => {
+                StateHttpError::NotFound(relay_url)
+            }
+            StateServiceError::Storage(err) => StateHttpError::Storage(err.to_string()),
+        }
+    }
+}
+
+impl IntoResponse for StateHttpError {
+    fn into_response(self) -> Response {
+        match self {
+            StateHttpError::BadRequest(message) => {
+                (StatusCode::BAD_REQUEST, message).into_response()
+            }
+            StateHttpError::NotFound(message) => {
+                (StatusCode::NOT_FOUND, message).into_response()
+            }
+            StateHttpError::Storage(message) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -269,6 +331,11 @@ pub struct RelayCompatibilityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_probe_error: Option<String>,
     pub checked_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelayCompatQuery {
+    relay_url: String,
 }
 
 #[derive(Debug, Clone)]
