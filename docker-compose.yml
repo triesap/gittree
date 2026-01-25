@@ -207,8 +207,9 @@ services:
     environment:
       FORGEJO__database__DB_TYPE: sqlite3
       FORGEJO__database__PATH: /data/forgejo.db
-      FORGEJO__log__MODE: file
+      FORGEJO__log__MODE: console,file
       FORGEJO__log__ROOT_PATH: /data/gitea/log
+      FORGEJO__log__FILE_NAME: forgejo.log
       FORGEJO__log__LEVEL: Info
       FORGEJO__server__ROOT_URL: http://localhost:3000/
       FORGEJO__server__DOMAIN: localhost
@@ -220,7 +221,6 @@ services:
       - "2222:22"
     volumes:
       - forgejo-data:/data
-      - ./deploy/forgejo/app.ini:/data/gitea/conf/app.ini:ro
       - ./logs/forgejo:/data/gitea/log
     depends_on:
       log-init:
