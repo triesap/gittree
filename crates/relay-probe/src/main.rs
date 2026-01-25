@@ -1,10 +1,14 @@
-use gittree_config::RelayTargetsConfig;
-use gittree_relay_probe::{HttpRelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay};
+use gittree_config::{RelayProbeConfig, RelayTargetsConfig};
+use gittree_relay_adapter::{RelayAdapterConfig, WebsocketRelayAdapter};
+use gittree_relay_probe::{
+    HttpRelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay, probe_relay_with_adapter,
+};
 use gittree_storage::{
     PostgresRepositories, RelayCompatibilityRecord, RelayCompatibilityRepository,
     RelayProbeMetadata, StorageConfig, StorageError,
 };
 use std::process::exit;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
@@ -13,6 +17,9 @@ struct ProbeCli {
     all: bool,
     json: bool,
     store: bool,
+    active: Option<bool>,
+    timeout_secs: Option<u64>,
+    secret_key: Option<String>,
 }
 
 impl ProbeCli {
@@ -25,6 +32,9 @@ impl ProbeCli {
         let mut all = false;
         let mut json = false;
         let mut store = false;
+        let mut active: Option<bool> = None;
+        let mut timeout_secs: Option<u64> = None;
+        let mut secret_key: Option<String> = None;
 
         let mut iter = args.into_iter().map(|arg| arg.into().to_string_lossy().to_string());
         iter.next();
@@ -33,6 +43,27 @@ impl ProbeCli {
                 "--all" => all = true,
                 "--json" => json = true,
                 "--store" => store = true,
+                "--active" => active = Some(true),
+                "--no-active" => active = Some(false),
+                "--timeout-secs" => {
+                    let Some(next) = iter.next() else {
+                        return Err(RelayProbeError::InvalidRelayUrl(
+                            "missing timeout value".to_string(),
+                        ));
+                    };
+                    let parsed = next.parse::<u64>().map_err(|_| {
+                        RelayProbeError::InvalidRelayUrl("invalid timeout value".to_string())
+                    })?;
+                    timeout_secs = Some(parsed);
+                }
+                "--secret-key" => {
+                    let Some(next) = iter.next() else {
+                        return Err(RelayProbeError::InvalidRelayUrl(
+                            "missing secret key".to_string(),
+                        ));
+                    };
+                    secret_key = Some(next);
+                }
                 "--relay" => {
                     let Some(next) = iter.next() else {
                         return Err(RelayProbeError::InvalidRelayUrl("--relay".to_string()));
@@ -69,13 +100,16 @@ impl ProbeCli {
             all,
             json,
             store,
+            active,
+            timeout_secs,
+            secret_key,
         })
     }
 }
 
 fn print_help() {
     println!(
-        "gittree-relay-probe --relay <wss://relay> [--json] [--store]\n       gittree-relay-probe --all [--json] [--store]\n\nFlags:\n  --relay <url>  Relay URL to probe\n  --all          Probe relay targets from GITTREE_RELAY_URLS\n  --json         Output JSON report\n  --store        Persist compatibility result to storage\n  -h, --help     Show help\n"
+        "gittree-relay-probe --relay <wss://relay> [--active] [--timeout-secs N] [--json] [--store]\n       gittree-relay-probe --all [--active] [--timeout-secs N] [--json] [--store]\n\nFlags:\n  --relay <url>       Relay URL to probe\n  --all               Probe relay targets from GITTREE_RELAY_URLS\n  --active            Run active write/read probe\n  --no-active         Disable active probe even if env enables it\n  --timeout-secs <n>  Active probe timeout in seconds\n  --secret-key <hex>  Hex secret key for probe signer (optional)\n  --json              Output JSON report\n  --store             Persist compatibility result to storage\n  -h, --help          Show help\n"
     );
 }
 
@@ -91,11 +125,34 @@ async fn main() {
 async fn run() -> Result<(), ProbeCommandError> {
     let cli = ProbeCli::parse(std::env::args_os()).map_err(ProbeCommandError::Cli)?;
     let client = HttpRelayProbeClient::new().map_err(ProbeCommandError::Cli)?;
+    let mut probe_config = RelayProbeConfig::from_env().map_err(ProbeCommandError::Config)?;
+    if let Some(active) = cli.active {
+        probe_config.active = active;
+    }
+    if let Some(timeout_secs) = cli.timeout_secs {
+        probe_config.timeout_secs = timeout_secs;
+    }
+    if let Some(secret_key) = cli.secret_key.clone() {
+        probe_config.secret_key = Some(secret_key);
+    }
+    probe_config.validate().map_err(ProbeCommandError::Config)?;
     let targets = resolve_targets(&cli)?;
     let mut results = Vec::with_capacity(targets.len());
 
     for relay_url in targets {
-        let result = probe_relay(&relay_url, &client).map_err(ProbeCommandError::Cli)?;
+        let result = if probe_config.active {
+            let mut adapter_config = RelayAdapterConfig::new(&relay_url)
+                .with_timeout(Duration::from_secs(probe_config.timeout_secs));
+            if let Some(secret_key) = probe_config.secret_key.clone() {
+                adapter_config = adapter_config.with_secret_key(secret_key);
+            }
+            let adapter = WebsocketRelayAdapter::new(adapter_config);
+            probe_relay_with_adapter(&relay_url, &client, &adapter)
+                .await
+                .map_err(ProbeCommandError::Cli)?
+        } else {
+            probe_relay(&relay_url, &client).map_err(ProbeCommandError::Cli)?
+        };
         if cli.store {
             store_probe_result(&result).await?;
         }
@@ -341,6 +398,26 @@ mod tests {
         let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
         assert!(cli.all);
         assert!(cli.relay.is_none());
+    }
+
+    #[test]
+    fn parse_accepts_active_flag() {
+        let cli = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--active"])
+            .expect("cli");
+        assert_eq!(cli.active, Some(true));
+    }
+
+    #[test]
+    fn parse_accepts_timeout_flag() {
+        let cli = ProbeCli::parse([
+            "probe",
+            "--relay",
+            "wss://relay.example",
+            "--timeout-secs",
+            "12",
+        ])
+        .expect("cli");
+        assert_eq!(cli.timeout_secs, Some(12));
     }
 
     #[test]
