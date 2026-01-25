@@ -184,12 +184,6 @@ async fn run() -> Result<(), ProbeCommandError> {
 }
 
 async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeCommandError> {
-    let record = RelayCompatibilityRecord::new(
-        &result.report,
-        now_unix_timestamp(),
-        &RelayProbeMetadata::default(),
-    )
-    .map_err(ProbeCommandError::Storage)?;
     let storage = storage_from_env().map_err(ProbeCommandError::StorageConfig)?;
     let options = storage
         .write_connect_options()
@@ -202,9 +196,23 @@ async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeComman
         .map_err(StorageError::from)
         .map_err(ProbeCommandError::Storage)?;
     let repo = PostgresRepositories::new(pool);
-    repo.upsert_relay_compatibility(record)
+    store_probe_result_with_repo(&repo, result, now_unix_timestamp())
         .await
         .map_err(ProbeCommandError::Storage)?;
+    Ok(())
+}
+
+async fn store_probe_result_with_repo<R: RelayCompatibilityRepository>(
+    repo: &R,
+    result: &RelayProbeResult,
+    checked_at: i64,
+) -> Result<(), StorageError> {
+    let record = RelayCompatibilityRecord::new(
+        &result.report,
+        checked_at,
+        &RelayProbeMetadata::default(),
+    )?;
+    repo.upsert_relay_compatibility(record).await?;
     Ok(())
 }
 
@@ -355,9 +363,11 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, StorageConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeCli, ProbeCommandError, RelayProbeError, StorageConfigError, resolve_targets,
-        storage_from_env,
+        ProbeCli, ProbeCommandError, RelayProbeError, RelayProbeResult, StorageConfigError,
+        resolve_targets, storage_from_env, store_probe_result_with_repo,
     };
+    use gittree_core::{RelayCapability, RelayCompatibilityReport};
+    use gittree_storage::{InMemoryRepositories, RelayCompatibilityRepository};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -425,6 +435,35 @@ mod tests {
         let err = ProbeCli::parse(["probe", "--all", "--relay", "wss://relay.example"])
             .unwrap_err();
         assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn store_probe_result_writes_record() {
+        let repo = InMemoryRepositories::new();
+        let report = RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        };
+        let result = RelayProbeResult {
+            relay_url: report.relay_url.clone(),
+            nip11_url: Some("https://relay.example/".to_string()),
+            nip11_available: true,
+            report,
+            observed_capabilities: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            nip11: None,
+            active_probe: None,
+            warnings: Vec::new(),
+        };
+        store_probe_result_with_repo(&repo, &result, 1)
+            .await
+            .expect("store");
+        let record = repo
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("fetch");
+        assert!(record.is_some());
     }
 
     #[test]
