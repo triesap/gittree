@@ -6,7 +6,7 @@ services:
     command:
       - "sh"
       - "-c"
-      - "mkdir -p /logs/forgejo /logs/postgres /logs/nginx /logs/gittree /logs/nostr-rs-relay && chmod -R 0777 /logs"
+      - "mkdir -p /logs/forgejo /logs/postgres /logs/nginx /logs/gittree /logs/nostr-rs-relay && chmod -R 0777 /logs && chown -R 1000:1000 /logs/forgejo"
     volumes:
       - ./logs:/logs
     restart: "no"
@@ -220,6 +220,7 @@ services:
       - "2222:22"
     volumes:
       - forgejo-data:/data
+      - ./deploy/forgejo/app.ini:/data/gitea/conf/app.ini:ro
       - ./logs/forgejo:/data/gitea/log
     depends_on:
       log-init:
