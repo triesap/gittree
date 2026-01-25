@@ -1,11 +1,14 @@
+use axum::routing::get;
+use axum::Router;
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
-    AnnouncementRepository, RelayCompatibilityRepository, RepoFilter, StateRepository,
-    StorageConfig, StorageError,
+    AnnouncementRepository, CachedRepositories, PostgresRepositories, RelayCompatibilityRepository,
+    RepoFilter, StateRepository, StorageConfig, StorageError,
 };
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
@@ -143,6 +146,8 @@ pub enum StateError {
     Config(StateConfigError),
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
+    Storage(StorageError),
+    Serve(String),
 }
 
 impl std::fmt::Display for StateError {
@@ -153,6 +158,8 @@ impl std::fmt::Display for StateError {
                 write!(f, "state observability config error: {err}")
             }
             StateError::Observability(err) => write!(f, "state observability error: {err}"),
+            StateError::Storage(err) => write!(f, "state storage error: {err}"),
+            StateError::Serve(err) => write!(f, "state serve error: {err}"),
         }
     }
 }
@@ -163,6 +170,8 @@ impl std::error::Error for StateError {
             StateError::Config(err) => Some(err),
             StateError::ObservabilityConfig(err) => Some(err),
             StateError::Observability(err) => Some(err),
+            StateError::Storage(err) => Some(err),
+            StateError::Serve(_) => None,
         }
     }
 }
@@ -172,6 +181,62 @@ pub fn init_observability() -> Result<ObservabilityHandle, StateError> {
         .map_err(StateError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(StateError::Observability)?;
     Ok(handle)
+}
+
+pub type StateRepositories = CachedRepositories<PostgresRepositories>;
+
+pub fn build_repositories(config: &StateConfig) -> Result<StateRepositories, StateError> {
+    let pool_options = config.storage.pool_options().map_err(StateError::Storage)?;
+    let connect_options = config
+        .storage
+        .read_connect_options()
+        .map_err(StateError::Storage)?;
+    let pool = pool_options.connect_lazy_with(connect_options);
+    let repos = PostgresRepositories::new(pool);
+    Ok(CachedRepositories::new(repos))
+}
+
+struct StateAppState<R> {
+    repositories: Arc<R>,
+    cache: Arc<StateCache>,
+}
+
+impl<R> Clone for StateAppState<R> {
+    fn clone(&self) -> Self {
+        Self {
+            repositories: Arc::clone(&self.repositories),
+            cache: Arc::clone(&self.cache),
+        }
+    }
+}
+
+pub async fn serve(config: StateConfig) -> Result<(), StateError> {
+    let _observability = init_observability()?;
+    let repositories = build_repositories(&config)?;
+    let cache = Arc::new(StateCache::new(StateCacheConfig::default()));
+    let state = StateAppState {
+        repositories: Arc::new(repositories),
+        cache,
+    };
+    let router = build_router(state);
+    let listener = tokio::net::TcpListener::bind(&config.bind)
+        .await
+        .map_err(|err| StateError::Serve(err.to_string()))?;
+    axum::serve(listener, router)
+        .await
+        .map_err(|err| StateError::Serve(err.to_string()))?;
+    Ok(())
+}
+
+fn build_router<R>(state: StateAppState<R>) -> Router
+where
+    R: AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync + 'static,
+{
+    Router::new().route("/health", get(health_handler)).with_state(state)
+}
+
+async fn health_handler() -> &'static str {
+    "ok"
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -616,6 +681,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::http::Request;
     use super::ENV_STORAGE_READ_URL;
     use super::ObservabilityHandle;
     use super::StateCache;
@@ -629,6 +696,7 @@ mod tests {
     use super::relay_compatibility;
     use super::relay_compatibility_cached;
     use super::resolve_maintainers;
+    use tower::ServiceExt;
     use super::resolve_maintainers_cached;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
@@ -954,6 +1022,18 @@ mod tests {
             .await
             .expect("second");
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let repositories = std::sync::Arc::new(InMemoryRepositories::new());
+        let cache = std::sync::Arc::new(StateCache::new(StateCacheConfig::default()));
+        let app = super::build_router(super::StateAppState { repositories, cache });
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 
     #[test]

@@ -1,16 +1,15 @@
-use gittree_state::{StateConfig, StateError, init_observability};
+use gittree_state::{StateConfig, StateError, serve};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         eprintln!("state service failed: {err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), StateError> {
+async fn run() -> Result<(), StateError> {
     let config = StateConfig::from_env().map_err(StateError::Config)?;
-    let _observability = init_observability()?;
-    tracing::info!(bind = %config.bind, "state service configured");
-    Ok(())
+    serve(config).await
 }
