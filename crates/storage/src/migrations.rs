@@ -19,6 +19,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_repo_init(),
         migration_repo_mapping(),
         migration_relay_compatibility(),
+        migration_relay_compatibility_metadata(),
     ]
 }
 
@@ -123,6 +124,16 @@ fn migration_relay_compatibility() -> Migration {
     }
 }
 
+fn migration_relay_compatibility_metadata() -> Migration {
+    const RELAY_COMPATIBILITY_METADATA_SQL: &str =
+        include_str!("../../../migrations/0004_relay_compatibility_metadata.sql");
+    Migration {
+        version: 4,
+        description: "relay compatibility metadata",
+        sql: RELAY_COMPATIBILITY_METADATA_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -196,6 +207,6 @@ mod tests {
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3]);
+        assert_eq!(versions, vec![1, 2, 3, 4]);
     }
 }
