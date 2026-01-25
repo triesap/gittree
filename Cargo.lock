@@ -827,6 +827,7 @@ dependencies = [
  "async-trait",
  "gittree-core",
  "tokio",
+ "url",
 ]
 
 [[package]]

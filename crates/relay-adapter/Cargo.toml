@@ -9,6 +9,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = "0.1"
 gittree-core = { path = "../core" }
+url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
