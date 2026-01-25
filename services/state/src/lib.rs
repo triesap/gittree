@@ -196,6 +196,13 @@ pub struct RelayCompatibilityResponse {
     pub supported_capabilities: Vec<String>,
     pub missing_required: Vec<String>,
     pub missing_optional: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nip11_url: Option<String>,
+    pub nip11_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_probe_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_probe_error: Option<String>,
     pub checked_at: i64,
 }
 
@@ -582,6 +589,10 @@ where
         supported_capabilities: record.supported_capabilities,
         missing_required: record.missing_required,
         missing_optional: record.missing_optional,
+        nip11_url: record.nip11_url,
+        nip11_available: record.nip11_available,
+        active_probe_ok: record.active_probe_ok,
+        active_probe_error: record.active_probe_error,
         checked_at: record.checked_at,
     })
 }
@@ -675,8 +686,13 @@ mod tests {
             missing_required: Vec::new(),
             missing_optional: Vec::new(),
         };
-        RelayCompatibilityRecord::new(&report, 123, &gittree_storage::RelayProbeMetadata::default())
-            .expect("record")
+        let metadata = gittree_storage::RelayProbeMetadata {
+            nip11_url: Some("https://relay.example/".to_string()),
+            nip11_available: true,
+            active_probe_ok: Some(true),
+            active_probe_error: None,
+        };
+        RelayCompatibilityRecord::new(&report, 123, &metadata).expect("record")
     }
 
     #[test]
@@ -775,6 +791,8 @@ mod tests {
             .expect("response");
         assert_eq!(response.relay_url, "wss://relay.example");
         assert!(response.compatible);
+        assert!(response.nip11_available);
+        assert_eq!(response.active_probe_ok, Some(true));
         assert_eq!(response.checked_at, 123);
     }
 
