@@ -868,6 +868,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dotenvy",
+ "futures-util",
  "gittree-config",
  "gittree-core",
  "gittree-relay-adapter",
@@ -877,6 +878,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "url",
 ]
 
