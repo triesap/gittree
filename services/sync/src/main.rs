@@ -1,16 +1,15 @@
-use gittree_sync::{SyncConfig, SyncError, init_observability};
+use gittree_sync::{SyncConfig, SyncError, serve};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         eprintln!("sync service failed: {err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), SyncError> {
+async fn run() -> Result<(), SyncError> {
     let config = SyncConfig::from_env().map_err(SyncError::Config)?;
-    let _observability = init_observability()?;
-    tracing::info!(bind = %config.bind, "sync configured");
-    Ok(())
+    serve(config).await
 }

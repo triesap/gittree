@@ -1,9 +1,18 @@
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use bech32::{Bech32, Hrp};
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
+use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{RelayCompatibilityRecord, StorageConfig};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
@@ -13,12 +22,14 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const ENV_SYNC_REPO_ROOT: &str = "GITTREE_SYNC_REPO_ROOT";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncConfig {
     pub bind: String,
     pub storage: StorageConfig,
     pub relay_urls: Vec<String>,
+    pub repo_root: PathBuf,
 }
 
 impl SyncConfig {
@@ -27,10 +38,12 @@ impl SyncConfig {
         let storage = storage_from_env()?;
         let relay_targets =
             RelayTargetsConfig::from_env_validated().map_err(SyncConfigError::Config)?;
+        let repo_root = env_path(ENV_SYNC_REPO_ROOT)?;
         Ok(Self {
             bind: services.sync.bind,
             storage,
             relay_urls: relay_targets.relay_urls,
+            repo_root,
         })
     }
 }
@@ -39,6 +52,8 @@ impl SyncConfig {
 pub enum SyncConfigError {
     Config(ConfigError),
     Storage(StorageConfigError),
+    MissingEnv(&'static str),
+    InvalidEnv { key: &'static str, value: String },
 }
 
 impl std::fmt::Display for SyncConfigError {
@@ -46,6 +61,8 @@ impl std::fmt::Display for SyncConfigError {
         match self {
             SyncConfigError::Config(err) => write!(f, "sync config error: {err}"),
             SyncConfigError::Storage(err) => write!(f, "sync storage config error: {err}"),
+            SyncConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
+            SyncConfigError::InvalidEnv { key, value } => write!(f, "invalid env {key}: {value}"),
         }
     }
 }
@@ -55,6 +72,8 @@ impl std::error::Error for SyncConfigError {
         match self {
             SyncConfigError::Config(err) => Some(err),
             SyncConfigError::Storage(err) => Some(err),
+            SyncConfigError::MissingEnv(_) => None,
+            SyncConfigError::InvalidEnv { .. } => None,
         }
     }
 }
@@ -136,11 +155,20 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, SyncConfigError> {
     }
 }
 
+fn env_path(key: &'static str) -> Result<PathBuf, SyncConfigError> {
+    let value = std::env::var(key).map_err(|_| SyncConfigError::MissingEnv(key))?;
+    if value.trim().is_empty() {
+        return Err(SyncConfigError::InvalidEnv { key, value });
+    }
+    Ok(PathBuf::from(value))
+}
+
 #[derive(Debug)]
 pub enum SyncError {
     Config(SyncConfigError),
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
+    Serve(String),
 }
 
 impl std::fmt::Display for SyncError {
@@ -151,6 +179,7 @@ impl std::fmt::Display for SyncError {
                 write!(f, "sync observability config error: {err}")
             }
             SyncError::Observability(err) => write!(f, "sync observability error: {err}"),
+            SyncError::Serve(err) => write!(f, "sync serve error: {err}"),
         }
     }
 }
@@ -161,6 +190,7 @@ impl std::error::Error for SyncError {
             SyncError::Config(err) => Some(err),
             SyncError::ObservabilityConfig(err) => Some(err),
             SyncError::Observability(err) => Some(err),
+            SyncError::Serve(_) => None,
         }
     }
 }
@@ -170,6 +200,105 @@ pub fn init_observability() -> Result<ObservabilityHandle, SyncError> {
         .map_err(SyncError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(SyncError::Observability)?;
     Ok(handle)
+}
+
+struct SyncAppState {
+    repo_root: PathBuf,
+}
+
+pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
+    let _observability = init_observability()?;
+    let state = SyncAppState {
+        repo_root: config.repo_root,
+    };
+    let router = build_router(state);
+    let listener = tokio::net::TcpListener::bind(&config.bind)
+        .await
+        .map_err(|err| SyncError::Serve(err.to_string()))?;
+    axum::serve(listener, router)
+        .await
+        .map_err(|err| SyncError::Serve(err.to_string()))?;
+    Ok(())
+}
+
+fn build_router(state: SyncAppState) -> Router {
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/", post(post_receive_handler))
+        .with_state(Arc::new(state))
+}
+
+async fn health_handler() -> &'static str {
+    "ok"
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostReceivePayload {
+    pub pubkey: String,
+    pub identifier: String,
+    pub updates: Vec<RefUpdatePayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefUpdatePayload {
+    pub old: String,
+    pub new: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncAckPayload {
+    pub repo_path: String,
+    pub updates: usize,
+}
+
+#[derive(Debug)]
+enum SyncHttpError {
+    BadRequest(String),
+    Internal(String),
+}
+
+impl IntoResponse for SyncHttpError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            SyncHttpError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            SyncHttpError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        };
+        (status, message).into_response()
+    }
+}
+
+async fn post_receive_handler(
+    State(state): State<Arc<SyncAppState>>,
+    Json(payload): Json<PostReceivePayload>,
+) -> Result<Json<SyncAckPayload>, SyncHttpError> {
+    RepoAddress::new(payload.pubkey.clone(), payload.identifier.clone()).map_err(|err| {
+        SyncHttpError::BadRequest(format!("invalid repo address: {err}"))
+    })?;
+    let npub = npub_from_hex(&payload.pubkey)?;
+    let repo_path = state
+        .repo_root
+        .join(npub)
+        .join(format!("{}.git", payload.identifier));
+    Ok(Json(SyncAckPayload {
+        repo_path: repo_path.display().to_string(),
+        updates: payload.updates.len(),
+    }))
+}
+
+fn npub_from_hex(pubkey: &str) -> Result<String, SyncHttpError> {
+    if pubkey.len() != 64 {
+        return Err(SyncHttpError::BadRequest("invalid pubkey".to_string()));
+    }
+    let bytes = hex::decode(pubkey)
+        .map_err(|_| SyncHttpError::BadRequest("invalid pubkey".to_string()))?;
+    if bytes.len() != 32 {
+        return Err(SyncHttpError::BadRequest("invalid pubkey".to_string()));
+    }
+    let hrp = Hrp::parse("npub")
+        .map_err(|_| SyncHttpError::Internal("npub hrp parse failed".to_string()))?;
+    bech32::encode::<Bech32>(hrp, &bytes)
+        .map_err(|_| SyncHttpError::Internal("npub encode failed".to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,6 +692,11 @@ mod tests {
     use super::build_sync_plan;
     use super::execute_sync_plan;
     use super::init_observability;
+    use super::PostReceivePayload;
+    use super::RefUpdatePayload;
+    use super::SyncAckPayload;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
     use gittree_core::NostrEvent;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
@@ -570,8 +704,10 @@ mod tests {
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use gittree_storage::{RelayCompatibilityRecord, RelayProbeMetadata};
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::OnceLock;
+    use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
@@ -602,16 +738,19 @@ mod tests {
             || {
                 with_env_var("GITTREE_SYNC_BIND", "127.0.0.1:9092", || {
                     with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                        let config = SyncConfig::from_env().expect("config");
-                        assert_eq!(config.bind, "127.0.0.1:9092");
-                        assert_eq!(
-                            config.storage.read_connection,
-                            "postgres://user:pass@localhost:5432/gittree"
-                        );
-                        assert_eq!(
-                            config.relay_urls,
-                            vec!["wss://relay.example".to_string()]
-                        );
+                        with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
+                            let config = SyncConfig::from_env().expect("config");
+                            assert_eq!(config.bind, "127.0.0.1:9092");
+                            assert_eq!(
+                                config.storage.read_connection,
+                                "postgres://user:pass@localhost:5432/gittree"
+                            );
+                            assert_eq!(
+                                config.relay_urls,
+                                vec!["wss://relay.example".to_string()]
+                            );
+                            assert_eq!(config.repo_root, PathBuf::from("/tmp/gittree-sync"));
+                        });
                     });
                 });
             },
@@ -625,15 +764,64 @@ mod tests {
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
             || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
-                        let config = SyncConfig::from_env().expect("config");
-                        assert_eq!(config.storage.idle_timeout_secs, None);
-                        assert_eq!(config.storage.max_lifetime_secs, None);
+                with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                            let config = SyncConfig::from_env().expect("config");
+                            assert_eq!(config.storage.idle_timeout_secs, None);
+                            assert_eq!(config.storage.max_lifetime_secs, None);
+                        });
                     });
                 });
             },
         );
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let app = super::build_router(super::SyncAppState {
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        });
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn post_receive_endpoint_returns_repo_path() {
+        let repo_root = PathBuf::from("/tmp/gittree-sync");
+        let app = super::build_router(super::SyncAppState {
+            repo_root: repo_root.clone(),
+        });
+        let payload = PostReceivePayload {
+            pubkey: "11".repeat(32),
+            identifier: "repo".to_string(),
+            updates: vec![RefUpdatePayload {
+                old: "0".repeat(40),
+                new: "1".repeat(40),
+                reference: "refs/heads/main".to_string(),
+            }],
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let ack: SyncAckPayload = serde_json::from_slice(&body).expect("ack");
+        let npub = super::npub_from_hex(&payload.pubkey).expect("npub");
+        let expected = repo_root.join(npub).join("repo.git");
+        assert_eq!(ack.repo_path, expected.display().to_string());
+        assert_eq!(ack.updates, 1);
     }
 
     #[test]
