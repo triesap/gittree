@@ -204,18 +204,20 @@ services:
 
   forgejo:
     image: codeberg.org/forgejo/forgejo:1.21
+    env_file:
+      - .env
     environment:
-      FORGEJO__database__DB_TYPE: sqlite3
-      FORGEJO__database__PATH: /data/forgejo.db
-      FORGEJO__log__MODE: console,file
-      FORGEJO__log__ROOT_PATH: /data/gitea/log
-      FORGEJO__log__FILE_NAME: forgejo.log
-      FORGEJO__log__LEVEL: Info
-      FORGEJO__server__ROOT_URL: http://localhost:3000/
-      FORGEJO__server__DOMAIN: localhost
-      FORGEJO__server__HTTP_PORT: 3000
-      FORGEJO__server__SSH_DOMAIN: localhost
-      FORGEJO__server__SSH_PORT: 2222
+      FORGEJO__database__DB_TYPE: ${FORGEJO__database__DB_TYPE}
+      FORGEJO__database__PATH: ${FORGEJO__database__PATH}
+      FORGEJO__log__MODE: ${FORGEJO__log__MODE}
+      FORGEJO__log__ROOT_PATH: ${FORGEJO__log__ROOT_PATH}
+      FORGEJO__log__file__FILE_NAME: ${FORGEJO__log__file__FILE_NAME}
+      FORGEJO__log__LEVEL: ${FORGEJO__log__LEVEL}
+      FORGEJO__server__ROOT_URL: ${FORGEJO__server__ROOT_URL}
+      FORGEJO__server__DOMAIN: ${FORGEJO__server__DOMAIN}
+      FORGEJO__server__HTTP_PORT: ${FORGEJO__server__HTTP_PORT}
+      FORGEJO__server__SSH_DOMAIN: ${FORGEJO__server__SSH_DOMAIN}
+      FORGEJO__server__SSH_PORT: ${FORGEJO__server__SSH_PORT}
     ports:
       - "3000:3000"
       - "2222:22"

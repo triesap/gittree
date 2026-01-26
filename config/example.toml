@@ -1,4 +1,13 @@
 relay_bind = "0.0.0.0:8080"
+relay_urls = ["wss://relay.example"]
+
+[relay_compatibility]
+mode = "strict"
+
+[relay_probe]
+active = false
+timeout_secs = 5
+# secret_key = "hex-encoded-secret"
 
 [services.relay]
 bind = "0.0.0.0:8080"
