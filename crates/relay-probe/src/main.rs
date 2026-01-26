@@ -1,7 +1,8 @@
 use gittree_config::{RelayProbeConfig, RelayTargetsConfig};
 use gittree_relay_adapter::{RelayAdapterConfig, WebsocketRelayAdapter};
 use gittree_relay_probe::{
-    HttpRelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay, probe_relay_with_adapter,
+    HttpRelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay,
+    probe_relay_with_adapter_result,
 };
 use gittree_storage::{
     PostgresRepositories, RelayCompatibilityRecord, RelayCompatibilityRepository,
@@ -113,18 +114,19 @@ fn print_help() {
     );
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run().await {
+    if let Err(err) = run() {
         eprintln!("relay probe failed: {err}");
         exit(1);
     }
 }
 
-async fn run() -> Result<(), ProbeCommandError> {
+fn run() -> Result<(), ProbeCommandError> {
     let cli = ProbeCli::parse(std::env::args_os()).map_err(ProbeCommandError::Cli)?;
     let client = HttpRelayProbeClient::new().map_err(ProbeCommandError::Cli)?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|err| ProbeCommandError::Runtime(err.to_string()))?;
     let mut probe_config = RelayProbeConfig::from_env().map_err(ProbeCommandError::Config)?;
     if let Some(active) = cli.active {
         probe_config.active = active;
@@ -140,21 +142,20 @@ async fn run() -> Result<(), ProbeCommandError> {
     let mut results = Vec::with_capacity(targets.len());
 
     for relay_url in targets {
-        let result = if probe_config.active {
+        let mut result = probe_relay(&relay_url, &client).map_err(ProbeCommandError::Cli)?;
+        if probe_config.active {
             let mut adapter_config = RelayAdapterConfig::new(&relay_url)
                 .with_timeout(Duration::from_secs(probe_config.timeout_secs));
             if let Some(secret_key) = probe_config.secret_key.clone() {
                 adapter_config = adapter_config.with_secret_key(secret_key);
             }
             let adapter = WebsocketRelayAdapter::new(adapter_config);
-            probe_relay_with_adapter(&relay_url, &client, &adapter)
-                .await
-                .map_err(ProbeCommandError::Cli)?
-        } else {
-            probe_relay(&relay_url, &client).map_err(ProbeCommandError::Cli)?
-        };
+            result = runtime
+                .block_on(probe_relay_with_adapter_result(result, &adapter))
+                .map_err(ProbeCommandError::Cli)?;
+        }
         if cli.store {
-            store_probe_result(&result).await?;
+            runtime.block_on(store_probe_result(&result))?;
         }
         results.push(result);
     }
@@ -257,6 +258,7 @@ enum ProbeCommandError {
     Cli(RelayProbeError),
     Config(gittree_config::ConfigError),
     MissingTargets(String),
+    Runtime(String),
     StorageConfig(StorageConfigError),
     Storage(StorageError),
 }
@@ -267,6 +269,7 @@ impl std::fmt::Display for ProbeCommandError {
             ProbeCommandError::Cli(err) => write!(f, "{err}"),
             ProbeCommandError::Config(err) => write!(f, "relay probe config error: {err}"),
             ProbeCommandError::MissingTargets(message) => write!(f, "{message}"),
+            ProbeCommandError::Runtime(message) => write!(f, "relay probe runtime error: {message}"),
             ProbeCommandError::StorageConfig(err) => {
                 write!(f, "relay probe storage config error: {err}")
             }
@@ -281,6 +284,7 @@ impl std::error::Error for ProbeCommandError {
             ProbeCommandError::Cli(err) => Some(err),
             ProbeCommandError::Config(err) => Some(err),
             ProbeCommandError::MissingTargets(_) => None,
+            ProbeCommandError::Runtime(_) => None,
             ProbeCommandError::StorageConfig(err) => Some(err),
             ProbeCommandError::Storage(err) => Some(err),
         }

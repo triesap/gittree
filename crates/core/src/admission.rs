@@ -27,6 +27,16 @@ pub fn evaluate_admission(
             });
         };
         let announcement = RepoAnnouncement::from_tags(tags)?;
+        if announcement.clone.is_empty() {
+            return Ok(AdmissionDecision::Reject {
+                reason: "repository announcement missing clone tags".to_string(),
+            });
+        }
+        if announcement.relays.is_empty() {
+            return Ok(AdmissionDecision::Reject {
+                reason: "repository announcement missing relays tags".to_string(),
+            });
+        }
         if announcement.lists_grasp_host(host)? {
             Ok(AdmissionDecision::Accept)
         } else {
@@ -63,7 +73,7 @@ mod tests {
             name: None,
             description: None,
             root_commit: None,
-            clone: vec!["https://gittr.ee/npub1example/repo.git".to_string()],
+            clone: vec!["https://git.example/repo.git".to_string()],
             web: Vec::new(),
             relays: vec!["wss://gittr.ee".to_string()],
             blossoms: Vec::new(),
@@ -80,6 +90,58 @@ mod tests {
         )
         .expect("decision");
         assert!(matches!(decision, AdmissionDecision::Accept));
+    }
+
+    #[test]
+    fn admission_rejects_announcement_without_clone_tags() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let tags = announcement.to_tags();
+        let decision = evaluate_admission(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            "pubkey",
+            "event",
+            &tags,
+            Some("gittr.ee"),
+        )
+        .expect("decision");
+        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn admission_rejects_announcement_without_relays_tags() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let tags = announcement.to_tags();
+        let decision = evaluate_admission(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            "pubkey",
+            "event",
+            &tags,
+            Some("gittr.ee"),
+        )
+        .expect("decision");
+        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
     }
 
     #[test]

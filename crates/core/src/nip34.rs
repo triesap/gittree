@@ -111,17 +111,12 @@ impl RepoAnnouncement {
 
     pub fn lists_grasp_host(&self, host: &str) -> Result<bool> {
         let host = normalize_grasp_host_for_compare(host)?;
-        let listed_in_clones = self
-            .clone
-            .iter()
-            .filter_map(|url| normalize_grasp_host_for_compare(url).ok())
-            .any(|normalized| normalized == host);
         let listed_in_relays = self
             .relays
             .iter()
             .filter_map(|url| normalize_grasp_host_for_compare(url).ok())
             .any(|normalized| normalized == host);
-        Ok(listed_in_clones && listed_in_relays)
+        Ok(listed_in_relays)
     }
 
     pub fn grasp_servers(&self) -> Vec<String> {
@@ -526,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn announcement_lists_grasp_host_requires_both_lists() {
+    fn announcement_lists_grasp_host_requires_relay_list() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
             name: None,
@@ -544,6 +539,27 @@ mod tests {
             .lists_grasp_host("gittr.ee")
             .expect("host check");
         assert!(!listed);
+    }
+
+    #[test]
+    fn announcement_lists_grasp_host_when_relay_listed_only() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let listed = announcement
+            .lists_grasp_host("gittr.ee")
+            .expect("host check");
+        assert!(listed);
     }
 
     #[test]

@@ -209,6 +209,13 @@ services:
     environment:
       FORGEJO__database__DB_TYPE: ${FORGEJO__database__DB_TYPE}
       FORGEJO__database__PATH: ${FORGEJO__database__PATH}
+      FORGEJO__mailer__ENABLED: ${FORGEJO__mailer__ENABLED}
+      FORGEJO__mailer__MAILER_TYPE: ${FORGEJO__mailer__MAILER_TYPE}
+      FORGEJO__mailer__FROM: ${FORGEJO__mailer__FROM}
+      FORGEJO__mailer__SMTP_ADDR: ${FORGEJO__mailer__SMTP_ADDR}
+      FORGEJO__mailer__SMTP_PORT: ${FORGEJO__mailer__SMTP_PORT}
+      FORGEJO__mailer__USER: ${FORGEJO__mailer__USER}
+      FORGEJO__mailer__PASSWD: ${FORGEJO__mailer__PASSWD}
       FORGEJO__log__MODE: ${FORGEJO__log__MODE}
       FORGEJO__log__ROOT_PATH: ${FORGEJO__log__ROOT_PATH}
       FORGEJO__log__file__FILE_NAME: ${FORGEJO__log__file__FILE_NAME}
@@ -227,6 +234,12 @@ services:
     depends_on:
       log-init:
         condition: service_completed_successfully
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
 
   nostr-rs-relay:
     image: scsibug/nostr-rs-relay:latest
