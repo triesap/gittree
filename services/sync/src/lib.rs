@@ -1,7 +1,7 @@
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
-use gittree_storage::StorageConfig;
+use gittree_storage::{RelayCompatibilityRecord, StorageConfig};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -184,6 +184,46 @@ pub struct SyncPlan {
 pub struct RefUpdatePlan {
     pub reference: String,
     pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelaySelection {
+    pub relays: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub fn select_relay_urls(
+    configured: &[String],
+    compatibility: &[RelayCompatibilityRecord],
+) -> RelaySelection {
+    let mut compatible = Vec::new();
+    for url in configured {
+        if compatibility
+            .iter()
+            .any(|record| record.relay_url == *url && record.compatible)
+        {
+            compatible.push(url.clone());
+        }
+    }
+
+    if !compatible.is_empty() {
+        return RelaySelection {
+            relays: compatible,
+            warnings: Vec::new(),
+        };
+    }
+
+    let mut warnings = Vec::new();
+    if configured.is_empty() {
+        warnings.push("no relay urls configured".to_string());
+    } else {
+        warnings.push("no compatible relays found; using configured list".to_string());
+    }
+
+    RelaySelection {
+        relays: configured.to_vec(),
+        warnings,
+    }
 }
 
 pub fn build_sync_plan(
@@ -519,13 +559,16 @@ mod tests {
     use super::SyncPlan;
     use super::SyncScheduleConfig;
     use super::SyncScheduler;
+    use super::select_relay_urls;
     use super::build_sync_plan;
     use super::execute_sync_plan;
     use super::init_observability;
     use gittree_core::NostrEvent;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
+    use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
+    use gittree_storage::{RelayCompatibilityRecord, RelayProbeMetadata};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::OnceLock;
@@ -768,6 +811,53 @@ mod tests {
         assert!(!scheduler.try_start_repo("repo-b"));
         scheduler.finish_repo("repo-a");
         assert!(scheduler.try_start_repo("repo-b"));
+    }
+
+    #[test]
+    fn select_relays_prefers_compatible() {
+        let report = RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        };
+        let record = RelayCompatibilityRecord::new(
+            &report,
+            0,
+            &RelayProbeMetadata::default(),
+        )
+        .expect("record");
+        let selection = select_relay_urls(
+            &vec![
+                "wss://relay.example".to_string(),
+                "wss://relay.other".to_string(),
+            ],
+            &[record],
+        );
+        assert_eq!(selection.relays, vec!["wss://relay.example".to_string()]);
+        assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn select_relays_falls_back_when_none_compatible() {
+        let report = RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01],
+            missing_required: vec![RelayCapability::Nip34],
+            missing_optional: Vec::new(),
+        };
+        let record = RelayCompatibilityRecord::new(
+            &report,
+            0,
+            &RelayProbeMetadata::default(),
+        )
+        .expect("record");
+        let selection = select_relay_urls(
+            &vec!["wss://relay.example".to_string()],
+            &[record],
+        );
+        assert_eq!(selection.relays, vec!["wss://relay.example".to_string()]);
+        assert!(!selection.warnings.is_empty());
     }
 
     #[test]
