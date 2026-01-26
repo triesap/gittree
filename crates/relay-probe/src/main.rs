@@ -207,11 +207,16 @@ async fn store_probe_result_with_repo<R: RelayCompatibilityRepository>(
     result: &RelayProbeResult,
     checked_at: i64,
 ) -> Result<(), StorageError> {
-    let record = RelayCompatibilityRecord::new(
-        &result.report,
-        checked_at,
-        &RelayProbeMetadata::default(),
-    )?;
+    let metadata = RelayProbeMetadata {
+        nip11_url: result.nip11_url.clone(),
+        nip11_available: result.nip11_available,
+        active_probe_ok: result.active_probe.as_ref().map(|probe| probe.ok),
+        active_probe_error: result
+            .active_probe
+            .as_ref()
+            .and_then(|probe| probe.error.clone()),
+    };
+    let record = RelayCompatibilityRecord::new(&result.report, checked_at, &metadata)?;
     repo.upsert_relay_compatibility(record).await?;
     Ok(())
 }
@@ -453,7 +458,10 @@ mod tests {
             report,
             observed_capabilities: vec![RelayCapability::Nip01, RelayCapability::Nip34],
             nip11: None,
-            active_probe: None,
+            active_probe: Some(gittree_relay_probe::ActiveProbeResult {
+                ok: true,
+                error: None,
+            }),
             warnings: Vec::new(),
         };
         store_probe_result_with_repo(&repo, &result, 1)
@@ -463,7 +471,11 @@ mod tests {
             .relay_compatibility("wss://relay.example")
             .await
             .expect("fetch");
-        assert!(record.is_some());
+        let record = record.expect("record");
+        assert_eq!(record.nip11_url.as_deref(), Some("https://relay.example/"));
+        assert!(record.nip11_available);
+        assert_eq!(record.active_probe_ok, Some(true));
+        assert_eq!(record.active_probe_error, None);
     }
 
     #[test]
