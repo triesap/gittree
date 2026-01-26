@@ -1,16 +1,15 @@
-use gittree_coordinator::{CoordinatorConfig, CoordinatorError, init_observability};
+use gittree_coordinator::{CoordinatorConfig, CoordinatorError, serve};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         eprintln!("coordinator service failed: {err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), CoordinatorError> {
+async fn run() -> Result<(), CoordinatorError> {
     let config = CoordinatorConfig::from_env().map_err(CoordinatorError::Config)?;
-    let _observability = init_observability()?;
-    tracing::info!(bind = %config.bind, "coordinator configured");
-    Ok(())
+    serve(config).await
 }

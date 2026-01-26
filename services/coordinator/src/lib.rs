@@ -1,9 +1,19 @@
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_core::{Nip34Event, RepoAnnouncement, extract_npub, parse_repo_path};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
-use gittree_storage::{AnnouncementRepository, RepoAnnouncementRecord, StorageConfig, StorageError};
+use gittree_storage::{
+    AnnouncementRepository, PostgresRepositories, RepoAnnouncementRecord, StorageConfig,
+    StorageError,
+};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -12,12 +22,17 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const ENV_COORDINATOR_REPO_ROOT: &str = "GITTREE_COORDINATOR_REPO_ROOT";
+const ENV_COORDINATOR_PRE_RECEIVE_HOOK: &str = "GITTREE_COORDINATOR_PRE_RECEIVE_HOOK";
+const ENV_COORDINATOR_POST_RECEIVE_HOOK: &str = "GITTREE_COORDINATOR_POST_RECEIVE_HOOK";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinatorConfig {
     pub bind: String,
     pub storage: StorageConfig,
     pub relay_urls: Vec<String>,
+    pub repo_root: PathBuf,
+    pub hooks: HookInstallConfig,
 }
 
 impl CoordinatorConfig {
@@ -27,10 +42,17 @@ impl CoordinatorConfig {
         let storage = storage_from_env()?;
         let relay_targets =
             RelayTargetsConfig::from_env_validated().map_err(CoordinatorConfigError::Config)?;
+        let repo_root = env_path(ENV_COORDINATOR_REPO_ROOT)?;
+        let hooks = HookInstallConfig {
+            pre_receive_source: env_path(ENV_COORDINATOR_PRE_RECEIVE_HOOK)?,
+            post_receive_source: env_path(ENV_COORDINATOR_POST_RECEIVE_HOOK)?,
+        };
         Ok(Self {
             bind: services.coordinator.bind,
             storage,
             relay_urls: relay_targets.relay_urls,
+            repo_root,
+            hooks,
         })
     }
 }
@@ -39,6 +61,8 @@ impl CoordinatorConfig {
 pub enum CoordinatorConfigError {
     Config(ConfigError),
     Storage(StorageConfigError),
+    MissingEnv(&'static str),
+    InvalidEnv { key: &'static str, value: String },
 }
 
 impl std::fmt::Display for CoordinatorConfigError {
@@ -47,6 +71,10 @@ impl std::fmt::Display for CoordinatorConfigError {
             CoordinatorConfigError::Config(err) => write!(f, "coordinator config error: {err}"),
             CoordinatorConfigError::Storage(err) => {
                 write!(f, "coordinator storage config error: {err}")
+            }
+            CoordinatorConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
+            CoordinatorConfigError::InvalidEnv { key, value } => {
+                write!(f, "invalid env {key}: {value}")
             }
         }
     }
@@ -57,6 +85,8 @@ impl std::error::Error for CoordinatorConfigError {
         match self {
             CoordinatorConfigError::Config(err) => Some(err),
             CoordinatorConfigError::Storage(err) => Some(err),
+            CoordinatorConfigError::MissingEnv(_) => None,
+            CoordinatorConfigError::InvalidEnv { .. } => None,
         }
     }
 }
@@ -138,11 +168,22 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, CoordinatorConfigError> {
     }
 }
 
+fn env_path(key: &'static str) -> Result<PathBuf, CoordinatorConfigError> {
+    let value =
+        std::env::var(key).map_err(|_| CoordinatorConfigError::MissingEnv(key))?;
+    if value.trim().is_empty() {
+        return Err(CoordinatorConfigError::InvalidEnv { key, value });
+    }
+    Ok(PathBuf::from(value))
+}
+
 #[derive(Debug)]
 pub enum CoordinatorError {
     Config(CoordinatorConfigError),
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
+    Storage(StorageError),
+    Serve(String),
 }
 
 impl std::fmt::Display for CoordinatorError {
@@ -155,6 +196,8 @@ impl std::fmt::Display for CoordinatorError {
             CoordinatorError::Observability(err) => {
                 write!(f, "coordinator observability error: {err}")
             }
+            CoordinatorError::Storage(err) => write!(f, "coordinator storage error: {err}"),
+            CoordinatorError::Serve(err) => write!(f, "coordinator serve error: {err}"),
         }
     }
 }
@@ -165,6 +208,8 @@ impl std::error::Error for CoordinatorError {
             CoordinatorError::Config(err) => Some(err),
             CoordinatorError::ObservabilityConfig(err) => Some(err),
             CoordinatorError::Observability(err) => Some(err),
+            CoordinatorError::Storage(err) => Some(err),
+            CoordinatorError::Serve(_) => None,
         }
     }
 }
@@ -174,6 +219,161 @@ pub fn init_observability() -> Result<ObservabilityHandle, CoordinatorError> {
         .map_err(CoordinatorError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(CoordinatorError::Observability)?;
     Ok(handle)
+}
+
+pub fn build_repositories(
+    config: &CoordinatorConfig,
+) -> Result<PostgresRepositories, CoordinatorError> {
+    let pool_options = config.storage.pool_options().map_err(CoordinatorError::Storage)?;
+    let connect_options = config
+        .storage
+        .read_connect_options()
+        .map_err(CoordinatorError::Storage)?;
+    let pool = pool_options.connect_lazy_with(connect_options);
+    Ok(PostgresRepositories::new(pool))
+}
+
+struct CoordinatorAppState<R> {
+    repositories: Arc<R>,
+    repo_root: PathBuf,
+    hooks: HookInstallConfig,
+}
+
+impl<R> Clone for CoordinatorAppState<R> {
+    fn clone(&self) -> Self {
+        Self {
+            repositories: Arc::clone(&self.repositories),
+            repo_root: self.repo_root.clone(),
+            hooks: self.hooks.clone(),
+        }
+    }
+}
+
+pub async fn serve(config: CoordinatorConfig) -> Result<(), CoordinatorError> {
+    let _observability = init_observability()?;
+    let repositories = build_repositories(&config)?;
+    let state = CoordinatorAppState {
+        repositories: Arc::new(repositories),
+        repo_root: config.repo_root,
+        hooks: config.hooks,
+    };
+    let router = build_router(state);
+    let listener = tokio::net::TcpListener::bind(&config.bind)
+        .await
+        .map_err(|err| CoordinatorError::Serve(err.to_string()))?;
+    axum::serve(listener, router)
+        .await
+        .map_err(|err| CoordinatorError::Serve(err.to_string()))?;
+    Ok(())
+}
+
+fn build_router<R>(state: CoordinatorAppState<R>) -> Router
+where
+    R: AnnouncementRepository + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/announcement", post(announcement_handler))
+        .with_state(state)
+}
+
+async fn health_handler() -> &'static str {
+    "ok"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorEventPayload {
+    pub kind: u64,
+    pub event_id: String,
+    pub pubkey: String,
+    pub created_at: i64,
+    pub tags: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CoordinatorActionPayload {
+    Provisioned { repo_path: String },
+    SkippedExisting { repo_path: String },
+    Ignored,
+}
+
+impl From<CoordinatorAction> for CoordinatorActionPayload {
+    fn from(action: CoordinatorAction) -> Self {
+        match action {
+            CoordinatorAction::Provisioned { repo_path } => {
+                CoordinatorActionPayload::Provisioned {
+                    repo_path: repo_path.display().to_string(),
+                }
+            }
+            CoordinatorAction::SkippedExisting { repo_path } => {
+                CoordinatorActionPayload::SkippedExisting {
+                    repo_path: repo_path.display().to_string(),
+                }
+            }
+            CoordinatorAction::Ignored => CoordinatorActionPayload::Ignored,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CoordinatorHttpError {
+    BadRequest(String),
+    Internal(String),
+}
+
+impl From<CoordinatorEventError> for CoordinatorHttpError {
+    fn from(err: CoordinatorEventError) -> Self {
+        match err {
+            CoordinatorEventError::Parse(message) => CoordinatorHttpError::BadRequest(message),
+            CoordinatorEventError::MissingNpub => {
+                CoordinatorHttpError::BadRequest("missing npub".to_string())
+            }
+            CoordinatorEventError::Plan(err) => CoordinatorHttpError::Internal(err.to_string()),
+            CoordinatorEventError::Init(err) => CoordinatorHttpError::Internal(err.to_string()),
+            CoordinatorEventError::Hooks(err) => CoordinatorHttpError::Internal(err.to_string()),
+            CoordinatorEventError::Storage(err) => CoordinatorHttpError::Internal(err.to_string()),
+        }
+    }
+}
+
+impl IntoResponse for CoordinatorHttpError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            CoordinatorHttpError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            CoordinatorHttpError::Internal(message) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+        };
+        (status, message).into_response()
+    }
+}
+
+async fn announcement_handler<R>(
+    State(state): State<CoordinatorAppState<R>>,
+    Json(payload): Json<CoordinatorEventPayload>,
+) -> Result<Json<CoordinatorActionPayload>, CoordinatorHttpError>
+where
+    R: AnnouncementRepository + Send + Sync,
+{
+    let kind = u32::try_from(payload.kind)
+        .map_err(|_| CoordinatorHttpError::BadRequest("invalid kind".to_string()))?;
+    let event = RelayEvent {
+        kind,
+        event_id: payload.event_id,
+        pubkey: payload.pubkey,
+        created_at: payload.created_at,
+        tags: payload.tags,
+    };
+    let action = handle_announcement_event_with_storage(
+        &state.repo_root,
+        &state.hooks,
+        state.repositories.as_ref(),
+        &event,
+    )
+    .await
+    .map_err(CoordinatorHttpError::from)?;
+    Ok(Json(action.into()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -557,12 +757,18 @@ mod tests {
     use super::handle_announcement_event;
     use super::init_observability;
     use super::init_repo;
+    use super::CoordinatorActionPayload;
+    use super::CoordinatorEventPayload;
     use super::install_hooks;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use gittree_storage::{AnnouncementRepository, InMemoryRepositories};
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::OnceLock;
+    use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
@@ -593,15 +799,46 @@ mod tests {
             || {
                 with_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091", || {
                     with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                        let config = CoordinatorConfig::from_env().expect("config");
-                        assert_eq!(config.bind, "127.0.0.1:9091");
-                        assert_eq!(
-                            config.storage.read_connection,
-                            "postgres://user:pass@localhost:5432/gittree"
-                        );
-                        assert_eq!(
-                            config.relay_urls,
-                            vec!["wss://relay.example".to_string()]
+                        with_env_var(
+                            super::ENV_COORDINATOR_REPO_ROOT,
+                            "/tmp/gittree-repos",
+                            || {
+                                with_env_var(
+                                    super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
+                                    "/tmp/gittree-pre-receive",
+                                    || {
+                                        with_env_var(
+                                            super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
+                                            "/tmp/gittree-post-receive",
+                                            || {
+                                                let config =
+                                                    CoordinatorConfig::from_env().expect("config");
+                                                assert_eq!(config.bind, "127.0.0.1:9091");
+                                                assert_eq!(
+                                                    config.storage.read_connection,
+                                                    "postgres://user:pass@localhost:5432/gittree"
+                                                );
+                                                assert_eq!(
+                                                    config.relay_urls,
+                                                    vec!["wss://relay.example".to_string()]
+                                                );
+                                                assert_eq!(
+                                                    config.repo_root,
+                                                    PathBuf::from("/tmp/gittree-repos")
+                                                );
+                                                assert_eq!(
+                                                    config.hooks.pre_receive_source,
+                                                    PathBuf::from("/tmp/gittree-pre-receive")
+                                                );
+                                                assert_eq!(
+                                                    config.hooks.post_receive_source,
+                                                    PathBuf::from("/tmp/gittree-post-receive")
+                                                );
+                                            },
+                                        );
+                                    },
+                                );
+                            },
                         );
                     });
                 });
@@ -616,11 +853,17 @@ mod tests {
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
             || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
-                        let config = CoordinatorConfig::from_env().expect("config");
-                        assert_eq!(config.storage.idle_timeout_secs, None);
-                        assert_eq!(config.storage.max_lifetime_secs, None);
+                with_env_var(super::ENV_COORDINATOR_REPO_ROOT, "/tmp/gittree-repos", || {
+                    with_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, "/tmp/pre", || {
+                        with_env_var(super::ENV_COORDINATOR_POST_RECEIVE_HOOK, "/tmp/post", || {
+                            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                                    let config = CoordinatorConfig::from_env().expect("config");
+                                    assert_eq!(config.storage.idle_timeout_secs, None);
+                                    assert_eq!(config.storage.max_lifetime_secs, None);
+                                });
+                            });
+                        });
                     });
                 });
             },
@@ -814,6 +1057,90 @@ mod tests {
             .await
             .expect("latest");
         assert!(stored.is_some());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let repositories = std::sync::Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-coordinator-health");
+        let bin_dir = temp_dir.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let hooks = HookInstallConfig {
+            pre_receive_source: bin_dir.join("pre-receive"),
+            post_receive_source: bin_dir.join("post-receive"),
+        };
+        let app = super::build_router(super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+        });
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn announcement_endpoint_provisions_repo() {
+        let repositories = std::sync::Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-coordinator-http");
+        let bin_dir = temp_dir.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let pre_source = bin_dir.join("pre-receive");
+        let post_source = bin_dir.join("post-receive");
+        fs::write(&pre_source, "#!/bin/sh\necho pre\n").expect("pre hook");
+        fs::write(&post_source, "#!/bin/sh\necho post\n").expect("post hook");
+        let hooks = HookInstallConfig {
+            pre_receive_source: pre_source,
+            post_receive_source: post_source,
+        };
+        let repo_root = temp_dir.join("repos");
+        let app = super::build_router(super::CoordinatorAppState {
+            repositories,
+            repo_root: repo_root.clone(),
+            hooks,
+        });
+
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![format!("https://gittr.ee/{npub}/repo.git")],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let payload = CoordinatorEventPayload {
+            kind: KIND_GIT_REPO_ANNOUNCEMENT.0 as u64,
+            event_id: "44".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: announcement.to_tags(),
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/announcement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let action: CoordinatorActionPayload =
+            serde_json::from_slice(&body).expect("action");
+        assert!(matches!(action, CoordinatorActionPayload::Provisioned { .. }));
+        assert!(repo_root.join(npub).join("repo.git").exists());
         let _ = fs::remove_dir_all(temp_dir);
     }
 
