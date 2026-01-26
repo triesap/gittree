@@ -12,6 +12,39 @@ const ENV_METRICS_ENABLED: &str = "GITTREE_METRICS_ENABLED";
 pub const LOG_FIELD_RELAY_URL: &str = "relay_url";
 pub const LOG_FIELD_RELAY_PROBE_STATUS: &str = "relay_probe_status";
 pub const LOG_FIELD_RELAY_PROBE_DETAIL: &str = "relay_probe_detail";
+pub const METRIC_RELAY_COMPATIBLE: &str = "gittree_relay_compatibility_ok";
+pub const METRIC_RELAY_INCOMPATIBLE: &str = "gittree_relay_compatibility_bad";
+
+pub struct RelayCompatibilityMetrics {
+    compatible: opentelemetry::metrics::Counter<u64>,
+    incompatible: opentelemetry::metrics::Counter<u64>,
+}
+
+impl RelayCompatibilityMetrics {
+    pub fn new() -> Self {
+        let meter = opentelemetry::global::meter("gittree");
+        let compatible = meter
+            .u64_counter(METRIC_RELAY_COMPATIBLE)
+            .with_description("relay compatibility checks that passed")
+            .init();
+        let incompatible = meter
+            .u64_counter(METRIC_RELAY_INCOMPATIBLE)
+            .with_description("relay compatibility checks that failed")
+            .init();
+        Self {
+            compatible,
+            incompatible,
+        }
+    }
+
+    pub fn record(&self, is_compatible: bool) {
+        if is_compatible {
+            self.compatible.add(1, &[]);
+        } else {
+            self.incompatible.add(1, &[]);
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservabilityConfig {
