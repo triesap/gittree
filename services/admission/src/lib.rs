@@ -1,3 +1,8 @@
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use gittree_config::{
     ConfigError, RelayCompatibilityConfig, RelayCompatibilityMode, ServicesConfig,
 };
@@ -7,38 +12,155 @@ use gittree_observability::{
     ObservabilityConfigError, ObservabilityError, ObservabilityHandle, RelayCompatibilityMetrics,
 };
 use gittree_storage::{
-    AnnouncementRepository, RelayCompatibilityRepository, StateRepository, StorageError,
+    AnnouncementRepository, CachedRepositories, PostgresRepositories, RelayCompatibilityRepository,
+    StateRepository, StorageConfig, StorageError,
 };
-use tracing::warn;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use tracing::warn;
+
+const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
+const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
+const ENV_STORAGE_MAX_CONNECTIONS: &str = "GITTREE_STORAGE_MAX_CONNECTIONS";
+const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
+const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
+const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
+const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionConfig {
     pub bind: String,
     pub compatibility: RelayCompatibilityConfig,
+    pub storage: StorageConfig,
 }
 
 impl AdmissionConfig {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        let services = ServicesConfig::from_env_validated()?;
-        let compatibility = RelayCompatibilityConfig::from_env()?;
+    pub fn from_env() -> Result<Self, AdmissionConfigError> {
+        let services = ServicesConfig::from_env_validated().map_err(AdmissionConfigError::Config)?;
+        let compatibility =
+            RelayCompatibilityConfig::from_env().map_err(AdmissionConfigError::Config)?;
+        let storage = storage_from_env()?;
         Ok(Self {
             bind: services.admission.bind,
             compatibility,
+            storage,
         })
     }
 }
 
 #[derive(Debug)]
-pub enum AdmissionError {
+pub enum AdmissionConfigError {
     Config(ConfigError),
+    Storage(StorageConfigError),
+}
+
+impl std::fmt::Display for AdmissionConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdmissionConfigError::Config(err) => write!(f, "admission config error: {err}"),
+            AdmissionConfigError::Storage(err) => write!(f, "admission storage config error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for AdmissionConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AdmissionConfigError::Config(err) => Some(err),
+            AdmissionConfigError::Storage(err) => Some(err),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum StorageConfigError {
+    MissingEnv(&'static str),
+    InvalidEnv { key: &'static str, value: String },
+    InvalidConfig(String),
+}
+
+impl std::fmt::Display for StorageConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
+            StorageConfigError::InvalidEnv { key, value } => {
+                write!(f, "invalid env {key}: {value}")
+            }
+            StorageConfigError::InvalidConfig(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for StorageConfigError {}
+
+fn storage_from_env() -> Result<StorageConfig, AdmissionConfigError> {
+    let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
+        AdmissionConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
+    })?;
+    let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
+    let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
+    let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
+    let idle_timeout_secs = env_u64(ENV_STORAGE_IDLE_TIMEOUT_SECS)?;
+    let max_lifetime_secs = env_u64(ENV_STORAGE_MAX_LIFETIME_SECS)?;
+    let application_name = std::env::var(ENV_STORAGE_APP_NAME).ok();
+
+    let config = StorageConfig {
+        read_connection,
+        write_connection,
+        max_connections,
+        min_connections,
+        idle_timeout_secs,
+        max_lifetime_secs,
+        application_name,
+    };
+
+    config.validate().map_err(|err| {
+        AdmissionConfigError::Storage(StorageConfigError::InvalidConfig(err.to_string()))
+    })?;
+
+    Ok(config)
+}
+
+fn env_u32(key: &'static str) -> Result<Option<u32>, AdmissionConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u32>().map(Some).map_err(|_| {
+                AdmissionConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
+            })
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn env_u64(key: &'static str) -> Result<Option<u64>, AdmissionConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u64>().map(Some).map_err(|_| {
+                AdmissionConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
+            })
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+#[derive(Debug)]
+pub enum AdmissionError {
+    Config(AdmissionConfigError),
     Request(AdmissionRequestError),
     Core(CoreError),
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
+    Storage(StorageError),
+    Serve(String),
 }
 
 #[derive(Debug, Clone)]
@@ -607,6 +729,8 @@ impl std::fmt::Display for AdmissionError {
             AdmissionError::Observability(err) => {
                 write!(f, "admission observability error: {err}")
             }
+            AdmissionError::Storage(err) => write!(f, "admission storage error: {err}"),
+            AdmissionError::Serve(err) => write!(f, "admission serve error: {err}"),
         }
     }
 }
@@ -619,6 +743,8 @@ impl std::error::Error for AdmissionError {
             AdmissionError::Core(err) => Some(err),
             AdmissionError::ObservabilityConfig(err) => Some(err),
             AdmissionError::Observability(err) => Some(err),
+            AdmissionError::Storage(err) => Some(err),
+            AdmissionError::Serve(_) => None,
         }
     }
 }
@@ -630,15 +756,204 @@ pub fn init_observability() -> Result<ObservabilityHandle, AdmissionError> {
     Ok(handle)
 }
 
+pub type AdmissionRepositories = CachedRepositories<PostgresRepositories>;
+
+pub fn build_repositories(config: &AdmissionConfig) -> Result<AdmissionRepositories, AdmissionError> {
+    let pool_options = config.storage.pool_options().map_err(AdmissionError::Storage)?;
+    let connect_options = config
+        .storage
+        .read_connect_options()
+        .map_err(AdmissionError::Storage)?;
+    let pool = pool_options.connect_lazy_with(connect_options);
+    let repos = PostgresRepositories::new(pool);
+    Ok(CachedRepositories::new(repos))
+}
+
+struct AdmissionAppState<R> {
+    repositories: Arc<R>,
+    cache: Arc<AdmissionCache>,
+    compatibility: RelayCompatibilityMode,
+}
+
+impl<R> Clone for AdmissionAppState<R> {
+    fn clone(&self) -> Self {
+        Self {
+            repositories: Arc::clone(&self.repositories),
+            cache: Arc::clone(&self.cache),
+            compatibility: self.compatibility,
+        }
+    }
+}
+
+pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
+    let _observability = init_observability()?;
+    let repositories = build_repositories(&config)?;
+    let cache = Arc::new(AdmissionCache::new(AdmissionCacheConfig::default()));
+    let state = AdmissionAppState {
+        repositories: Arc::new(repositories),
+        cache,
+        compatibility: config.compatibility.mode,
+    };
+    let router = build_router(state);
+    let listener = tokio::net::TcpListener::bind(&config.bind)
+        .await
+        .map_err(|err| AdmissionError::Serve(err.to_string()))?;
+    axum::serve(listener, router)
+        .await
+        .map_err(|err| AdmissionError::Serve(err.to_string()))?;
+    Ok(())
+}
+
+fn build_router<R>(state: AdmissionAppState<R>) -> Router
+where
+    R: AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/decide", post(decide_handler))
+        .with_state(state)
+}
+
+async fn health_handler() -> &'static str {
+    "ok"
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionRequestPayload {
+    pub kind: u64,
+    pub pubkey: String,
+    pub event_id: String,
+    pub tags: Vec<Vec<String>>,
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    #[serde(default)]
+    pub source_ip: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum AdmissionDecisionPayload {
+    Accept,
+    Reject { reason: String },
+    RequiresRelatedEvents { filters: Vec<AdmissionFilter> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionFilter {
+    pub ids: Vec<String>,
+    pub kinds: Vec<u32>,
+    pub authors: Vec<String>,
+    pub tags: BTreeMap<String, Vec<String>>,
+    pub limit: Option<u64>,
+}
+
+impl From<AdmissionFilter> for EventFilter {
+    fn from(filter: AdmissionFilter) -> Self {
+        Self {
+            ids: filter.ids,
+            kinds: filter.kinds,
+            authors: filter.authors,
+            tags: filter.tags,
+            limit: filter.limit,
+        }
+    }
+}
+
+impl From<&EventFilter> for AdmissionFilter {
+    fn from(filter: &EventFilter) -> Self {
+        Self {
+            ids: filter.ids.clone(),
+            kinds: filter.kinds.clone(),
+            authors: filter.authors.clone(),
+            tags: filter.tags.clone(),
+            limit: filter.limit,
+        }
+    }
+}
+
+impl From<AdmissionDecision> for AdmissionDecisionPayload {
+    fn from(decision: AdmissionDecision) -> Self {
+        match decision {
+            AdmissionDecision::Accept => AdmissionDecisionPayload::Accept,
+            AdmissionDecision::Reject { reason } => AdmissionDecisionPayload::Reject { reason },
+            AdmissionDecision::RequiresRelatedEvents { filters } => {
+                AdmissionDecisionPayload::RequiresRelatedEvents {
+                    filters: filters.iter().map(AdmissionFilter::from).collect(),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AdmissionHttpError {
+    BadRequest(String),
+    Internal(String),
+}
+
+impl From<AdmissionError> for AdmissionHttpError {
+    fn from(err: AdmissionError) -> Self {
+        match err {
+            AdmissionError::Request(err) => AdmissionHttpError::BadRequest(err.to_string()),
+            AdmissionError::Core(err) => AdmissionHttpError::BadRequest(err.to_string()),
+            AdmissionError::Storage(err) => AdmissionHttpError::Internal(err.to_string()),
+            AdmissionError::Config(err) => AdmissionHttpError::Internal(err.to_string()),
+            AdmissionError::ObservabilityConfig(err) => AdmissionHttpError::Internal(err.to_string()),
+            AdmissionError::Observability(err) => AdmissionHttpError::Internal(err.to_string()),
+            AdmissionError::Serve(err) => AdmissionHttpError::Internal(err),
+        }
+    }
+}
+
+impl IntoResponse for AdmissionHttpError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            AdmissionHttpError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            AdmissionHttpError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        };
+        (status, message).into_response()
+    }
+}
+
+async fn decide_handler<R>(
+    State(state): State<AdmissionAppState<R>>,
+    Json(payload): Json<AdmissionRequestPayload>,
+) -> Result<Json<AdmissionDecisionPayload>, AdmissionHttpError>
+where
+    R: AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync,
+{
+    let request = AdmissionRequest::new(
+        payload.kind,
+        payload.pubkey,
+        payload.event_id,
+        payload.tags,
+        payload.relay_url,
+        payload.source_ip,
+    )
+    .map_err(|err| AdmissionHttpError::BadRequest(err.to_string()))?;
+    let decision = evaluate_request_cached_mode(
+        &request,
+        state.repositories.as_ref(),
+        state.cache.as_ref(),
+        state.compatibility,
+    )
+    .await
+    .map_err(AdmissionHttpError::from)?;
+    Ok(Json(decision.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::AdmissionCache;
     use super::AdmissionCacheConfig;
     use super::AdmissionConfig;
+    use super::AdmissionDecisionPayload;
     use super::AdmissionDecision;
+    use super::AdmissionRequestPayload;
     use super::AdmissionRequest;
     use super::RateLimitConfig;
     use super::RateLimiter;
+    use axum::body::{Body, to_bytes};
     use super::evaluate_request;
     use super::evaluate_request_cached;
     use super::evaluate_request_with_storage;
@@ -654,14 +969,69 @@ mod tests {
         RelayCompatibilityRepository, RepoAnnouncementRecord,
     };
     use gittree_storage::{RelayProbeMetadata, StateRepository, StorageError};
+    use axum::http::Request;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tower::ServiceExt;
 
     #[test]
     fn config_loads_from_env() {
-        let config = AdmissionConfig::from_env().expect("config");
-        let services = ServicesConfig::from_env_validated().expect("services");
-        assert_eq!(config.bind, services.admission.bind);
+        with_env_var(super::ENV_STORAGE_READ_URL, "postgres://localhost/test", || {
+            let config = AdmissionConfig::from_env().expect("config");
+            let services = ServicesConfig::from_env_validated().expect("services");
+            assert_eq!(config.bind, services.admission.bind);
+        });
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let repositories = std::sync::Arc::new(InMemoryRepositories::new());
+        let cache = std::sync::Arc::new(AdmissionCache::new(AdmissionCacheConfig::default()));
+        let app = super::build_router(super::AdmissionAppState {
+            repositories,
+            cache,
+            compatibility: RelayCompatibilityMode::Strict,
+        });
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn decide_endpoint_accepts_state_event() {
+        let repositories = std::sync::Arc::new(InMemoryRepositories::new());
+        let cache = std::sync::Arc::new(AdmissionCache::new(AdmissionCacheConfig::default()));
+        let app = super::build_router(super::AdmissionAppState {
+            repositories,
+            cache,
+            compatibility: RelayCompatibilityMode::Strict,
+        });
+        let payload = AdmissionRequestPayload {
+            kind: KIND_GIT_REPO_STATE.0 as u64,
+            pubkey: "pubkey".to_string(),
+            event_id: "event".to_string(),
+            tags: Vec::new(),
+            relay_url: None,
+            source_ip: None,
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let decision: AdmissionDecisionPayload =
+            serde_json::from_slice(&body).expect("decision");
+        assert!(matches!(decision, AdmissionDecisionPayload::Accept));
     }
 
     #[test]
@@ -1251,5 +1621,22 @@ mod tests {
             .expect("second");
 
         assert!(storage.calls.load(Ordering::SeqCst) >= 4);
+    }
+
+    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        f();
+        if let Some(value) = previous {
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
     }
 }

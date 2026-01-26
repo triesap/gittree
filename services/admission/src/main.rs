@@ -1,20 +1,15 @@
-use gittree_admission::{AdmissionConfig, AdmissionError, init_observability};
+use gittree_admission::{AdmissionConfig, AdmissionError, serve};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         eprintln!("admission service failed: {err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), AdmissionError> {
+async fn run() -> Result<(), AdmissionError> {
     let config = AdmissionConfig::from_env().map_err(AdmissionError::Config)?;
-    let _observability = init_observability()?;
-    tracing::info!(
-        bind = %config.bind,
-        compat_mode = %config.compatibility.mode.as_str(),
-        "admission service configured"
-    );
-    Ok(())
+    serve(config).await
 }
