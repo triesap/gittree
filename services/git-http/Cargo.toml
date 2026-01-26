@@ -4,10 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+async-trait = "0.1"
+axum = "0.7"
+bytes = "1"
 gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
 gittree-observability = { path = "../../crates/observability" }
+gittree-storage = { path = "../../crates/storage" }
 dotenvy = "0.15"
+hex = "0.4"
 opentelemetry = { version = "0.23", features = ["metrics"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1"
 url = "2"
+
+[dev-dependencies]
+tower = "0.4"

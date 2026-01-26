@@ -802,11 +802,19 @@ dependencies = [
 name = "gittree-git-http"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum 0.7.9",
+ "bytes",
  "dotenvy",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
+ "gittree-storage",
+ "hex",
  "opentelemetry 0.23.0",
+ "reqwest",
+ "tokio",
+ "tower 0.4.13",
  "tracing",
  "url",
 ]

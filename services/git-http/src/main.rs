@@ -1,17 +1,15 @@
-use gittree_git_http::{GitHttpConfig, GitHttpError, GitHttpMetrics, init_observability};
+use gittree_git_http::{GitHttpConfig, GitHttpError, serve};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         eprintln!("git-http service failed: {err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), GitHttpError> {
+async fn run() -> Result<(), GitHttpError> {
     let config = GitHttpConfig::from_env().map_err(GitHttpError::Config)?;
-    let _observability = init_observability()?;
-    let _metrics = GitHttpMetrics::new();
-    tracing::info!(bind = %config.bind, "git-http configured");
-    Ok(())
+    serve(config).await
 }
