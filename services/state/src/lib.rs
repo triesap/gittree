@@ -772,6 +772,7 @@ mod tests {
     use gittree_storage::InMemoryRepositories;
     use gittree_storage::RelayCompatibilityRecord;
     use gittree_storage::RelayCompatibilityRepository;
+    use gittree_storage::RelayProbeMetadata;
     use gittree_storage::RepoAnnouncementRecord;
     use gittree_storage::StateRepository;
     use std::collections::HashMap;
@@ -1098,6 +1099,37 @@ mod tests {
         let app = super::build_router(super::StateAppState { repositories, cache });
         let response = app
             .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn relay_compatibility_endpoint_returns_record() {
+        let repositories = std::sync::Arc::new(InMemoryRepositories::new());
+        let report = RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        };
+        let record =
+            RelayCompatibilityRecord::new(&report, 10, &RelayProbeMetadata::default())
+                .expect("record");
+        repositories
+            .upsert_relay_compatibility(record)
+            .await
+            .expect("upsert");
+
+        let cache = std::sync::Arc::new(StateCache::new(StateCacheConfig::default()));
+        let app = super::build_router(super::StateAppState { repositories, cache });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/relay-compatibility?relay_url=wss://relay.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
