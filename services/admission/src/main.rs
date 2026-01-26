@@ -11,6 +11,10 @@ fn main() {
 fn run() -> Result<(), AdmissionError> {
     let config = AdmissionConfig::from_env().map_err(AdmissionError::Config)?;
     let _observability = init_observability()?;
-    tracing::info!(bind = %config.bind, "admission service configured");
+    tracing::info!(
+        bind = %config.bind,
+        compat_mode = %config.compatibility.mode.as_str(),
+        "admission service configured"
+    );
     Ok(())
 }

@@ -1,10 +1,15 @@
-use gittree_config::{ConfigError, ServicesConfig};
+use gittree_config::{
+    ConfigError, RelayCompatibilityConfig, RelayCompatibilityMode, ServicesConfig,
+};
 use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{CoreError, EventFilter};
-use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
+use gittree_observability::{
+    ObservabilityConfigError, ObservabilityError, ObservabilityHandle, RelayCompatibilityMetrics,
+};
 use gittree_storage::{
     AnnouncementRepository, RelayCompatibilityRepository, StateRepository, StorageError,
 };
+use tracing::warn;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::RwLock;
@@ -13,13 +18,16 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionConfig {
     pub bind: String,
+    pub compatibility: RelayCompatibilityConfig,
 }
 
 impl AdmissionConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let services = ServicesConfig::from_env_validated()?;
+        let compatibility = RelayCompatibilityConfig::from_env()?;
         Ok(Self {
             bind: services.admission.bind,
+            compatibility,
         })
     }
 }
@@ -426,19 +434,62 @@ pub async fn evaluate_request_with_storage<S>(
 where
     S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
+    evaluate_request_with_storage_mode(request, storage, RelayCompatibilityMode::Strict).await
+}
+
+pub async fn evaluate_request_with_storage_mode<S>(
+    request: &AdmissionRequest,
+    storage: &S,
+    mode: RelayCompatibilityMode,
+) -> Result<AdmissionDecision, AdmissionError>
+where
+    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
+{
     let decision = evaluate_request(request)?;
     if let Some(relay_url) = request.relay_host() {
+        let metrics = RelayCompatibilityMetrics::new();
         match storage.relay_compatibility(relay_url).await {
             Ok(Some(record)) if !record.compatible => {
-                return Ok(AdmissionDecision::Reject {
-                    reason: format!("relay incompatible: {relay_url}"),
-                });
+                metrics.record(false);
+                return match mode {
+                    RelayCompatibilityMode::Strict => Ok(AdmissionDecision::Reject {
+                        reason: format!("relay incompatible: {relay_url}"),
+                    }),
+                    RelayCompatibilityMode::Warn => {
+                        warn!(relay_url = %relay_url, "relay incompatible; allowing");
+                        Ok(decision.clone())
+                    }
+                    RelayCompatibilityMode::Allow => Ok(decision.clone()),
+                };
             }
-            Ok(_) => {}
+            Ok(Some(record)) => {
+                metrics.record(record.compatible);
+            }
+            Ok(None) => {
+                metrics.record(false);
+                return match mode {
+                    RelayCompatibilityMode::Strict => Ok(AdmissionDecision::Reject {
+                        reason: format!("relay compatibility missing: {relay_url}"),
+                    }),
+                    RelayCompatibilityMode::Warn => {
+                        warn!(relay_url = %relay_url, "relay compatibility missing; allowing");
+                        Ok(decision.clone())
+                    }
+                    RelayCompatibilityMode::Allow => Ok(decision.clone()),
+                };
+            }
             Err(err) => {
-                return Ok(AdmissionDecision::Reject {
-                    reason: format!("storage error: {err}"),
-                });
+                metrics.record(false);
+                return match mode {
+                    RelayCompatibilityMode::Strict => Ok(AdmissionDecision::Reject {
+                        reason: format!("storage error: {err}"),
+                    }),
+                    RelayCompatibilityMode::Warn => {
+                        warn!(relay_url = %relay_url, "storage error on compatibility; allowing");
+                        Ok(decision.clone())
+                    }
+                    RelayCompatibilityMode::Allow => Ok(decision.clone()),
+                };
             }
         }
     }
@@ -473,12 +524,24 @@ pub async fn evaluate_request_cached<S>(
 where
     S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
+    evaluate_request_cached_mode(request, storage, cache, RelayCompatibilityMode::Strict).await
+}
+
+pub async fn evaluate_request_cached_mode<S>(
+    request: &AdmissionRequest,
+    storage: &S,
+    cache: &AdmissionCache,
+    mode: RelayCompatibilityMode,
+) -> Result<AdmissionDecision, AdmissionError>
+where
+    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
+{
     let key = cache.cache_key(request);
     if let Some(cached) = cache.get(&key) {
         return Ok(cached);
     }
 
-    let decision = evaluate_request_with_storage(request, storage).await?;
+    let decision = evaluate_request_with_storage_mode(request, storage, mode).await?;
     cache.insert(key, decision.clone());
     Ok(decision)
 }
@@ -579,8 +642,9 @@ mod tests {
     use super::evaluate_request;
     use super::evaluate_request_cached;
     use super::evaluate_request_with_storage;
+    use super::evaluate_request_with_storage_mode;
     use async_trait::async_trait;
-    use gittree_config::ServicesConfig;
+    use gittree_config::{RelayCompatibilityMode, ServicesConfig};
     use gittree_core::EventFilter;
     use gittree_core::RepoAnnouncement;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
@@ -589,7 +653,7 @@ mod tests {
         AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRecord,
         RelayCompatibilityRepository, RepoAnnouncementRecord,
     };
-    use gittree_storage::{StateRepository, StorageError};
+    use gittree_storage::{RelayProbeMetadata, StateRepository, StorageError};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -792,8 +856,7 @@ mod tests {
             missing_required,
             missing_optional: Vec::new(),
         };
-        RelayCompatibilityRecord::new(&report, 0, &gittree_storage::RelayProbeMetadata::default())
-            .expect("record")
+        RelayCompatibilityRecord::new(&report, 0, &RelayProbeMetadata::default()).expect("record")
     }
 
     #[tokio::test]
@@ -826,6 +889,11 @@ mod tests {
         let record =
             RepoAnnouncementRecord::new(&event_id, &pubkey, 10, &announcement).expect("record");
         storage.insert_announcement(record).await.expect("insert");
+        let compat_record = sample_compat_record("wss://relay.example", true);
+        storage
+            .upsert_relay_compatibility(compat_record)
+            .await
+            .expect("compat");
 
         let address = format!("30617:{pubkey}:repo");
         let request = AdmissionRequest::new(
@@ -833,7 +901,7 @@ mod tests {
             "pubkey",
             "event",
             vec![vec!["a".to_string(), address]],
-            Some("relay".to_string()),
+            Some("wss://relay.example".to_string()),
             None,
         )
         .expect("request");
@@ -874,6 +942,68 @@ mod tests {
         assert!(matches!(
             decision,
             AdmissionDecision::Reject { reason } if reason.contains("relay incompatible")
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_warns_on_incompatible_relay() {
+        let storage = InMemoryRepositories::new();
+        let record = sample_compat_record("wss://relay.example", false);
+        storage
+            .upsert_relay_compatibility(record)
+            .await
+            .expect("upsert");
+
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("wss://relay.example".to_string()),
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage_mode(
+            &request,
+            &storage,
+            RelayCompatibilityMode::Warn,
+        )
+        .await
+        .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_allows_missing_compatibility_in_allow_mode() {
+        let storage = InMemoryRepositories::new();
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("wss://relay.example".to_string()),
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage_mode(
+            &request,
+            &storage,
+            RelayCompatibilityMode::Allow,
+        )
+        .await
+        .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
         ));
     }
 
@@ -1059,6 +1189,11 @@ mod tests {
         let record =
             RepoAnnouncementRecord::new(&event_id, &pubkey, 10, &announcement).expect("record");
         storage.insert_announcement(record).await.expect("insert");
+        let compat_record = sample_compat_record("wss://relay.example", true);
+        storage
+            .upsert_relay_compatibility(compat_record)
+            .await
+            .expect("compat");
 
         let address = format!("30617:{pubkey}:repo");
         let request = AdmissionRequest::new(
@@ -1066,7 +1201,7 @@ mod tests {
             "pubkey",
             "event",
             vec![vec!["a".to_string(), address]],
-            Some("relay".to_string()),
+            Some("wss://relay.example".to_string()),
             None,
         )
         .expect("request");
@@ -1091,6 +1226,11 @@ mod tests {
         let record =
             RepoAnnouncementRecord::new(&event_id, &pubkey, 10, &announcement).expect("record");
         storage.insert_announcement(record).await.expect("insert");
+        let compat_record = sample_compat_record("wss://relay.example", true);
+        storage
+            .upsert_relay_compatibility(compat_record)
+            .await
+            .expect("compat");
 
         let address = format!("30617:{pubkey}:repo");
         let request = AdmissionRequest::new(
@@ -1098,7 +1238,7 @@ mod tests {
             "pubkey",
             "event",
             vec![vec!["a".to_string(), address]],
-            Some("relay".to_string()),
+            Some("wss://relay.example".to_string()),
             None,
         )
         .expect("request");
