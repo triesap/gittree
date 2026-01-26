@@ -425,4 +425,10 @@ mod tests {
         assert!(!super::LOG_FIELD_RELAY_PROBE_STATUS.is_empty());
         assert!(!super::LOG_FIELD_RELAY_PROBE_DETAIL.is_empty());
     }
+
+    #[test]
+    fn relay_compatibility_metrics_have_names() {
+        assert!(!super::METRIC_RELAY_COMPATIBLE.is_empty());
+        assert!(!super::METRIC_RELAY_INCOMPATIBLE.is_empty());
+    }
 }
