@@ -27,7 +27,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.admission
     environment:
       GITTREE_ADMISSION_BIND: 0.0.0.0:8081
-      GITTREE_RELAY_URLS: wss://relay.example
+      GITTREE_RELAY_URLS: wss://gittr.ee
       GITTREE_RELAY_COMPAT_MODE: strict
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
@@ -40,7 +40,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.state
     environment:
       GITTREE_STATE_BIND: 0.0.0.0:8082
-      GITTREE_RELAY_URLS: wss://relay.example
+      GITTREE_RELAY_URLS: wss://gittr.ee
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
     depends_on:
@@ -62,7 +62,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.coordinator
     environment:
       GITTREE_COORDINATOR_BIND: 0.0.0.0:8083
-      GITTREE_RELAY_URLS: wss://relay.example
+      GITTREE_RELAY_URLS: wss://gittr.ee
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
     depends_on:
@@ -74,7 +74,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.sync
     environment:
       GITTREE_SYNC_BIND: 0.0.0.0:8084
-      GITTREE_RELAY_URLS: wss://relay.example
+      GITTREE_RELAY_URLS: wss://gittr.ee
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
     depends_on:
