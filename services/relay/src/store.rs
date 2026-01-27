@@ -256,17 +256,32 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
         let mut seen = HashSet::new();
         let mut results = Vec::new();
         for filter in filters {
-            let query = filter_to_query(filter);
+            let plan = build_query_plan(filter);
             let records = self
                 .repo
-                .query_events(&query)
+                .query_events(&plan.query)
                 .await
                 .map_err(map_repo_err)?;
+            let mut remaining = filter.limit.unwrap_or(u64::MAX);
             for record in records {
-                let event = record_to_event(record)?;
-                if seen.insert(event.id.clone()) {
-                    results.push(event);
+                if remaining == 0 {
+                    break;
                 }
+                let event = record_to_event(record)?;
+                let event_id = event.id.clone();
+                if seen.contains(&event_id) {
+                    continue;
+                }
+                if plan.needs_post_filter {
+                    let tags = TagIndex::from_tags(&event.tags)
+                        .map_err(|err| StoreError::Backend(err.to_string()))?;
+                    if !filter.matches(&event, &tags) {
+                        continue;
+                    }
+                }
+                results.push(event);
+                seen.insert(event_id);
+                remaining = remaining.saturating_sub(1);
             }
         }
 
@@ -461,7 +476,17 @@ fn group_tags(tags: &[TagRecord]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn filter_to_query(filter: &Filter) -> EventQuery {
+const HEX_32_LEN: usize = 64;
+
+struct QueryPlan {
+    query: EventQuery,
+    needs_post_filter: bool,
+}
+
+fn build_query_plan(filter: &Filter) -> QueryPlan {
+    let (ids, ids_need_post) = exact_hex_filters(&filter.ids);
+    let (authors, authors_need_post) = exact_hex_filters(&filter.authors);
+    let needs_post_filter = ids_need_post || authors_need_post;
     let mut tags = Vec::new();
     for (name, values) in &filter.tags {
         for value in values {
@@ -472,14 +497,31 @@ fn filter_to_query(filter: &Filter) -> EventQuery {
         }
     }
 
-    EventQuery {
-        ids: filter.ids.clone(),
-        authors: filter.authors.clone(),
-        kinds: filter.kinds.clone(),
-        since: filter.since,
-        until: filter.until,
-        tags,
-        limit: filter.limit,
+    QueryPlan {
+        query: EventQuery {
+            ids,
+            authors,
+            kinds: filter.kinds.clone(),
+            since: filter.since,
+            until: filter.until,
+            tags,
+            limit: if needs_post_filter { None } else { filter.limit },
+        },
+        needs_post_filter,
+    }
+}
+
+fn exact_hex_filters(values: &[String]) -> (Vec<String>, bool) {
+    if values.is_empty() {
+        return (Vec::new(), false);
+    }
+    let all_exact = values
+        .iter()
+        .all(|value| value.len() == HEX_32_LEN && hex::decode(value).is_ok());
+    if all_exact {
+        (values.to_vec(), false)
+    } else {
+        (Vec::new(), true)
     }
 }
 
@@ -698,5 +740,36 @@ mod tests {
 
         assert!(store.get(&target.id).await.expect("get").is_none());
         assert!(store.get(&delete.id).await.expect("get").is_some());
+    }
+
+    #[tokio::test]
+    async fn repository_store_matches_prefix_filters() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let event = sample_event(&"aa".repeat(32));
+        store.insert(event.clone()).await.expect("insert");
+
+        let filter = crate::Filter::from_json(&json!({
+            "ids": ["aa"],
+            "authors": ["aa"]
+        }))
+        .expect("filter");
+        let results = store.query(&[filter]).await.expect("query");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, event.id);
+    }
+
+    #[tokio::test]
+    async fn repository_store_ignores_invalid_hex_filters() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let event = sample_event(&"aa".repeat(32));
+        store.insert(event).await.expect("insert");
+
+        let filter = crate::Filter::from_json(&json!({"ids": ["zz"]})).expect("filter");
+        let results = store.query(&[filter]).await.expect("query");
+        assert!(results.is_empty());
     }
 }
