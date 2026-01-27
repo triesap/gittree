@@ -1,13 +1,15 @@
 use crate::{
-    ClientMessage, EventStore, Filter, Notice, ServerMessage, SubscriptionId,
-    SubscriptionRegistry, decode_client_message,
+    ClientMessage, EventStore, Filter, Notice, Policy, ServerMessage, StoreOutcome,
+    SubscriptionId, SubscriptionRegistry, decode_client_message,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 #[derive(Debug)]
 pub struct Session<S: EventStore> {
     registry: SubscriptionRegistry,
     store: S,
+    policy: Policy,
 }
 
 impl<S: EventStore> Session<S> {
@@ -15,6 +17,15 @@ impl<S: EventStore> Session<S> {
         Self {
             registry: SubscriptionRegistry::default(),
             store,
+            policy: Policy::default(),
+        }
+    }
+
+    pub fn with_policy(store: S, policy: Policy) -> Self {
+        Self {
+            registry: SubscriptionRegistry::default(),
+            store,
+            policy,
         }
     }
 
@@ -45,7 +56,7 @@ impl<S: EventStore> Session<S> {
                 };
 
                 let sub_id = SubscriptionId::new(subscription_id.clone());
-                self.registry.insert(sub_id.clone());
+                self.registry.insert(sub_id.clone(), parsed.clone());
 
                 let mut responses = Vec::new();
                 for event in events {
@@ -68,10 +79,77 @@ impl<S: EventStore> Session<S> {
                 self.registry.remove(&SubscriptionId::new(subscription_id));
                 Vec::new()
             }
-            ClientMessage::Event(_) | ClientMessage::Auth(_) | ClientMessage::Count { .. } => {
-                Vec::new()
+            ClientMessage::Event(value) => self.handle_event(value),
+            ClientMessage::Auth(_) | ClientMessage::Count { .. } => Vec::new(),
+        }
+    }
+
+    fn handle_event(&mut self, value: Value) -> Vec<ServerMessage> {
+        let event: crate::NostrEvent = match serde_json::from_value(value) {
+            Ok(event) => event,
+            Err(_) => return vec![Notice::message("invalid event").into()],
+        };
+
+        if let Err(err) = event.verify() {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: err.to_string(),
+            }];
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        if let Err(err) = self.policy.validate_event(&event, now) {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: err.to_string(),
+            }];
+        }
+
+        let outcome = match self.store.insert(event.clone()) {
+            Ok(outcome) => outcome,
+            Err(err) => return vec![Notice::from(err).into()],
+        };
+
+        let mut responses = Vec::new();
+        let message = match outcome {
+            StoreOutcome::Inserted => "saved".to_string(),
+            StoreOutcome::Duplicate => "duplicate".to_string(),
+        };
+        responses.push(ServerMessage::Ok {
+            event_id: event.id.clone(),
+            accepted: true,
+            message,
+        });
+
+        let event_value = match serde_json::to_value(event.clone()) {
+            Ok(value) => value,
+            Err(_) => return vec![Notice::message("failed to serialize event").into()],
+        };
+
+        let tags = match crate::TagIndex::from_tags(&event.tags) {
+            Ok(tags) => tags,
+            Err(_) => return vec![Notice::message("invalid event tags").into()],
+        };
+
+        for (sub_id, filters) in self.registry.iter() {
+            if filters.is_empty() {
+                continue;
+            }
+            let matches = filters.iter().any(|filter| filter.matches(&event, &tags));
+            if matches {
+                responses.push(ServerMessage::Event {
+                    subscription_id: sub_id.as_str().to_string(),
+                    event: event_value.clone(),
+                });
             }
         }
+
+        responses
     }
 }
 
