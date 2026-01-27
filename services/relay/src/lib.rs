@@ -31,7 +31,7 @@ pub use protocol::{
 };
 pub use session::Session;
 pub use subscription::{SubscriptionId, SubscriptionRegistry};
-pub use store::{EventStore, MemoryStore, StoreError, StoreOutcome};
+pub use store::{EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome};
 pub use tags::{TagError, TagIndex};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";

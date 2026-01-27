@@ -1,5 +1,6 @@
 use crate::{Filter, NostrEvent, TagIndex};
 use async_trait::async_trait;
+use gittree_storage::{EventQuery, EventRecord, EventRepository, TagRecord};
 use std::collections::{BTreeMap, HashSet};
 use tokio::sync::RwLock;
 
@@ -88,6 +89,17 @@ impl MemoryStore {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RepositoryStore<R: EventRepository> {
+    repo: R,
+}
+
+impl<R: EventRepository> RepositoryStore<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
 #[async_trait]
 impl EventStore for MemoryStore {
     async fn insert(&self, event: NostrEvent) -> Result<StoreOutcome, StoreError> {
@@ -164,6 +176,76 @@ impl EventStore for MemoryStore {
     }
 }
 
+#[async_trait]
+impl<R: EventRepository> EventStore for RepositoryStore<R> {
+    async fn insert(&self, event: NostrEvent) -> Result<StoreOutcome, StoreError> {
+        let record = event_to_record(&event)?;
+        if self
+            .repo
+            .get_event(&record.id)
+            .await
+            .map_err(map_repo_err)?
+            .is_some()
+        {
+            return Ok(StoreOutcome::Duplicate);
+        }
+        self.repo
+            .insert_event(record)
+            .await
+            .map_err(map_repo_err)?;
+        Ok(StoreOutcome::Inserted)
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<NostrEvent>, StoreError> {
+        let bytes = decode_hex_id(id)?;
+        let record = self
+            .repo
+            .get_event(&bytes)
+            .await
+            .map_err(map_repo_err)?;
+        record.map(record_to_event).transpose()
+    }
+
+    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+        let bytes = decode_hex_id(id)?;
+        self.repo
+            .delete_event(&bytes)
+            .await
+            .map_err(map_repo_err)
+    }
+
+    async fn query(&self, filters: &[Filter]) -> Result<Vec<NostrEvent>, StoreError> {
+        if filters.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut seen = HashSet::new();
+        let mut results = Vec::new();
+        for filter in filters {
+            let query = filter_to_query(filter);
+            let records = self
+                .repo
+                .query_events(&query)
+                .await
+                .map_err(map_repo_err)?;
+            for record in records {
+                let event = record_to_event(record)?;
+                if seen.insert(event.id.clone()) {
+                    results.push(event);
+                }
+            }
+        }
+
+        results.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(results)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ReplaceableKey {
     kind: u32,
@@ -222,10 +304,89 @@ fn parse_address(value: &str) -> Option<ReplaceableKey> {
     })
 }
 
+fn event_to_record(event: &NostrEvent) -> Result<EventRecord, StoreError> {
+    EventRecord::new(
+        &event.id,
+        &event.pubkey,
+        event.created_at,
+        event.kind,
+        event.content.clone(),
+        &event.sig,
+        event.tags.clone(),
+    )
+    .map_err(|err| StoreError::Backend(err.to_string()))
+}
+
+fn record_to_event(record: EventRecord) -> Result<NostrEvent, StoreError> {
+    let id = hex::encode(record.id);
+    let pubkey = hex::encode(record.pubkey);
+    let sig = hex::encode(record.sig);
+    let tags = group_tags(&record.tags);
+    Ok(NostrEvent {
+        id,
+        pubkey,
+        created_at: record.created_at,
+        kind: record.kind,
+        tags,
+        content: record.content,
+        sig,
+    })
+}
+
+fn group_tags(tags: &[TagRecord]) -> Vec<Vec<String>> {
+    let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for tag in tags {
+        by_name
+            .entry(tag.name.clone())
+            .or_default()
+            .push(tag.value.clone());
+    }
+    by_name
+        .into_iter()
+        .map(|(name, values)| {
+            let mut row = Vec::with_capacity(values.len() + 1);
+            row.push(name);
+            row.extend(values);
+            row
+        })
+        .collect()
+}
+
+fn filter_to_query(filter: &Filter) -> EventQuery {
+    let mut tags = Vec::new();
+    for (name, values) in &filter.tags {
+        for value in values {
+            tags.push(TagRecord {
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+
+    EventQuery {
+        ids: filter.ids.clone(),
+        authors: filter.authors.clone(),
+        kinds: filter.kinds.clone(),
+        since: filter.since,
+        until: filter.until,
+        tags,
+        limit: filter.limit,
+    }
+}
+
+fn decode_hex_id(value: &str) -> Result<Vec<u8>, StoreError> {
+    hex::decode(value).map_err(|_| StoreError::Backend("invalid event id".to_string()))
+}
+
+fn map_repo_err(err: gittree_storage::StorageError) -> StoreError {
+    StoreError::Backend(err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EventStore, MemoryStore, StoreOutcome};
+    use super::{EventStore, MemoryStore, RepositoryStore, StoreOutcome};
     use crate::NostrEvent;
+    use gittree_storage::InMemoryRepositories;
     use serde_json::json;
 
     fn sample_event(id: &str) -> NostrEvent {
@@ -366,5 +527,21 @@ mod tests {
 
         assert!(store.get("target").await.expect("get").is_none());
         assert!(store.get("delete").await.expect("get").is_some());
+    }
+
+    #[tokio::test]
+    async fn repository_store_inserts_and_queries() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let event = sample_event(&"aa".repeat(32));
+        let outcome = store.insert(event.clone()).await.expect("insert");
+        assert_eq!(outcome, StoreOutcome::Inserted);
+
+        let filter =
+            crate::Filter::from_json(&json!({"ids": [event.id.clone()]})).expect("filter");
+        let results = store.query(&[filter]).await.expect("query");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, event.id);
     }
 }
