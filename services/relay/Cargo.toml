@@ -24,3 +24,4 @@ opentelemetry = { version = "0.23", features = ["metrics"] }
 
 [dev-dependencies]
 tower = "0.5"
+tokio-tungstenite = "0.23"

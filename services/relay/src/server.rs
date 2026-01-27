@@ -164,11 +164,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
 #[cfg(test)]
 mod tests {
     use super::{build_router, nip11_response};
-    use crate::{MemoryStore, Policy, RelayConfig, RelayMetrics};
+    use crate::{MemoryStore, NostrEvent, Policy, RelayConfig, RelayMetrics};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
+    use futures_util::{SinkExt, StreamExt};
+    use secp256k1::{Keypair, Secp256k1, SecretKey};
+    use serde_json::json;
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tower::ServiceExt;
 
     fn sample_config() -> RelayConfig {
@@ -186,6 +194,47 @@ mod tests {
             policy: gittree_config::RelayPolicyConfig::default(),
             admission: None,
         }
+    }
+
+    async fn spawn_ws_server() -> std::net::SocketAddr {
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let app = build_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        addr
+    }
+
+    fn signed_event(seed: &str) -> NostrEvent {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0x11; 32]).expect("secret");
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
+
+        let mut event = NostrEvent {
+            id: seed.to_string(),
+            pubkey: hex::encode(pubkey.serialize()),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: String::new(),
+        };
+        event.id = event.compute_id().expect("id");
+        let id_bytes = hex::decode(&event.id).expect("id bytes");
+        let msg = secp256k1::Message::from_digest_slice(&id_bytes).expect("msg");
+        let sig = secp.sign_schnorr(&msg, &keypair);
+        event.sig = hex::encode(sig.as_ref());
+        event
     }
 
     #[tokio::test]
@@ -255,6 +304,51 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn websocket_req_sends_eose() {
+        let addr = spawn_ws_server().await;
+        let url = format!("ws://{addr}/");
+        let (mut socket, _) = connect_async(url).await.expect("connect");
+
+        socket
+            .send(WsMessage::Text(r#"["REQ","sub",{}]"#.to_string()))
+            .await
+            .expect("send");
+
+        let message = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("timeout")
+            .expect("message")
+            .expect("ws");
+        let payload = message.into_text().expect("text");
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("json");
+        assert_eq!(value[0], "EOSE");
+    }
+
+    #[tokio::test]
+    async fn websocket_event_returns_ok() {
+        let addr = spawn_ws_server().await;
+        let url = format!("ws://{addr}/");
+        let (mut socket, _) = connect_async(url).await.expect("connect");
+
+        let event = signed_event("event-1");
+        let payload = json!(["EVENT", event]).to_string();
+        socket
+            .send(WsMessage::Text(payload))
+            .await
+            .expect("send");
+
+        let message = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("timeout")
+            .expect("message")
+            .expect("ws");
+        let payload = message.into_text().expect("text");
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("json");
+        assert_eq!(value[0], "OK");
+        assert_eq!(value[2], true);
     }
 
     #[test]
