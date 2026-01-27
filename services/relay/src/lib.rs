@@ -10,6 +10,7 @@ mod cli;
 mod driver;
 mod event;
 mod filter;
+mod metrics;
 mod notice;
 mod policy;
 mod protocol;
@@ -27,6 +28,7 @@ pub use cli::{RelayCli, RelayCliError};
 pub use driver::SessionDriver;
 pub use event::{EventError, NostrEvent};
 pub use filter::{Filter, FilterError};
+pub use metrics::RelayMetrics;
 pub use notice::Notice;
 pub use policy::{Policy, PolicyError};
 pub use protocol::{

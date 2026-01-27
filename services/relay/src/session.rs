@@ -1,5 +1,5 @@
 use crate::{
-    AdmissionDecider, ClientMessage, EventStore, Filter, Notice, Policy, RelayEvent,
+    AdmissionDecider, ClientMessage, EventStore, Filter, Notice, Policy, RelayEvent, RelayMetrics,
     ServerMessage, StoreOutcome, SubscriptionId, SubscriptionRegistry, decode_client_message,
 };
 use gittree_core::AdmissionDecision;
@@ -116,6 +116,7 @@ pub struct Session<S: EventStore> {
     broadcast: Option<broadcast::Sender<crate::NostrEvent>>,
     auth: Option<AuthState>,
     rate_limiter: Option<RateLimiter>,
+    metrics: Option<Arc<RelayMetrics>>,
 }
 
 impl<S: EventStore> Session<S> {
@@ -129,6 +130,7 @@ impl<S: EventStore> Session<S> {
             broadcast: None,
             auth: None,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
+            metrics: None,
         }
     }
 
@@ -141,6 +143,7 @@ impl<S: EventStore> Session<S> {
             broadcast: None,
             auth: None,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
+            metrics: None,
         }
     }
 
@@ -154,6 +157,7 @@ impl<S: EventStore> Session<S> {
             broadcast: None,
             auth: None,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
+            metrics: None,
         }
     }
 
@@ -170,6 +174,7 @@ impl<S: EventStore> Session<S> {
             broadcast: None,
             auth: None,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
+            metrics: None,
         }
     }
 
@@ -182,6 +187,7 @@ impl<S: EventStore> Session<S> {
             broadcast: None,
             auth: auth_state(auth_required),
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
+            metrics: None,
         }
     }
 
@@ -200,7 +206,13 @@ impl<S: EventStore> Session<S> {
             broadcast: Some(broadcast),
             auth: auth_state(auth_required),
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<RelayMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     pub fn registry(&self) -> &SubscriptionRegistry {
@@ -264,6 +276,7 @@ impl<S: EventStore> Session<S> {
                 subscription_id,
                 filters,
             } => {
+                self.record_message("REQ");
                 if let Some(notice) = self.rate_limit_request() {
                     return vec![notice.into()];
                 }
@@ -307,15 +320,23 @@ impl<S: EventStore> Session<S> {
                 responses
             }
             ClientMessage::Close { subscription_id } => {
+                self.record_message("CLOSE");
                 self.registry.remove(&SubscriptionId::new(subscription_id));
                 Vec::new()
             }
-            ClientMessage::Event(value) => self.handle_event(value).await,
-            ClientMessage::Auth(value) => self.handle_auth(value).await,
+            ClientMessage::Event(value) => {
+                self.record_message("EVENT");
+                self.handle_event(value).await
+            }
+            ClientMessage::Auth(value) => {
+                self.record_message("AUTH");
+                self.handle_auth(value).await
+            }
             ClientMessage::Count {
                 subscription_id,
                 filters,
             } => {
+                self.record_message("COUNT");
                 if let Some(notice) = self.rate_limit_request() {
                     return vec![notice.into()];
                 }
@@ -373,16 +394,33 @@ impl<S: EventStore> Session<S> {
         None
     }
 
+    fn record_message(&self, kind: &str) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_message(kind);
+        }
+    }
+
+    fn record_event(&self, status: &str) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_event(status);
+        }
+    }
+
     async fn handle_event(&mut self, value: Value) -> Vec<ServerMessage> {
         let event: crate::NostrEvent = match serde_json::from_value(value) {
             Ok(event) => event,
-            Err(_) => return vec![Notice::message("invalid event").into()],
+            Err(_) => {
+                self.record_event("rejected");
+                return vec![Notice::message("invalid event").into()];
+            }
         };
         if let Some(notice) = self.rate_limit_event() {
+            self.record_event("rejected");
             return vec![notice.into()];
         }
 
         if let Err(err) = event.verify() {
+            self.record_event("rejected");
             return vec![ServerMessage::Ok {
                 event_id: event.id.clone(),
                 accepted: false,
@@ -395,6 +433,7 @@ impl<S: EventStore> Session<S> {
             .unwrap_or_default()
             .as_secs() as i64;
         if let Err(err) = self.policy.validate_event(&event, now) {
+            self.record_event("rejected");
             return vec![ServerMessage::Ok {
                 event_id: event.id.clone(),
                 accepted: false,
@@ -405,6 +444,7 @@ impl<S: EventStore> Session<S> {
         if let Some(auth) = &self.auth {
             match auth.authenticated_pubkey.as_ref() {
                 None => {
+                    self.record_event("rejected");
                     return vec![ServerMessage::Ok {
                         event_id: event.id.clone(),
                         accepted: false,
@@ -412,6 +452,7 @@ impl<S: EventStore> Session<S> {
                     }];
                 }
                 Some(pubkey) if pubkey != &event.pubkey => {
+                    self.record_event("rejected");
                     return vec![ServerMessage::Ok {
                         event_id: event.id.clone(),
                         accepted: false,
@@ -435,6 +476,7 @@ impl<S: EventStore> Session<S> {
             match decision {
                 AdmissionDecision::Accept => {}
                 AdmissionDecision::Reject { reason } => {
+                    self.record_event("rejected");
                     return vec![ServerMessage::Ok {
                         event_id: event.id.clone(),
                         accepted: false,
@@ -446,9 +488,13 @@ impl<S: EventStore> Session<S> {
                         let relay_filter = filter_from_event_filter(&filter);
                         let related = match self.store.query(&[relay_filter]).await {
                             Ok(related) => related,
-                            Err(err) => return vec![Notice::from(err).into()],
+                            Err(err) => {
+                                self.record_event("rejected");
+                                return vec![Notice::from(err).into()];
+                            }
                         };
                         if related.is_empty() {
+                            self.record_event("rejected");
                             return vec![ServerMessage::Ok {
                                 event_id: event.id.clone(),
                                 accepted: false,
@@ -462,13 +508,22 @@ impl<S: EventStore> Session<S> {
 
         let outcome = match self.store.insert(event.clone()).await {
             Ok(outcome) => outcome,
-            Err(err) => return vec![Notice::from(err).into()],
+            Err(err) => {
+                self.record_event("rejected");
+                return vec![Notice::from(err).into()];
+            }
         };
 
         let mut responses = Vec::new();
         let message = match outcome {
-            StoreOutcome::Inserted => "saved".to_string(),
-            StoreOutcome::Duplicate => "duplicate".to_string(),
+            StoreOutcome::Inserted => {
+                self.record_event("accepted");
+                "saved".to_string()
+            }
+            StoreOutcome::Duplicate => {
+                self.record_event("duplicate");
+                "duplicate".to_string()
+            }
         };
         responses.push(ServerMessage::Ok {
             event_id: event.id.clone(),

@@ -20,6 +20,7 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
+opentelemetry = { version = "0.23", features = ["metrics"] }
 
 [dev-dependencies]
 tower = "0.5"

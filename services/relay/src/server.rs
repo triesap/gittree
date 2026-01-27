@@ -1,6 +1,6 @@
 use crate::{
     AdmissionDecider, AdmissionHookClient, EventStore, Policy, RelayConfig, RelayError,
-    RepositoryStore, Session, SessionDriver, build_nip11_document,
+    RelayMetrics, RepositoryStore, Session, SessionDriver, build_nip11_document,
 };
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -19,6 +19,7 @@ struct RelayState {
     store: Arc<dyn EventStore>,
     admission: Option<Arc<dyn AdmissionDecider>>,
     broadcast: broadcast::Sender<crate::NostrEvent>,
+    metrics: Arc<RelayMetrics>,
 }
 
 pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
@@ -33,6 +34,7 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
     let store: Arc<dyn EventStore> = Arc::new(RepositoryStore::new(repos));
     let (broadcast, _) = broadcast::channel(1024);
     let policy = Policy::from_config(&config.policy);
+    let metrics = Arc::new(RelayMetrics::new());
     let admission = match &config.admission {
         Some(config) => Some(Arc::new(
             AdmissionHookClient::new_http(config.clone()).map_err(RelayError::Admission)?,
@@ -45,6 +47,7 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
         store,
         admission,
         broadcast,
+        metrics,
     };
 
     let router = build_router(Arc::new(state));
@@ -124,7 +127,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
         state.admission.clone(),
         state.broadcast.clone(),
         state.config.policy.auth_required,
-    );
+    )
+    .with_metrics(state.metrics.clone());
     let driver = SessionDriver::new(session);
     tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
 
@@ -160,7 +164,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
 #[cfg(test)]
 mod tests {
     use super::{build_router, nip11_response};
-    use crate::{MemoryStore, Policy, RelayConfig};
+    use crate::{MemoryStore, Policy, RelayConfig, RelayMetrics};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
@@ -192,6 +196,7 @@ mod tests {
             store: Arc::new(MemoryStore::new()),
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
         });
         let app = build_router(state);
 
@@ -210,6 +215,7 @@ mod tests {
             store: Arc::new(MemoryStore::new()),
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
         });
         let app = build_router(state);
 
@@ -240,6 +246,7 @@ mod tests {
             store: Arc::new(MemoryStore::new()),
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
         });
         let app = build_router(state);
 
@@ -258,6 +265,7 @@ mod tests {
             store: Arc::new(MemoryStore::new()),
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
         };
         let response = nip11_response(&state);
         let cors = response
