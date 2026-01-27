@@ -221,7 +221,7 @@ pub fn build_repositories(config: &RelayConfig) -> Result<RelayRepositories, Rel
     Ok(CachedRepositories::new(repos))
 }
 
-pub fn build_nip11_document(config: &RelayConfig) -> RelayInfoDocument {
+pub fn build_nip11_document(config: &RelayConfig, policy: &Policy) -> RelayInfoDocument {
     let name = config
         .storage
         .application_name
@@ -246,8 +246,8 @@ pub fn build_nip11_document(config: &RelayConfig) -> RelayInfoDocument {
             max_subscriptions: None,
             max_limit: None,
             max_subid_length: None,
-            max_event_tags: None,
-            max_content_length: None,
+            max_event_tags: Some(policy.max_tags as u64),
+            max_content_length: Some(policy.max_content_len as u64),
             min_pow_difficulty: None,
             auth_required: None,
             payment_required: None,
@@ -277,6 +277,7 @@ mod tests {
     use super::RelayConfig;
     use super::RelayError;
     use super::StorageConfigError;
+    use super::Policy;
     use super::build_nip11_document;
     use super::build_repositories;
     use super::init_observability;
@@ -362,12 +363,16 @@ mod tests {
             || {
                 with_env_var(ENV_STORAGE_APP_NAME, "gittree-relay", || {
                     let config = RelayConfig::from_env().expect("config");
-                    let doc = build_nip11_document(&config);
+                    let policy = Policy::default();
+                    let doc = build_nip11_document(&config, &policy);
                     assert_eq!(doc.name, Some("gittree-relay".to_string()));
                     assert!(doc.supported_nips.as_ref().unwrap().contains(&34));
+                    let limitation = doc.limitation.as_ref().expect("limitation");
+                    assert_eq!(limitation.restricted_writes, Some(true));
+                    assert_eq!(limitation.max_event_tags, Some(policy.max_tags as u64));
                     assert_eq!(
-                        doc.limitation.as_ref().unwrap().restricted_writes,
-                        Some(true)
+                        limitation.max_content_length,
+                        Some(policy.max_content_len as u64)
                     );
                 });
             },
