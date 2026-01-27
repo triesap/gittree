@@ -32,9 +32,10 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
     let repos = gittree_storage::PostgresRepositories::new(pool);
     let store: Arc<dyn EventStore> = Arc::new(RepositoryStore::new(repos));
     let (broadcast, _) = broadcast::channel(1024);
+    let policy = Policy::from_config(&config.policy);
     let state = RelayState {
         config: config.clone(),
-        policy: Policy::default(),
+        policy,
         store,
         admission: None,
         broadcast,
@@ -159,6 +160,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: Some("gittree".to_string()),
             },
+            policy: gittree_config::RelayPolicyConfig::default(),
         }
     }
 

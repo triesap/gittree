@@ -1,4 +1,5 @@
 use crate::NostrEvent;
+use gittree_config::RelayPolicyConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
@@ -45,6 +46,16 @@ impl std::fmt::Display for PolicyError {
 impl std::error::Error for PolicyError {}
 
 impl Policy {
+    pub fn from_config(config: &RelayPolicyConfig) -> Self {
+        Self {
+            max_content_len: config.max_content_len as usize,
+            max_tags: config.max_tags as usize,
+            max_tag_values: config.max_tag_values as usize,
+            max_tag_value_len: config.max_tag_value_len as usize,
+            max_future_seconds: config.max_future_seconds as i64,
+        }
+    }
+
     pub fn validate_event(&self, event: &NostrEvent, now: i64) -> Result<(), PolicyError> {
         if event.content.len() > self.max_content_len {
             return Err(PolicyError::ContentTooLong);
@@ -73,6 +84,7 @@ impl Policy {
 mod tests {
     use super::{Policy, PolicyError};
     use crate::NostrEvent;
+    use gittree_config::RelayPolicyConfig;
 
     fn sample_event() -> NostrEvent {
         NostrEvent {
@@ -96,6 +108,27 @@ mod tests {
         };
         let err = policy.validate_event(&event, 0).unwrap_err();
         assert_eq!(err, PolicyError::ContentTooLong);
+    }
+
+    #[test]
+    fn policy_from_config_maps_limits() {
+        let config = RelayPolicyConfig {
+            max_content_len: 2048,
+            max_tags: 5,
+            max_tag_values: 3,
+            max_tag_value_len: 22,
+            max_future_seconds: 12,
+            max_subscriptions: None,
+            max_limit: None,
+            max_message_bytes: None,
+            auth_required: false,
+        };
+        let policy = Policy::from_config(&config);
+        assert_eq!(policy.max_content_len, 2048);
+        assert_eq!(policy.max_tags, 5);
+        assert_eq!(policy.max_tag_values, 3);
+        assert_eq!(policy.max_tag_value_len, 22);
+        assert_eq!(policy.max_future_seconds, 12);
     }
 
     #[test]

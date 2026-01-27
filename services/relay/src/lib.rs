@@ -1,4 +1,4 @@
-use gittree_config::{ConfigError, ServicesConfig};
+use gittree_config::{ConfigError, RelayPolicyConfig, ServicesConfig};
 use gittree_core::RelayInfoDocument;
 use gittree_core::nip11::RelayLimitation;
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
@@ -49,15 +49,18 @@ const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 pub struct RelayConfig {
     pub bind: String,
     pub storage: StorageConfig,
+    pub policy: RelayPolicyConfig,
 }
 
 impl RelayConfig {
     pub fn from_env() -> Result<Self, RelayConfigError> {
         let services = ServicesConfig::from_env_validated().map_err(RelayConfigError::Config)?;
         let storage = storage_from_env()?;
+        let policy = RelayPolicyConfig::from_env().map_err(RelayConfigError::Config)?;
         Ok(Self {
             bind: services.relay.bind,
             storage,
+            policy,
         })
     }
 
@@ -65,9 +68,11 @@ impl RelayConfig {
         let services =
             ServicesConfig::from_toml_file_validated(path).map_err(RelayConfigError::Config)?;
         let storage = storage_from_env()?;
+        let policy = RelayPolicyConfig::from_env().map_err(RelayConfigError::Config)?;
         Ok(Self {
             bind: services.relay.bind,
             storage,
+            policy,
         })
     }
 }
@@ -252,14 +257,14 @@ pub fn build_nip11_document(config: &RelayConfig, policy: &Policy) -> RelayInfoD
         privacy_policy: None,
         terms_of_service: None,
         limitation: Some(RelayLimitation {
-            max_message_length: None,
-            max_subscriptions: None,
-            max_limit: None,
+            max_message_length: config.policy.max_message_bytes,
+            max_subscriptions: config.policy.max_subscriptions,
+            max_limit: config.policy.max_limit,
             max_subid_length: None,
             max_event_tags: Some(policy.max_tags as u64),
             max_content_length: Some(policy.max_content_len as u64),
             min_pow_difficulty: None,
-            auth_required: None,
+            auth_required: Some(config.policy.auth_required),
             payment_required: None,
             restricted_writes: Some(true),
             created_at_lower_limit: None,
@@ -291,6 +296,7 @@ mod tests {
     use super::build_nip11_document;
     use super::build_repositories;
     use super::init_observability;
+    use gittree_config::RelayPolicyConfig;
     use std::sync::Mutex;
     use std::sync::OnceLock;
 
@@ -372,18 +378,30 @@ mod tests {
             "postgres://user:pass@localhost:5432/gittree",
             || {
                 with_env_var(ENV_STORAGE_APP_NAME, "gittree-relay", || {
-                    let config = RelayConfig::from_env().expect("config");
-                    let policy = Policy::default();
-                    let doc = build_nip11_document(&config, &policy);
-                    assert_eq!(doc.name, Some("gittree-relay".to_string()));
-                    assert!(doc.supported_nips.as_ref().unwrap().contains(&34));
-                    let limitation = doc.limitation.as_ref().expect("limitation");
-                    assert_eq!(limitation.restricted_writes, Some(true));
-                    assert_eq!(limitation.max_event_tags, Some(policy.max_tags as u64));
-                    assert_eq!(
-                        limitation.max_content_length,
-                        Some(policy.max_content_len as u64)
-                    );
+                    with_env_var("GITTREE_RELAY_POLICY_MAX_MESSAGE_BYTES", "4096", || {
+                        with_env_var("GITTREE_RELAY_POLICY_MAX_SUBSCRIPTIONS", "7", || {
+                            with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "120", || {
+                                with_env_var("GITTREE_RELAY_POLICY_AUTH_REQUIRED", "true", || {
+                                    let config = RelayConfig::from_env().expect("config");
+                                    let policy = Policy::default();
+                                    let doc = build_nip11_document(&config, &policy);
+                                    assert_eq!(doc.name, Some("gittree-relay".to_string()));
+                                    assert!(doc.supported_nips.as_ref().unwrap().contains(&34));
+                                    let limitation = doc.limitation.as_ref().expect("limitation");
+                                    assert_eq!(limitation.restricted_writes, Some(true));
+                                    assert_eq!(limitation.max_event_tags, Some(policy.max_tags as u64));
+                                    assert_eq!(
+                                        limitation.max_content_length,
+                                        Some(policy.max_content_len as u64)
+                                    );
+                                    assert_eq!(limitation.max_message_length, Some(4096));
+                                    assert_eq!(limitation.max_subscriptions, Some(7));
+                                    assert_eq!(limitation.max_limit, Some(120));
+                                    assert_eq!(limitation.auth_required, Some(true));
+                                });
+                            });
+                        });
+                    });
                 });
             },
         );
@@ -414,6 +432,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: Some("gittree".to_string()),
             },
+            policy: RelayPolicyConfig::default(),
         };
 
         let err = build_repositories(&config).unwrap_err();
