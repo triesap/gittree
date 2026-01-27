@@ -9,6 +9,15 @@ pub struct TagRecord {
     pub value: String,
 }
 
+impl TagRecord {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub id: Vec<u8>,
@@ -29,6 +38,41 @@ pub struct EventQuery {
     pub until: Option<i64>,
     pub tags: Vec<TagRecord>,
     pub limit: Option<u64>,
+}
+
+impl EventQuery {
+    pub fn for_ids(ids: Vec<String>) -> Self {
+        Self {
+            ids,
+            ..Default::default()
+        }
+    }
+
+    pub fn for_authors(authors: Vec<String>) -> Self {
+        Self {
+            authors,
+            ..Default::default()
+        }
+    }
+
+    pub fn for_kinds(kinds: Vec<u32>) -> Self {
+        Self {
+            kinds,
+            ..Default::default()
+        }
+    }
+
+    pub fn for_tag(name: impl Into<String>, values: Vec<String>) -> Self {
+        let name = name.into();
+        let tags = values
+            .into_iter()
+            .map(|value| TagRecord::new(name.clone(), value))
+            .collect();
+        Self {
+            tags,
+            ..Default::default()
+        }
+    }
 }
 
 impl EventRecord {
@@ -170,5 +214,34 @@ mod tests {
             value: "1".to_string(),
         };
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn tag_record_new_sets_fields() {
+        let record = TagRecord::new("e", "abc");
+        assert_eq!(record.name, "e");
+        assert_eq!(record.value, "abc");
+    }
+
+    #[test]
+    fn event_query_helpers_set_fields() {
+        let ids = vec!["aa".to_string(), "bb".to_string()];
+        let query = EventQuery::for_ids(ids.clone());
+        assert_eq!(query.ids, ids);
+
+        let authors = vec!["cc".to_string()];
+        let query = EventQuery::for_authors(authors.clone());
+        assert_eq!(query.authors, authors);
+
+        let kinds = vec![1, 2];
+        let query = EventQuery::for_kinds(kinds.clone());
+        assert_eq!(query.kinds, kinds);
+
+        let query = EventQuery::for_tag("e", vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(query.tags.len(), 2);
+        assert!(query
+            .tags
+            .iter()
+            .all(|tag| tag.name == "e"));
     }
 }
