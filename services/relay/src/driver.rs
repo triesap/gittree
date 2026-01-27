@@ -1,5 +1,5 @@
 use crate::{EventStore, Notice, ServerMessage, Session, encode_server_message};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 pub struct SessionDriver<S: EventStore> {
     session: Session<S>,
@@ -28,6 +28,44 @@ impl<S: EventStore> SessionDriver<S> {
             for response in responses {
                 if outbound.send(response).await.is_err() {
                     break;
+                }
+            }
+        }
+    }
+
+    pub async fn run_with_broadcast(
+        mut self,
+        mut inbound: mpsc::Receiver<String>,
+        outbound: mpsc::Sender<String>,
+        mut broadcast_rx: broadcast::Receiver<crate::NostrEvent>,
+    ) {
+        let outbound = outbound;
+        loop {
+            tokio::select! {
+                Some(input) = inbound.recv() => {
+                    let responses = self.handle_text(&input).await;
+                    for response in responses {
+                        if outbound.send(response).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                recv = broadcast_rx.recv() => {
+                    let event = match recv {
+                        Ok(event) => event,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    };
+                    let responses = self.session.dispatch_event(&event);
+                    for response in responses {
+                        let encoded = encode_response(response);
+                        if outbound.send(encoded).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                else => {
+                    return;
                 }
             }
         }

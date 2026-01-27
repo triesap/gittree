@@ -59,6 +59,33 @@ impl<S: EventStore> Session<S> {
         &self.registry
     }
 
+    pub fn dispatch_event(&self, event: &crate::NostrEvent) -> Vec<ServerMessage> {
+        let event_value = match serde_json::to_value(event) {
+            Ok(value) => value,
+            Err(_) => return vec![Notice::message("failed to serialize event").into()],
+        };
+
+        let tags = match crate::TagIndex::from_tags(&event.tags) {
+            Ok(tags) => tags,
+            Err(_) => return vec![Notice::message("invalid event tags").into()],
+        };
+
+        let mut responses = Vec::new();
+        for (sub_id, filters) in self.registry.iter() {
+            if filters.is_empty() {
+                continue;
+            }
+            let matches = filters.iter().any(|filter| filter.matches(event, &tags));
+            if matches {
+                responses.push(ServerMessage::Event {
+                    subscription_id: sub_id.as_str().to_string(),
+                    event: event_value.clone(),
+                });
+            }
+        }
+        responses
+    }
+
     pub async fn handle_raw(&mut self, input: &str) -> Vec<ServerMessage> {
         match decode_client_message(input) {
             Ok(message) => self.handle_message(message).await,
@@ -190,28 +217,7 @@ impl<S: EventStore> Session<S> {
             message,
         });
 
-        let event_value = match serde_json::to_value(event.clone()) {
-            Ok(value) => value,
-            Err(_) => return vec![Notice::message("failed to serialize event").into()],
-        };
-
-        let tags = match crate::TagIndex::from_tags(&event.tags) {
-            Ok(tags) => tags,
-            Err(_) => return vec![Notice::message("invalid event tags").into()],
-        };
-
-        for (sub_id, filters) in self.registry.iter() {
-            if filters.is_empty() {
-                continue;
-            }
-            let matches = filters.iter().any(|filter| filter.matches(&event, &tags));
-            if matches {
-                responses.push(ServerMessage::Event {
-                    subscription_id: sub_id.as_str().to_string(),
-                    event: event_value.clone(),
-                });
-            }
-        }
+        responses.extend(self.dispatch_event(&event));
 
         responses
     }
@@ -381,5 +387,22 @@ mod tests {
             response[0],
             ServerMessage::Ok { accepted: true, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_matches_subscriptions() {
+        let store = MemoryStore::new();
+        let mut session = Session::new(store);
+        session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        let event = signed_event("seed");
+        let responses = session.dispatch_event(&event);
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(responses[0], ServerMessage::Event { .. }));
     }
 }
