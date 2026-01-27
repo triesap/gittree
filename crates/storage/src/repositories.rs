@@ -74,6 +74,7 @@ pub struct InMemoryRepositories {
     mappings_by_forgejo: RwLock<HashMap<String, RepoMappingRecord>>,
     mappings_by_repo: RwLock<HashMap<String, RepoMappingRecord>>,
     relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
+    events: RwLock<HashMap<String, EventRecord>>,
 }
 
 impl InMemoryRepositories {
@@ -87,6 +88,10 @@ impl InMemoryRepositories {
 
     fn forgejo_key(owner: &str, repo: &str) -> String {
         format!("{owner}/{repo}")
+    }
+
+    fn event_key(event_id: &[u8]) -> String {
+        hex::encode(event_id)
     }
 }
 
@@ -243,15 +248,130 @@ impl RelayCompatibilityRepository for InMemoryRepositories {
     }
 }
 
+#[async_trait]
+impl EventRepository for InMemoryRepositories {
+    async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError> {
+        let key = Self::event_key(&record.id);
+        let mut map = self.events.write().map_err(|_| StorageError::Internal {
+            message: "event store poisoned".to_string(),
+        })?;
+        map.entry(key).or_insert(record);
+        Ok(())
+    }
+
+    async fn get_event(&self, event_id: &[u8]) -> Result<Option<EventRecord>, StorageError> {
+        let key = Self::event_key(event_id);
+        let map = self.events.read().map_err(|_| StorageError::Internal {
+            message: "event store poisoned".to_string(),
+        })?;
+        Ok(map.get(&key).cloned())
+    }
+
+    async fn delete_event(&self, event_id: &[u8]) -> Result<bool, StorageError> {
+        let key = Self::event_key(event_id);
+        let mut map = self.events.write().map_err(|_| StorageError::Internal {
+            message: "event store poisoned".to_string(),
+        })?;
+        Ok(map.remove(&key).is_some())
+    }
+
+    async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError> {
+        let map = self.events.read().map_err(|_| StorageError::Internal {
+            message: "event store poisoned".to_string(),
+        })?;
+
+        let mut tag_filters: HashMap<&str, Vec<&str>> = HashMap::new();
+        for tag in &query.tags {
+            tag_filters
+                .entry(tag.name.as_str())
+                .or_default()
+                .push(tag.value.as_str());
+        }
+
+        let mut results: Vec<EventRecord> = map
+            .values()
+            .filter(|event| {
+                if !query.ids.is_empty()
+                    && !query.ids.iter().any(|id| match hex::decode(id) {
+                        Ok(bytes) => bytes == event.id,
+                        Err(_) => false,
+                    })
+                {
+                    return false;
+                }
+
+                if !query.authors.is_empty()
+                    && !query.authors.iter().any(|author| match hex::decode(author) {
+                        Ok(bytes) => bytes == event.pubkey,
+                        Err(_) => false,
+                    })
+                {
+                    return false;
+                }
+
+                if !query.kinds.is_empty() && !query.kinds.contains(&event.kind) {
+                    return false;
+                }
+
+                if let Some(since) = query.since {
+                    if event.created_at < since {
+                        return false;
+                    }
+                }
+
+                if let Some(until) = query.until {
+                    if event.created_at > until {
+                        return false;
+                    }
+                }
+
+                if !tag_filters.is_empty() {
+                    let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+                    for tag in &event.tags {
+                        by_name
+                            .entry(tag.name.as_str())
+                            .or_default()
+                            .push(tag.value.as_str());
+                    }
+                    for (name, wanted) in &tag_filters {
+                        let Some(values) = by_name.get(name) else {
+                            return false;
+                        };
+                        if !values.iter().any(|value| wanted.contains(value)) {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            })
+            .cloned()
+            .collect();
+
+        results.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        if let Some(limit) = query.limit {
+            results.truncate(limit as usize);
+        }
+
+        Ok(results)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRepository,
-        RepoMappingRepository, StateRepository,
+        AnnouncementRepository, EventQuery, EventRecord, EventRepository, InMemoryRepositories,
+        RelayCompatibilityRepository, RepoMappingRepository, StateRepository,
     };
     use crate::{
         RelayCompatibilityRecord, RelayProbeMetadata, RepoAnnouncementRecord, RepoMappingRecord,
-        RepoStateRecord,
+        RepoStateRecord, TagRecord,
     };
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
@@ -302,6 +422,19 @@ mod tests {
             missing_required: Vec::new(),
             missing_optional: Vec::new(),
         }
+    }
+
+    fn event_record(event_id: &str, pubkey: &str, created_at: i64) -> EventRecord {
+        EventRecord::new(
+            event_id,
+            pubkey,
+            created_at,
+            1,
+            "content",
+            &format!("{pubkey}{pubkey}"),
+            vec![vec!["e".to_string(), "tag".to_string()]],
+        )
+        .expect("event record")
     }
 
     #[tokio::test]
@@ -408,5 +541,55 @@ mod tests {
             .await
             .expect("lookup");
         assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_event_repo_inserts_and_reads() {
+        let store = InMemoryRepositories::new();
+        let event_id = "11".repeat(32);
+        let pubkey = "22".repeat(32);
+        let record = event_record(&event_id, &pubkey, 1);
+
+        store.insert_event(record.clone()).await.expect("insert");
+        let fetched = store
+            .get_event(&hex::decode(event_id).expect("id"))
+            .await
+            .expect("get")
+            .expect("record");
+        assert_eq!(fetched, record);
+    }
+
+    #[tokio::test]
+    async fn in_memory_event_repo_filters_tags_and_kinds() {
+        let store = InMemoryRepositories::new();
+        let event_id = "aa".repeat(32);
+        let pubkey = "bb".repeat(32);
+        let mut record = event_record(&event_id, &pubkey, 5);
+        record.kind = 30000;
+        record.tags = vec![
+            TagRecord {
+                name: "d".to_string(),
+                value: "repo".to_string(),
+            },
+            TagRecord {
+                name: "e".to_string(),
+                value: "tag".to_string(),
+            },
+        ];
+
+        store.insert_event(record.clone()).await.expect("insert");
+
+        let query = EventQuery {
+            kinds: vec![30000],
+            tags: vec![TagRecord {
+                name: "d".to_string(),
+                value: "repo".to_string(),
+            }],
+            ..EventQuery::default()
+        };
+
+        let results = store.query_events(&query).await.expect("query");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], record);
     }
 }
