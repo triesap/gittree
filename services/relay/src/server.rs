@@ -52,13 +52,17 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
         .await
         .map_err(|err| RelayError::Serve(err.to_string()))?;
     axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|err| RelayError::Serve(err.to_string()))?;
     Ok(())
 }
 
 fn build_router(state: Arc<RelayState>) -> Router {
-    Router::new().route("/", get(root_handler)).with_state(state)
+    Router::new()
+        .route("/", get(root_handler))
+        .route("/health", get(health_handler))
+        .with_state(state)
 }
 
 async fn root_handler(
@@ -98,6 +102,14 @@ fn nip11_response(state: &RelayState) -> Response {
         HeaderValue::from_static("*"),
     );
     response
+}
+
+async fn health_handler() -> &'static str {
+    "ok"
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
@@ -218,6 +230,24 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         assert_eq!(content_type, "application/nostr+json");
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+        });
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]
