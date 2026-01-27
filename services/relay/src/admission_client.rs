@@ -1,6 +1,7 @@
 use gittree_core::{AdmissionDecision, EventFilter};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use async_trait::async_trait;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,8 +178,9 @@ impl std::fmt::Display for AdmissionHookError {
 
 impl std::error::Error for AdmissionHookError {}
 
+#[async_trait]
 pub trait AdmissionTransport: Send + Sync {
-    fn send(
+    async fn send(
         &self,
         endpoint: &str,
         request: &AdmissionRequestPayload,
@@ -186,12 +188,12 @@ pub trait AdmissionTransport: Send + Sync {
 }
 
 pub struct HttpAdmissionTransport {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl HttpAdmissionTransport {
     pub fn new(timeout: Duration) -> Result<Self, AdmissionHookError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|err| AdmissionHookError::Transport(err.to_string()))?;
@@ -199,8 +201,9 @@ impl HttpAdmissionTransport {
     }
 }
 
+#[async_trait]
 impl AdmissionTransport for HttpAdmissionTransport {
-    fn send(
+    async fn send(
         &self,
         endpoint: &str,
         request: &AdmissionRequestPayload,
@@ -210,11 +213,12 @@ impl AdmissionTransport for HttpAdmissionTransport {
             .post(endpoint)
             .json(request)
             .send()
+            .await
             .map_err(|err| AdmissionHookError::Transport(err.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().unwrap_or_default();
+            let body = response.text().await.unwrap_or_default();
             return Err(AdmissionHookError::Transport(format!(
                 "admission error {status}: {body}"
             )));
@@ -222,6 +226,7 @@ impl AdmissionTransport for HttpAdmissionTransport {
 
         response
             .json::<AdmissionDecisionPayload>()
+            .await
             .map_err(|err| AdmissionHookError::Decode(err.to_string()))
     }
 }
@@ -243,7 +248,7 @@ impl<T: AdmissionTransport> AdmissionHookClient<T> {
         Self { config, transport }
     }
 
-    pub fn decide(&self, event: &RelayEvent) -> AdmissionDecision {
+    pub async fn decide(&self, event: &RelayEvent) -> AdmissionDecision {
         let request = match AdmissionRequestPayload::try_from(event) {
             Ok(request) => request,
             Err(err) => {
@@ -254,7 +259,7 @@ impl<T: AdmissionTransport> AdmissionHookClient<T> {
             }
         };
 
-        match self.transport.send(&self.config.endpoint, &request) {
+        match self.transport.send(&self.config.endpoint, &request).await {
             Ok(payload) => match admission_decision_from_payload(payload) {
                 Ok(decision) => decision,
                 Err(err) => self.config.fallback.decision(&err),
@@ -301,6 +306,7 @@ mod tests {
     use super::AdmissionRequestPayload;
     use super::AdmissionTransport;
     use super::RelayEvent;
+    use async_trait::async_trait;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -319,8 +325,9 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl AdmissionTransport for MockTransport {
-        fn send(
+        async fn send(
             &self,
             endpoint: &str,
             request: &AdmissionRequestPayload,
@@ -343,8 +350,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn client_sends_expected_request() {
+    #[tokio::test]
+    async fn client_sends_expected_request() {
         let transport = MockTransport::with_result(Ok(AdmissionDecisionPayload::Accept));
         let config = AdmissionHookConfig::new(
             "http://admission.local/decide",
@@ -354,7 +361,7 @@ mod tests {
         let client = AdmissionHookClient::new(config, transport);
         let event = sample_event();
 
-        let decision = client.decide(&event);
+        let decision = client.decide(&event).await;
         assert!(matches!(decision, gittree_core::AdmissionDecision::Accept));
 
         let calls = client.transport.calls.lock().expect("calls lock");
@@ -369,8 +376,8 @@ mod tests {
         assert_eq!(payload.source_ip, event.source_ip);
     }
 
-    #[test]
-    fn client_falls_back_on_transport_error() {
+    #[tokio::test]
+    async fn client_falls_back_on_transport_error() {
         let transport =
             MockTransport::with_result(Err(AdmissionHookError::Transport("timeout".to_string())));
         let config = AdmissionHookConfig::new(
@@ -381,7 +388,7 @@ mod tests {
         let client = AdmissionHookClient::new(config, transport);
         let event = sample_event();
 
-        let decision = client.decide(&event);
+        let decision = client.decide(&event).await;
         match decision {
             gittree_core::AdmissionDecision::Reject { reason } => {
                 assert!(reason.contains("admission unavailable"));
@@ -390,8 +397,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn client_maps_requires_related_filters() {
+    #[tokio::test]
+    async fn client_maps_requires_related_filters() {
         let mut tags = BTreeMap::new();
         tags.insert("e".to_string(), vec!["event".to_string()]);
         let filter = AdmissionFilter {
@@ -413,7 +420,7 @@ mod tests {
         let client = AdmissionHookClient::new(config, transport);
         let event = sample_event();
 
-        let decision = client.decide(&event);
+        let decision = client.decide(&event).await;
         match decision {
             gittree_core::AdmissionDecision::RequiresRelatedEvents { filters } => {
                 assert_eq!(filters.len(), 1);
