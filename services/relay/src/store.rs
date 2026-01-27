@@ -1,5 +1,7 @@
 use crate::{Filter, NostrEvent, TagIndex};
+use async_trait::async_trait;
 use std::collections::{BTreeMap, HashSet};
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreOutcome {
@@ -22,24 +24,21 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
-pub trait EventStore {
-    fn insert(&mut self, event: NostrEvent) -> Result<StoreOutcome, StoreError>;
-    fn get(&self, id: &str) -> Result<Option<NostrEvent>, StoreError>;
-    fn delete(&mut self, id: &str) -> Result<bool, StoreError>;
-    fn query(&self, filters: &[Filter]) -> Result<Vec<NostrEvent>, StoreError>;
+#[async_trait]
+pub trait EventStore: Send + Sync {
+    async fn insert(&self, event: NostrEvent) -> Result<StoreOutcome, StoreError>;
+    async fn get(&self, id: &str) -> Result<Option<NostrEvent>, StoreError>;
+    async fn delete(&self, id: &str) -> Result<bool, StoreError>;
+    async fn query(&self, filters: &[Filter]) -> Result<Vec<NostrEvent>, StoreError>;
 }
 
 #[derive(Debug, Default)]
-pub struct MemoryStore {
+struct MemoryStoreState {
     events: BTreeMap<String, NostrEvent>,
     replaceable: BTreeMap<ReplaceableKey, String>,
 }
 
-impl MemoryStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+impl MemoryStoreState {
     fn remove_event(&mut self, id: &str) -> bool {
         let Some(event) = self.events.remove(id) else {
             return false;
@@ -76,46 +75,64 @@ impl MemoryStore {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct MemoryStore {
+    state: RwLock<MemoryStoreState>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self {
+            state: RwLock::new(MemoryStoreState::default()),
+        }
+    }
+}
+
+#[async_trait]
 impl EventStore for MemoryStore {
-    fn insert(&mut self, event: NostrEvent) -> Result<StoreOutcome, StoreError> {
-        if self.events.contains_key(&event.id) {
+    async fn insert(&self, event: NostrEvent) -> Result<StoreOutcome, StoreError> {
+        let mut state = self.state.write().await;
+        if state.events.contains_key(&event.id) {
             return Ok(StoreOutcome::Duplicate);
         }
 
         if event.kind == 5 {
-            self.apply_delete(&event);
+            state.apply_delete(&event);
         }
 
         if let Some(key) = replaceable_key(&event) {
-            if let Some(existing_id) = self.replaceable.get(&key).cloned() {
-                if let Some(existing) = self.events.get(&existing_id) {
+            if let Some(existing_id) = state.replaceable.get(&key).cloned() {
+                if let Some(existing) = state.events.get(&existing_id) {
                     if existing.created_at >= event.created_at {
                         return Ok(StoreOutcome::Duplicate);
                     }
                 }
-                self.remove_event(&existing_id);
+                state.remove_event(&existing_id);
             }
-            self.replaceable.insert(key, event.id.clone());
+            state.replaceable.insert(key, event.id.clone());
         }
 
-        self.events.insert(event.id.clone(), event);
+        state.events.insert(event.id.clone(), event);
         Ok(StoreOutcome::Inserted)
     }
 
-    fn get(&self, id: &str) -> Result<Option<NostrEvent>, StoreError> {
-        Ok(self.events.get(id).cloned())
+    async fn get(&self, id: &str) -> Result<Option<NostrEvent>, StoreError> {
+        let state = self.state.read().await;
+        Ok(state.events.get(id).cloned())
     }
 
-    fn delete(&mut self, id: &str) -> Result<bool, StoreError> {
-        Ok(self.remove_event(id))
+    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+        let mut state = self.state.write().await;
+        Ok(state.remove_event(id))
     }
 
-    fn query(&self, filters: &[Filter]) -> Result<Vec<NostrEvent>, StoreError> {
+    async fn query(&self, filters: &[Filter]) -> Result<Vec<NostrEvent>, StoreError> {
         if filters.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut ordered: Vec<&NostrEvent> = self.events.values().collect();
+        let state = self.state.read().await;
+        let mut ordered: Vec<&NostrEvent> = state.events.values().collect();
         ordered.sort_by(|left, right| {
             right
                 .created_at
@@ -223,36 +240,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn insert_and_get_event() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn insert_and_get_event() {
+        let store = MemoryStore::new();
         let event = sample_event("abc");
-        let outcome = store.insert(event.clone()).expect("insert");
+        let outcome = store.insert(event.clone()).await.expect("insert");
         assert_eq!(outcome, StoreOutcome::Inserted);
 
-        let fetched = store.get("abc").expect("get").expect("event");
+        let fetched = store.get("abc").await.expect("get").expect("event");
         assert_eq!(fetched.id, event.id);
     }
 
-    #[test]
-    fn insert_reports_duplicates() {
-        let mut store = MemoryStore::new();
-        store.insert(sample_event("dup")).expect("insert");
-        let outcome = store.insert(sample_event("dup")).expect("insert");
+    #[tokio::test]
+    async fn insert_reports_duplicates() {
+        let store = MemoryStore::new();
+        store.insert(sample_event("dup")).await.expect("insert");
+        let outcome = store.insert(sample_event("dup")).await.expect("insert");
         assert_eq!(outcome, StoreOutcome::Duplicate);
     }
 
-    #[test]
-    fn delete_removes_event() {
-        let mut store = MemoryStore::new();
-        store.insert(sample_event("gone")).expect("insert");
-        assert!(store.delete("gone").expect("delete"));
-        assert!(store.get("gone").expect("get").is_none());
+    #[tokio::test]
+    async fn delete_removes_event() {
+        let store = MemoryStore::new();
+        store.insert(sample_event("gone")).await.expect("insert");
+        assert!(store.delete("gone").await.expect("delete"));
+        assert!(store.get("gone").await.expect("get").is_none());
     }
 
-    #[test]
-    fn query_orders_by_created_at_desc() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn query_orders_by_created_at_desc() {
+        let store = MemoryStore::new();
         let mut event_a = sample_event("a");
         event_a.created_at = 10;
         let mut event_b = sample_event("b");
@@ -260,94 +277,94 @@ mod tests {
         let mut event_c = sample_event("c");
         event_c.created_at = 20;
 
-        store.insert(event_a).expect("insert");
-        store.insert(event_b).expect("insert");
-        store.insert(event_c).expect("insert");
+        store.insert(event_a).await.expect("insert");
+        store.insert(event_b).await.expect("insert");
+        store.insert(event_c).await.expect("insert");
 
         let filter = crate::Filter::from_json(&json!({})).expect("filter");
-        let results = store.query(&[filter]).expect("query");
+        let results = store.query(&[filter]).await.expect("query");
         let ids: Vec<String> = results.into_iter().map(|event| event.id).collect();
         assert_eq!(ids, vec!["b", "c", "a"]);
     }
 
-    #[test]
-    fn query_applies_limit() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn query_applies_limit() {
+        let store = MemoryStore::new();
         for id in ["a", "b", "c"] {
             let mut event = sample_event(id);
             event.created_at = 10;
-            store.insert(event).expect("insert");
+            store.insert(event).await.expect("insert");
         }
 
         let filter = crate::Filter::from_json(&json!({"limit": 1})).expect("filter");
-        let results = store.query(&[filter]).expect("query");
+        let results = store.query(&[filter]).await.expect("query");
         assert_eq!(results.len(), 1);
     }
 
-    #[test]
-    fn query_dedupes_across_filters() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn query_dedupes_across_filters() {
+        let store = MemoryStore::new();
         let event = sample_event("dup");
-        store.insert(event).expect("insert");
+        store.insert(event).await.expect("insert");
 
         let filter_a = crate::Filter::from_json(&json!({"ids": ["d"]})).expect("filter");
         let filter_b = crate::Filter::from_json(&json!({"authors": ["aa"]})).expect("filter");
-        let results = store.query(&[filter_a, filter_b]).expect("query");
+        let results = store.query(&[filter_a, filter_b]).await.expect("query");
         assert_eq!(results.len(), 1);
     }
 
-    #[test]
-    fn replaceable_events_replace_older_versions() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn replaceable_events_replace_older_versions() {
+        let store = MemoryStore::new();
         let mut older = sample_event("old");
         older.kind = 0;
         older.created_at = 10;
         older.pubkey = "aa".repeat(32);
-        store.insert(older).expect("insert");
+        store.insert(older).await.expect("insert");
 
         let mut newer = sample_event("new");
         newer.kind = 0;
         newer.created_at = 20;
         newer.pubkey = "aa".repeat(32);
-        let outcome = store.insert(newer.clone()).expect("insert");
+        let outcome = store.insert(newer.clone()).await.expect("insert");
         assert_eq!(outcome, StoreOutcome::Inserted);
-        assert!(store.get("old").expect("get").is_none());
-        assert!(store.get("new").expect("get").is_some());
+        assert!(store.get("old").await.expect("get").is_none());
+        assert!(store.get("new").await.expect("get").is_some());
     }
 
-    #[test]
-    fn replaceable_events_reject_older_updates() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn replaceable_events_reject_older_updates() {
+        let store = MemoryStore::new();
         let mut newer = sample_event("new");
         newer.kind = 0;
         newer.created_at = 20;
         newer.pubkey = "aa".repeat(32);
-        store.insert(newer).expect("insert");
+        store.insert(newer).await.expect("insert");
 
         let mut older = sample_event("old");
         older.kind = 0;
         older.created_at = 10;
         older.pubkey = "aa".repeat(32);
-        let outcome = store.insert(older).expect("insert");
+        let outcome = store.insert(older).await.expect("insert");
         assert_eq!(outcome, StoreOutcome::Duplicate);
     }
 
-    #[test]
-    fn delete_event_removes_matching_event() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn delete_event_removes_matching_event() {
+        let store = MemoryStore::new();
         let mut target = sample_event("target");
         target.pubkey = "aa".repeat(32);
         target.created_at = 5;
-        store.insert(target).expect("insert");
+        store.insert(target).await.expect("insert");
 
         let mut delete = sample_event("delete");
         delete.kind = 5;
         delete.pubkey = "aa".repeat(32);
         delete.created_at = 10;
         delete.tags = vec![vec!["e".to_string(), "target".to_string()]];
-        store.insert(delete.clone()).expect("insert");
+        store.insert(delete.clone()).await.expect("insert");
 
-        assert!(store.get("target").expect("get").is_none());
-        assert!(store.get("delete").expect("get").is_some());
+        assert!(store.get("target").await.expect("get").is_none());
+        assert!(store.get("delete").await.expect("get").is_some());
     }
 }

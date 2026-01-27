@@ -33,14 +33,14 @@ impl<S: EventStore> Session<S> {
         &self.registry
     }
 
-    pub fn handle_raw(&mut self, input: &str) -> Vec<ServerMessage> {
+    pub async fn handle_raw(&mut self, input: &str) -> Vec<ServerMessage> {
         match decode_client_message(input) {
-            Ok(message) => self.handle_message(message),
+            Ok(message) => self.handle_message(message).await,
             Err(err) => vec![Notice::from(err).into()],
         }
     }
 
-    pub fn handle_message(&mut self, message: ClientMessage) -> Vec<ServerMessage> {
+    pub async fn handle_message(&mut self, message: ClientMessage) -> Vec<ServerMessage> {
         match message {
             ClientMessage::Req {
                 subscription_id,
@@ -50,7 +50,7 @@ impl<S: EventStore> Session<S> {
                     Ok(filters) => filters,
                     Err(err) => return vec![Notice::from(err).into()],
                 };
-                let events = match self.store.query(&parsed) {
+                let events = match self.store.query(&parsed).await {
                     Ok(events) => events,
                     Err(err) => return vec![Notice::from(err).into()],
                 };
@@ -79,12 +79,12 @@ impl<S: EventStore> Session<S> {
                 self.registry.remove(&SubscriptionId::new(subscription_id));
                 Vec::new()
             }
-            ClientMessage::Event(value) => self.handle_event(value),
+            ClientMessage::Event(value) => self.handle_event(value).await,
             ClientMessage::Auth(_) | ClientMessage::Count { .. } => Vec::new(),
         }
     }
 
-    fn handle_event(&mut self, value: Value) -> Vec<ServerMessage> {
+    async fn handle_event(&mut self, value: Value) -> Vec<ServerMessage> {
         let event: crate::NostrEvent = match serde_json::from_value(value) {
             Ok(event) => event,
             Err(_) => return vec![Notice::message("invalid event").into()],
@@ -110,7 +110,7 @@ impl<S: EventStore> Session<S> {
             }];
         }
 
-        let outcome = match self.store.insert(event.clone()) {
+        let outcome = match self.store.insert(event.clone()).await {
             Ok(outcome) => outcome,
             Err(err) => return vec![Notice::from(err).into()],
         };
@@ -166,32 +166,36 @@ mod tests {
     use crate::{ClientMessage, EventStore, MemoryStore, NostrEvent, ServerMessage};
     use serde_json::json;
 
-    #[test]
-    fn handle_raw_reports_invalid_messages() {
+    #[tokio::test]
+    async fn handle_raw_reports_invalid_messages() {
         let mut session = Session::new(MemoryStore::new());
-        let responses = session.handle_raw("{\"bad\":true}");
+        let responses = session.handle_raw("{\"bad\":true}").await;
         assert_eq!(responses.len(), 1);
         assert!(matches!(responses[0], ServerMessage::Notice { .. }));
     }
 
-    #[test]
-    fn handle_message_updates_subscriptions() {
+    #[tokio::test]
+    async fn handle_message_updates_subscriptions() {
         let mut session = Session::new(MemoryStore::new());
-        session.handle_message(ClientMessage::Req {
+        session
+            .handle_message(ClientMessage::Req {
             subscription_id: "sub".to_string(),
             filters: vec![json!({})],
-        });
+            })
+            .await;
         assert!(session.registry().contains(&crate::SubscriptionId::new("sub")));
 
-        session.handle_message(ClientMessage::Close {
+        session
+            .handle_message(ClientMessage::Close {
             subscription_id: "sub".to_string(),
-        });
+            })
+            .await;
         assert!(!session.registry().contains(&crate::SubscriptionId::new("sub")));
     }
 
-    #[test]
-    fn req_sends_events_and_eose() {
-        let mut store = MemoryStore::new();
+    #[tokio::test]
+    async fn req_sends_events_and_eose() {
+        let store = MemoryStore::new();
         let event = NostrEvent {
             id: "id".to_string(),
             pubkey: "aa".repeat(32),
@@ -201,13 +205,15 @@ mod tests {
             content: String::new(),
             sig: "00".repeat(64),
         };
-        store.insert(event).expect("insert");
+        store.insert(event).await.expect("insert");
 
         let mut session = Session::new(store);
-        let responses = session.handle_message(ClientMessage::Req {
+        let responses = session
+            .handle_message(ClientMessage::Req {
             subscription_id: "sub".to_string(),
             filters: vec![json!({})],
-        });
+            })
+            .await;
 
         assert_eq!(responses.len(), 2);
         assert!(matches!(responses[0], ServerMessage::Event { .. }));
