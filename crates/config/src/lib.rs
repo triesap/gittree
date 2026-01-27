@@ -23,6 +23,8 @@ const ENV_RELAY_POLICY_MAX_FUTURE_SECS: &str = "GITTREE_RELAY_POLICY_MAX_FUTURE_
 const ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS: &str = "GITTREE_RELAY_POLICY_MAX_SUBSCRIPTIONS";
 const ENV_RELAY_POLICY_MAX_LIMIT: &str = "GITTREE_RELAY_POLICY_MAX_LIMIT";
 const ENV_RELAY_POLICY_MAX_MESSAGE_BYTES: &str = "GITTREE_RELAY_POLICY_MAX_MESSAGE_BYTES";
+const ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN: &str = "GITTREE_RELAY_POLICY_MAX_EVENTS_PER_MIN";
+const ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN: &str = "GITTREE_RELAY_POLICY_MAX_REQUESTS_PER_MIN";
 const ENV_RELAY_POLICY_AUTH_REQUIRED: &str = "GITTREE_RELAY_POLICY_AUTH_REQUIRED";
 const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
 const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
@@ -225,6 +227,8 @@ pub struct RelayPolicyConfig {
     pub max_subscriptions: Option<u64>,
     pub max_limit: Option<u64>,
     pub max_message_bytes: Option<u64>,
+    pub max_events_per_min: Option<u64>,
+    pub max_requests_per_min: Option<u64>,
     pub auth_required: bool,
 }
 
@@ -239,6 +243,8 @@ impl Default for RelayPolicyConfig {
             max_subscriptions: None,
             max_limit: None,
             max_message_bytes: None,
+            max_events_per_min: None,
+            max_requests_per_min: None,
             auth_required: false,
         }
     }
@@ -278,6 +284,14 @@ impl RelayPolicyConfig {
             ENV_RELAY_POLICY_MAX_MESSAGE_BYTES,
             "relay_policy.max_message_bytes",
         )?;
+        let max_events_per_min = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN,
+            "relay_policy.max_events_per_min",
+        )?;
+        let max_requests_per_min = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN,
+            "relay_policy.max_requests_per_min",
+        )?;
         let auth_required = env_bool_policy(
             ENV_RELAY_POLICY_AUTH_REQUIRED,
             "relay_policy.auth_required",
@@ -293,6 +307,8 @@ impl RelayPolicyConfig {
             max_subscriptions,
             max_limit,
             max_message_bytes,
+            max_events_per_min,
+            max_requests_per_min,
             auth_required,
         };
         config.validate()?;
@@ -321,6 +337,12 @@ impl RelayPolicyConfig {
         }
         if let Some(limit) = self.max_message_bytes {
             validate_policy_limit("relay_policy.max_message_bytes", limit)?;
+        }
+        if let Some(limit) = self.max_events_per_min {
+            validate_policy_limit("relay_policy.max_events_per_min", limit)?;
+        }
+        if let Some(limit) = self.max_requests_per_min {
+            validate_policy_limit("relay_policy.max_requests_per_min", limit)?;
         }
         Ok(())
     }
@@ -651,6 +673,8 @@ struct TomlRelayPolicyConfig {
     max_subscriptions: Option<u64>,
     max_limit: Option<u64>,
     max_message_bytes: Option<u64>,
+    max_events_per_min: Option<u64>,
+    max_requests_per_min: Option<u64>,
     auth_required: Option<bool>,
 }
 
@@ -665,6 +689,8 @@ impl TomlRelayPolicyRoot {
             max_subscriptions: None,
             max_limit: None,
             max_message_bytes: None,
+            max_events_per_min: None,
+            max_requests_per_min: None,
             auth_required: None,
         });
         RelayPolicyConfig {
@@ -684,6 +710,8 @@ impl TomlRelayPolicyRoot {
             max_subscriptions: config.max_subscriptions,
             max_limit: config.max_limit,
             max_message_bytes: config.max_message_bytes,
+            max_events_per_min: config.max_events_per_min,
+            max_requests_per_min: config.max_requests_per_min,
             auth_required: config.auth_required.unwrap_or(false),
         }
     }
@@ -904,9 +932,11 @@ mod tests {
     use crate::ENV_RELAY_COMPAT_MODE;
     use crate::ENV_RELAY_POLICY_AUTH_REQUIRED;
     use crate::ENV_RELAY_POLICY_MAX_CONTENT_LEN;
+    use crate::ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN;
     use crate::ENV_RELAY_POLICY_MAX_FUTURE_SECS;
     use crate::ENV_RELAY_POLICY_MAX_LIMIT;
     use crate::ENV_RELAY_POLICY_MAX_MESSAGE_BYTES;
+    use crate::ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN;
     use crate::ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS;
     use crate::ENV_RELAY_POLICY_MAX_TAGS;
     use crate::ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN;
@@ -1105,18 +1135,24 @@ secret_key = "22"
                             with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "9", || {
                                 with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "200", || {
                                     with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "9999", || {
-                                        with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "true", || {
-                                            let config =
-                                                RelayPolicyConfig::from_env().expect("policy");
-                                            assert_eq!(config.max_content_len, 9000);
-                                            assert_eq!(config.max_tags, 33);
-                                            assert_eq!(config.max_tag_values, 12);
-                                            assert_eq!(config.max_tag_value_len, 120);
-                                            assert_eq!(config.max_future_seconds, 30);
-                                            assert_eq!(config.max_subscriptions, Some(9));
-                                            assert_eq!(config.max_limit, Some(200));
-                                            assert_eq!(config.max_message_bytes, Some(9999));
-                                            assert!(config.auth_required);
+                                        with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "60", || {
+                                            with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "30", || {
+                                                with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "true", || {
+                                                    let config =
+                                                        RelayPolicyConfig::from_env().expect("policy");
+                                                    assert_eq!(config.max_content_len, 9000);
+                                                    assert_eq!(config.max_tags, 33);
+                                                    assert_eq!(config.max_tag_values, 12);
+                                                    assert_eq!(config.max_tag_value_len, 120);
+                                                    assert_eq!(config.max_future_seconds, 30);
+                                                    assert_eq!(config.max_subscriptions, Some(9));
+                                                    assert_eq!(config.max_limit, Some(200));
+                                                    assert_eq!(config.max_message_bytes, Some(9999));
+                                                    assert_eq!(config.max_events_per_min, Some(60));
+                                                    assert_eq!(config.max_requests_per_min, Some(30));
+                                                    assert!(config.auth_required);
+                                                });
+                                            });
                                         });
                                     });
                                 });
@@ -1140,6 +1176,8 @@ secret_key = "22"
             std::env::remove_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS);
             std::env::remove_var(ENV_RELAY_POLICY_MAX_LIMIT);
             std::env::remove_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN);
             std::env::remove_var(ENV_RELAY_POLICY_AUTH_REQUIRED);
         }
         let config = RelayPolicyConfig::from_env().expect("policy");
@@ -1151,6 +1189,8 @@ secret_key = "22"
         assert_eq!(config.max_subscriptions, None);
         assert_eq!(config.max_limit, None);
         assert_eq!(config.max_message_bytes, None);
+        assert_eq!(config.max_events_per_min, None);
+        assert_eq!(config.max_requests_per_min, None);
         assert!(!config.auth_required);
     }
 
@@ -1178,6 +1218,8 @@ max_future_seconds = 10
 max_subscriptions = 5
 max_limit = 250
 max_message_bytes = 10000
+max_events_per_min = 60
+max_requests_per_min = 30
 auth_required = true
 "#,
         )
@@ -1190,6 +1232,8 @@ auth_required = true
         assert_eq!(config.max_subscriptions, Some(5));
         assert_eq!(config.max_limit, Some(250));
         assert_eq!(config.max_message_bytes, Some(10000));
+        assert_eq!(config.max_events_per_min, Some(60));
+        assert_eq!(config.max_requests_per_min, Some(30));
         assert!(config.auth_required);
     }
 

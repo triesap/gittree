@@ -6,7 +6,7 @@ use gittree_core::AdmissionDecision;
 use serde_json::Value;
 use secp256k1::rand::{rngs::OsRng, RngCore};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 const AUTH_KIND: u32 = 22242;
@@ -25,6 +25,89 @@ impl AuthState {
     }
 }
 
+struct RateLimitConfig {
+    max_events_per_min: Option<u64>,
+    max_requests_per_min: Option<u64>,
+    window: Duration,
+}
+
+impl RateLimitConfig {
+    fn from_policy(policy: &Policy) -> Option<Self> {
+        if policy.max_events_per_min.is_none() && policy.max_requests_per_min.is_none() {
+            return None;
+        }
+        Some(Self {
+            max_events_per_min: policy.max_events_per_min,
+            max_requests_per_min: policy.max_requests_per_min,
+            window: Duration::from_secs(60),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RateLimitCounter {
+    count: u64,
+    window_start: Instant,
+}
+
+struct RateLimiter {
+    config: RateLimitConfig,
+    events: RateLimitCounter,
+    requests: RateLimitCounter,
+}
+
+impl RateLimiter {
+    fn new(config: RateLimitConfig) -> Self {
+        let now = Instant::now();
+        Self {
+            config,
+            events: RateLimitCounter {
+                count: 0,
+                window_start: now,
+            },
+            requests: RateLimitCounter {
+                count: 0,
+                window_start: now,
+            },
+        }
+    }
+
+    fn check_event(&mut self) -> bool {
+        let limit = self.config.max_events_per_min;
+        let window = self.config.window;
+        Self::hit_limit(&mut self.events, limit, window)
+    }
+
+    fn check_request(&mut self) -> bool {
+        let limit = self.config.max_requests_per_min;
+        let window = self.config.window;
+        Self::hit_limit(&mut self.requests, limit, window)
+    }
+
+    fn hit_limit(
+        counter: &mut RateLimitCounter,
+        limit: Option<u64>,
+        window: Duration,
+    ) -> bool {
+        let Some(limit) = limit else {
+            return false;
+        };
+        if limit == 0 {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(counter.window_start) >= window {
+            counter.count = 0;
+            counter.window_start = now;
+        }
+        if counter.count >= limit {
+            return true;
+        }
+        counter.count += 1;
+        false
+    }
+}
+
 pub struct Session<S: EventStore> {
     registry: SubscriptionRegistry,
     store: S,
@@ -32,17 +115,20 @@ pub struct Session<S: EventStore> {
     admission: Option<Arc<dyn AdmissionDecider>>,
     broadcast: Option<broadcast::Sender<crate::NostrEvent>>,
     auth: Option<AuthState>,
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl<S: EventStore> Session<S> {
     pub fn new(store: S) -> Self {
+        let policy = Policy::default();
         Self {
             registry: SubscriptionRegistry::default(),
             store,
-            policy: Policy::default(),
+            policy,
             admission: None,
             broadcast: None,
             auth: None,
+            rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
         }
     }
 
@@ -54,17 +140,20 @@ impl<S: EventStore> Session<S> {
             admission: None,
             broadcast: None,
             auth: None,
+            rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
         }
     }
 
     pub fn with_admission(store: S, admission: Arc<dyn AdmissionDecider>) -> Self {
+        let policy = Policy::default();
         Self {
             registry: SubscriptionRegistry::default(),
             store,
-            policy: Policy::default(),
+            policy,
             admission: Some(admission),
             broadcast: None,
             auth: None,
+            rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
         }
     }
 
@@ -80,6 +169,7 @@ impl<S: EventStore> Session<S> {
             admission: Some(admission),
             broadcast: None,
             auth: None,
+            rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
         }
     }
 
@@ -91,6 +181,7 @@ impl<S: EventStore> Session<S> {
             admission: None,
             broadcast: None,
             auth: auth_state(auth_required),
+            rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
         }
     }
 
@@ -108,6 +199,7 @@ impl<S: EventStore> Session<S> {
             admission,
             broadcast: Some(broadcast),
             auth: auth_state(auth_required),
+            rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
         }
     }
 
@@ -172,6 +264,9 @@ impl<S: EventStore> Session<S> {
                 subscription_id,
                 filters,
             } => {
+                if let Some(notice) = self.rate_limit_request() {
+                    return vec![notice.into()];
+                }
                 let parsed = match parse_filters(&filters) {
                     Ok(filters) => filters,
                     Err(err) => return vec![Notice::from(err).into()],
@@ -221,6 +316,9 @@ impl<S: EventStore> Session<S> {
                 subscription_id,
                 filters,
             } => {
+                if let Some(notice) = self.rate_limit_request() {
+                    return vec![notice.into()];
+                }
                 let parsed = match parse_filters(&filters) {
                     Ok(filters) => filters,
                     Err(err) => return vec![Notice::from(err).into()],
@@ -257,11 +355,32 @@ impl<S: EventStore> Session<S> {
         }
     }
 
+    fn rate_limit_event(&mut self) -> Option<Notice> {
+        if let Some(limiter) = &mut self.rate_limiter {
+            if limiter.check_event() {
+                return Some(Notice::message("rate limited"));
+            }
+        }
+        None
+    }
+
+    fn rate_limit_request(&mut self) -> Option<Notice> {
+        if let Some(limiter) = &mut self.rate_limiter {
+            if limiter.check_request() {
+                return Some(Notice::message("rate limited"));
+            }
+        }
+        None
+    }
+
     async fn handle_event(&mut self, value: Value) -> Vec<ServerMessage> {
         let event: crate::NostrEvent = match serde_json::from_value(value) {
             Ok(event) => event,
             Err(_) => return vec![Notice::message("invalid event").into()],
         };
+        if let Some(notice) = self.rate_limit_event() {
+            return vec![notice.into()];
+        }
 
         if let Err(err) = event.verify() {
             return vec![ServerMessage::Ok {
@@ -627,6 +746,51 @@ mod tests {
                 filters: vec![json!({"limit": 5})],
             })
             .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+    }
+
+    #[tokio::test]
+    async fn req_rate_limiter_rejects_excess_requests() {
+        let store = MemoryStore::new();
+        let policy = Policy {
+            max_requests_per_min: Some(1),
+            ..Policy::default()
+        };
+        let mut session = Session::with_policy(store, policy);
+        let _ = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub-1".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        let responses = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub-2".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+    }
+
+    #[tokio::test]
+    async fn event_rate_limiter_rejects_excess_events() {
+        let store = MemoryStore::new();
+        let policy = Policy {
+            max_events_per_min: Some(1),
+            ..Policy::default()
+        };
+        let mut session = Session::with_policy(store, policy);
+
+        let first = serde_json::to_value(signed_event("rate-1")).expect("event");
+        let second = serde_json::to_value(signed_event("rate-2")).expect("event");
+
+        let _ = session.handle_message(ClientMessage::Event(first)).await;
+        let responses = session.handle_message(ClientMessage::Event(second)).await;
 
         assert_eq!(responses.len(), 1);
         assert!(matches!(responses[0], ServerMessage::Notice { .. }));

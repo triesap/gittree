@@ -11,6 +11,8 @@ pub struct Policy {
     pub max_subscriptions: Option<usize>,
     pub max_limit: Option<u64>,
     pub max_message_bytes: Option<usize>,
+    pub max_events_per_min: Option<u64>,
+    pub max_requests_per_min: Option<u64>,
 }
 
 impl Default for Policy {
@@ -24,6 +26,8 @@ impl Default for Policy {
             max_subscriptions: None,
             max_limit: None,
             max_message_bytes: None,
+            max_events_per_min: None,
+            max_requests_per_min: None,
         }
     }
 }
@@ -62,6 +66,8 @@ impl Policy {
             max_subscriptions: config.max_subscriptions.map(|value| value as usize),
             max_limit: config.max_limit,
             max_message_bytes: config.max_message_bytes.map(|value| value as usize),
+            max_events_per_min: config.max_events_per_min,
+            max_requests_per_min: config.max_requests_per_min,
         }
     }
 
@@ -130,6 +136,8 @@ mod tests {
             max_subscriptions: Some(9),
             max_limit: Some(100),
             max_message_bytes: Some(1024),
+            max_events_per_min: Some(7),
+            max_requests_per_min: Some(5),
             auth_required: false,
         };
         let policy = Policy::from_config(&config);
@@ -141,6 +149,8 @@ mod tests {
         assert_eq!(policy.max_subscriptions, Some(9));
         assert_eq!(policy.max_limit, Some(100));
         assert_eq!(policy.max_message_bytes, Some(1024));
+        assert_eq!(policy.max_events_per_min, Some(7));
+        assert_eq!(policy.max_requests_per_min, Some(5));
     }
 
     #[test]
