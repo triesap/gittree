@@ -13,6 +13,7 @@ pub struct Policy {
     pub max_message_bytes: Option<usize>,
     pub max_events_per_min: Option<u64>,
     pub max_requests_per_min: Option<u64>,
+    pub retention_max_age_seconds: Option<i64>,
 }
 
 impl Default for Policy {
@@ -28,6 +29,7 @@ impl Default for Policy {
             max_message_bytes: None,
             max_events_per_min: None,
             max_requests_per_min: None,
+            retention_max_age_seconds: None,
         }
     }
 }
@@ -68,6 +70,7 @@ impl Policy {
             max_message_bytes: config.max_message_bytes.map(|value| value as usize),
             max_events_per_min: config.max_events_per_min,
             max_requests_per_min: config.max_requests_per_min,
+            retention_max_age_seconds: config.retention_max_age_seconds.map(|value| value as i64),
         }
     }
 
@@ -138,6 +141,7 @@ mod tests {
             max_message_bytes: Some(1024),
             max_events_per_min: Some(7),
             max_requests_per_min: Some(5),
+            retention_max_age_seconds: Some(3600),
             auth_required: false,
         };
         let policy = Policy::from_config(&config);
@@ -151,6 +155,7 @@ mod tests {
         assert_eq!(policy.max_message_bytes, Some(1024));
         assert_eq!(policy.max_events_per_min, Some(7));
         assert_eq!(policy.max_requests_per_min, Some(5));
+        assert_eq!(policy.retention_max_age_seconds, Some(3600));
     }
 
     #[test]

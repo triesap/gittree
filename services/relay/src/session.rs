@@ -1,10 +1,12 @@
 use crate::{
     AdmissionDecider, ClientMessage, EventStore, Filter, Notice, Policy, RelayEvent, RelayMetrics,
-    ServerMessage, StoreOutcome, SubscriptionId, SubscriptionRegistry, decode_client_message,
+    ServerMessage, StoreError, StoreOutcome, SubscriptionId, SubscriptionRegistry,
+    decode_client_message,
 };
 use gittree_core::AdmissionDecision;
 use serde_json::Value;
 use secp256k1::rand::{rngs::OsRng, RngCore};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
@@ -514,6 +516,10 @@ impl<S: EventStore> Session<S> {
             }
         };
 
+        if matches!(outcome, StoreOutcome::Inserted) {
+            let _ = self.apply_retention(now).await;
+        }
+
         let mut responses = Vec::new();
         let message = match outcome {
             StoreOutcome::Inserted => {
@@ -540,6 +546,36 @@ impl<S: EventStore> Session<S> {
         responses.extend(self.dispatch_event(&event));
 
         responses
+    }
+
+    async fn apply_retention(&self, now: i64) -> Result<(), StoreError> {
+        let Some(max_age) = self.policy.retention_max_age_seconds else {
+            return Ok(());
+        };
+        if max_age <= 0 {
+            return Ok(());
+        }
+        let cutoff = now.saturating_sub(max_age);
+        let filter = Filter {
+            ids: Vec::new(),
+            authors: Vec::new(),
+            kinds: Vec::new(),
+            since: None,
+            until: Some(cutoff),
+            limit: Some(100),
+            tags: BTreeMap::new(),
+        };
+
+        loop {
+            let events = self.store.query(&[filter.clone()]).await?;
+            if events.is_empty() {
+                break;
+            }
+            for event in events {
+                let _ = self.store.delete(&event.id).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn handle_auth(&mut self, value: Value) -> Vec<ServerMessage> {
@@ -849,6 +885,56 @@ mod tests {
 
         assert_eq!(responses.len(), 1);
         assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+    }
+
+    #[tokio::test]
+    async fn retention_prunes_events_older_than_cutoff() {
+        let store = MemoryStore::new();
+        let old = NostrEvent {
+            id: "old".to_string(),
+            pubkey: "aa".repeat(32),
+            created_at: 10,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "00".repeat(64),
+        };
+        let new = NostrEvent {
+            id: "new".to_string(),
+            pubkey: "aa".repeat(32),
+            created_at: 100,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "00".repeat(64),
+        };
+        store.insert(old).await.expect("insert");
+        store.insert(new).await.expect("insert");
+
+        let policy = Policy {
+            retention_max_age_seconds: Some(50),
+            ..Policy::default()
+        };
+        let mut session = Session::with_policy(store, policy);
+        session.apply_retention(100).await.expect("retention");
+
+        let responses = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        let ids: Vec<String> = responses
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Event { event, .. } => event
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["new".to_string()]);
     }
 
     #[test]

@@ -25,6 +25,8 @@ const ENV_RELAY_POLICY_MAX_LIMIT: &str = "GITTREE_RELAY_POLICY_MAX_LIMIT";
 const ENV_RELAY_POLICY_MAX_MESSAGE_BYTES: &str = "GITTREE_RELAY_POLICY_MAX_MESSAGE_BYTES";
 const ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN: &str = "GITTREE_RELAY_POLICY_MAX_EVENTS_PER_MIN";
 const ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN: &str = "GITTREE_RELAY_POLICY_MAX_REQUESTS_PER_MIN";
+const ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS: &str =
+    "GITTREE_RELAY_POLICY_RETENTION_MAX_AGE_SECS";
 const ENV_RELAY_POLICY_AUTH_REQUIRED: &str = "GITTREE_RELAY_POLICY_AUTH_REQUIRED";
 const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
 const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
@@ -229,6 +231,7 @@ pub struct RelayPolicyConfig {
     pub max_message_bytes: Option<u64>,
     pub max_events_per_min: Option<u64>,
     pub max_requests_per_min: Option<u64>,
+    pub retention_max_age_seconds: Option<u64>,
     pub auth_required: bool,
 }
 
@@ -245,6 +248,7 @@ impl Default for RelayPolicyConfig {
             max_message_bytes: None,
             max_events_per_min: None,
             max_requests_per_min: None,
+            retention_max_age_seconds: None,
             auth_required: false,
         }
     }
@@ -292,6 +296,10 @@ impl RelayPolicyConfig {
             ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN,
             "relay_policy.max_requests_per_min",
         )?;
+        let retention_max_age_seconds = env_u64_policy(
+            ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS,
+            "relay_policy.retention_max_age_seconds",
+        )?;
         let auth_required = env_bool_policy(
             ENV_RELAY_POLICY_AUTH_REQUIRED,
             "relay_policy.auth_required",
@@ -309,6 +317,7 @@ impl RelayPolicyConfig {
             max_message_bytes,
             max_events_per_min,
             max_requests_per_min,
+            retention_max_age_seconds,
             auth_required,
         };
         config.validate()?;
@@ -343,6 +352,9 @@ impl RelayPolicyConfig {
         }
         if let Some(limit) = self.max_requests_per_min {
             validate_policy_limit("relay_policy.max_requests_per_min", limit)?;
+        }
+        if let Some(limit) = self.retention_max_age_seconds {
+            validate_policy_limit("relay_policy.retention_max_age_seconds", limit)?;
         }
         Ok(())
     }
@@ -675,6 +687,7 @@ struct TomlRelayPolicyConfig {
     max_message_bytes: Option<u64>,
     max_events_per_min: Option<u64>,
     max_requests_per_min: Option<u64>,
+    retention_max_age_seconds: Option<u64>,
     auth_required: Option<bool>,
 }
 
@@ -691,6 +704,7 @@ impl TomlRelayPolicyRoot {
             max_message_bytes: None,
             max_events_per_min: None,
             max_requests_per_min: None,
+            retention_max_age_seconds: None,
             auth_required: None,
         });
         RelayPolicyConfig {
@@ -712,6 +726,7 @@ impl TomlRelayPolicyRoot {
             max_message_bytes: config.max_message_bytes,
             max_events_per_min: config.max_events_per_min,
             max_requests_per_min: config.max_requests_per_min,
+            retention_max_age_seconds: config.retention_max_age_seconds,
             auth_required: config.auth_required.unwrap_or(false),
         }
     }
@@ -941,6 +956,7 @@ mod tests {
     use crate::ENV_RELAY_POLICY_MAX_TAGS;
     use crate::ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN;
     use crate::ENV_RELAY_POLICY_MAX_TAG_VALUES;
+    use crate::ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS;
     use crate::ENV_RELAY_PROBE_ACTIVE;
     use crate::ENV_RELAY_PROBE_SECRET_KEY;
     use crate::ENV_RELAY_PROBE_TIMEOUT_SECS;
@@ -1137,20 +1153,23 @@ secret_key = "22"
                                     with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "9999", || {
                                         with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "60", || {
                                             with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "30", || {
-                                                with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "true", || {
-                                                    let config =
-                                                        RelayPolicyConfig::from_env().expect("policy");
-                                                    assert_eq!(config.max_content_len, 9000);
-                                                    assert_eq!(config.max_tags, 33);
-                                                    assert_eq!(config.max_tag_values, 12);
-                                                    assert_eq!(config.max_tag_value_len, 120);
-                                                    assert_eq!(config.max_future_seconds, 30);
-                                                    assert_eq!(config.max_subscriptions, Some(9));
-                                                    assert_eq!(config.max_limit, Some(200));
-                                                    assert_eq!(config.max_message_bytes, Some(9999));
-                                                    assert_eq!(config.max_events_per_min, Some(60));
-                                                    assert_eq!(config.max_requests_per_min, Some(30));
-                                                    assert!(config.auth_required);
+                                                with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "3600", || {
+                                                    with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "true", || {
+                                                        let config =
+                                                            RelayPolicyConfig::from_env().expect("policy");
+                                                        assert_eq!(config.max_content_len, 9000);
+                                                        assert_eq!(config.max_tags, 33);
+                                                        assert_eq!(config.max_tag_values, 12);
+                                                        assert_eq!(config.max_tag_value_len, 120);
+                                                        assert_eq!(config.max_future_seconds, 30);
+                                                        assert_eq!(config.max_subscriptions, Some(9));
+                                                        assert_eq!(config.max_limit, Some(200));
+                                                        assert_eq!(config.max_message_bytes, Some(9999));
+                                                        assert_eq!(config.max_events_per_min, Some(60));
+                                                        assert_eq!(config.max_requests_per_min, Some(30));
+                                                        assert_eq!(config.retention_max_age_seconds, Some(3600));
+                                                        assert!(config.auth_required);
+                                                    });
                                                 });
                                             });
                                         });
@@ -1178,6 +1197,7 @@ secret_key = "22"
             std::env::remove_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES);
             std::env::remove_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN);
             std::env::remove_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN);
+            std::env::remove_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS);
             std::env::remove_var(ENV_RELAY_POLICY_AUTH_REQUIRED);
         }
         let config = RelayPolicyConfig::from_env().expect("policy");
@@ -1191,6 +1211,7 @@ secret_key = "22"
         assert_eq!(config.max_message_bytes, None);
         assert_eq!(config.max_events_per_min, None);
         assert_eq!(config.max_requests_per_min, None);
+        assert_eq!(config.retention_max_age_seconds, None);
         assert!(!config.auth_required);
     }
 
@@ -1220,6 +1241,7 @@ max_limit = 250
 max_message_bytes = 10000
 max_events_per_min = 60
 max_requests_per_min = 30
+retention_max_age_seconds = 3600
 auth_required = true
 "#,
         )
@@ -1234,6 +1256,7 @@ auth_required = true
         assert_eq!(config.max_message_bytes, Some(10000));
         assert_eq!(config.max_events_per_min, Some(60));
         assert_eq!(config.max_requests_per_min, Some(30));
+        assert_eq!(config.retention_max_age_seconds, Some(3600));
         assert!(config.auth_required);
     }
 
