@@ -1,6 +1,6 @@
 use crate::{
-    AdmissionDecider, EventStore, Policy, RelayConfig, RelayError, RepositoryStore, Session,
-    SessionDriver, build_nip11_document,
+    AdmissionDecider, AdmissionHookClient, EventStore, Policy, RelayConfig, RelayError,
+    RepositoryStore, Session, SessionDriver, build_nip11_document,
 };
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -33,11 +33,17 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
     let store: Arc<dyn EventStore> = Arc::new(RepositoryStore::new(repos));
     let (broadcast, _) = broadcast::channel(1024);
     let policy = Policy::from_config(&config.policy);
+    let admission = match &config.admission {
+        Some(config) => Some(Arc::new(
+            AdmissionHookClient::new_http(config.clone()).map_err(RelayError::Admission)?,
+        ) as Arc<dyn AdmissionDecider>),
+        None => None,
+    };
     let state = RelayState {
         config: config.clone(),
         policy,
         store,
-        admission: None,
+        admission,
         broadcast,
     };
 
@@ -161,6 +167,7 @@ mod tests {
                 application_name: Some("gittree".to_string()),
             },
             policy: gittree_config::RelayPolicyConfig::default(),
+            admission: None,
         }
     }
 

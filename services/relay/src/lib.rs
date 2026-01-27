@@ -3,6 +3,7 @@ use gittree_core::RelayInfoDocument;
 use gittree_core::nip11::RelayLimitation;
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, StorageError};
+use std::time::Duration;
 
 mod admission_client;
 mod cli;
@@ -44,12 +45,17 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const ENV_ADMISSION_URL: &str = "GITTREE_ADMISSION_URL";
+const ENV_ADMISSION_TIMEOUT_SECS: &str = "GITTREE_ADMISSION_TIMEOUT_SECS";
+const ENV_ADMISSION_FALLBACK: &str = "GITTREE_ADMISSION_FALLBACK";
+const DEFAULT_ADMISSION_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayConfig {
     pub bind: String,
     pub storage: StorageConfig,
     pub policy: RelayPolicyConfig,
+    pub admission: Option<AdmissionHookConfig>,
 }
 
 impl RelayConfig {
@@ -57,10 +63,12 @@ impl RelayConfig {
         let services = ServicesConfig::from_env_validated().map_err(RelayConfigError::Config)?;
         let storage = storage_from_env()?;
         let policy = RelayPolicyConfig::from_env().map_err(RelayConfigError::Config)?;
+        let admission = admission_from_env()?;
         Ok(Self {
             bind: services.relay.bind,
             storage,
             policy,
+            admission,
         })
     }
 
@@ -69,10 +77,12 @@ impl RelayConfig {
             ServicesConfig::from_toml_file_validated(path).map_err(RelayConfigError::Config)?;
         let storage = storage_from_env()?;
         let policy = RelayPolicyConfig::from_env().map_err(RelayConfigError::Config)?;
+        let admission = admission_from_env()?;
         Ok(Self {
             bind: services.relay.bind,
             storage,
             policy,
+            admission,
         })
     }
 }
@@ -81,6 +91,7 @@ impl RelayConfig {
 pub enum RelayConfigError {
     Config(ConfigError),
     Storage(StorageConfigError),
+    Admission(AdmissionConfigError),
 }
 
 impl std::fmt::Display for RelayConfigError {
@@ -88,6 +99,7 @@ impl std::fmt::Display for RelayConfigError {
         match self {
             RelayConfigError::Config(err) => write!(f, "relay config error: {err}"),
             RelayConfigError::Storage(err) => write!(f, "relay storage config error: {err}"),
+            RelayConfigError::Admission(err) => write!(f, "relay admission config error: {err}"),
         }
     }
 }
@@ -97,6 +109,7 @@ impl std::error::Error for RelayConfigError {
         match self {
             RelayConfigError::Config(err) => Some(err),
             RelayConfigError::Storage(err) => Some(err),
+            RelayConfigError::Admission(err) => Some(err),
         }
     }
 }
@@ -121,6 +134,31 @@ impl std::fmt::Display for StorageConfigError {
 }
 
 impl std::error::Error for StorageConfigError {}
+
+#[derive(Debug)]
+pub enum AdmissionConfigError {
+    InvalidEndpoint(String),
+    InvalidTimeout { value: String },
+    InvalidFallback { value: String },
+}
+
+impl std::fmt::Display for AdmissionConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdmissionConfigError::InvalidEndpoint(value) => {
+                write!(f, "invalid admission endpoint: {value}")
+            }
+            AdmissionConfigError::InvalidTimeout { value } => {
+                write!(f, "invalid admission timeout: {value}")
+            }
+            AdmissionConfigError::InvalidFallback { value } => {
+                write!(f, "invalid admission fallback: {value}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdmissionConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, RelayConfigError> {
     let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
@@ -148,6 +186,53 @@ fn storage_from_env() -> Result<StorageConfig, RelayConfigError> {
     })?;
 
     Ok(config)
+}
+
+fn admission_from_env() -> Result<Option<AdmissionHookConfig>, RelayConfigError> {
+    let endpoint = match std::env::var(ENV_ADMISSION_URL) {
+        Ok(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(RelayConfigError::Admission(
+                    AdmissionConfigError::InvalidEndpoint(value),
+                ));
+            }
+            trimmed
+        }
+        Err(_) => return Ok(None),
+    };
+
+    let timeout_secs = match std::env::var(ENV_ADMISSION_TIMEOUT_SECS) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                DEFAULT_ADMISSION_TIMEOUT_SECS
+            } else {
+                value.parse::<u64>().map_err(|_| {
+                    RelayConfigError::Admission(AdmissionConfigError::InvalidTimeout { value })
+                })?
+            }
+        }
+        Err(_) => DEFAULT_ADMISSION_TIMEOUT_SECS,
+    };
+
+    let fallback = match std::env::var(ENV_ADMISSION_FALLBACK) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                AdmissionFallback::Reject
+            } else {
+                parse_admission_fallback(&value).ok_or_else(|| {
+                    RelayConfigError::Admission(AdmissionConfigError::InvalidFallback { value })
+                })?
+            }
+        }
+        Err(_) => AdmissionFallback::Reject,
+    };
+
+    Ok(Some(AdmissionHookConfig::new(
+        endpoint,
+        Duration::from_secs(timeout_secs),
+        fallback,
+    )))
 }
 
 fn env_u32(key: &'static str) -> Result<Option<u32>, RelayConfigError> {
@@ -178,10 +263,19 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, RelayConfigError> {
     }
 }
 
+fn parse_admission_fallback(value: &str) -> Option<AdmissionFallback> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "accept" => Some(AdmissionFallback::Accept),
+        "reject" => Some(AdmissionFallback::Reject),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 pub enum RelayError {
     Cli(RelayCliError),
     Config(RelayConfigError),
+    Admission(AdmissionHookError),
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
     Storage(StorageError),
@@ -193,6 +287,7 @@ impl std::fmt::Display for RelayError {
         match self {
             RelayError::Cli(err) => write!(f, "relay cli error: {err}"),
             RelayError::Config(err) => write!(f, "relay config error: {err}"),
+            RelayError::Admission(err) => write!(f, "relay admission error: {err}"),
             RelayError::ObservabilityConfig(err) => {
                 write!(f, "relay observability config error: {err}")
             }
@@ -208,6 +303,7 @@ impl std::error::Error for RelayError {
         match self {
             RelayError::Cli(err) => Some(err),
             RelayError::Config(err) => Some(err),
+            RelayError::Admission(err) => Some(err),
             RelayError::ObservabilityConfig(err) => Some(err),
             RelayError::Observability(err) => Some(err),
             RelayError::Storage(err) => Some(err),
@@ -288,6 +384,11 @@ pub fn build_nip11_document(config: &RelayConfig, policy: &Policy) -> RelayInfoD
 mod tests {
     use super::ENV_STORAGE_APP_NAME;
     use super::ENV_STORAGE_READ_URL;
+    use super::ENV_ADMISSION_FALLBACK;
+    use super::ENV_ADMISSION_TIMEOUT_SECS;
+    use super::ENV_ADMISSION_URL;
+    use super::AdmissionConfigError;
+    use super::AdmissionFallback;
     use super::ObservabilityHandle;
     use super::RelayConfig;
     use super::RelayError;
@@ -299,6 +400,7 @@ mod tests {
     use gittree_config::RelayPolicyConfig;
     use std::sync::Mutex;
     use std::sync::OnceLock;
+    use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
@@ -348,6 +450,50 @@ mod tests {
                     config.storage.read_connection,
                     "postgres://user:pass@localhost:5432/gittree"
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn config_loads_admission_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
+                    with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "9", || {
+                        with_env_var(ENV_ADMISSION_FALLBACK, "accept", || {
+                            let config = RelayConfig::from_env().expect("config");
+                            let admission = config.admission.expect("admission config");
+                            assert_eq!(admission.endpoint, "http://localhost:8081/decide");
+                            assert_eq!(admission.timeout, Duration::from_secs(9));
+                            assert_eq!(admission.fallback, AdmissionFallback::Accept);
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_rejects_invalid_admission_fallback() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
+                    with_env_var(ENV_ADMISSION_FALLBACK, "nope", || {
+                        let err = RelayConfig::from_env().unwrap_err();
+                        assert!(matches!(
+                            err,
+                            super::RelayConfigError::Admission(
+                                AdmissionConfigError::InvalidFallback { .. }
+                            )
+                        ));
+                    });
+                });
             },
         );
     }
@@ -433,6 +579,7 @@ mod tests {
                 application_name: Some("gittree".to_string()),
             },
             policy: RelayPolicyConfig::default(),
+            admission: None,
         };
 
         let err = build_repositories(&config).unwrap_err();
