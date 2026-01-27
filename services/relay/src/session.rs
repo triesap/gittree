@@ -6,12 +6,14 @@ use gittree_core::AdmissionDecision;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
 
 pub struct Session<S: EventStore> {
     registry: SubscriptionRegistry,
     store: S,
     policy: Policy,
     admission: Option<Arc<dyn AdmissionDecider>>,
+    broadcast: Option<broadcast::Sender<crate::NostrEvent>>,
 }
 
 impl<S: EventStore> Session<S> {
@@ -21,6 +23,7 @@ impl<S: EventStore> Session<S> {
             store,
             policy: Policy::default(),
             admission: None,
+            broadcast: None,
         }
     }
 
@@ -30,6 +33,7 @@ impl<S: EventStore> Session<S> {
             store,
             policy,
             admission: None,
+            broadcast: None,
         }
     }
 
@@ -39,6 +43,7 @@ impl<S: EventStore> Session<S> {
             store,
             policy: Policy::default(),
             admission: Some(admission),
+            broadcast: None,
         }
     }
 
@@ -52,6 +57,22 @@ impl<S: EventStore> Session<S> {
             store,
             policy,
             admission: Some(admission),
+            broadcast: None,
+        }
+    }
+
+    pub fn with_broadcast(
+        store: S,
+        policy: Policy,
+        admission: Option<Arc<dyn AdmissionDecider>>,
+        broadcast: broadcast::Sender<crate::NostrEvent>,
+    ) -> Self {
+        Self {
+            registry: SubscriptionRegistry::default(),
+            store,
+            policy,
+            admission,
+            broadcast: Some(broadcast),
         }
     }
 
@@ -217,6 +238,12 @@ impl<S: EventStore> Session<S> {
             message,
         });
 
+        if matches!(outcome, StoreOutcome::Inserted) {
+            if let Some(broadcast) = &self.broadcast {
+                let _ = broadcast.send(event.clone());
+            }
+        }
+
         responses.extend(self.dispatch_event(&event));
 
         responses
@@ -246,7 +273,8 @@ fn filter_from_event_filter(filter: &gittree_core::EventFilter) -> Filter {
 mod tests {
     use super::Session;
     use crate::{
-        AdmissionDecider, ClientMessage, EventStore, MemoryStore, NostrEvent, ServerMessage,
+        AdmissionDecider, ClientMessage, EventStore, MemoryStore, NostrEvent, Policy,
+        ServerMessage,
     };
     use async_trait::async_trait;
     use gittree_core::{AdmissionDecision, EventFilter};
@@ -404,5 +432,25 @@ mod tests {
         let responses = session.dispatch_event(&event);
         assert_eq!(responses.len(), 1);
         assert!(matches!(responses[0], ServerMessage::Event { .. }));
+    }
+
+    #[tokio::test]
+    async fn broadcast_sends_inserted_events() {
+        let store = MemoryStore::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let mut session =
+            Session::with_broadcast(store, Policy::default(), None, tx);
+        let event = signed_event("seed");
+
+        let response = session
+            .handle_message(ClientMessage::Event(serde_json::to_value(event.clone()).unwrap()))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok { accepted: true, .. }
+        ));
+
+        let received = rx.recv().await.expect("broadcast");
+        assert_eq!(received.id, event.id);
     }
 }
