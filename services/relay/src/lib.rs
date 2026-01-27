@@ -18,7 +18,8 @@ mod store;
 mod tags;
 
 pub use admission_client::{
-    AdmissionFallback, AdmissionHookClient, AdmissionHookConfig, AdmissionHookError, RelayEvent,
+    AdmissionDecider, AdmissionFallback, AdmissionHookClient, AdmissionHookConfig,
+    AdmissionHookError, RelayEvent,
 };
 pub use cli::{RelayCli, RelayCliError};
 pub use driver::SessionDriver;

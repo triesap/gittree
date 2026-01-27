@@ -187,6 +187,11 @@ pub trait AdmissionTransport: Send + Sync {
     ) -> Result<AdmissionDecisionPayload, AdmissionHookError>;
 }
 
+#[async_trait]
+pub trait AdmissionDecider: Send + Sync {
+    async fn decide(&self, event: &RelayEvent) -> AdmissionDecision;
+}
+
 pub struct HttpAdmissionTransport {
     client: reqwest::Client,
 }
@@ -266,6 +271,13 @@ impl<T: AdmissionTransport> AdmissionHookClient<T> {
             },
             Err(err) => self.config.fallback.decision(&err),
         }
+    }
+}
+
+#[async_trait]
+impl<T: AdmissionTransport> AdmissionDecider for AdmissionHookClient<T> {
+    async fn decide(&self, event: &RelayEvent) -> AdmissionDecision {
+        AdmissionHookClient::decide(self, event).await
     }
 }
 

@@ -1,7 +1,6 @@
 use crate::{EventStore, Notice, ServerMessage, Session, encode_server_message};
 use tokio::sync::mpsc;
 
-#[derive(Debug)]
 pub struct SessionDriver<S: EventStore> {
     session: Session<S>,
 }
