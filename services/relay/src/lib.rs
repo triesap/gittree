@@ -8,6 +8,7 @@ mod admission_client;
 mod cli;
 mod event;
 mod filter;
+mod notice;
 mod protocol;
 mod subscription;
 mod tags;
@@ -18,6 +19,7 @@ pub use admission_client::{
 pub use cli::{RelayCli, RelayCliError};
 pub use event::{EventError, NostrEvent};
 pub use filter::{Filter, FilterError};
+pub use notice::Notice;
 pub use protocol::{
     ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
 };
