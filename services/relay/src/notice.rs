@@ -1,4 +1,4 @@
-use crate::{EventError, FilterError, ProtocolError, ServerMessage};
+use crate::{EventError, FilterError, ProtocolError, ServerMessage, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
@@ -35,6 +35,12 @@ impl From<FilterError> for Notice {
     }
 }
 
+impl From<StoreError> for Notice {
+    fn from(err: StoreError) -> Self {
+        Notice::message(err.to_string())
+    }
+}
+
 impl From<Notice> for ServerMessage {
     fn from(notice: Notice) -> Self {
         ServerMessage::Notice {
@@ -46,7 +52,7 @@ impl From<Notice> for ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::Notice;
-    use crate::{EventError, FilterError, ProtocolError, ServerMessage};
+    use crate::{EventError, FilterError, ProtocolError, ServerMessage, StoreError};
 
     #[test]
     fn protocol_error_maps_to_notice_message() {
@@ -76,5 +82,11 @@ mod tests {
                 message: "hello".to_string()
             }
         );
+    }
+
+    #[test]
+    fn store_error_maps_to_notice_message() {
+        let notice = Notice::from(StoreError::Backend("boom".to_string()));
+        assert_eq!(notice.as_str(), "store error: boom");
     }
 }
