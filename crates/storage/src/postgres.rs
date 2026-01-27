@@ -1,12 +1,14 @@
 use crate::repositories::{
-    AnnouncementRepository, RelayCompatibilityRepository, RepoMappingRepository, StateRepository,
+    AnnouncementRepository, EventRepository, RelayCompatibilityRepository, RepoMappingRepository,
+    StateRepository,
 };
 use crate::{
-    RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord,
-    StorageError,
+    EventQuery, EventRecord, RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord,
+    RepoStateRecord, TagRecord, StorageError,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,36 @@ impl PostgresRepositories {
 
     fn from_offset_datetime(timestamp: OffsetDateTime) -> i64 {
         timestamp.unix_timestamp()
+    }
+
+    fn decode_hex(field: &'static str, value: &str) -> Result<Vec<u8>, StorageError> {
+        hex::decode(value).map_err(|_| StorageError::InvalidHex {
+            field,
+            value: value.to_string(),
+        })
+    }
+
+    async fn fetch_tags(&self, event_id: &[u8]) -> Result<Vec<TagRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+SELECT name, value
+FROM nostr_tag
+WHERE event_id = $1
+ORDER BY id ASC
+"#,
+        )
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut tags = Vec::with_capacity(rows.len());
+        for row in rows {
+            tags.push(TagRecord {
+                name: row.try_get("name")?,
+                value: row.try_get("value")?,
+            });
+        }
+        Ok(tags)
     }
 }
 
@@ -439,10 +471,189 @@ LIMIT 1
     }
 }
 
+#[async_trait]
+impl EventRepository for PostgresRepositories {
+    async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+INSERT INTO nostr_event (id, pubkey, created_at, kind, content, sig)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT DO NOTHING
+"#,
+        )
+        .bind(&record.id)
+        .bind(&record.pubkey)
+        .bind(record.created_at)
+        .bind(record.kind as i32)
+        .bind(&record.content)
+        .bind(&record.sig)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        for tag in &record.tags {
+            sqlx::query(
+                r#"
+INSERT INTO nostr_tag (event_id, name, value)
+VALUES ($1, $2, $3)
+"#,
+            )
+            .bind(&record.id)
+            .bind(&tag.name)
+            .bind(&tag.value)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_event(&self, event_id: &[u8]) -> Result<Option<EventRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT id, pubkey, created_at, kind, content, sig
+FROM nostr_event
+WHERE id = $1
+"#,
+        )
+        .bind(event_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let id: Vec<u8> = row.try_get("id")?;
+        let tags = self.fetch_tags(&id).await?;
+        Ok(Some(EventRecord {
+            id,
+            pubkey: row.try_get("pubkey")?,
+            created_at: row.try_get("created_at")?,
+            kind: row.try_get::<i32, _>("kind")? as u32,
+            content: row.try_get("content")?,
+            sig: row.try_get("sig")?,
+            tags,
+        }))
+    }
+
+    async fn delete_event(&self, event_id: &[u8]) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM nostr_event WHERE id = $1")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError> {
+        use sqlx::QueryBuilder;
+        let mut builder = QueryBuilder::new(
+            "SELECT id, pubkey, created_at, kind, content, sig FROM nostr_event",
+        );
+
+        let mut separator = " WHERE ";
+        if !query.ids.is_empty() {
+            builder.push(separator).push("id IN (");
+            let mut separated = builder.separated(", ");
+            for id in &query.ids {
+                separated.push_bind(Self::decode_hex("ids", id)?);
+            }
+            builder.push(")");
+            separator = " AND ";
+        }
+
+        if !query.authors.is_empty() {
+            builder.push(separator).push("pubkey IN (");
+            let mut separated = builder.separated(", ");
+            for author in &query.authors {
+                separated.push_bind(Self::decode_hex("authors", author)?);
+            }
+            builder.push(")");
+            separator = " AND ";
+        }
+
+        if !query.kinds.is_empty() {
+            builder.push(separator).push("kind IN (");
+            let mut separated = builder.separated(", ");
+            for kind in &query.kinds {
+                separated.push_bind(*kind as i32);
+            }
+            builder.push(")");
+            separator = " AND ";
+        }
+
+        if let Some(since) = query.since {
+            builder.push(separator).push("created_at >= ");
+            builder.push_bind(since);
+            separator = " AND ";
+        }
+
+        if let Some(until) = query.until {
+            builder.push(separator).push("created_at <= ");
+            builder.push_bind(until);
+            separator = " AND ";
+        }
+
+        if !query.tags.is_empty() {
+            let mut grouped: HashMap<&str, Vec<&str>> = HashMap::new();
+            for tag in &query.tags {
+                grouped
+                    .entry(tag.name.as_str())
+                    .or_default()
+                    .push(tag.value.as_str());
+            }
+
+            for (name, values) in grouped {
+                builder.push(separator);
+                builder.push("EXISTS (SELECT 1 FROM nostr_tag t WHERE t.event_id = nostr_event.id AND t.name = ");
+                builder.push_bind(name);
+                builder.push(" AND t.value IN (");
+                let mut separated = builder.separated(", ");
+                for value in values {
+                    separated.push_bind(value);
+                }
+                builder.push("))");
+                separator = " AND ";
+            }
+        }
+
+        builder.push(" ORDER BY created_at DESC, id");
+
+        if let Some(limit) = query.limit {
+            builder.push(" LIMIT ");
+            builder.push_bind(limit as i64);
+        }
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: Vec<u8> = row.try_get("id")?;
+            let tags = self.fetch_tags(&id).await?;
+            records.push(EventRecord {
+                id,
+                pubkey: row.try_get("pubkey")?,
+                created_at: row.try_get("created_at")?,
+                kind: row.try_get::<i32, _>("kind")? as u32,
+                content: row.try_get("content")?,
+                sig: row.try_get("sig")?,
+                tags,
+            });
+        }
+
+        Ok(records)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PostgresRepositories;
-    use crate::repositories::{RelayCompatibilityRepository, RepoMappingRepository};
+    use crate::repositories::{EventRepository, RelayCompatibilityRepository, RepoMappingRepository};
     use crate::StorageError;
 
     #[test]
@@ -466,6 +677,12 @@ mod tests {
     #[test]
     fn postgres_repos_implements_relay_compat_repo() {
         fn assert_impl<T: RelayCompatibilityRepository>() {}
+        assert_impl::<PostgresRepositories>();
+    }
+
+    #[test]
+    fn postgres_repos_implements_event_repo() {
+        fn assert_impl<T: EventRepository>() {}
         assert_impl::<PostgresRepositories>();
     }
 }
