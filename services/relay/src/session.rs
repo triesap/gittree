@@ -203,7 +203,23 @@ impl<S: EventStore> Session<S> {
             }
             ClientMessage::Event(value) => self.handle_event(value).await,
             ClientMessage::Auth(value) => self.handle_auth(value).await,
-            ClientMessage::Count { .. } => Vec::new(),
+            ClientMessage::Count {
+                subscription_id,
+                filters,
+            } => {
+                let parsed = match parse_filters(&filters) {
+                    Ok(filters) => filters,
+                    Err(err) => return vec![Notice::from(err).into()],
+                };
+                let count = match self.store.query(&parsed).await {
+                    Ok(events) => events.len() as u64,
+                    Err(err) => return vec![Notice::from(err).into()],
+                };
+                vec![ServerMessage::Count {
+                    subscription_id,
+                    count,
+                }]
+            }
         }
     }
 
@@ -482,6 +498,35 @@ mod tests {
         assert!(matches!(responses[0], ServerMessage::Event { .. }));
         assert!(matches!(responses[1], ServerMessage::Eose { .. }));
         assert!(session.registry().eose_sent(&crate::SubscriptionId::new("sub")));
+    }
+
+    #[tokio::test]
+    async fn count_returns_match_count() {
+        let store = MemoryStore::new();
+        let event = NostrEvent {
+            id: "id".to_string(),
+            pubkey: "aa".repeat(32),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "00".repeat(64),
+        };
+        store.insert(event).await.expect("insert");
+
+        let mut session = Session::new(store);
+        let responses = session
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(
+            responses[0],
+            ServerMessage::Count { count: 1, .. }
+        ));
     }
 
     #[test]
