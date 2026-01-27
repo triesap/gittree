@@ -857,6 +857,7 @@ dependencies = [
  "gittree-storage",
  "reqwest",
  "serde",
+ "serde_json",
  "tracing",
 ]
 

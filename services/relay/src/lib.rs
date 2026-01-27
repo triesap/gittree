@@ -6,11 +6,15 @@ use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, S
 
 mod admission_client;
 mod cli;
+mod protocol;
 
 pub use admission_client::{
     AdmissionFallback, AdmissionHookClient, AdmissionHookConfig, AdmissionHookError, RelayEvent,
 };
 pub use cli::{RelayCli, RelayCliError};
+pub use protocol::{
+    ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
+};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
