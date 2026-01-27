@@ -11,6 +11,7 @@ mod filter;
 mod notice;
 mod policy;
 mod protocol;
+mod session;
 mod subscription;
 mod store;
 mod tags;
@@ -26,6 +27,7 @@ pub use policy::{Policy, PolicyError};
 pub use protocol::{
     ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
 };
+pub use session::Session;
 pub use subscription::{SubscriptionId, SubscriptionRegistry};
 pub use store::{EventStore, MemoryStore, StoreError, StoreOutcome};
 pub use tags::{TagError, TagIndex};
