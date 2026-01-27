@@ -1,14 +1,15 @@
-use gittree_relay::{RelayCli, RelayConfig, RelayError, init_observability};
+use gittree_relay::{RelayCli, RelayConfig, RelayError, serve};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         eprintln!("relay service failed: {err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), RelayError> {
+async fn run() -> Result<(), RelayError> {
     let cli = RelayCli::parse(std::env::args_os()).map_err(RelayError::Cli)?;
     if cli.help {
         println!("{}", RelayCli::help_text());
@@ -24,7 +25,5 @@ fn run() -> Result<(), RelayError> {
         config.bind = bind;
     }
 
-    let _observability = init_observability()?;
-    tracing::info!(bind = %config.bind, "relay service configured");
-    Ok(())
+    serve(config).await
 }

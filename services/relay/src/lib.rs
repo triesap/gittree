@@ -12,6 +12,7 @@ mod filter;
 mod notice;
 mod policy;
 mod protocol;
+mod server;
 mod session;
 mod subscription;
 mod store;
@@ -30,6 +31,7 @@ pub use policy::{Policy, PolicyError};
 pub use protocol::{
     ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
 };
+pub use server::serve;
 pub use session::Session;
 pub use subscription::{SubscriptionId, SubscriptionRegistry};
 pub use store::{EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome};
@@ -178,6 +180,7 @@ pub enum RelayError {
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
     Storage(StorageError),
+    Serve(String),
 }
 
 impl std::fmt::Display for RelayError {
@@ -190,6 +193,7 @@ impl std::fmt::Display for RelayError {
             }
             RelayError::Observability(err) => write!(f, "relay observability error: {err}"),
             RelayError::Storage(err) => write!(f, "relay storage error: {err}"),
+            RelayError::Serve(err) => write!(f, "relay serve error: {err}"),
         }
     }
 }
@@ -202,6 +206,7 @@ impl std::error::Error for RelayError {
             RelayError::ObservabilityConfig(err) => Some(err),
             RelayError::Observability(err) => Some(err),
             RelayError::Storage(err) => Some(err),
+            RelayError::Serve(_) => None,
         }
     }
 }

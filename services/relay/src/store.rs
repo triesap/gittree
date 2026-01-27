@@ -2,6 +2,7 @@ use crate::{Filter, NostrEvent, TagIndex};
 use async_trait::async_trait;
 use gittree_storage::{EventQuery, EventRecord, EventRepository, TagRecord};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +174,28 @@ impl EventStore for MemoryStore {
             }
         }
         Ok(results)
+    }
+}
+
+#[async_trait]
+impl<T> EventStore for Arc<T>
+where
+    T: EventStore + Send + Sync + ?Sized,
+{
+    async fn insert(&self, event: NostrEvent) -> Result<StoreOutcome, StoreError> {
+        (**self).insert(event).await
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<NostrEvent>, StoreError> {
+        (**self).get(id).await
+    }
+
+    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+        (**self).delete(id).await
+    }
+
+    async fn query(&self, filters: &[Filter]) -> Result<Vec<NostrEvent>, StoreError> {
+        (**self).query(filters).await
     }
 }
 
