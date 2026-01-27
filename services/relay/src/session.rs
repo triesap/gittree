@@ -233,6 +233,26 @@ impl<S: EventStore> Session<S> {
             }];
         }
 
+        if let Some(auth) = &self.auth {
+            match auth.authenticated_pubkey.as_ref() {
+                None => {
+                    return vec![ServerMessage::Ok {
+                        event_id: event.id.clone(),
+                        accepted: false,
+                        message: "auth required".to_string(),
+                    }];
+                }
+                Some(pubkey) if pubkey != &event.pubkey => {
+                    return vec![ServerMessage::Ok {
+                        event_id: event.id.clone(),
+                        accepted: false,
+                        message: "auth pubkey mismatch".to_string(),
+                    }];
+                }
+                Some(_) => {}
+            }
+        }
+
         if let Some(admission) = &self.admission {
             let relay_event = RelayEvent {
                 kind: event.kind as u64,
@@ -527,6 +547,19 @@ mod tests {
         assert!(matches!(
             response[0],
             ServerMessage::Ok { accepted: true, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_required_rejects_event_without_auth() {
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let event = signed_event("seed");
+        let response = session
+            .handle_message(ClientMessage::Event(serde_json::to_value(event).unwrap()))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok { accepted: false, .. }
         ));
     }
 
