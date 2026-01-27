@@ -212,6 +212,17 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
         {
             return Ok(StoreOutcome::Duplicate);
         }
+
+        if event.kind == 5 {
+            apply_delete_repo(&self.repo, &event).await?;
+        }
+
+        if let Some(key) = replaceable_key(&event) {
+            if apply_replaceable_repo(&self.repo, &event, &key).await? {
+                return Ok(StoreOutcome::Duplicate);
+            }
+        }
+
         self.repo
             .insert_event(record)
             .await
@@ -267,6 +278,81 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
         });
         Ok(results)
     }
+}
+
+async fn apply_delete_repo<R: EventRepository>(
+    repo: &R,
+    event: &NostrEvent,
+) -> Result<(), StoreError> {
+    let author = decode_hex_pubkey(&event.pubkey)?;
+
+    for target in collect_tag_values(&event.tags, "e") {
+        let Ok(bytes) = hex::decode(&target) else {
+            continue;
+        };
+        let record = repo
+            .get_event(&bytes)
+            .await
+            .map_err(map_repo_err)?;
+        if let Some(record) = record {
+            if record.pubkey == author && record.created_at <= event.created_at {
+                repo.delete_event(&record.id)
+                    .await
+                    .map_err(map_repo_err)?;
+            }
+        }
+    }
+
+    for address in collect_tag_values(&event.tags, "a") {
+        let Some(key) = parse_address(&address) else {
+            continue;
+        };
+        if key.pubkey != event.pubkey {
+            continue;
+        }
+        let mut query = EventQuery::default();
+        query.kinds = vec![key.kind];
+        query.authors = vec![key.pubkey.clone()];
+        if let Some(identifier) = key.identifier {
+            query.tags = vec![TagRecord::new("d", identifier)];
+        }
+        let records = repo.query_events(&query).await.map_err(map_repo_err)?;
+        for record in records {
+            if record.created_at <= event.created_at {
+                repo.delete_event(&record.id)
+                    .await
+                    .map_err(map_repo_err)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_replaceable_repo<R: EventRepository>(
+    repo: &R,
+    event: &NostrEvent,
+    key: &ReplaceableKey,
+) -> Result<bool, StoreError> {
+    let mut query = EventQuery::default();
+    query.kinds = vec![key.kind];
+    query.authors = vec![key.pubkey.clone()];
+    if let Some(identifier) = &key.identifier {
+        query.tags = vec![TagRecord::new("d", identifier.clone())];
+    }
+    let records = repo.query_events(&query).await.map_err(map_repo_err)?;
+    if records
+        .iter()
+        .any(|record| record.created_at >= event.created_at)
+    {
+        return Ok(true);
+    }
+    for record in records {
+        repo.delete_event(&record.id)
+            .await
+            .map_err(map_repo_err)?;
+    }
+    Ok(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -399,6 +485,10 @@ fn filter_to_query(filter: &Filter) -> EventQuery {
 
 fn decode_hex_id(value: &str) -> Result<Vec<u8>, StoreError> {
     hex::decode(value).map_err(|_| StoreError::Backend("invalid event id".to_string()))
+}
+
+fn decode_hex_pubkey(value: &str) -> Result<Vec<u8>, StoreError> {
+    hex::decode(value).map_err(|_| StoreError::Backend("invalid pubkey".to_string()))
 }
 
 fn map_repo_err(err: gittree_storage::StorageError) -> StoreError {
@@ -566,5 +656,47 @@ mod tests {
         let results = store.query(&[filter]).await.expect("query");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, event.id);
+    }
+
+    #[tokio::test]
+    async fn repository_store_replaces_replaceable_events() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let mut older = sample_event(&"11".repeat(32));
+        older.kind = 0;
+        older.created_at = 10;
+        older.pubkey = "aa".repeat(32);
+        store.insert(older).await.expect("insert");
+
+        let mut newer = sample_event(&"22".repeat(32));
+        newer.kind = 0;
+        newer.created_at = 20;
+        newer.pubkey = "aa".repeat(32);
+        let outcome = store.insert(newer.clone()).await.expect("insert");
+        assert_eq!(outcome, StoreOutcome::Inserted);
+        assert!(store.get(&"11".repeat(32)).await.expect("get").is_none());
+        assert!(store.get(&"22".repeat(32)).await.expect("get").is_some());
+    }
+
+    #[tokio::test]
+    async fn repository_store_applies_delete_events() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let mut target = sample_event(&"33".repeat(32));
+        target.pubkey = "aa".repeat(32);
+        target.created_at = 5;
+        store.insert(target.clone()).await.expect("insert");
+
+        let mut delete = sample_event(&"44".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 10;
+        delete.tags = vec![vec!["e".to_string(), target.id.clone()]];
+        store.insert(delete.clone()).await.expect("insert");
+
+        assert!(store.get(&target.id).await.expect("get").is_none());
+        assert!(store.get(&delete.id).await.expect("get").is_some());
     }
 }
