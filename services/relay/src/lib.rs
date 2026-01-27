@@ -6,6 +6,7 @@ use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, S
 
 mod admission_client;
 mod cli;
+mod driver;
 mod event;
 mod filter;
 mod notice;
@@ -20,6 +21,7 @@ pub use admission_client::{
     AdmissionFallback, AdmissionHookClient, AdmissionHookConfig, AdmissionHookError, RelayEvent,
 };
 pub use cli::{RelayCli, RelayCliError};
+pub use driver::SessionDriver;
 pub use event::{EventError, NostrEvent};
 pub use filter::{Filter, FilterError};
 pub use notice::Notice;
