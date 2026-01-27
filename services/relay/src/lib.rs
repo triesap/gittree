@@ -7,6 +7,7 @@ use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, S
 mod admission_client;
 mod cli;
 mod event;
+mod filter;
 mod protocol;
 mod tags;
 
@@ -15,6 +16,7 @@ pub use admission_client::{
 };
 pub use cli::{RelayCli, RelayCliError};
 pub use event::{EventError, NostrEvent};
+pub use filter::{Filter, FilterError};
 pub use protocol::{
     ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
 };
