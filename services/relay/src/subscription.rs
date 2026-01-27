@@ -46,6 +46,10 @@ impl SubscriptionRegistry {
         self.subscriptions.contains_key(id)
     }
 
+    pub fn len(&self) -> usize {
+        self.subscriptions.len()
+    }
+
     pub fn mark_eose(&mut self, id: &SubscriptionId) -> bool {
         let Some(state) = self.subscriptions.get_mut(id) else {
             return false;

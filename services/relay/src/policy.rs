@@ -8,6 +8,9 @@ pub struct Policy {
     pub max_tag_values: usize,
     pub max_tag_value_len: usize,
     pub max_future_seconds: i64,
+    pub max_subscriptions: Option<usize>,
+    pub max_limit: Option<u64>,
+    pub max_message_bytes: Option<usize>,
 }
 
 impl Default for Policy {
@@ -18,6 +21,9 @@ impl Default for Policy {
             max_tag_values: 16,
             max_tag_value_len: 512,
             max_future_seconds: 60,
+            max_subscriptions: None,
+            max_limit: None,
+            max_message_bytes: None,
         }
     }
 }
@@ -53,6 +59,9 @@ impl Policy {
             max_tag_values: config.max_tag_values as usize,
             max_tag_value_len: config.max_tag_value_len as usize,
             max_future_seconds: config.max_future_seconds as i64,
+            max_subscriptions: config.max_subscriptions.map(|value| value as usize),
+            max_limit: config.max_limit,
+            max_message_bytes: config.max_message_bytes.map(|value| value as usize),
         }
     }
 
@@ -118,9 +127,9 @@ mod tests {
             max_tag_values: 3,
             max_tag_value_len: 22,
             max_future_seconds: 12,
-            max_subscriptions: None,
-            max_limit: None,
-            max_message_bytes: None,
+            max_subscriptions: Some(9),
+            max_limit: Some(100),
+            max_message_bytes: Some(1024),
             auth_required: false,
         };
         let policy = Policy::from_config(&config);
@@ -129,6 +138,9 @@ mod tests {
         assert_eq!(policy.max_tag_values, 3);
         assert_eq!(policy.max_tag_value_len, 22);
         assert_eq!(policy.max_future_seconds, 12);
+        assert_eq!(policy.max_subscriptions, Some(9));
+        assert_eq!(policy.max_limit, Some(100));
+        assert_eq!(policy.max_message_bytes, Some(1024));
     }
 
     #[test]

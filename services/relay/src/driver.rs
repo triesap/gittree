@@ -11,6 +11,12 @@ impl<S: EventStore> SessionDriver<S> {
     }
 
     pub async fn handle_text(&mut self, input: &str) -> Vec<String> {
+        if let Some(limit) = self.session.max_message_bytes() {
+            if input.len() > limit {
+                let notice = Notice::message("message too large");
+                return vec![encode_response(notice.into())];
+            }
+        }
         let responses = self.session.handle_raw(input).await;
         responses
             .into_iter()
@@ -96,7 +102,7 @@ fn encode_response(message: ServerMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::SessionDriver;
-    use crate::{EventStore, MemoryStore, NostrEvent, Session};
+    use crate::{EventStore, MemoryStore, NostrEvent, Policy, Session};
     use serde_json::Value;
 
     fn decode_frames(frames: &[String]) -> Vec<Value> {
@@ -144,5 +150,21 @@ mod tests {
         let decoded = decode_frames(&frames);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0][0], Value::String("OK".to_string()));
+    }
+
+    #[tokio::test]
+    async fn driver_rejects_oversized_messages() {
+        let store = MemoryStore::new();
+        let policy = Policy {
+            max_message_bytes: Some(10),
+            ..Policy::default()
+        };
+        let session = Session::with_policy(store, policy);
+        let mut driver = SessionDriver::new(session);
+        let frames = driver.handle_text(r#"["REQ","sub",{}]"#).await;
+
+        let decoded = decode_frames(&frames);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0][0], Value::String("NOTICE".to_string()));
     }
 }

@@ -115,6 +115,10 @@ impl<S: EventStore> Session<S> {
         &self.registry
     }
 
+    pub fn max_message_bytes(&self) -> Option<usize> {
+        self.policy.max_message_bytes
+    }
+
     pub fn auth_challenge(&self) -> Option<String> {
         self.auth.as_ref().map(|state| state.challenge.clone())
     }
@@ -172,12 +176,22 @@ impl<S: EventStore> Session<S> {
                     Ok(filters) => filters,
                     Err(err) => return vec![Notice::from(err).into()],
                 };
+                if let Some(notice) = self.validate_filter_limits(&parsed) {
+                    return vec![notice.into()];
+                }
+
+                let sub_id = SubscriptionId::new(subscription_id.clone());
+                if let Some(max) = self.policy.max_subscriptions {
+                    if !self.registry.contains(&sub_id) && self.registry.len() >= max {
+                        return vec![Notice::message("too many subscriptions").into()];
+                    }
+                }
+
                 let events = match self.store.query(&parsed).await {
                     Ok(events) => events,
                     Err(err) => return vec![Notice::from(err).into()],
                 };
 
-                let sub_id = SubscriptionId::new(subscription_id.clone());
                 self.registry.insert(sub_id.clone(), parsed.clone());
 
                 let mut responses = Vec::new();
@@ -211,6 +225,9 @@ impl<S: EventStore> Session<S> {
                     Ok(filters) => filters,
                     Err(err) => return vec![Notice::from(err).into()],
                 };
+                if let Some(notice) = self.validate_filter_limits(&parsed) {
+                    return vec![notice.into()];
+                }
                 let count = match self.store.query(&parsed).await {
                     Ok(events) => events.len() as u64,
                     Err(err) => return vec![Notice::from(err).into()],
@@ -220,6 +237,23 @@ impl<S: EventStore> Session<S> {
                     count,
                 }]
             }
+        }
+    }
+
+    fn validate_filter_limits(&self, filters: &[Filter]) -> Option<Notice> {
+        let Some(max_limit) = self.policy.max_limit else {
+            return None;
+        };
+        let exceeded = filters.iter().any(|filter| {
+            filter
+                .limit
+                .map(|limit| limit > max_limit)
+                .unwrap_or(false)
+        });
+        if exceeded {
+            Some(Notice::message("limit too large"))
+        } else {
+            None
         }
     }
 
@@ -527,6 +561,75 @@ mod tests {
             responses[0],
             ServerMessage::Count { count: 1, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn req_rejects_when_subscription_limit_reached() {
+        let store = MemoryStore::new();
+        let policy = Policy {
+            max_subscriptions: Some(1),
+            ..Policy::default()
+        };
+        let mut session = Session::with_policy(store, policy);
+        let _ = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub-1".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        let responses = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub-2".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert!(session.registry().contains(&crate::SubscriptionId::new("sub-1")));
+        assert!(!session.registry().contains(&crate::SubscriptionId::new("sub-2")));
+    }
+
+    #[tokio::test]
+    async fn req_rejects_when_limit_exceeds_policy() {
+        let store = MemoryStore::new();
+        let policy = Policy {
+            max_limit: Some(1),
+            ..Policy::default()
+        };
+        let mut session = Session::with_policy(store, policy);
+
+        let responses = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"limit": 2})],
+            })
+            .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert!(!session.registry().contains(&crate::SubscriptionId::new("sub")));
+    }
+
+    #[tokio::test]
+    async fn count_rejects_when_limit_exceeds_policy() {
+        let store = MemoryStore::new();
+        let policy = Policy {
+            max_limit: Some(1),
+            ..Policy::default()
+        };
+        let mut session = Session::with_policy(store, policy);
+
+        let responses = session
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"limit": 5})],
+            })
+            .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
     }
 
     #[test]
