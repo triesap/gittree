@@ -4,9 +4,26 @@ use crate::{
 };
 use gittree_core::AdmissionDecision;
 use serde_json::Value;
+use secp256k1::rand::{rngs::OsRng, RngCore};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
+
+const AUTH_KIND: u32 = 22242;
+
+struct AuthState {
+    challenge: String,
+    authenticated_pubkey: Option<String>,
+}
+
+impl AuthState {
+    fn new() -> Self {
+        Self {
+            challenge: generate_challenge(),
+            authenticated_pubkey: None,
+        }
+    }
+}
 
 pub struct Session<S: EventStore> {
     registry: SubscriptionRegistry,
@@ -14,6 +31,7 @@ pub struct Session<S: EventStore> {
     policy: Policy,
     admission: Option<Arc<dyn AdmissionDecider>>,
     broadcast: Option<broadcast::Sender<crate::NostrEvent>>,
+    auth: Option<AuthState>,
 }
 
 impl<S: EventStore> Session<S> {
@@ -24,6 +42,7 @@ impl<S: EventStore> Session<S> {
             policy: Policy::default(),
             admission: None,
             broadcast: None,
+            auth: None,
         }
     }
 
@@ -34,6 +53,7 @@ impl<S: EventStore> Session<S> {
             policy,
             admission: None,
             broadcast: None,
+            auth: None,
         }
     }
 
@@ -44,6 +64,7 @@ impl<S: EventStore> Session<S> {
             policy: Policy::default(),
             admission: Some(admission),
             broadcast: None,
+            auth: None,
         }
     }
 
@@ -58,6 +79,18 @@ impl<S: EventStore> Session<S> {
             policy,
             admission: Some(admission),
             broadcast: None,
+            auth: None,
+        }
+    }
+
+    pub fn with_policy_and_auth(store: S, policy: Policy, auth_required: bool) -> Self {
+        Self {
+            registry: SubscriptionRegistry::default(),
+            store,
+            policy,
+            admission: None,
+            broadcast: None,
+            auth: auth_state(auth_required),
         }
     }
 
@@ -66,6 +99,7 @@ impl<S: EventStore> Session<S> {
         policy: Policy,
         admission: Option<Arc<dyn AdmissionDecider>>,
         broadcast: broadcast::Sender<crate::NostrEvent>,
+        auth_required: bool,
     ) -> Self {
         Self {
             registry: SubscriptionRegistry::default(),
@@ -73,11 +107,25 @@ impl<S: EventStore> Session<S> {
             policy,
             admission,
             broadcast: Some(broadcast),
+            auth: auth_state(auth_required),
         }
     }
 
     pub fn registry(&self) -> &SubscriptionRegistry {
         &self.registry
+    }
+
+    pub fn auth_challenge(&self) -> Option<String> {
+        self.auth.as_ref().map(|state| state.challenge.clone())
+    }
+
+    pub fn initial_messages(&self) -> Vec<ServerMessage> {
+        match &self.auth {
+            Some(state) => vec![ServerMessage::Auth {
+                challenge: state.challenge.clone(),
+            }],
+            None => Vec::new(),
+        }
     }
 
     pub fn dispatch_event(&self, event: &crate::NostrEvent) -> Vec<ServerMessage> {
@@ -154,7 +202,8 @@ impl<S: EventStore> Session<S> {
                 Vec::new()
             }
             ClientMessage::Event(value) => self.handle_event(value).await,
-            ClientMessage::Auth(_) | ClientMessage::Count { .. } => Vec::new(),
+            ClientMessage::Auth(value) => self.handle_auth(value).await,
+            ClientMessage::Count { .. } => Vec::new(),
         }
     }
 
@@ -248,6 +297,84 @@ impl<S: EventStore> Session<S> {
 
         responses
     }
+
+    async fn handle_auth(&mut self, value: Value) -> Vec<ServerMessage> {
+        let event: crate::NostrEvent = match serde_json::from_value(value) {
+            Ok(event) => event,
+            Err(_) => return vec![Notice::message("invalid auth event").into()],
+        };
+
+        if event.kind != AUTH_KIND {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: "invalid auth kind".to_string(),
+            }];
+        }
+
+        if let Err(err) = event.verify() {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: err.to_string(),
+            }];
+        }
+
+        let Some(auth) = &mut self.auth else {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: "auth not enabled".to_string(),
+            }];
+        };
+
+        let challenge = match find_tag_value(&event.tags, "challenge") {
+            Some(value) => value,
+            None => {
+                return vec![ServerMessage::Ok {
+                    event_id: event.id.clone(),
+                    accepted: false,
+                    message: "missing challenge tag".to_string(),
+                }];
+            }
+        };
+
+        if challenge != auth.challenge {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: "invalid challenge".to_string(),
+            }];
+        }
+
+        auth.authenticated_pubkey = Some(event.pubkey.clone());
+
+        vec![ServerMessage::Ok {
+            event_id: event.id.clone(),
+            accepted: true,
+            message: "authenticated".to_string(),
+        }]
+    }
+}
+
+fn auth_state(required: bool) -> Option<AuthState> {
+    if required {
+        Some(AuthState::new())
+    } else {
+        None
+    }
+}
+
+fn generate_challenge() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn find_tag_value(tags: &[Vec<String>], name: &str) -> Option<String> {
+    tags.iter()
+        .find(|tag| tag.first().map(|entry| entry == name).unwrap_or(false))
+        .and_then(|tag| tag.get(1).cloned())
 }
 
 fn parse_filters(filters: &[Value]) -> Result<Vec<Filter>, crate::FilterError> {
@@ -337,6 +464,15 @@ mod tests {
         assert!(session.registry().eose_sent(&crate::SubscriptionId::new("sub")));
     }
 
+    #[test]
+    fn auth_challenge_emitted_when_required() {
+        let session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let challenge = session.auth_challenge().expect("challenge");
+        assert!(!challenge.is_empty());
+        let messages = session.initial_messages();
+        assert!(matches!(messages[0], ServerMessage::Auth { .. }));
+    }
+
     struct StubAdmission {
         decision: AdmissionDecision,
     }
@@ -349,6 +485,10 @@ mod tests {
     }
 
     fn signed_event(seed: &str) -> NostrEvent {
+        signed_event_with_tags(seed, 1, Vec::new())
+    }
+
+    fn signed_event_with_tags(seed: &str, kind: u32, tags: Vec<Vec<String>>) -> NostrEvent {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[0x11; 32]).expect("secret");
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
@@ -358,8 +498,8 @@ mod tests {
             id: seed.to_string(),
             pubkey: hex::encode(pubkey.serialize()),
             created_at: 1,
-            kind: 1,
-            tags: Vec::new(),
+            kind,
+            tags,
             content: String::new(),
             sig: String::new(),
         };
@@ -369,6 +509,25 @@ mod tests {
         let sig = secp.sign_schnorr(&msg, &keypair);
         event.sig = hex::encode(sig.as_ref());
         event
+    }
+
+    #[tokio::test]
+    async fn auth_accepts_valid_event() {
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let challenge = session.auth_challenge().expect("challenge");
+        let event = signed_event_with_tags(
+            "auth",
+            super::AUTH_KIND,
+            vec![vec!["challenge".to_string(), challenge]],
+        );
+
+        let response = session
+            .handle_message(ClientMessage::Auth(serde_json::to_value(event).unwrap()))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok { accepted: true, .. }
+        ));
     }
 
     #[tokio::test]
@@ -439,7 +598,7 @@ mod tests {
         let store = MemoryStore::new();
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
         let mut session =
-            Session::with_broadcast(store, Policy::default(), None, tx);
+            Session::with_broadcast(store, Policy::default(), None, tx, false);
         let event = signed_event("seed");
 
         let response = session

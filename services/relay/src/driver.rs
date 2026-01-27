@@ -23,6 +23,11 @@ impl<S: EventStore> SessionDriver<S> {
         mut inbound: mpsc::Receiver<String>,
         outbound: mpsc::Sender<String>,
     ) {
+        for message in self.session.initial_messages() {
+            if outbound.send(encode_response(message)).await.is_err() {
+                return;
+            }
+        }
         while let Some(input) = inbound.recv().await {
             let responses = self.handle_text(&input).await;
             for response in responses {
@@ -40,6 +45,11 @@ impl<S: EventStore> SessionDriver<S> {
         mut broadcast_rx: broadcast::Receiver<crate::NostrEvent>,
     ) {
         let outbound = outbound;
+        for message in self.session.initial_messages() {
+            if outbound.send(encode_response(message)).await.is_err() {
+                return;
+            }
+        }
         loop {
             tokio::select! {
                 Some(input) = inbound.recv() => {

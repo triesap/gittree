@@ -111,6 +111,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
         state.policy,
         state.admission.clone(),
         state.broadcast.clone(),
+        state.config.policy.auth_required,
     );
     let driver = SessionDriver::new(session);
     tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
