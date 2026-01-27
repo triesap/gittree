@@ -6,12 +6,14 @@ use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, S
 
 mod admission_client;
 mod cli;
+mod event;
 mod protocol;
 
 pub use admission_client::{
     AdmissionFallback, AdmissionHookClient, AdmissionHookConfig, AdmissionHookError, RelayEvent,
 };
 pub use cli::{RelayCli, RelayCliError};
+pub use event::{EventError, NostrEvent};
 pub use protocol::{
     ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
 };

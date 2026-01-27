@@ -855,9 +855,12 @@ dependencies = [
  "gittree-core",
  "gittree-observability",
  "gittree-storage",
+ "hex",
  "reqwest",
+ "secp256k1",
  "serde",
  "serde_json",
+ "sha2",
  "tracing",
 ]
 
