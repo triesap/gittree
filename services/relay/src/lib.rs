@@ -8,6 +8,7 @@ mod admission_client;
 mod cli;
 mod event;
 mod protocol;
+mod tags;
 
 pub use admission_client::{
     AdmissionFallback, AdmissionHookClient, AdmissionHookConfig, AdmissionHookError, RelayEvent,
@@ -17,6 +18,7 @@ pub use event::{EventError, NostrEvent};
 pub use protocol::{
     ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
 };
+pub use tags::{TagError, TagIndex};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
