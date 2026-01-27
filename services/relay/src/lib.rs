@@ -9,6 +9,7 @@ mod cli;
 mod event;
 mod filter;
 mod notice;
+mod policy;
 mod protocol;
 mod subscription;
 mod store;
@@ -21,6 +22,7 @@ pub use cli::{RelayCli, RelayCliError};
 pub use event::{EventError, NostrEvent};
 pub use filter::{Filter, FilterError};
 pub use notice::Notice;
+pub use policy::{Policy, PolicyError};
 pub use protocol::{
     ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
 };
