@@ -15,6 +15,15 @@ const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
 const ENV_RELAY_PROBE_ACTIVE: &str = "GITTREE_RELAY_PROBE_ACTIVE";
 const ENV_RELAY_PROBE_TIMEOUT_SECS: &str = "GITTREE_RELAY_PROBE_TIMEOUT_SECS";
 const ENV_RELAY_PROBE_SECRET_KEY: &str = "GITTREE_RELAY_PROBE_SECRET_KEY";
+const ENV_RELAY_POLICY_MAX_CONTENT_LEN: &str = "GITTREE_RELAY_POLICY_MAX_CONTENT_LEN";
+const ENV_RELAY_POLICY_MAX_TAGS: &str = "GITTREE_RELAY_POLICY_MAX_TAGS";
+const ENV_RELAY_POLICY_MAX_TAG_VALUES: &str = "GITTREE_RELAY_POLICY_MAX_TAG_VALUES";
+const ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN: &str = "GITTREE_RELAY_POLICY_MAX_TAG_VALUE_LEN";
+const ENV_RELAY_POLICY_MAX_FUTURE_SECS: &str = "GITTREE_RELAY_POLICY_MAX_FUTURE_SECS";
+const ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS: &str = "GITTREE_RELAY_POLICY_MAX_SUBSCRIPTIONS";
+const ENV_RELAY_POLICY_MAX_LIMIT: &str = "GITTREE_RELAY_POLICY_MAX_LIMIT";
+const ENV_RELAY_POLICY_MAX_MESSAGE_BYTES: &str = "GITTREE_RELAY_POLICY_MAX_MESSAGE_BYTES";
+const ENV_RELAY_POLICY_AUTH_REQUIRED: &str = "GITTREE_RELAY_POLICY_AUTH_REQUIRED";
 const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
 const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
 const ENV_COORDINATOR_BIND: &str = "GITTREE_COORDINATOR_BIND";
@@ -23,6 +32,11 @@ const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
 
 const DEFAULT_RELAY_COMPAT_MODE: RelayCompatibilityMode = RelayCompatibilityMode::Strict;
 const DEFAULT_RELAY_PROBE_TIMEOUT_SECS: u64 = 5;
+const DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN: u64 = 8_192;
+const DEFAULT_RELAY_POLICY_MAX_TAGS: u64 = 128;
+const DEFAULT_RELAY_POLICY_MAX_TAG_VALUES: u64 = 16;
+const DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN: u64 = 512;
+const DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -201,6 +215,117 @@ impl RelayProbeConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayPolicyConfig {
+    pub max_content_len: u64,
+    pub max_tags: u64,
+    pub max_tag_values: u64,
+    pub max_tag_value_len: u64,
+    pub max_future_seconds: u64,
+    pub max_subscriptions: Option<u64>,
+    pub max_limit: Option<u64>,
+    pub max_message_bytes: Option<u64>,
+    pub auth_required: bool,
+}
+
+impl Default for RelayPolicyConfig {
+    fn default() -> Self {
+        Self {
+            max_content_len: DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN,
+            max_tags: DEFAULT_RELAY_POLICY_MAX_TAGS,
+            max_tag_values: DEFAULT_RELAY_POLICY_MAX_TAG_VALUES,
+            max_tag_value_len: DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN,
+            max_future_seconds: DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS,
+            max_subscriptions: None,
+            max_limit: None,
+            max_message_bytes: None,
+            auth_required: false,
+        }
+    }
+}
+
+impl RelayPolicyConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let max_content_len = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_CONTENT_LEN,
+            "relay_policy.max_content_len",
+        )?
+        .unwrap_or(DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN);
+        let max_tags =
+            env_u64_policy(ENV_RELAY_POLICY_MAX_TAGS, "relay_policy.max_tags")?
+                .unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAGS);
+        let max_tag_values = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_TAG_VALUES,
+            "relay_policy.max_tag_values",
+        )?
+        .unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAG_VALUES);
+        let max_tag_value_len = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN,
+            "relay_policy.max_tag_value_len",
+        )?
+        .unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN);
+        let max_future_seconds = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_FUTURE_SECS,
+            "relay_policy.max_future_seconds",
+        )?
+        .unwrap_or(DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS);
+        let max_subscriptions = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS,
+            "relay_policy.max_subscriptions",
+        )?;
+        let max_limit = env_u64_policy(ENV_RELAY_POLICY_MAX_LIMIT, "relay_policy.max_limit")?;
+        let max_message_bytes = env_u64_policy(
+            ENV_RELAY_POLICY_MAX_MESSAGE_BYTES,
+            "relay_policy.max_message_bytes",
+        )?;
+        let auth_required = env_bool_policy(
+            ENV_RELAY_POLICY_AUTH_REQUIRED,
+            "relay_policy.auth_required",
+        )?
+        .unwrap_or(false);
+
+        let config = Self {
+            max_content_len,
+            max_tags,
+            max_tag_values,
+            max_tag_value_len,
+            max_future_seconds,
+            max_subscriptions,
+            max_limit,
+            max_message_bytes,
+            auth_required,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlRelayPolicyRoot = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let config = parsed.into_config();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        validate_policy_limit("relay_policy.max_content_len", self.max_content_len)?;
+        validate_policy_limit("relay_policy.max_tags", self.max_tags)?;
+        validate_policy_limit("relay_policy.max_tag_values", self.max_tag_values)?;
+        validate_policy_limit("relay_policy.max_tag_value_len", self.max_tag_value_len)?;
+        validate_policy_limit("relay_policy.max_future_seconds", self.max_future_seconds)?;
+        if let Some(limit) = self.max_subscriptions {
+            validate_policy_limit("relay_policy.max_subscriptions", limit)?;
+        }
+        if let Some(limit) = self.max_limit {
+            validate_policy_limit("relay_policy.max_limit", limit)?;
+        }
+        if let Some(limit) = self.max_message_bytes {
+            validate_policy_limit("relay_policy.max_message_bytes", limit)?;
+        }
+        Ok(())
+    }
+}
+
 impl Default for ServicesConfig {
     fn default() -> Self {
         Self {
@@ -315,6 +440,43 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, ConfigError> {
     }
 }
 
+fn env_bool_policy(
+    key: &'static str,
+    field: &'static str,
+) -> Result<Option<bool>, ConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            parse_bool(&value).map(Some).ok_or_else(|| {
+                ConfigError::InvalidRelayPolicyConfig {
+                    field,
+                    value,
+                }
+            })
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn env_u64_policy(key: &'static str, field: &'static str) -> Result<Option<u64>, ConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<u64>().map(Some).map_err(|_| {
+                ConfigError::InvalidRelayPolicyConfig {
+                    field,
+                    value,
+                }
+            })
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" => Some(true),
@@ -351,6 +513,16 @@ fn validate_relay_url(value: &str) -> Result<(), ConfigError> {
         "ws" | "wss" | "http" | "https" => Ok(()),
         _ => Err(ConfigError::InvalidRelayUrl(value.to_string())),
     }
+}
+
+fn validate_policy_limit(field: &'static str, value: u64) -> Result<(), ConfigError> {
+    if value == 0 {
+        return Err(ConfigError::InvalidRelayPolicyConfig {
+            field,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -462,6 +634,61 @@ impl TomlRelayProbeRoot {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlRelayPolicyRoot {
+    relay_policy: Option<TomlRelayPolicyConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlRelayPolicyConfig {
+    max_content_len: Option<u64>,
+    max_tags: Option<u64>,
+    max_tag_values: Option<u64>,
+    max_tag_value_len: Option<u64>,
+    max_future_seconds: Option<u64>,
+    max_subscriptions: Option<u64>,
+    max_limit: Option<u64>,
+    max_message_bytes: Option<u64>,
+    auth_required: Option<bool>,
+}
+
+impl TomlRelayPolicyRoot {
+    fn into_config(self) -> RelayPolicyConfig {
+        let config = self.relay_policy.unwrap_or(TomlRelayPolicyConfig {
+            max_content_len: None,
+            max_tags: None,
+            max_tag_values: None,
+            max_tag_value_len: None,
+            max_future_seconds: None,
+            max_subscriptions: None,
+            max_limit: None,
+            max_message_bytes: None,
+            auth_required: None,
+        });
+        RelayPolicyConfig {
+            max_content_len: config
+                .max_content_len
+                .unwrap_or(DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN),
+            max_tags: config.max_tags.unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAGS),
+            max_tag_values: config
+                .max_tag_values
+                .unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAG_VALUES),
+            max_tag_value_len: config
+                .max_tag_value_len
+                .unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN),
+            max_future_seconds: config
+                .max_future_seconds
+                .unwrap_or(DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS),
+            max_subscriptions: config.max_subscriptions,
+            max_limit: config.max_limit,
+            max_message_bytes: config.max_message_bytes,
+            auth_required: config.auth_required.unwrap_or(false),
+        }
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlServicesConfig {
@@ -485,6 +712,7 @@ pub enum ConfigError {
     InvalidRelayUrl(String),
     InvalidRelayCompatibilityMode(String),
     InvalidRelayProbeConfig { field: &'static str, value: String },
+    InvalidRelayPolicyConfig { field: &'static str, value: String },
     InvalidServiceBind {
         service: &'static str,
         value: String,
@@ -514,6 +742,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidRelayProbeConfig { field, value } => {
                 write!(f, "invalid relay probe config {field}: {value}")
             }
+            ConfigError::InvalidRelayPolicyConfig { field, value } => {
+                write!(f, "invalid relay policy config {field}: {value}")
+            }
             ConfigError::InvalidServiceBind { service, value } => {
                 write!(f, "invalid {service} bind address: {value}")
             }
@@ -542,6 +773,7 @@ impl std::error::Error for ConfigError {
             ConfigError::InvalidRelayUrl(_) => None,
             ConfigError::InvalidRelayCompatibilityMode(_) => None,
             ConfigError::InvalidRelayProbeConfig { .. } => None,
+            ConfigError::InvalidRelayPolicyConfig { .. } => None,
             ConfigError::InvalidServiceBind { .. } => None,
             ConfigError::ReadConfig { source, .. } => Some(source),
             ConfigError::TomlParse { source, .. } => Some(source),
@@ -651,12 +883,18 @@ mod tests {
     use super::RelayCompatibilityConfig;
     use super::RelayCompatibilityMode;
     use super::RelayProbeConfig;
+    use super::RelayPolicyConfig;
     use super::RelayTargetsConfig;
     use super::ServicesConfig;
     use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
     use crate::DEFAULT_GIT_HTTP_BIND;
     use crate::DEFAULT_RELAY_BIND;
+    use crate::DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN;
+    use crate::DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS;
+    use crate::DEFAULT_RELAY_POLICY_MAX_TAGS;
+    use crate::DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN;
+    use crate::DEFAULT_RELAY_POLICY_MAX_TAG_VALUES;
     use crate::DEFAULT_STATE_BIND;
     use crate::DEFAULT_SYNC_BIND;
     use crate::ENV_ADMISSION_BIND;
@@ -664,6 +902,15 @@ mod tests {
     use crate::ENV_GIT_HTTP_BIND;
     use crate::ENV_RELAY_BIND;
     use crate::ENV_RELAY_COMPAT_MODE;
+    use crate::ENV_RELAY_POLICY_AUTH_REQUIRED;
+    use crate::ENV_RELAY_POLICY_MAX_CONTENT_LEN;
+    use crate::ENV_RELAY_POLICY_MAX_FUTURE_SECS;
+    use crate::ENV_RELAY_POLICY_MAX_LIMIT;
+    use crate::ENV_RELAY_POLICY_MAX_MESSAGE_BYTES;
+    use crate::ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS;
+    use crate::ENV_RELAY_POLICY_MAX_TAGS;
+    use crate::ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN;
+    use crate::ENV_RELAY_POLICY_MAX_TAG_VALUES;
     use crate::ENV_RELAY_PROBE_ACTIVE;
     use crate::ENV_RELAY_PROBE_SECRET_KEY;
     use crate::ENV_RELAY_PROBE_TIMEOUT_SECS;
@@ -844,6 +1091,119 @@ secret_key = "22"
         assert!(matches!(
             err,
             ConfigError::InvalidRelayProbeConfig { field, .. } if field == "relay_probe.secret_key"
+        ));
+    }
+
+    #[test]
+    fn relay_policy_env_parses() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "9000", || {
+            with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "33", || {
+                with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "12", || {
+                    with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN, "120", || {
+                        with_env_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS, "30", || {
+                            with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "9", || {
+                                with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "200", || {
+                                    with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "9999", || {
+                                        with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "true", || {
+                                            let config =
+                                                RelayPolicyConfig::from_env().expect("policy");
+                                            assert_eq!(config.max_content_len, 9000);
+                                            assert_eq!(config.max_tags, 33);
+                                            assert_eq!(config.max_tag_values, 12);
+                                            assert_eq!(config.max_tag_value_len, 120);
+                                            assert_eq!(config.max_future_seconds, 30);
+                                            assert_eq!(config.max_subscriptions, Some(9));
+                                            assert_eq!(config.max_limit, Some(200));
+                                            assert_eq!(config.max_message_bytes, Some(9999));
+                                            assert!(config.auth_required);
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn relay_policy_env_defaults_apply() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_TAGS);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_TAG_VALUES);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_LIMIT);
+            std::env::remove_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES);
+            std::env::remove_var(ENV_RELAY_POLICY_AUTH_REQUIRED);
+        }
+        let config = RelayPolicyConfig::from_env().expect("policy");
+        assert_eq!(config.max_content_len, DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN);
+        assert_eq!(config.max_tags, DEFAULT_RELAY_POLICY_MAX_TAGS);
+        assert_eq!(config.max_tag_values, DEFAULT_RELAY_POLICY_MAX_TAG_VALUES);
+        assert_eq!(config.max_tag_value_len, DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN);
+        assert_eq!(config.max_future_seconds, DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS);
+        assert_eq!(config.max_subscriptions, None);
+        assert_eq!(config.max_limit, None);
+        assert_eq!(config.max_message_bytes, None);
+        assert!(!config.auth_required);
+    }
+
+    #[test]
+    fn relay_policy_env_rejects_zero() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "0", || {
+            let err = RelayPolicyConfig::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig { field, .. } if field == "relay_policy.max_tags"
+            ));
+        });
+    }
+
+    #[test]
+    fn relay_policy_toml_parses() {
+        let config = RelayPolicyConfig::from_toml_str(
+            r#"[relay_policy]
+max_content_len = 4096
+max_tags = 48
+max_tag_values = 10
+max_tag_value_len = 80
+max_future_seconds = 10
+max_subscriptions = 5
+max_limit = 250
+max_message_bytes = 10000
+auth_required = true
+"#,
+        )
+        .expect("policy config");
+        assert_eq!(config.max_content_len, 4096);
+        assert_eq!(config.max_tags, 48);
+        assert_eq!(config.max_tag_values, 10);
+        assert_eq!(config.max_tag_value_len, 80);
+        assert_eq!(config.max_future_seconds, 10);
+        assert_eq!(config.max_subscriptions, Some(5));
+        assert_eq!(config.max_limit, Some(250));
+        assert_eq!(config.max_message_bytes, Some(10000));
+        assert!(config.auth_required);
+    }
+
+    #[test]
+    fn relay_policy_toml_rejects_zero() {
+        let err = RelayPolicyConfig::from_toml_str(
+            r#"[relay_policy]
+max_content_len = 0
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidRelayPolicyConfig { field, .. } if field == "relay_policy.max_content_len"
         ));
     }
 
