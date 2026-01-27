@@ -1,6 +1,6 @@
 use crate::{
-    RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord,
-    StorageError,
+    EventQuery, EventRecord, RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord,
+    RepoStateRecord, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -57,6 +57,14 @@ pub trait RelayCompatibilityRepository: Send + Sync {
         &self,
         relay_url: &str,
     ) -> Result<Option<RelayCompatibilityRecord>, StorageError>;
+}
+
+#[async_trait]
+pub trait EventRepository: Send + Sync {
+    async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError>;
+    async fn get_event(&self, event_id: &[u8]) -> Result<Option<EventRecord>, StorageError>;
+    async fn delete_event(&self, event_id: &[u8]) -> Result<bool, StorageError>;
+    async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError>;
 }
 
 #[derive(Debug, Default)]

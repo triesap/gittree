@@ -850,6 +850,7 @@ dependencies = [
 name = "gittree-relay"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dotenvy",
  "gittree-config",
  "gittree-core",
@@ -861,6 +862,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "tracing",
 ]
 

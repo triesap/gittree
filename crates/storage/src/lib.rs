@@ -4,6 +4,7 @@ use sqlx::postgres::PgConnectOptions;
 use std::time::Duration;
 
 pub mod cache;
+pub mod event;
 pub mod migrations;
 pub mod postgres;
 pub mod queries;
@@ -13,6 +14,7 @@ pub mod repositories;
 pub mod relay_compat;
 
 pub use cache::{CacheConfig, CachedRepositories};
+pub use event::{EventQuery, EventRecord, TagRecord};
 pub use migrations::{Migration, MigrationRunner};
 pub use postgres::PostgresRepositories;
 pub use queries::RepoFilter;
@@ -20,8 +22,8 @@ pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
 pub use repo_mapping::RepoMappingRecord;
 pub use relay_compat::{RelayCompatibilityRecord, RelayProbeMetadata};
 pub use repositories::{
-    AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRepository,
-    RepoMappingRepository, StateRepository,
+    AnnouncementRepository, EventRepository, InMemoryRepositories,
+    RelayCompatibilityRepository, RepoMappingRepository, StateRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -20,6 +20,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_repo_mapping(),
         migration_relay_compatibility(),
         migration_relay_compatibility_metadata(),
+        migration_nostr_events(),
     ]
 }
 
@@ -134,6 +135,15 @@ fn migration_relay_compatibility_metadata() -> Migration {
     }
 }
 
+fn migration_nostr_events() -> Migration {
+    const NOSTR_EVENTS_SQL: &str = include_str!("../../../migrations/0005_nostr_events.sql");
+    Migration {
+        version: 5,
+        description: "nostr event store",
+        sql: NOSTR_EVENTS_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -201,12 +211,13 @@ mod tests {
         assert!(sql.contains("CREATE TABLE repo_state"));
         assert!(sql.contains("CREATE TABLE repo_mapping"));
         assert!(sql.contains("CREATE TABLE relay_compatibility"));
+        assert!(sql.contains("CREATE TABLE nostr_event"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
     }
 }
