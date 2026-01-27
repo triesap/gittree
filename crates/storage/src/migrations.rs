@@ -21,6 +21,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_relay_compatibility(),
         migration_relay_compatibility_metadata(),
         migration_nostr_events(),
+        migration_nostr_event_indexes(),
     ]
 }
 
@@ -144,6 +145,16 @@ fn migration_nostr_events() -> Migration {
     }
 }
 
+fn migration_nostr_event_indexes() -> Migration {
+    const NOSTR_EVENT_INDEX_SQL: &str =
+        include_str!("../../../migrations/0006_nostr_event_indexes.sql");
+    Migration {
+        version: 6,
+        description: "nostr event indexes",
+        sql: NOSTR_EVENT_INDEX_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -218,6 +229,6 @@ mod tests {
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
     }
 }
