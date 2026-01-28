@@ -9,6 +9,7 @@ const DEFAULT_STATE_BIND: &str = "127.0.0.1:8082";
 const DEFAULT_COORDINATOR_BIND: &str = "127.0.0.1:8083";
 const DEFAULT_SYNC_BIND: &str = "127.0.0.1:8084";
 const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
+const DEFAULT_UI_BIND: &str = "127.0.0.1:8086";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
 const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
@@ -33,6 +34,15 @@ const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
 const ENV_COORDINATOR_BIND: &str = "GITTREE_COORDINATOR_BIND";
 const ENV_SYNC_BIND: &str = "GITTREE_SYNC_BIND";
 const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
+const ENV_UI_BIND: &str = "GITTREE_UI_BIND";
+const ENV_FORGEJO_BASE_URL: &str = "GITTREE_FORGEJO_BASE_URL";
+const ENV_FORGEJO_API_TOKEN: &str = "GITTREE_FORGEJO_API_TOKEN";
+const ENV_FORGEJO_OWNER: &str = "GITTREE_FORGEJO_OWNER";
+const ENV_FORGEJO_WEBHOOK_URL: &str = "GITTREE_FORGEJO_WEBHOOK_URL";
+const ENV_FORGEJO_WEBHOOK_SECRET: &str = "GITTREE_FORGEJO_WEBHOOK_SECRET";
+const ENV_FORGEJO_REPO_PRIVATE: &str = "GITTREE_FORGEJO_REPO_PRIVATE";
+const ENV_UI_REPO_ROOT: &str = "GITTREE_UI_REPO_ROOT";
+const ENV_UI_PUBLIC_GIT_URL: &str = "GITTREE_UI_PUBLIC_GIT_URL";
 
 const DEFAULT_RELAY_COMPAT_MODE: RelayCompatibilityMode = RelayCompatibilityMode::Strict;
 const DEFAULT_RELAY_PROBE_TIMEOUT_SECS: u64 = 5;
@@ -61,6 +71,7 @@ pub struct ServicesConfig {
     pub coordinator: ServiceConfig,
     pub sync: ServiceConfig,
     pub git_http: ServiceConfig,
+    pub ui: ServiceConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +113,125 @@ impl RelayTargetsConfig {
         for url in &self.relay_urls {
             validate_relay_url(url)?;
         }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoConfig {
+    pub base_url: String,
+    pub api_token: String,
+    pub owner: String,
+    pub webhook_url: String,
+    pub webhook_secret: String,
+    pub repo_private: bool,
+}
+
+impl ForgejoConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let base_url = env_required_string(ENV_FORGEJO_BASE_URL)?;
+        let api_token = env_required_string(ENV_FORGEJO_API_TOKEN)?;
+        let owner = env_required_string(ENV_FORGEJO_OWNER)?;
+        let webhook_url = env_required_string(ENV_FORGEJO_WEBHOOK_URL)?;
+        let webhook_secret = env_required_string(ENV_FORGEJO_WEBHOOK_SECRET)?;
+        let repo_private = env_bool_default(ENV_FORGEJO_REPO_PRIVATE, true)?;
+        let config = Self {
+            base_url,
+            api_token,
+            owner,
+            webhook_url,
+            webhook_secret,
+            repo_private,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlForgejoRoot = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let config = parsed.into_config()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadConfig {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_toml_str(&contents).map_err(|err| err.with_path(path))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        validate_http_url("forgejo.base_url", &self.base_url)?;
+        validate_http_url("forgejo.webhook_url", &self.webhook_url)?;
+        if self.api_token.trim().is_empty() {
+            return Err(ConfigError::InvalidConfig {
+                field: "forgejo.api_token",
+                value: self.api_token.clone(),
+            });
+        }
+        if self.owner.trim().is_empty() {
+            return Err(ConfigError::InvalidConfig {
+                field: "forgejo.owner",
+                value: self.owner.clone(),
+            });
+        }
+        if self.webhook_secret.trim().is_empty() {
+            return Err(ConfigError::InvalidConfig {
+                field: "forgejo.webhook_secret",
+                value: self.webhook_secret.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiConfig {
+    pub repo_root: std::path::PathBuf,
+    pub public_git_url: String,
+}
+
+impl UiConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let repo_root = env_required_path(ENV_UI_REPO_ROOT)?;
+        let public_git_url = env_required_string(ENV_UI_PUBLIC_GIT_URL)?;
+        let config = Self {
+            repo_root,
+            public_git_url,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let parsed: TomlUiRoot = toml::from_str(input)
+            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let config = parsed.into_config()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadConfig {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_toml_str(&contents).map_err(|err| err.with_path(path))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.repo_root.as_os_str().is_empty() {
+            return Err(ConfigError::InvalidConfig {
+                field: "ui.repo_root",
+                value: "".to_string(),
+            });
+        }
+        validate_http_url("ui.public_git_url", &self.public_git_url)?;
         Ok(())
     }
 }
@@ -369,6 +499,7 @@ impl Default for ServicesConfig {
             coordinator: ServiceConfig::new(DEFAULT_COORDINATOR_BIND),
             sync: ServiceConfig::new(DEFAULT_SYNC_BIND),
             git_http: ServiceConfig::new(DEFAULT_GIT_HTTP_BIND),
+            ui: ServiceConfig::new(DEFAULT_UI_BIND),
         }
     }
 }
@@ -388,6 +519,7 @@ impl ServicesConfig {
             )),
             sync: ServiceConfig::new(env_or_default(ENV_SYNC_BIND, DEFAULT_SYNC_BIND)),
             git_http: ServiceConfig::new(env_or_default(ENV_GIT_HTTP_BIND, DEFAULT_GIT_HTTP_BIND)),
+            ui: ServiceConfig::new(env_or_default(ENV_UI_BIND, DEFAULT_UI_BIND)),
         }
     }
 
@@ -413,6 +545,7 @@ impl ServicesConfig {
         validate_service_bind("coordinator", &self.coordinator.bind)?;
         validate_service_bind("sync", &self.sync.bind)?;
         validate_service_bind("git_http", &self.git_http.bind)?;
+        validate_service_bind("ui", &self.ui.bind)?;
         Ok(())
     }
 
@@ -433,6 +566,30 @@ impl ServicesConfig {
 
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_required_string(key: &'static str) -> Result<String, ConfigError> {
+    let value = std::env::var(key).map_err(|_| ConfigError::MissingEnv(key))?;
+    if value.trim().is_empty() {
+        return Err(ConfigError::MissingEnv(key));
+    }
+    Ok(value)
+}
+
+fn env_required_path(key: &'static str) -> Result<std::path::PathBuf, ConfigError> {
+    env_required_string(key).map(std::path::PathBuf::from)
+}
+
+fn env_bool_default(key: &'static str, default: bool) -> Result<bool, ConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(default);
+            }
+            parse_bool(&value).ok_or_else(|| ConfigError::InvalidConfig { field: key, value })
+        }
+        Err(_) => Ok(default),
+    }
 }
 
 fn env_optional_string(key: &str) -> Option<String> {
@@ -549,6 +706,25 @@ fn validate_relay_url(value: &str) -> Result<(), ConfigError> {
     }
 }
 
+fn validate_http_url(field: &'static str, value: &str) -> Result<(), ConfigError> {
+    let parsed = url::Url::parse(value)
+        .map_err(|_| ConfigError::InvalidConfig { field, value: value.to_string() })?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err(ConfigError::InvalidConfig {
+            field,
+            value: value.to_string(),
+        }),
+    }
+}
+
+fn require_toml_field<T>(value: Option<T>, field: &'static str) -> Result<T, ConfigError> {
+    value.ok_or_else(|| ConfigError::InvalidConfig {
+        field,
+        value: "missing".to_string(),
+    })
+}
+
 fn validate_policy_limit(field: &'static str, value: u64) -> Result<(), ConfigError> {
     if value == 0 {
         return Err(ConfigError::InvalidRelayPolicyConfig {
@@ -591,6 +767,7 @@ impl TomlServicesRoot {
             )),
             sync: ServiceConfig::new(bind_or_default(services.sync, DEFAULT_SYNC_BIND)),
             git_http: ServiceConfig::new(bind_or_default(services.git_http, DEFAULT_GIT_HTTP_BIND)),
+            ui: ServiceConfig::new(bind_or_default(services.ui, DEFAULT_UI_BIND)),
         }
     }
 }
@@ -611,6 +788,74 @@ struct TomlServicesRoot {
 #[serde(deny_unknown_fields)]
 struct TomlRelayTargets {
     relay_urls: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlForgejoRoot {
+    forgejo: Option<TomlForgejoConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlForgejoConfig {
+    base_url: Option<String>,
+    api_token: Option<String>,
+    owner: Option<String>,
+    webhook_url: Option<String>,
+    webhook_secret: Option<String>,
+    repo_private: Option<bool>,
+}
+
+impl TomlForgejoRoot {
+    fn into_config(self) -> Result<ForgejoConfig, ConfigError> {
+        let config = self.forgejo.ok_or_else(|| ConfigError::InvalidConfig {
+            field: "forgejo",
+            value: "missing".to_string(),
+        })?;
+        let base_url = require_toml_field(config.base_url, "forgejo.base_url")?;
+        let api_token = require_toml_field(config.api_token, "forgejo.api_token")?;
+        let owner = require_toml_field(config.owner, "forgejo.owner")?;
+        let webhook_url = require_toml_field(config.webhook_url, "forgejo.webhook_url")?;
+        let webhook_secret = require_toml_field(config.webhook_secret, "forgejo.webhook_secret")?;
+        let repo_private = config.repo_private.unwrap_or(true);
+        Ok(ForgejoConfig {
+            base_url,
+            api_token,
+            owner,
+            webhook_url,
+            webhook_secret,
+            repo_private,
+        })
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlUiRoot {
+    ui: Option<TomlUiConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlUiConfig {
+    repo_root: Option<String>,
+    public_git_url: Option<String>,
+}
+
+impl TomlUiRoot {
+    fn into_config(self) -> Result<UiConfig, ConfigError> {
+        let config = self.ui.ok_or_else(|| ConfigError::InvalidConfig {
+            field: "ui",
+            value: "missing".to_string(),
+        })?;
+        let repo_root = require_toml_field(config.repo_root, "ui.repo_root")?;
+        let public_git_url = require_toml_field(config.public_git_url, "ui.public_git_url")?;
+        Ok(UiConfig {
+            repo_root: std::path::PathBuf::from(repo_root),
+            public_git_url,
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -741,6 +986,7 @@ struct TomlServicesConfig {
     coordinator: Option<TomlServiceConfig>,
     sync: Option<TomlServiceConfig>,
     git_http: Option<TomlServiceConfig>,
+    ui: Option<TomlServiceConfig>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -760,6 +1006,8 @@ pub enum ConfigError {
         service: &'static str,
         value: String,
     },
+    MissingEnv(&'static str),
+    InvalidConfig { field: &'static str, value: String },
     ReadConfig {
         path: std::path::PathBuf,
         source: std::io::Error,
@@ -791,6 +1039,10 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidServiceBind { service, value } => {
                 write!(f, "invalid {service} bind address: {value}")
             }
+            ConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
+            ConfigError::InvalidConfig { field, value } => {
+                write!(f, "invalid config {field}: {value}")
+            }
             ConfigError::ReadConfig { path, source } => {
                 write!(f, "failed to read config file {}: {source}", path.display())
             }
@@ -818,6 +1070,8 @@ impl std::error::Error for ConfigError {
             ConfigError::InvalidRelayProbeConfig { .. } => None,
             ConfigError::InvalidRelayPolicyConfig { .. } => None,
             ConfigError::InvalidServiceBind { .. } => None,
+            ConfigError::MissingEnv(_) => None,
+            ConfigError::InvalidConfig { .. } => None,
             ConfigError::ReadConfig { source, .. } => Some(source),
             ConfigError::TomlParse { source, .. } => Some(source),
         }
@@ -923,12 +1177,14 @@ impl GittreeConfig {
 mod tests {
     use super::ConfigError;
     use super::GittreeConfig;
+    use super::ForgejoConfig;
     use super::RelayCompatibilityConfig;
     use super::RelayCompatibilityMode;
     use super::RelayProbeConfig;
     use super::RelayPolicyConfig;
     use super::RelayTargetsConfig;
     use super::ServicesConfig;
+    use super::UiConfig;
     use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
     use crate::DEFAULT_GIT_HTTP_BIND;
@@ -940,8 +1196,15 @@ mod tests {
     use crate::DEFAULT_RELAY_POLICY_MAX_TAG_VALUES;
     use crate::DEFAULT_STATE_BIND;
     use crate::DEFAULT_SYNC_BIND;
+    use crate::DEFAULT_UI_BIND;
     use crate::ENV_ADMISSION_BIND;
     use crate::ENV_COORDINATOR_BIND;
+    use crate::ENV_FORGEJO_API_TOKEN;
+    use crate::ENV_FORGEJO_BASE_URL;
+    use crate::ENV_FORGEJO_OWNER;
+    use crate::ENV_FORGEJO_REPO_PRIVATE;
+    use crate::ENV_FORGEJO_WEBHOOK_SECRET;
+    use crate::ENV_FORGEJO_WEBHOOK_URL;
     use crate::ENV_GIT_HTTP_BIND;
     use crate::ENV_RELAY_BIND;
     use crate::ENV_RELAY_COMPAT_MODE;
@@ -963,6 +1226,9 @@ mod tests {
     use crate::ENV_RELAY_URLS;
     use crate::ENV_STATE_BIND;
     use crate::ENV_SYNC_BIND;
+    use crate::ENV_UI_BIND;
+    use crate::ENV_UI_PUBLIC_GIT_URL;
+    use crate::ENV_UI_REPO_ROOT;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1433,6 +1699,7 @@ max_content_len = 0
         assert_eq!(services.coordinator.bind, DEFAULT_COORDINATOR_BIND);
         assert_eq!(services.sync.bind, DEFAULT_SYNC_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
+        assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
     }
 
     #[test]
@@ -1445,6 +1712,7 @@ max_content_len = 0
             std::env::remove_var(ENV_COORDINATOR_BIND);
             std::env::remove_var(ENV_SYNC_BIND);
             std::env::remove_var(ENV_GIT_HTTP_BIND);
+            std::env::remove_var(ENV_UI_BIND);
         }
 
         let services = ServicesConfig::from_env();
@@ -1454,6 +1722,7 @@ max_content_len = 0
         assert_eq!(services.coordinator.bind, DEFAULT_COORDINATOR_BIND);
         assert_eq!(services.sync.bind, DEFAULT_SYNC_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
+        assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
     }
 
     #[test]
@@ -1479,6 +1748,7 @@ bind = "127.0.0.1:9011"
         assert_eq!(services.admission.bind, "127.0.0.1:9011");
         assert_eq!(services.state.bind, DEFAULT_STATE_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
+        assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
     }
 
     #[test]
@@ -1544,5 +1814,73 @@ bind = "bad"
             })
         ));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn forgejo_config_from_env_parses() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_FORGEJO_BASE_URL, "http://localhost:3000", || {
+            with_env_var(ENV_FORGEJO_API_TOKEN, "token", || {
+                with_env_var(ENV_FORGEJO_OWNER, "gittree", || {
+                    with_env_var(ENV_FORGEJO_WEBHOOK_URL, "http://localhost:8090/", || {
+                        with_env_var(ENV_FORGEJO_WEBHOOK_SECRET, "secret", || {
+                            with_env_var(ENV_FORGEJO_REPO_PRIVATE, "false", || {
+                                let config = ForgejoConfig::from_env().expect("forgejo");
+                                assert_eq!(config.base_url, "http://localhost:3000");
+                                assert_eq!(config.api_token, "token");
+                                assert_eq!(config.owner, "gittree");
+                                assert_eq!(config.webhook_url, "http://localhost:8090/");
+                                assert_eq!(config.webhook_secret, "secret");
+                                assert!(!config.repo_private);
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn forgejo_config_from_toml_parses() {
+        let toml = r#"
+[forgejo]
+base_url = "http://localhost:3000"
+api_token = "token"
+owner = "gittree"
+webhook_url = "http://localhost:8090/"
+webhook_secret = "secret"
+repo_private = true
+"#;
+        let config = ForgejoConfig::from_toml_str(toml).expect("forgejo");
+        assert_eq!(config.base_url, "http://localhost:3000");
+        assert_eq!(config.api_token, "token");
+        assert_eq!(config.owner, "gittree");
+        assert_eq!(config.webhook_url, "http://localhost:8090/");
+        assert_eq!(config.webhook_secret, "secret");
+        assert!(config.repo_private);
+    }
+
+    #[test]
+    fn ui_config_from_env_parses() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", || {
+                let config = UiConfig::from_env().expect("ui");
+                assert_eq!(config.repo_root, std::path::PathBuf::from("/tmp/gittree-ui"));
+                assert_eq!(config.public_git_url, "http://localhost:8085");
+            });
+        });
+    }
+
+    #[test]
+    fn ui_config_from_toml_parses() {
+        let toml = r#"
+[ui]
+repo_root = "/tmp/gittree-ui"
+public_git_url = "http://localhost:8085"
+"#;
+        let config = UiConfig::from_toml_str(toml).expect("ui");
+        assert_eq!(config.repo_root, std::path::PathBuf::from("/tmp/gittree-ui"));
+        assert_eq!(config.public_git_url, "http://localhost:8085");
     }
 }
