@@ -1,5 +1,5 @@
 relay_bind = "0.0.0.0:8080"
-relay_urls = ["wss://gittr.ee"]
+relay_urls = ["ws://localhost:8080"]
 
 [relay_compatibility]
 mode = "strict"
