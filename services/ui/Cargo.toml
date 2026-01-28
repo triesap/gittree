@@ -1,0 +1,20 @@
+[package]
+name = "gittree-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.7"
+bech32 = "0.11"
+dotenvy = "0.15"
+gittree-config = { path = "../../crates/config" }
+gittree-core = { path = "../../crates/core" }
+gittree-observability = { path = "../../crates/observability" }
+gittree-storage = { path = "../../crates/storage" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tower = "0.4"
