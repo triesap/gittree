@@ -784,6 +784,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-forgejo"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gittree-config",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gittree-git-hook"
 version = "0.1.0"
 dependencies = [

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/forgejo",
   "crates/config",
   "crates/observability",
   "crates/core",
