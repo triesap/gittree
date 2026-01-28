@@ -16,6 +16,7 @@ members = [
   "services/relay",
   "services/state",
   "services/sync",
+  "services/webhook",
 ]
 resolver = "2"
 
