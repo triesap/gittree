@@ -780,6 +780,10 @@ where
         .ensure_repo(&forgejo_name, announcement.description.as_deref())
         .await
         .map_err(CoordinatorEventError::Forgejo)?;
+    forgejo
+        .ensure_webhook(&repo.name)
+        .await
+        .map_err(CoordinatorEventError::Forgejo)?;
     let mapping = RepoMapping::new(
         repo.owner,
         repo.name,
@@ -840,6 +844,10 @@ mod tests {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 responses: Arc::new(Mutex::new(VecDeque::from(responses))),
             }
+        }
+
+        fn requests(&self) -> Vec<ForgejoRequest> {
+            self.requests.lock().expect("requests").clone()
         }
     }
 
@@ -1180,8 +1188,16 @@ mod tests {
                 status: 201,
                 body: repo_json("gittree", &forgejo_repo),
             },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
+            },
         ];
-        let (forgejo, _transport) = forgejo_client_with_responses(forgejo_responses);
+        let (forgejo, transport) = forgejo_client_with_responses(forgejo_responses);
         let storage = InMemoryRepositories::new();
         let temp_dir = temp_dir("gittree-event-storage");
         let bin_dir = temp_dir.join("bin");
@@ -1205,6 +1221,7 @@ mod tests {
         .await
         .expect("handle");
         assert!(matches!(action, CoordinatorAction::Provisioned { .. }));
+        assert_eq!(transport.requests().len(), 4);
         let pubkey_bytes = hex::decode(&event.pubkey).expect("decode");
         let stored = storage
             .latest_announcement(&pubkey_bytes, &announcement.identifier)
@@ -1270,6 +1287,14 @@ mod tests {
             ForgejoResponse {
                 status: 201,
                 body: repo_json("gittree", &forgejo_repo),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
             },
         ];
         let (forgejo, _transport) = forgejo_client_with_responses(forgejo_responses);
