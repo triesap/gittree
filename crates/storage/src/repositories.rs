@@ -45,6 +45,7 @@ pub trait RepoMappingRepository: Send + Sync {
         pubkey: &[u8],
         identifier: &str,
     ) -> Result<Option<RepoMappingRecord>, StorageError>;
+    async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -214,6 +215,18 @@ impl RepoMappingRepository for InMemoryRepositories {
                     message: "repo mapping store poisoned".to_string(),
                 })?;
         Ok(map.get(&key).cloned())
+    }
+
+    async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
+        let map =
+            self.mappings_by_repo
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "repo mapping store poisoned".to_string(),
+                })?;
+        let mut records: Vec<RepoMappingRecord> = map.values().cloned().collect();
+        records.sort_by(|a, b| a.forgejo_full_name().cmp(&b.forgejo_full_name()));
+        Ok(records)
     }
 }
 
@@ -522,6 +535,23 @@ mod tests {
             .await
             .expect("lookup");
         assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_lists_mappings_sorted() {
+        let store = InMemoryRepositories::new();
+        let mapping_a = RepoMapping::new("owner", "alpha", hex_32(0x11), "alpha")
+            .expect("mapping");
+        let mapping_b = RepoMapping::new("owner", "beta", hex_32(0x22), "beta")
+            .expect("mapping");
+        let record_a = RepoMappingRecord::new(&mapping_a).expect("record");
+        let record_b = RepoMappingRecord::new(&mapping_b).expect("record");
+
+        store.upsert_mapping(record_b.clone()).await.expect("upsert");
+        store.upsert_mapping(record_a.clone()).await.expect("upsert");
+
+        let records = store.list_mappings().await.expect("list");
+        assert_eq!(records, vec![record_a, record_b]);
     }
 
     #[tokio::test]

@@ -368,6 +368,32 @@ LIMIT 1
             identifier: row.get("identifier"),
         }))
     }
+
+    async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+SELECT
+    forgejo_owner,
+    forgejo_repo,
+    pubkey,
+    identifier
+FROM repo_mapping
+ORDER BY forgejo_owner, forgejo_repo
+"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let records = rows
+            .into_iter()
+            .map(|row| RepoMappingRecord {
+                forgejo_owner: row.get("forgejo_owner"),
+                forgejo_repo: row.get("forgejo_repo"),
+                pubkey: row.get("pubkey"),
+                identifier: row.get("identifier"),
+            })
+            .collect();
+        Ok(records)
+    }
 }
 
 #[async_trait]
