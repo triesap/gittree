@@ -10,6 +10,22 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:1.21
+    environment:
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__database__PATH: /data/gitea/forgejo.db
+      FORGEJO__server__ROOT_URL: http://localhost:3000/
+      FORGEJO__server__DOMAIN: localhost
+      FORGEJO__server__HTTP_PORT: 3000
+      FORGEJO__server__SSH_DOMAIN: localhost
+      FORGEJO__server__SSH_PORT: 2222
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    volumes:
+      - forgejo-data:/data
+
   relay:
     build:
       context: ..
@@ -52,9 +68,10 @@ services:
       dockerfile: deploy/docker/Dockerfile.git-http
     environment:
       GITTREE_GIT_HTTP_BIND: 0.0.0.0:8085
-      GITTREE_GIT_HTTP_UPSTREAM_URL: http://git-backend:9418
+      GITTREE_GIT_HTTP_UPSTREAM_URL: http://forgejo:3000/
     depends_on:
       - relay
+      - forgejo
 
   coordinator:
     build:
@@ -65,8 +82,15 @@ services:
       GITTREE_RELAY_URLS: ws://relay:8080
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_FORGEJO_BASE_URL: http://forgejo:3000
+      GITTREE_FORGEJO_API_TOKEN: dev-token
+      GITTREE_FORGEJO_OWNER: gittree
+      GITTREE_FORGEJO_WEBHOOK_URL: http://webhook:8087/
+      GITTREE_FORGEJO_WEBHOOK_SECRET: dev-secret
+      GITTREE_FORGEJO_REPO_PRIVATE: "true"
     depends_on:
       - postgres
+      - forgejo
 
   sync:
     build:
@@ -75,6 +99,33 @@ services:
     environment:
       GITTREE_SYNC_BIND: 0.0.0.0:8084
       GITTREE_RELAY_URLS: ws://relay:8080
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    depends_on:
+      - postgres
+
+  webhook:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.webhook
+    environment:
+      GITTREE_WEBHOOK_BIND: 0.0.0.0:8087
+      GITTREE_SYNC_URL: http://sync:8084
+      GITTREE_FORGEJO_WEBHOOK_SECRET: dev-secret
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    depends_on:
+      - postgres
+      - sync
+
+  ui:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.ui
+    environment:
+      GITTREE_UI_BIND: 0.0.0.0:8086
+      GITTREE_UI_REPO_ROOT: /var/lib/gittree/repos
+      GITTREE_UI_PUBLIC_GIT_URL: http://localhost:8085
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
     depends_on:
@@ -92,3 +143,4 @@ services:
 
 volumes:
   pgdata: {}
+  forgejo-data: {}

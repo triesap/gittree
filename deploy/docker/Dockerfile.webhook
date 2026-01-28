@@ -1,0 +1,13 @@
+FROM rust:1.85-bookworm AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY services ./services
+COPY migrations ./migrations
+RUN cargo build -p gittree-webhook --release
+
+FROM debian:bookworm-slim
+RUN useradd -m -u 10001 gittree
+COPY --from=builder /app/target/release/gittree-webhook /usr/local/bin/gittree-webhook
+USER gittree
+ENTRYPOINT ["/usr/local/bin/gittree-webhook"]

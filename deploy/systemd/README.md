@@ -12,6 +12,8 @@ sudo systemctl enable --now gittree-state.service
 sudo systemctl enable --now gittree-git-http.service
 sudo systemctl enable --now gittree-coordinator.service
 sudo systemctl enable --now gittree-sync.service
+sudo systemctl enable --now gittree-webhook.service
+sudo systemctl enable --now gittree-ui.service
 ```
 
 Check status with `systemctl status <service>`.

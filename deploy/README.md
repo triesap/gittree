@@ -8,6 +8,8 @@
 - 8083: coordinator service
 - 8084: sync service
 - 8085: git-http service
+- 8086: ui service
+- 8087: webhook service
 - 5432: postgres
 
 ## Volumes

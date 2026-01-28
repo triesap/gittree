@@ -141,6 +141,12 @@ services:
       GITTREE_COORDINATOR_BIND: 0.0.0.0:8083
       GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
       GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_FORGEJO_BASE_URL: http://forgejo:3000
+      GITTREE_FORGEJO_API_TOKEN: ${GITTREE_FORGEJO_API_TOKEN}
+      GITTREE_FORGEJO_OWNER: ${GITTREE_FORGEJO_OWNER}
+      GITTREE_FORGEJO_WEBHOOK_URL: http://webhook:8087/
+      GITTREE_FORGEJO_WEBHOOK_SECRET: ${GITTREE_FORGEJO_WEBHOOK_SECRET}
+      GITTREE_FORGEJO_REPO_PRIVATE: ${GITTREE_FORGEJO_REPO_PRIVATE}
       GITTREE_LOG_DIR: /var/log/gittree
       GITTREE_LOG_STDOUT: "true"
     ports:
@@ -169,6 +175,58 @@ services:
       GITTREE_LOG_STDOUT: "true"
     ports:
       - "8084:8084"
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/var/log/gittree
+
+  webhook:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.webhook
+    env_file:
+      - .env
+    environment:
+      GITTREE_WEBHOOK_BIND: 0.0.0.0:8087
+      GITTREE_SYNC_URL: http://sync:8084
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
+    ports:
+      - "8087:8087"
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      sync:
+        condition: service_started
+    volumes:
+      - ./logs:/var/log/gittree
+
+  ui:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.ui
+    env_file:
+      - .env
+    environment:
+      GITTREE_UI_BIND: 0.0.0.0:8086
+      GITTREE_UI_REPO_ROOT: /var/lib/gittree/repos
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
+    ports:
+      - "8086:8086"
     depends_on:
       log-init:
         condition: service_completed_successfully
