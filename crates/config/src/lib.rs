@@ -10,6 +10,7 @@ const DEFAULT_COORDINATOR_BIND: &str = "127.0.0.1:8083";
 const DEFAULT_SYNC_BIND: &str = "127.0.0.1:8084";
 const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const DEFAULT_UI_BIND: &str = "127.0.0.1:8086";
+const DEFAULT_WEBHOOK_BIND: &str = "127.0.0.1:8087";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
 const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
@@ -35,6 +36,7 @@ const ENV_COORDINATOR_BIND: &str = "GITTREE_COORDINATOR_BIND";
 const ENV_SYNC_BIND: &str = "GITTREE_SYNC_BIND";
 const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
 const ENV_UI_BIND: &str = "GITTREE_UI_BIND";
+const ENV_WEBHOOK_BIND: &str = "GITTREE_WEBHOOK_BIND";
 const ENV_FORGEJO_BASE_URL: &str = "GITTREE_FORGEJO_BASE_URL";
 const ENV_FORGEJO_API_TOKEN: &str = "GITTREE_FORGEJO_API_TOKEN";
 const ENV_FORGEJO_OWNER: &str = "GITTREE_FORGEJO_OWNER";
@@ -72,6 +74,7 @@ pub struct ServicesConfig {
     pub sync: ServiceConfig,
     pub git_http: ServiceConfig,
     pub ui: ServiceConfig,
+    pub webhook: ServiceConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +503,7 @@ impl Default for ServicesConfig {
             sync: ServiceConfig::new(DEFAULT_SYNC_BIND),
             git_http: ServiceConfig::new(DEFAULT_GIT_HTTP_BIND),
             ui: ServiceConfig::new(DEFAULT_UI_BIND),
+            webhook: ServiceConfig::new(DEFAULT_WEBHOOK_BIND),
         }
     }
 }
@@ -520,6 +524,7 @@ impl ServicesConfig {
             sync: ServiceConfig::new(env_or_default(ENV_SYNC_BIND, DEFAULT_SYNC_BIND)),
             git_http: ServiceConfig::new(env_or_default(ENV_GIT_HTTP_BIND, DEFAULT_GIT_HTTP_BIND)),
             ui: ServiceConfig::new(env_or_default(ENV_UI_BIND, DEFAULT_UI_BIND)),
+            webhook: ServiceConfig::new(env_or_default(ENV_WEBHOOK_BIND, DEFAULT_WEBHOOK_BIND)),
         }
     }
 
@@ -546,6 +551,7 @@ impl ServicesConfig {
         validate_service_bind("sync", &self.sync.bind)?;
         validate_service_bind("git_http", &self.git_http.bind)?;
         validate_service_bind("ui", &self.ui.bind)?;
+        validate_service_bind("webhook", &self.webhook.bind)?;
         Ok(())
     }
 
@@ -768,6 +774,7 @@ impl TomlServicesRoot {
             sync: ServiceConfig::new(bind_or_default(services.sync, DEFAULT_SYNC_BIND)),
             git_http: ServiceConfig::new(bind_or_default(services.git_http, DEFAULT_GIT_HTTP_BIND)),
             ui: ServiceConfig::new(bind_or_default(services.ui, DEFAULT_UI_BIND)),
+            webhook: ServiceConfig::new(bind_or_default(services.webhook, DEFAULT_WEBHOOK_BIND)),
         }
     }
 }
@@ -987,6 +994,7 @@ struct TomlServicesConfig {
     sync: Option<TomlServiceConfig>,
     git_http: Option<TomlServiceConfig>,
     ui: Option<TomlServiceConfig>,
+    webhook: Option<TomlServiceConfig>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1197,6 +1205,7 @@ mod tests {
     use crate::DEFAULT_STATE_BIND;
     use crate::DEFAULT_SYNC_BIND;
     use crate::DEFAULT_UI_BIND;
+    use crate::DEFAULT_WEBHOOK_BIND;
     use crate::ENV_ADMISSION_BIND;
     use crate::ENV_COORDINATOR_BIND;
     use crate::ENV_FORGEJO_API_TOKEN;
@@ -1206,6 +1215,7 @@ mod tests {
     use crate::ENV_FORGEJO_WEBHOOK_SECRET;
     use crate::ENV_FORGEJO_WEBHOOK_URL;
     use crate::ENV_GIT_HTTP_BIND;
+    use crate::ENV_WEBHOOK_BIND;
     use crate::ENV_RELAY_BIND;
     use crate::ENV_RELAY_COMPAT_MODE;
     use crate::ENV_RELAY_POLICY_AUTH_REQUIRED;
@@ -1700,6 +1710,7 @@ max_content_len = 0
         assert_eq!(services.sync.bind, DEFAULT_SYNC_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
+        assert_eq!(services.webhook.bind, DEFAULT_WEBHOOK_BIND);
     }
 
     #[test]
@@ -1713,6 +1724,7 @@ max_content_len = 0
             std::env::remove_var(ENV_SYNC_BIND);
             std::env::remove_var(ENV_GIT_HTTP_BIND);
             std::env::remove_var(ENV_UI_BIND);
+            std::env::remove_var(ENV_WEBHOOK_BIND);
         }
 
         let services = ServicesConfig::from_env();
@@ -1723,6 +1735,7 @@ max_content_len = 0
         assert_eq!(services.sync.bind, DEFAULT_SYNC_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
+        assert_eq!(services.webhook.bind, DEFAULT_WEBHOOK_BIND);
     }
 
     #[test]
@@ -1749,6 +1762,7 @@ bind = "127.0.0.1:9011"
         assert_eq!(services.state.bind, DEFAULT_STATE_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
+        assert_eq!(services.webhook.bind, DEFAULT_WEBHOOK_BIND);
     }
 
     #[test]
