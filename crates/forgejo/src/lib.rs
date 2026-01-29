@@ -79,6 +79,66 @@ pub struct ForgejoRepo {
     pub html_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoUser {
+    pub username: String,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoOrg {
+    pub name: String,
+    pub full_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoPullRequest {
+    pub number: u64,
+    pub url: String,
+    pub html_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForgejoCreateUser {
+    pub username: String,
+    pub email: String,
+    pub password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub must_change_password: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_notify: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForgejoCreateOrg {
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForgejoCreateRepo {
+    pub name: String,
+    pub description: Option<String>,
+    pub private: Option<bool>,
+    pub auto_init: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForgejoCreatePullRequest {
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum ForgejoError {
     Request(String),
@@ -145,10 +205,138 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
         self.create_hook(repo).await
     }
 
-    async fn get_repo(&self, name: &str) -> Result<Option<ForgejoRepo>, ForgejoError> {
+    pub async fn create_user(&self, user: ForgejoCreateUser) -> Result<ForgejoUser, ForgejoError> {
+        let url = join_url(&self.config.base_url, "/api/v1/admin/users");
+        let response = self
+            .transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Post,
+                url,
+                body: Some(serialize_json(&user)?),
+            })
+            .await?;
+        match response.status {
+            200 | 201 => {
+                let user = parse_json::<ForgejoUserResponse>(&response.body)?;
+                Ok(user.into_user())
+            }
+            status => Err(ForgejoError::Response {
+                status,
+                body: response.body,
+            }),
+        }
+    }
+
+    pub async fn create_org(
+        &self,
+        owner: &str,
+        org: ForgejoCreateOrg,
+    ) -> Result<ForgejoOrg, ForgejoError> {
         let url = join_url(
             &self.config.base_url,
-            &format!("/api/v1/repos/{}/{}", self.config.owner, name),
+            &format!("/api/v1/admin/users/{owner}/orgs"),
+        );
+        let response = self
+            .transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Post,
+                url,
+                body: Some(serialize_json(&org)?),
+            })
+            .await?;
+        match response.status {
+            200 | 201 => {
+                let org = parse_json::<ForgejoOrgResponse>(&response.body)?;
+                Ok(org.into_org())
+            }
+            status => Err(ForgejoError::Response {
+                status,
+                body: response.body,
+            }),
+        }
+    }
+
+    pub async fn create_repo_for_owner(
+        &self,
+        owner: &str,
+        repo: ForgejoCreateRepo,
+    ) -> Result<ForgejoRepo, ForgejoError> {
+        let url = join_url(
+            &self.config.base_url,
+            &format!("/api/v1/admin/users/{owner}/repos"),
+        );
+        let payload = CreateAdminRepoPayload {
+            name: repo.name,
+            description: repo.description,
+            private: repo.private.unwrap_or(self.config.repo_private),
+            auto_init: repo.auto_init.unwrap_or(false),
+        };
+        let response = self
+            .transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Post,
+                url,
+                body: Some(serialize_json(&payload)?),
+            })
+            .await?;
+        match response.status {
+            201 => {
+                let repo = parse_json::<ForgejoRepoResponse>(&response.body)?;
+                Ok(repo.into_repo())
+            }
+            409 => self
+                .get_repo_for_owner(owner, &payload.name)
+                .await?
+                .ok_or_else(|| ForgejoError::NotFound(payload.name.clone())),
+            status => Err(ForgejoError::Response {
+                status,
+                body: response.body,
+            }),
+        }
+    }
+
+    pub async fn create_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        request: ForgejoCreatePullRequest,
+    ) -> Result<ForgejoPullRequest, ForgejoError> {
+        let url = join_url(
+            &self.config.base_url,
+            &format!("/api/v1/repos/{owner}/{repo}/pulls"),
+        );
+        let response = self
+            .transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Post,
+                url,
+                body: Some(serialize_json(&request)?),
+            })
+            .await?;
+        match response.status {
+            201 => {
+                let pr = parse_json::<ForgejoPullRequestResponse>(&response.body)?;
+                pr.into_pull_request()
+            }
+            status => Err(ForgejoError::Response {
+                status,
+                body: response.body,
+            }),
+        }
+    }
+
+    async fn get_repo(&self, name: &str) -> Result<Option<ForgejoRepo>, ForgejoError> {
+        self.get_repo_for_owner(&self.config.owner, name).await
+    }
+
+    async fn get_repo_for_owner(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<Option<ForgejoRepo>, ForgejoError> {
+        let url = join_url(
+            &self.config.base_url,
+            &format!("/api/v1/repos/{owner}/{name}"),
         );
         let response = self
             .transport
@@ -323,6 +511,59 @@ impl ForgejoRepoResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ForgejoUserResponse {
+    #[serde(alias = "login", alias = "username")]
+    username: String,
+    email: Option<String>,
+}
+
+impl ForgejoUserResponse {
+    fn into_user(self) -> ForgejoUser {
+        ForgejoUser {
+            username: self.username,
+            email: self.email,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoOrgResponse {
+    #[serde(alias = "username")]
+    name: String,
+    full_name: Option<String>,
+}
+
+impl ForgejoOrgResponse {
+    fn into_org(self) -> ForgejoOrg {
+        ForgejoOrg {
+            name: self.name,
+            full_name: self.full_name,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoPullRequestResponse {
+    number: i64,
+    url: String,
+    html_url: Option<String>,
+}
+
+impl ForgejoPullRequestResponse {
+    fn into_pull_request(self) -> Result<ForgejoPullRequest, ForgejoError> {
+        let number = u64::try_from(self.number).map_err(|_| ForgejoError::Parse(format!(
+            "invalid pull request number: {}",
+            self.number
+        )))?;
+        Ok(ForgejoPullRequest {
+            number,
+            url: self.url,
+            html_url: self.html_url,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct ForgejoHookResponse {
     config: ForgejoHookConfig,
 }
@@ -337,6 +578,19 @@ struct CreateRepoPayload {
     name: String,
     description: Option<String>,
     private: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateAdminRepoPayload {
+    name: String,
+    description: Option<String>,
+    private: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    auto_init: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Serialize)]
@@ -499,5 +753,133 @@ mod tests {
         let body = requests[1].body.clone().expect("body");
         assert!(body.contains("\"push\""));
         assert!(body.contains("\"secret\":\"secret\""));
+    }
+
+    #[tokio::test]
+    async fn create_user_posts_admin_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"login":"alice","email":"alice@example.com"}"#.to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let user = client
+            .create_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: Some(true),
+                send_notify: Some(false),
+            })
+            .await
+            .expect("user");
+
+        assert_eq!(user.username, "alice");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/api/v1/admin/users"));
+        let body = requests[0].body.clone().expect("body");
+        assert!(body.contains("\"username\":\"alice\""));
+        assert!(body.contains("\"email\":\"alice@example.com\""));
+    }
+
+    #[tokio::test]
+    async fn create_org_posts_admin_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"name":"acme","full_name":"Acme Org"}"#.to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let org = client
+            .create_org(
+                "admin",
+                ForgejoCreateOrg {
+                    username: "acme".to_string(),
+                    full_name: Some("Acme Org".to_string()),
+                    description: None,
+                    visibility: None,
+                },
+            )
+            .await
+            .expect("org");
+
+        assert_eq!(org.name, "acme");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/admin/users/admin/orgs"));
+    }
+
+    #[tokio::test]
+    async fn create_repo_posts_admin_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: repo_json("alice", "demo"),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: Some("demo".to_string()),
+                    private: Some(false),
+                    auto_init: Some(true),
+                },
+            )
+            .await
+            .expect("repo");
+
+        assert_eq!(repo.full_name, "alice/demo");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/admin/users/alice/repos"));
+        let body = requests[0].body.clone().expect("body");
+        assert!(body.contains("\"name\":\"demo\""));
+        assert!(body.contains("\"auto_init\":true"));
+    }
+
+    #[tokio::test]
+    async fn create_pull_request_posts_repo_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"number":5,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/5","html_url":"http://localhost/gittree/demo/pulls/5"}"#.to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let pr = client
+            .create_pull_request(
+                "gittree",
+                "demo",
+                ForgejoCreatePullRequest {
+                    head: "feature".to_string(),
+                    base: "main".to_string(),
+                    title: "Add thing".to_string(),
+                    body: Some("desc".to_string()),
+                },
+            )
+            .await
+            .expect("pr");
+
+        assert_eq!(pr.number, 5);
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/repos/gittree/demo/pulls"));
+        let body = requests[0].body.clone().expect("body");
+        assert!(body.contains("\"head\":\"feature\""));
+        assert!(body.contains("\"base\":\"main\""));
+        assert!(body.contains("\"title\":\"Add thing\""));
     }
 }
