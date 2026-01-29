@@ -11,6 +11,7 @@ const DEFAULT_SYNC_BIND: &str = "127.0.0.1:8084";
 const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const DEFAULT_UI_BIND: &str = "127.0.0.1:8086";
 const DEFAULT_WEBHOOK_BIND: &str = "127.0.0.1:8087";
+const DEFAULT_CONTROL_BIND: &str = "127.0.0.1:8088";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
 const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
@@ -37,6 +38,7 @@ const ENV_SYNC_BIND: &str = "GITTREE_SYNC_BIND";
 const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
 const ENV_UI_BIND: &str = "GITTREE_UI_BIND";
 const ENV_WEBHOOK_BIND: &str = "GITTREE_WEBHOOK_BIND";
+const ENV_CONTROL_BIND: &str = "GITTREE_CONTROL_BIND";
 const ENV_FORGEJO_BASE_URL: &str = "GITTREE_FORGEJO_BASE_URL";
 const ENV_FORGEJO_API_TOKEN: &str = "GITTREE_FORGEJO_API_TOKEN";
 const ENV_FORGEJO_OWNER: &str = "GITTREE_FORGEJO_OWNER";
@@ -45,6 +47,8 @@ const ENV_FORGEJO_WEBHOOK_SECRET: &str = "GITTREE_FORGEJO_WEBHOOK_SECRET";
 const ENV_FORGEJO_REPO_PRIVATE: &str = "GITTREE_FORGEJO_REPO_PRIVATE";
 const ENV_UI_REPO_ROOT: &str = "GITTREE_UI_REPO_ROOT";
 const ENV_UI_PUBLIC_GIT_URL: &str = "GITTREE_UI_PUBLIC_GIT_URL";
+const ENV_CONTROL_TOKEN: &str = "GITTREE_CONTROL_TOKEN";
+const ENV_CONTROL_ADMIN_KEYS: &str = "GITTREE_CONTROL_ADMIN_KEYS";
 
 const DEFAULT_RELAY_COMPAT_MODE: RelayCompatibilityMode = RelayCompatibilityMode::Strict;
 const DEFAULT_RELAY_PROBE_TIMEOUT_SECS: u64 = 5;
@@ -75,6 +79,7 @@ pub struct ServicesConfig {
     pub git_http: ServiceConfig,
     pub ui: ServiceConfig,
     pub webhook: ServiceConfig,
+    pub control: ServiceConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +240,40 @@ impl UiConfig {
             });
         }
         validate_http_url("ui.public_git_url", &self.public_git_url)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlAuthConfig {
+    pub token: String,
+    pub admin_keys: Vec<String>,
+}
+
+impl ControlAuthConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let token = env_required_string(ENV_CONTROL_TOKEN)?;
+        let admin_keys = env_optional_string(ENV_CONTROL_ADMIN_KEYS)
+            .map(parse_csv_values)
+            .unwrap_or_default();
+        let config = Self { token, admin_keys };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.token.trim().is_empty() {
+            return Err(ConfigError::InvalidConfig {
+                field: "control.token",
+                value: self.token.clone(),
+            });
+        }
+        if self.admin_keys.iter().any(|key| key.trim().is_empty()) {
+            return Err(ConfigError::InvalidConfig {
+                field: "control.admin_keys",
+                value: "empty key".to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -504,6 +543,7 @@ impl Default for ServicesConfig {
             git_http: ServiceConfig::new(DEFAULT_GIT_HTTP_BIND),
             ui: ServiceConfig::new(DEFAULT_UI_BIND),
             webhook: ServiceConfig::new(DEFAULT_WEBHOOK_BIND),
+            control: ServiceConfig::new(DEFAULT_CONTROL_BIND),
         }
     }
 }
@@ -525,6 +565,7 @@ impl ServicesConfig {
             git_http: ServiceConfig::new(env_or_default(ENV_GIT_HTTP_BIND, DEFAULT_GIT_HTTP_BIND)),
             ui: ServiceConfig::new(env_or_default(ENV_UI_BIND, DEFAULT_UI_BIND)),
             webhook: ServiceConfig::new(env_or_default(ENV_WEBHOOK_BIND, DEFAULT_WEBHOOK_BIND)),
+            control: ServiceConfig::new(env_or_default(ENV_CONTROL_BIND, DEFAULT_CONTROL_BIND)),
         }
     }
 
@@ -552,6 +593,7 @@ impl ServicesConfig {
         validate_service_bind("git_http", &self.git_http.bind)?;
         validate_service_bind("ui", &self.ui.bind)?;
         validate_service_bind("webhook", &self.webhook.bind)?;
+        validate_service_bind("control", &self.control.bind)?;
         Ok(())
     }
 
@@ -703,6 +745,13 @@ fn parse_relay_urls(raw: String) -> Vec<String> {
         .collect()
 }
 
+fn parse_csv_values(raw: String) -> Vec<String> {
+    raw.split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
 fn validate_relay_url(value: &str) -> Result<(), ConfigError> {
     let parsed = url::Url::parse(value)
         .map_err(|_| ConfigError::InvalidRelayUrl(value.to_string()))?;
@@ -775,6 +824,7 @@ impl TomlServicesRoot {
             git_http: ServiceConfig::new(bind_or_default(services.git_http, DEFAULT_GIT_HTTP_BIND)),
             ui: ServiceConfig::new(bind_or_default(services.ui, DEFAULT_UI_BIND)),
             webhook: ServiceConfig::new(bind_or_default(services.webhook, DEFAULT_WEBHOOK_BIND)),
+            control: ServiceConfig::new(bind_or_default(services.control, DEFAULT_CONTROL_BIND)),
         }
     }
 }
@@ -995,6 +1045,7 @@ struct TomlServicesConfig {
     git_http: Option<TomlServiceConfig>,
     ui: Option<TomlServiceConfig>,
     webhook: Option<TomlServiceConfig>,
+    control: Option<TomlServiceConfig>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1184,6 +1235,7 @@ impl GittreeConfig {
 #[cfg(test)]
 mod tests {
     use super::ConfigError;
+    use super::ControlAuthConfig;
     use super::GittreeConfig;
     use super::ForgejoConfig;
     use super::RelayCompatibilityConfig;
@@ -1194,6 +1246,7 @@ mod tests {
     use super::ServicesConfig;
     use super::UiConfig;
     use crate::DEFAULT_ADMISSION_BIND;
+    use crate::DEFAULT_CONTROL_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
     use crate::DEFAULT_GIT_HTTP_BIND;
     use crate::DEFAULT_RELAY_BIND;
@@ -1207,6 +1260,9 @@ mod tests {
     use crate::DEFAULT_UI_BIND;
     use crate::DEFAULT_WEBHOOK_BIND;
     use crate::ENV_ADMISSION_BIND;
+    use crate::ENV_CONTROL_ADMIN_KEYS;
+    use crate::ENV_CONTROL_BIND;
+    use crate::ENV_CONTROL_TOKEN;
     use crate::ENV_COORDINATOR_BIND;
     use crate::ENV_FORGEJO_API_TOKEN;
     use crate::ENV_FORGEJO_BASE_URL;
@@ -1711,6 +1767,7 @@ max_content_len = 0
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
         assert_eq!(services.webhook.bind, DEFAULT_WEBHOOK_BIND);
+        assert_eq!(services.control.bind, DEFAULT_CONTROL_BIND);
     }
 
     #[test]
@@ -1725,6 +1782,7 @@ max_content_len = 0
             std::env::remove_var(ENV_GIT_HTTP_BIND);
             std::env::remove_var(ENV_UI_BIND);
             std::env::remove_var(ENV_WEBHOOK_BIND);
+            std::env::remove_var(ENV_CONTROL_BIND);
         }
 
         let services = ServicesConfig::from_env();
@@ -1736,6 +1794,7 @@ max_content_len = 0
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
         assert_eq!(services.webhook.bind, DEFAULT_WEBHOOK_BIND);
+        assert_eq!(services.control.bind, DEFAULT_CONTROL_BIND);
     }
 
     #[test]
@@ -1755,10 +1814,14 @@ bind = "127.0.0.1:9010"
 
 [services.admission]
 bind = "127.0.0.1:9011"
+
+[services.control]
+bind = "127.0.0.1:9019"
 "#;
         let services = ServicesConfig::from_toml_str(toml).expect("parse services");
         assert_eq!(services.relay.bind, "127.0.0.1:9010");
         assert_eq!(services.admission.bind, "127.0.0.1:9011");
+        assert_eq!(services.control.bind, "127.0.0.1:9019");
         assert_eq!(services.state.bind, DEFAULT_STATE_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
@@ -1896,5 +1959,17 @@ public_git_url = "http://localhost:8085"
         let config = UiConfig::from_toml_str(toml).expect("ui");
         assert_eq!(config.repo_root, std::path::PathBuf::from("/tmp/gittree-ui"));
         assert_eq!(config.public_git_url, "http://localhost:8085");
+    }
+
+    #[test]
+    fn control_auth_from_env_parses() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_CONTROL_TOKEN, "token", || {
+            with_env_var(ENV_CONTROL_ADMIN_KEYS, "npub1, npub2", || {
+                let config = ControlAuthConfig::from_env().expect("control");
+                assert_eq!(config.token, "token");
+                assert_eq!(config.admin_keys, vec!["npub1".to_string(), "npub2".to_string()]);
+            });
+        });
     }
 }
