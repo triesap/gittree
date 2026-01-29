@@ -4,6 +4,9 @@ use gittree_observability::ObservabilityHandle;
 use gittree_storage::{
     PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
 };
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -12,11 +15,105 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const ENV_CONTROL_URL: &str = "GITTREE_CONTROL_URL";
+const ENV_CONTROL_TOKEN: &str = "GITTREE_CONTROL_TOKEN";
+const DEFAULT_CONTROL_URL: &str = "http://127.0.0.1:8088";
 
 fn init_observability() -> Result<ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env("gittree-admin")
         .map_err(|err| err.to_string())?;
     gittree_observability::init(&config).map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Clone)]
+struct ControlClientConfig {
+    base_url: String,
+    token: String,
+}
+
+impl ControlClientConfig {
+    fn from_env() -> Result<Self, AdminError> {
+        let base_url = match std::env::var(ENV_CONTROL_URL) {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => DEFAULT_CONTROL_URL.to_string(),
+        };
+        let token = std::env::var(ENV_CONTROL_TOKEN).map_err(|_| {
+            AdminError::ControlConfig(ControlConfigError::MissingEnv(ENV_CONTROL_TOKEN))
+        })?;
+        if token.trim().is_empty() {
+            return Err(AdminError::ControlConfig(ControlConfigError::MissingEnv(
+                ENV_CONTROL_TOKEN,
+            )));
+        }
+        Ok(Self { base_url, token })
+    }
+}
+
+#[derive(Clone)]
+struct ControlClient {
+    base_url: String,
+    token: String,
+    client: Client,
+}
+
+impl ControlClient {
+    fn new(config: ControlClientConfig) -> Result<Self, AdminError> {
+        let client = Client::builder()
+            .user_agent("gittree-admin")
+            .build()
+            .map_err(AdminError::ControlRequest)?;
+        Ok(Self {
+            base_url: config.base_url,
+            token: config.token,
+            client,
+        })
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    async fn post<T, R>(&self, path: &str, payload: &T) -> Result<R, AdminError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let response = self
+            .client
+            .post(self.endpoint(path))
+            .bearer_auth(&self.token)
+            .json(payload)
+            .send()
+            .await
+            .map_err(AdminError::ControlRequest)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AdminError::ControlResponse(format!(
+                "control request failed: {status} {body}"
+            )));
+        }
+        response
+            .json::<R>()
+            .await
+            .map_err(AdminError::ControlRequest)
+    }
+
+    async fn create_user(&self, payload: ControlCreateUser) -> Result<ControlUser, AdminError> {
+        self.post("/control/users", &payload).await
+    }
+
+    async fn create_org(&self, payload: ControlCreateOrg) -> Result<ControlOrg, AdminError> {
+        self.post("/control/orgs", &payload).await
+    }
+
+    async fn create_repo(&self, payload: ControlCreateRepo) -> Result<ControlRepo, AdminError> {
+        self.post("/control/repos", &payload).await
+    }
+
+    async fn create_pull(&self, payload: ControlCreatePull) -> Result<ControlPull, AdminError> {
+        self.post("/control/pulls", &payload).await
+    }
 }
 
 #[tokio::main]
@@ -33,6 +130,70 @@ async fn main() {
         eprintln!("gittree-admin failed: {err}");
         std::process::exit(1);
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ControlCreateUser {
+    username: String,
+    email: String,
+    password: String,
+    full_name: Option<String>,
+    must_change_password: Option<bool>,
+    send_notify: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlCreateOrg {
+    owner: String,
+    name: String,
+    full_name: Option<String>,
+    description: Option<String>,
+    visibility: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlCreateRepo {
+    owner: String,
+    name: String,
+    description: Option<String>,
+    private: Option<bool>,
+    auto_init: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlCreatePull {
+    owner: String,
+    repo: String,
+    head: String,
+    base: String,
+    title: String,
+    body: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlUser {
+    username: String,
+    email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlOrg {
+    name: String,
+    full_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlRepo {
+    owner: String,
+    name: String,
+    html_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlPull {
+    number: u64,
+    url: String,
+    html_url: Option<String>,
 }
 
 async fn run() -> Result<(), AdminError> {
@@ -83,6 +244,116 @@ async fn run() -> Result<(), AdminError> {
                 "repo mapping stored"
             );
         }
+        AdminCommand::CreateUser {
+            username,
+            email,
+            password,
+            full_name,
+            must_change_password,
+            send_notify,
+        } => {
+            let control = control_client_from_env()?;
+            let user = control
+                .create_user(ControlCreateUser {
+                    username,
+                    email,
+                    password,
+                    full_name,
+                    must_change_password,
+                    send_notify,
+                })
+                .await?;
+            println!(
+                "created user {}{}",
+                user.username,
+                user.email
+                    .as_ref()
+                    .map(|email| format!(" ({email})"))
+                    .unwrap_or_default()
+            );
+        }
+        AdminCommand::CreateOrg {
+            owner,
+            name,
+            full_name,
+            description,
+            visibility,
+        } => {
+            let control = control_client_from_env()?;
+            let org = control
+                .create_org(ControlCreateOrg {
+                    owner,
+                    name,
+                    full_name,
+                    description,
+                    visibility,
+                })
+                .await?;
+            println!(
+                "created org {}{}",
+                org.name,
+                org.full_name
+                    .as_ref()
+                    .map(|full| format!(" ({full})"))
+                    .unwrap_or_default()
+            );
+        }
+        AdminCommand::CreateRepo {
+            owner,
+            name,
+            description,
+            private,
+            auto_init,
+        } => {
+            let control = control_client_from_env()?;
+            let repo = control
+                .create_repo(ControlCreateRepo {
+                    owner,
+                    name,
+                    description,
+                    private,
+                    auto_init,
+                })
+                .await?;
+            println!(
+                "created repo {} ({}){}",
+                repo.name,
+                repo.owner,
+                repo.html_url
+                    .as_ref()
+                    .map(|url| format!(" {url}"))
+                    .unwrap_or_default()
+            );
+        }
+        AdminCommand::CreatePull {
+            owner,
+            repo,
+            head,
+            base,
+            title,
+            body,
+        } => {
+            let control = control_client_from_env()?;
+            let pull = control
+                .create_pull(ControlCreatePull {
+                    owner,
+                    repo,
+                    head,
+                    base,
+                    title,
+                    body,
+                })
+                .await?;
+            println!(
+                "created pull #{} ({}){}",
+                pull.number,
+                pull.url,
+                pull.html_url
+                    .as_ref()
+                    .map(|url| format!(" {url}"))
+                    .unwrap_or_default()
+            );
+        }
     }
 
     Ok(())
@@ -94,6 +365,9 @@ pub enum AdminError {
     StorageConfig(StorageConfigError),
     Storage(StorageError),
     Core(gittree_core::CoreError),
+    ControlConfig(ControlConfigError),
+    ControlRequest(reqwest::Error),
+    ControlResponse(String),
 }
 
 impl std::fmt::Display for AdminError {
@@ -103,6 +377,9 @@ impl std::fmt::Display for AdminError {
             AdminError::StorageConfig(err) => write!(f, "admin storage config error: {err}"),
             AdminError::Storage(err) => write!(f, "admin storage error: {err}"),
             AdminError::Core(err) => write!(f, "admin mapping error: {err}"),
+            AdminError::ControlConfig(err) => write!(f, "admin control config error: {err}"),
+            AdminError::ControlRequest(err) => write!(f, "admin control request error: {err}"),
+            AdminError::ControlResponse(err) => write!(f, "admin control response error: {err}"),
         }
     }
 }
@@ -114,6 +391,9 @@ impl std::error::Error for AdminError {
             AdminError::StorageConfig(err) => Some(err),
             AdminError::Storage(err) => Some(err),
             AdminError::Core(err) => Some(err),
+            AdminError::ControlConfig(err) => Some(err),
+            AdminError::ControlRequest(err) => Some(err),
+            AdminError::ControlResponse(_) => None,
         }
     }
 }
@@ -138,6 +418,21 @@ impl std::fmt::Display for StorageConfigError {
 }
 
 impl std::error::Error for StorageConfigError {}
+
+#[derive(Debug)]
+pub enum ControlConfigError {
+    MissingEnv(&'static str),
+}
+
+impl std::fmt::Display for ControlConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, AdminError> {
     let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
@@ -165,6 +460,11 @@ fn storage_from_env() -> Result<StorageConfig, AdminError> {
     })?;
 
     Ok(config)
+}
+
+fn control_client_from_env() -> Result<ControlClient, AdminError> {
+    let config = ControlClientConfig::from_env()?;
+    ControlClient::new(config)
 }
 
 fn env_u32(key: &'static str) -> Result<Option<u32>, AdminError> {
@@ -197,6 +497,10 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AdminError> {
 
 #[cfg(test)]
 mod tests {
+    use super::ControlClientConfig;
+    use super::DEFAULT_CONTROL_URL;
+    use super::ENV_CONTROL_TOKEN;
+    use super::ENV_CONTROL_URL;
     use super::ENV_STORAGE_IDLE_TIMEOUT_SECS;
     use super::ENV_STORAGE_MAX_LIFETIME_SECS;
     use super::ENV_STORAGE_READ_URL;
@@ -238,5 +542,27 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn control_config_uses_default_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_CONTROL_TOKEN, "token", || {
+            with_env_var(ENV_CONTROL_URL, "", || {
+                let config = ControlClientConfig::from_env().expect("config");
+                assert_eq!(config.base_url, DEFAULT_CONTROL_URL);
+            });
+        });
+    }
+
+    #[test]
+    fn control_config_uses_env_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_CONTROL_TOKEN, "token", || {
+            with_env_var(ENV_CONTROL_URL, "http://localhost:9090", || {
+                let config = ControlClientConfig::from_env().expect("config");
+                assert_eq!(config.base_url, "http://localhost:9090");
+            });
+        });
     }
 }
