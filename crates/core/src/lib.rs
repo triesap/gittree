@@ -23,6 +23,7 @@ impl std::fmt::Display for CoreError {
 impl std::error::Error for CoreError {}
 
 pub mod admission;
+pub mod control_events;
 pub mod event_filters;
 pub mod event_refs;
 pub mod git_receive;
@@ -46,6 +47,7 @@ pub mod repo_path;
 pub mod tags;
 
 pub use admission::{AdmissionDecision, evaluate_admission};
+pub use control_events::ControlAction;
 pub use event_filters::{EventFilter, build_related_event_filters};
 pub use event_refs::{
     EventReferences, collect_event_references, collect_event_references_with_self,
@@ -61,7 +63,7 @@ pub use kinds::{
     KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST, KIND_GIT_PULL_REQUEST_UPDATE,
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_APPLIED,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_USER_GRASP_LIST,
-    NostrKind, is_nip34_kind, nip34_required_kinds, status_kinds,
+    KIND_GITTREE_CONTROL, NostrKind, is_nip34_kind, nip34_required_kinds, status_kinds,
 };
 pub use nip11::RelayInfoDocument;
 pub use nip34::RepoAnnouncement;

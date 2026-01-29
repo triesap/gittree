@@ -12,6 +12,7 @@ pub const KIND_GIT_STATUS_APPLIED: NostrKind = NostrKind(1631);
 pub const KIND_GIT_STATUS_CLOSED: NostrKind = NostrKind(1632);
 pub const KIND_GIT_STATUS_DRAFT: NostrKind = NostrKind(1633);
 pub const KIND_USER_GRASP_LIST: NostrKind = NostrKind(10317);
+pub const KIND_GITTREE_CONTROL: NostrKind = NostrKind(29000);
 
 pub fn status_kinds() -> [NostrKind; 4] {
     [
@@ -58,6 +59,7 @@ mod tests {
         assert_eq!(KIND_GIT_STATUS_CLOSED.0, 1632);
         assert_eq!(KIND_GIT_STATUS_DRAFT.0, 1633);
         assert_eq!(KIND_USER_GRASP_LIST.0, 10317);
+        assert_eq!(KIND_GITTREE_CONTROL.0, 29000);
     }
 
     #[test]
