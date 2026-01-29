@@ -1,18 +1,9 @@
 use clap::Parser;
-use gittree_git_hook::{
-    HookMode, HookServiceError, HttpPostReceiveNotifier, HttpStateFetcher, evaluate_pre_receive,
-    handle_post_receive, parse_updates,
-};
-use std::io::Read;
-use std::io::IsTerminal;
-use std::path::Path;
-use std::time::Duration;
+use gittree_git_hook::{HookServiceError, run_hook};
 
 mod cli;
 
 use cli::{HookCli, HookRunConfig};
-
-const ENV_HOOK_REPO_PATH: &str = "GITTREE_HOOK_REPO_PATH";
 
 fn init_observability() -> Result<gittree_observability::ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env("gittree-git-hook")
@@ -38,105 +29,5 @@ fn main() {
 fn run() -> Result<(), HookServiceError> {
     let cli = HookCli::parse();
     let config = HookRunConfig::from_env(cli).map_err(HookServiceError::Config)?;
-    tracing::info!(mode = ?config.hook.mode, "git hook configured");
-    validate_input_source(std::io::stdin().is_terminal(), config.stdin_file.as_deref())?;
-    let input = read_input(config.stdin_file.as_deref())?;
-    let updates = match parse_updates(&input) {
-        Ok(updates) => updates,
-        Err(err) => {
-            if matches!(config.hook.mode, HookMode::PostReceive) {
-                eprintln!("post-receive parse failed: {err}");
-                return Ok(());
-            }
-            return Err(HookServiceError::Parse(err));
-        }
-    };
-    let repo_path = std::env::var_os(ENV_HOOK_REPO_PATH)
-        .or_else(|| std::env::var_os("GIT_DIR"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or(std::env::current_dir().map_err(|err| {
-            HookServiceError::Core(format!("failed to read repo path: {err}"))
-        })?);
-    match config.hook.mode {
-        HookMode::PreReceive => {
-            let fetcher = HttpStateFetcher::new(config.hook.state_url, Duration::from_secs(5))?;
-            let decision = evaluate_pre_receive(&fetcher, repo_path, &updates)?;
-            if let gittree_core::UpdateDecision::Reject { reason } = decision {
-                return Err(HookServiceError::Reject(reason));
-            }
-        }
-        HookMode::PostReceive => {
-            let sync_url = config.hook.sync_url.ok_or_else(|| {
-                HookServiceError::Config(gittree_git_hook::HookConfigError::MissingEnv(
-                    "GITTREE_SYNC_URL",
-                ))
-            })?;
-            let notifier = HttpPostReceiveNotifier::new(sync_url, Duration::from_secs(5))?;
-            if let Err(err) = handle_post_receive(&notifier, repo_path, &updates) {
-                eprintln!("post-receive notify failed: {err}");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn read_input(stdin_file: Option<&Path>) -> Result<String, HookServiceError> {
-    if let Some(path) = stdin_file {
-        std::fs::read_to_string(path).map_err(|err| {
-            HookServiceError::Core(format!(
-                "failed to read stdin file {}: {err}",
-                path.display()
-            ))
-        })
-    } else {
-        let mut input = String::new();
-        std::io::stdin()
-            .read_to_string(&mut input)
-            .map_err(|err| HookServiceError::Core(format!("failed to read stdin: {err}")))?;
-        Ok(input)
-    }
-}
-
-fn validate_input_source(
-    stdin_is_tty: bool,
-    stdin_file: Option<&Path>,
-) -> Result<(), HookServiceError> {
-    if stdin_is_tty && stdin_file.is_none() {
-        return Err(HookServiceError::Core(
-            "refusing to run interactively; provide --stdin-file or pipe hook input".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{read_input, validate_input_source};
-    use std::io::Write;
-
-    #[test]
-    fn read_input_reads_file() {
-        let mut path = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        path.push(format!("gittree-hook-input-{nanos}.txt"));
-        let mut file = std::fs::File::create(&path).expect("create file");
-        writeln!(file, "old new refs/heads/main").expect("write file");
-        let contents = read_input(Some(&path)).expect("read input");
-        assert!(contents.contains("refs/heads/main"));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn validate_input_source_rejects_tty_without_file() {
-        assert!(validate_input_source(true, None).is_err());
-    }
-
-    #[test]
-    fn validate_input_source_accepts_file_or_pipe() {
-        assert!(validate_input_source(false, None).is_ok());
-        assert!(validate_input_source(true, Some(std::path::Path::new("input.txt"))).is_ok());
-    }
+    run_hook(config.hook, config.stdin_file.as_deref())
 }

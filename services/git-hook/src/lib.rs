@@ -2,12 +2,15 @@ use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{RepoMapping, RepoState, UpdateDecision};
 use hmac::Mac;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const ENV_STATE_URL: &str = "GITTREE_STATE_URL";
 const ENV_SYNC_URL: &str = "GITTREE_SYNC_URL";
 const ENV_HOOK_MODE: &str = "GITTREE_HOOK_MODE";
+const ENV_HOOK_REPO_PATH: &str = "GITTREE_HOOK_REPO_PATH";
+const ENV_HOOK_STDIN_FILE: &str = "GITTREE_HOOK_STDIN_FILE";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookConfig {
@@ -144,6 +147,88 @@ impl std::error::Error for HookServiceError {
             HookServiceError::Reject(_) => None,
         }
     }
+}
+
+pub fn run_hook_from_env(mode: HookMode) -> Result<(), HookServiceError> {
+    let config =
+        HookConfig::from_env_with_overrides(Some(mode), None, None).map_err(HookServiceError::Config)?;
+    let stdin_file = env_path(ENV_HOOK_STDIN_FILE);
+    run_hook(config, stdin_file.as_deref())
+}
+
+pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), HookServiceError> {
+    tracing::info!(mode = ?config.mode, "git hook configured");
+    validate_input_source(std::io::stdin().is_terminal(), stdin_file)?;
+    let input = read_input(stdin_file)?;
+    let updates = match parse_updates(&input) {
+        Ok(updates) => updates,
+        Err(err) => {
+            if matches!(config.mode, HookMode::PostReceive) {
+                eprintln!("post-receive parse failed: {err}");
+                return Ok(());
+            }
+            return Err(HookServiceError::Parse(err));
+        }
+    };
+    let repo_path = std::env::var_os(ENV_HOOK_REPO_PATH)
+        .or_else(|| std::env::var_os("GIT_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(|err| {
+            HookServiceError::Core(format!("failed to read repo path: {err}"))
+        })?);
+    match config.mode {
+        HookMode::PreReceive => {
+            let fetcher = HttpStateFetcher::new(config.state_url, Duration::from_secs(5))?;
+            let decision = evaluate_pre_receive(&fetcher, repo_path, &updates)?;
+            if let UpdateDecision::Reject { reason } = decision {
+                return Err(HookServiceError::Reject(reason));
+            }
+        }
+        HookMode::PostReceive => {
+            let sync_url = config.sync_url.ok_or_else(|| {
+                HookServiceError::Config(HookConfigError::MissingEnv(ENV_SYNC_URL))
+            })?;
+            let notifier = HttpPostReceiveNotifier::new(sync_url, Duration::from_secs(5))?;
+            if let Err(err) = handle_post_receive(&notifier, repo_path, &updates) {
+                eprintln!("post-receive notify failed: {err}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn env_path(key: &str) -> Option<PathBuf> {
+    let value = std::env::var(key).ok()?;
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value))
+}
+
+fn read_input(stdin_file: Option<&Path>) -> Result<String, HookServiceError> {
+    if let Some(path) = stdin_file {
+        std::fs::read_to_string(path).map_err(|err| {
+            HookServiceError::Core(format!("failed to read stdin file {}: {err}", path.display()))
+        })
+    } else {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .map_err(|err| HookServiceError::Core(format!("failed to read stdin: {err}")))?;
+        Ok(input)
+    }
+}
+
+fn validate_input_source(
+    stdin_is_tty: bool,
+    stdin_file: Option<&Path>,
+) -> Result<(), HookServiceError> {
+    if stdin_is_tty && stdin_file.is_none() {
+        return Err(HookServiceError::Core(
+            "refusing to run interactively; provide --stdin-file or pipe hook input".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn parse_updates(input: &str) -> Result<Vec<RefUpdate>, HookError> {
@@ -503,6 +588,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::read_input;
+    use super::validate_input_source;
     use super::HookError;
     use super::MappingResolver;
     use super::PostReceiveNotifier;
@@ -518,7 +605,34 @@ mod tests {
     use gittree_core::RepoMapping;
     use gittree_core::RepoState;
     use std::collections::HashMap;
+    use std::io::Write;
     use std::sync::Mutex;
+
+    #[test]
+    fn read_input_reads_file() {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        path.push(format!("gittree-hook-input-{nanos}.txt"));
+        let mut file = std::fs::File::create(&path).expect("create file");
+        writeln!(file, "old new refs/heads/main").expect("write file");
+        let contents = read_input(Some(&path)).expect("read input");
+        assert!(contents.contains("refs/heads/main"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_input_source_rejects_tty_without_file() {
+        assert!(validate_input_source(true, None).is_err());
+    }
+
+    #[test]
+    fn validate_input_source_accepts_file_or_pipe() {
+        assert!(validate_input_source(false, None).is_ok());
+        assert!(validate_input_source(true, Some(std::path::Path::new("input.txt"))).is_ok());
+    }
 
     #[test]
     fn parse_updates_accepts_lines() {
