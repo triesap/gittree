@@ -276,14 +276,14 @@ services:
       FORGEJO__log__ROOT_PATH: ${FORGEJO__log__ROOT_PATH}
       FORGEJO__LOG_0X2E_FILE__FILE_NAME: ${FORGEJO__LOG_0X2E_FILE__FILE_NAME}
       FORGEJO__log__LEVEL: ${FORGEJO__log__LEVEL}
-      FORGEJO__server__ROOT_URL: ${FORGEJO__server__ROOT_URL}
-      FORGEJO__server__DOMAIN: ${FORGEJO__server__DOMAIN}
-      FORGEJO__server__HTTP_PORT: ${FORGEJO__server__HTTP_PORT}
-      FORGEJO__server__SSH_DOMAIN: ${FORGEJO__server__SSH_DOMAIN}
-      FORGEJO__server__SSH_PORT: ${FORGEJO__server__SSH_PORT}
-    ports:
-      - "3000:3000"
-      - "2222:22"
+      FORGEJO__server__ROOT_URL: http://forgejo:3000/
+      FORGEJO__server__DOMAIN: forgejo
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__SSH_DOMAIN: forgejo
+      FORGEJO__server__SSH_PORT: "22"
+    expose:
+      - "3000"
+      - "22"
     volumes:
       - forgejo-data:/data
       - ./logs/forgejo:/data/gitea/log
