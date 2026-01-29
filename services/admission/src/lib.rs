@@ -8,6 +8,7 @@ use gittree_config::{
 };
 use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{CoreError, EventFilter};
+use gittree_core::kinds::KIND_GITTREE_CONTROL;
 use gittree_observability::{
     ObservabilityConfigError, ObservabilityError, ObservabilityHandle, RelayCompatibilityMetrics,
 };
@@ -29,12 +30,14 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const ENV_CONTROL_ADMIN_KEYS: &str = "GITTREE_CONTROL_ADMIN_KEYS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionConfig {
     pub bind: String,
     pub compatibility: RelayCompatibilityConfig,
     pub storage: StorageConfig,
+    pub control_admin_keys: Vec<String>,
 }
 
 impl AdmissionConfig {
@@ -43,10 +46,12 @@ impl AdmissionConfig {
         let compatibility =
             RelayCompatibilityConfig::from_env().map_err(AdmissionConfigError::Config)?;
         let storage = storage_from_env()?;
+        let control_admin_keys = admin_keys_from_env();
         Ok(Self {
             bind: services.admission.bind,
             compatibility,
             storage,
+            control_admin_keys,
         })
     }
 }
@@ -150,6 +155,20 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AdmissionConfigError> {
         }
         Err(_) => Ok(None),
     }
+}
+
+fn admin_keys_from_env() -> Vec<String> {
+    match std::env::var(ENV_CONTROL_ADMIN_KEYS) {
+        Ok(value) => parse_csv_values(value),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_csv_values(raw: String) -> Vec<String> {
+    raw.split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 #[derive(Debug)]
@@ -530,7 +549,22 @@ impl std::fmt::Display for AdmissionDecisionError {
 impl std::error::Error for AdmissionDecisionError {}
 
 pub fn evaluate_request(request: &AdmissionRequest) -> Result<AdmissionDecision, AdmissionError> {
+    evaluate_request_with_admin_keys(request, &[])
+}
+
+pub fn evaluate_request_with_admin_keys(
+    request: &AdmissionRequest,
+    admin_keys: &[String],
+) -> Result<AdmissionDecision, AdmissionError> {
     let kind = request.kind_u32().map_err(AdmissionError::Request)?;
+    if kind == KIND_GITTREE_CONTROL.0 {
+        if is_control_admin(&request.pubkey, admin_keys) {
+            return Ok(AdmissionDecision::Accept);
+        }
+        return Ok(AdmissionDecision::Reject {
+            reason: "control event not authorized".to_string(),
+        });
+    }
     let decision = gittree_core::evaluate_admission(
         kind,
         &request.pubkey,
@@ -556,18 +590,19 @@ pub async fn evaluate_request_with_storage<S>(
 where
     S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
-    evaluate_request_with_storage_mode(request, storage, RelayCompatibilityMode::Strict).await
+    evaluate_request_with_storage_mode(request, storage, RelayCompatibilityMode::Strict, &[]).await
 }
 
 pub async fn evaluate_request_with_storage_mode<S>(
     request: &AdmissionRequest,
     storage: &S,
     mode: RelayCompatibilityMode,
+    admin_keys: &[String],
 ) -> Result<AdmissionDecision, AdmissionError>
 where
     S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
-    let decision = evaluate_request(request)?;
+    let decision = evaluate_request_with_admin_keys(request, admin_keys)?;
     if let Some(relay_url) = request.relay_host() {
         let metrics = RelayCompatibilityMetrics::new();
         match storage.relay_compatibility(relay_url).await {
@@ -646,7 +681,14 @@ pub async fn evaluate_request_cached<S>(
 where
     S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
-    evaluate_request_cached_mode(request, storage, cache, RelayCompatibilityMode::Strict).await
+    evaluate_request_cached_mode(
+        request,
+        storage,
+        cache,
+        RelayCompatibilityMode::Strict,
+        &[],
+    )
+    .await
 }
 
 pub async fn evaluate_request_cached_mode<S>(
@@ -654,6 +696,7 @@ pub async fn evaluate_request_cached_mode<S>(
     storage: &S,
     cache: &AdmissionCache,
     mode: RelayCompatibilityMode,
+    admin_keys: &[String],
 ) -> Result<AdmissionDecision, AdmissionError>
 where
     S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
@@ -663,9 +706,15 @@ where
         return Ok(cached);
     }
 
-    let decision = evaluate_request_with_storage_mode(request, storage, mode).await?;
+    let decision = evaluate_request_with_storage_mode(request, storage, mode, admin_keys).await?;
     cache.insert(key, decision.clone());
     Ok(decision)
+}
+
+fn is_control_admin(pubkey: &str, admin_keys: &[String]) -> bool {
+    admin_keys
+        .iter()
+        .any(|key| key.eq_ignore_ascii_case(pubkey))
 }
 
 fn repo_address_from_tags(tags: &[Vec<String>]) -> Result<RepoAddress, CoreError> {
@@ -773,6 +822,7 @@ struct AdmissionAppState<R> {
     repositories: Arc<R>,
     cache: Arc<AdmissionCache>,
     compatibility: RelayCompatibilityMode,
+    control_admin_keys: Vec<String>,
 }
 
 impl<R> Clone for AdmissionAppState<R> {
@@ -781,6 +831,7 @@ impl<R> Clone for AdmissionAppState<R> {
             repositories: Arc::clone(&self.repositories),
             cache: Arc::clone(&self.cache),
             compatibility: self.compatibility,
+            control_admin_keys: self.control_admin_keys.clone(),
         }
     }
 }
@@ -793,6 +844,7 @@ pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
         repositories: Arc::new(repositories),
         cache,
         compatibility: config.compatibility.mode,
+        control_admin_keys: config.control_admin_keys,
     };
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind)
@@ -936,6 +988,7 @@ where
         state.repositories.as_ref(),
         state.cache.as_ref(),
         state.compatibility,
+        &state.control_admin_keys,
     )
     .await
     .map_err(AdmissionHttpError::from)?;
@@ -956,6 +1009,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use super::evaluate_request;
     use super::evaluate_request_cached;
+    use super::evaluate_request_with_admin_keys;
     use super::evaluate_request_with_storage;
     use super::evaluate_request_with_storage_mode;
     use async_trait::async_trait;
@@ -963,7 +1017,7 @@ mod tests {
     use gittree_core::EventFilter;
     use gittree_core::RepoAnnouncement;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
-    use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE};
+    use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE, KIND_GITTREE_CONTROL};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRecord,
         RelayCompatibilityRepository, RepoAnnouncementRecord,
@@ -977,9 +1031,15 @@ mod tests {
     #[test]
     fn config_loads_from_env() {
         with_env_var(super::ENV_STORAGE_READ_URL, "postgres://localhost/test", || {
-            let config = AdmissionConfig::from_env().expect("config");
-            let services = ServicesConfig::from_env_validated().expect("services");
-            assert_eq!(config.bind, services.admission.bind);
+            with_env_var(super::ENV_CONTROL_ADMIN_KEYS, "alpha, beta", || {
+                let config = AdmissionConfig::from_env().expect("config");
+                let services = ServicesConfig::from_env_validated().expect("services");
+                assert_eq!(config.bind, services.admission.bind);
+                assert_eq!(
+                    config.control_admin_keys,
+                    vec!["alpha".to_string(), "beta".to_string()]
+                );
+            });
         });
     }
 
@@ -991,6 +1051,7 @@ mod tests {
             repositories,
             cache,
             compatibility: RelayCompatibilityMode::Strict,
+            control_admin_keys: Vec::new(),
         });
         let response = app
             .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
@@ -1007,6 +1068,7 @@ mod tests {
             repositories,
             cache,
             compatibility: RelayCompatibilityMode::Strict,
+            control_admin_keys: Vec::new(),
         });
         let payload = AdmissionRequestPayload {
             kind: KIND_GIT_REPO_STATE.0 as u64,
@@ -1086,6 +1148,38 @@ mod tests {
         )
         .expect("request");
         assert_eq!(request.relay_host(), Some("wss://relay.example"));
+    }
+
+    #[test]
+    fn control_request_accepts_admin_key() {
+        let request = AdmissionRequest::new(
+            KIND_GITTREE_CONTROL.0 as u64,
+            "adminpub",
+            "event",
+            Vec::new(),
+            None,
+            None,
+        )
+        .expect("request");
+        let decision =
+            evaluate_request_with_admin_keys(&request, &["adminpub".to_string()]).expect("decision");
+        assert!(matches!(decision, AdmissionDecision::Accept));
+    }
+
+    #[test]
+    fn control_request_rejects_unknown_key() {
+        let request = AdmissionRequest::new(
+            KIND_GITTREE_CONTROL.0 as u64,
+            "otherpub",
+            "event",
+            Vec::new(),
+            None,
+            None,
+        )
+        .expect("request");
+        let decision =
+            evaluate_request_with_admin_keys(&request, &["adminpub".to_string()]).expect("decision");
+        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
     }
 
     #[test]
@@ -1340,6 +1434,7 @@ mod tests {
             &request,
             &storage,
             RelayCompatibilityMode::Warn,
+            &[],
         )
         .await
         .expect("decision");
@@ -1368,6 +1463,7 @@ mod tests {
             &request,
             &storage,
             RelayCompatibilityMode::Allow,
+            &[],
         )
         .await
         .expect("decision");
