@@ -158,6 +158,9 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./logs:/var/log/gittree
+    networks:
+      - default
+      - internal
 
   sync:
     build:
@@ -209,6 +212,34 @@ services:
         condition: service_started
     volumes:
       - ./logs:/var/log/gittree
+    networks:
+      - default
+      - internal
+
+  control:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.control
+    env_file:
+      - .env
+    environment:
+      GITTREE_CONTROL_BIND: 0.0.0.0:8088
+      GITTREE_FORGEJO_BASE_URL: http://forgejo:3000
+      GITTREE_FORGEJO_WEBHOOK_URL: http://webhook:8087/
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
+    ports:
+      - "8088:8088"
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      forgejo:
+        condition: service_started
+    volumes:
+      - ./logs:/var/log/gittree
+    networks:
+      - default
+      - internal
 
   ui:
     build:
@@ -257,6 +288,9 @@ services:
         condition: service_started
     volumes:
       - ./logs:/var/log/gittree
+    networks:
+      - default
+      - internal
 
   forgejo:
     image: codeberg.org/forgejo/forgejo:1.21
@@ -290,6 +324,8 @@ services:
     depends_on:
       log-init:
         condition: service_completed_successfully
+    networks:
+      - internal
 
   forgejo-init:
     image: codeberg.org/forgejo/forgejo:1.21
@@ -320,12 +356,17 @@ services:
     volumes:
       - forgejo-data:/data
     restart: "no"
+    networks:
+      - internal
 
   mailpit:
     image: axllent/mailpit:latest
     ports:
       - "1025:1025"
       - "8025:8025"
+    networks:
+      - default
+      - internal
 
   nginx:
     image: nginx:1.27
@@ -345,3 +386,7 @@ services:
 volumes:
   pgdata: {}
   forgejo-data: {}
+
+networks:
+  internal:
+    internal: true

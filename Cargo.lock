@@ -752,6 +752,8 @@ dependencies = [
  "gittree-core",
  "gittree-observability",
  "gittree-storage",
+ "reqwest",
+ "serde",
  "sqlx",
  "tokio",
  "tracing",
@@ -783,6 +785,24 @@ dependencies = [
  "serde",
  "toml",
  "url",
+]
+
+[[package]]
+name = "gittree-control"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.7.9",
+ "dotenvy",
+ "gittree-config",
+ "gittree-core",
+ "gittree-forgejo",
+ "gittree-observability",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
 ]
 
 [[package]]
