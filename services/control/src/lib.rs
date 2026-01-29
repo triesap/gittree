@@ -4,6 +4,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gittree_config::{ConfigError, ControlAuthConfig, ForgejoConfig, ServicesConfig};
+use gittree_core::kinds::KIND_GITTREE_CONTROL;
+use gittree_core::ControlAction;
 use gittree_forgejo::{
     ForgejoClient, ForgejoCreateOrg, ForgejoCreatePullRequest, ForgejoCreateRepo,
     ForgejoCreateUser, ForgejoError, ForgejoOrg, ForgejoPullRequest, ForgejoRepo, ForgejoTransport,
@@ -102,14 +104,17 @@ pub fn init_observability() -> Result<ObservabilityHandle, ControlError> {
 struct ControlAppState<T> {
     auth: ControlAuthConfig,
     forgejo: ForgejoClient<T>,
+    forgejo_owner: String,
 }
 
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
+    let forgejo_owner = config.forgejo.owner.clone();
     let forgejo = ForgejoClient::new(config.forgejo).map_err(ControlError::Forgejo)?;
     let state = ControlAppState {
         auth: config.auth,
         forgejo,
+        forgejo_owner,
     };
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind)
@@ -131,6 +136,7 @@ where
         .route("/control/orgs", post(create_org_handler))
         .route("/control/repos", post(create_repo_handler))
         .route("/control/pulls", post(create_pull_handler))
+        .route("/control/events", post(control_event_handler))
         .with_state(state)
 }
 
@@ -160,6 +166,21 @@ fn authorize(headers: &HeaderMap, token: &str) -> Result<(), ControlHttpError> {
         ));
     }
     Ok(())
+}
+
+fn authorize_admin_pubkey(
+    pubkey: &str,
+    auth: &ControlAuthConfig,
+) -> Result<(), ControlHttpError> {
+    if auth.admin_keys.is_empty() {
+        return Ok(());
+    }
+    if auth.admin_keys.iter().any(|key| key == pubkey) {
+        return Ok(());
+    }
+    Err(ControlHttpError::Unauthorized(
+        "control pubkey not authorized".to_string(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +232,13 @@ struct ControlCreatePullRequest {
     base: String,
     title: String,
     body: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlEventRequest {
+    kind: u64,
+    pubkey: String,
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -277,6 +305,15 @@ impl From<ForgejoPullRequest> for ControlPullResponse {
             html_url: value.html_url,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum ControlEventResponse {
+    CreateUser { user: ControlUserResponse },
+    CreateOrg { org: ControlOrgResponse },
+    CreateRepo { repo: ControlRepoResponse },
+    CreatePullRequest { pull: ControlPullResponse },
 }
 
 async fn create_user_handler<T>(
@@ -384,6 +421,131 @@ where
     Ok(Json(pr.into()))
 }
 
+async fn control_event_handler<T>(
+    State(state): State<ControlAppState<T>>,
+    headers: HeaderMap,
+    Json(payload): Json<ControlEventRequest>,
+) -> Result<Json<ControlEventResponse>, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    authorize(&headers, &state.auth.token)?;
+    require_non_empty("pubkey", &payload.pubkey)?;
+    require_non_empty("content", &payload.content)?;
+    authorize_admin_pubkey(&payload.pubkey, &state.auth)?;
+    let kind = u32::try_from(payload.kind)
+        .map_err(|_| ControlHttpError::BadRequest("invalid kind".to_string()))?;
+    let action = ControlAction::parse(kind, &payload.content, KIND_GITTREE_CONTROL.0)
+        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    let response = apply_control_action(&state, action).await?;
+    Ok(Json(response))
+}
+
+async fn apply_control_action<T>(
+    state: &ControlAppState<T>,
+    action: ControlAction,
+) -> Result<ControlEventResponse, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    match action {
+        ControlAction::CreateUser {
+            username,
+            email,
+            password,
+            must_change_password,
+            ..
+        } => {
+            let user = state
+                .forgejo
+                .create_user(ForgejoCreateUser {
+                    username,
+                    email,
+                    password,
+                    full_name: None,
+                    must_change_password,
+                    send_notify: None,
+                })
+                .await
+                .map_err(map_forgejo_error)?;
+            Ok(ControlEventResponse::CreateUser {
+                user: user.into(),
+            })
+        }
+        ControlAction::CreateOrg {
+            name,
+            full_name,
+            description,
+        } => {
+            let org = state
+                .forgejo
+                .create_org(
+                    &state.forgejo_owner,
+                    ForgejoCreateOrg {
+                        username: name,
+                        full_name,
+                        description,
+                        visibility: None,
+                    },
+                )
+                .await
+                .map_err(map_forgejo_error)?;
+            Ok(ControlEventResponse::CreateOrg { org: org.into() })
+        }
+        ControlAction::CreateRepo {
+            name,
+            owner,
+            description,
+            private,
+        } => {
+            let owner = owner.unwrap_or_else(|| state.forgejo_owner.clone());
+            let repo = state
+                .forgejo
+                .create_repo_for_owner(
+                    &owner,
+                    ForgejoCreateRepo {
+                        name,
+                        description,
+                        private,
+                        auto_init: None,
+                    },
+                )
+                .await
+                .map_err(map_forgejo_error)?;
+            Ok(ControlEventResponse::CreateRepo {
+                repo: repo.into(),
+            })
+        }
+        ControlAction::CreatePullRequest {
+            owner,
+            repo,
+            head,
+            base,
+            title,
+            body,
+            ..
+        } => {
+            let pull = state
+                .forgejo
+                .create_pull_request(
+                    &owner,
+                    &repo,
+                    ForgejoCreatePullRequest {
+                        head,
+                        base,
+                        title,
+                        body,
+                    },
+                )
+                .await
+                .map_err(map_forgejo_error)?;
+            Ok(ControlEventResponse::CreatePullRequest {
+                pull: pull.into(),
+            })
+        }
+    }
+}
+
 fn require_non_empty(field: &'static str, value: &str) -> Result<(), ControlHttpError> {
     if value.trim().is_empty() {
         return Err(ControlHttpError::BadRequest(format!(
@@ -428,6 +590,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{HeaderMap, Request};
     use gittree_config::{ControlAuthConfig, ForgejoConfig};
+    use gittree_core::kinds::KIND_GITTREE_CONTROL;
     use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
     use serde_json::json;
     use std::collections::VecDeque;
@@ -481,15 +644,24 @@ mod tests {
     fn test_state(
         responses: Vec<ForgejoResponse>,
     ) -> (super::ControlAppState<MockTransport>, MockTransport) {
+        test_state_with_auth(responses, Vec::new(), "gittree")
+    }
+
+    fn test_state_with_auth(
+        responses: Vec<ForgejoResponse>,
+        admin_keys: Vec<String>,
+        owner: &str,
+    ) -> (super::ControlAppState<MockTransport>, MockTransport) {
         let transport = MockTransport::new(responses);
         let client = ForgejoClient::with_transport(test_config(), transport.clone());
         (
             super::ControlAppState {
                 auth: ControlAuthConfig {
                     token: "token".to_string(),
-                    admin_keys: Vec::new(),
+                    admin_keys,
                 },
                 forgejo: client,
+                forgejo_owner: owner.to_string(),
             },
             transport,
         )
@@ -716,5 +888,65 @@ mod tests {
             .ends_with("/api/v1/repos/gittree/demo/pulls"));
         let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
         assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_event_rejects_non_admin_pubkey() {
+        let (state, _transport) = test_state_with_auth(
+            Vec::new(),
+            vec!["npub1admin".to_string()],
+            "gittree",
+        );
+        let app = build_router(state);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": "npub1other",
+            "content": r#"{"action":"create_repo","name":"demo"}"#
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn control_event_defaults_repo_owner() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"full_name":"gittree/demo","name":"demo","owner":{"username":"gittree"},"html_url":"http://localhost/gittree/demo"}"#.to_string(),
+        }];
+        let (state, transport) = test_state_with_auth(responses, Vec::new(), "gittree");
+        let app = build_router(state);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": "npub1admin",
+            "content": r#"{"action":"create_repo","name":"demo"}"#
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let requests = transport.requests();
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/admin/users/gittree/repos"));
     }
 }
