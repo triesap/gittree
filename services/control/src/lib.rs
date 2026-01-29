@@ -1,9 +1,14 @@
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use gittree_config::{ConfigError, ControlAuthConfig, ForgejoConfig, ServicesConfig};
+use gittree_forgejo::{
+    ForgejoClient, ForgejoCreateOrg, ForgejoCreatePullRequest, ForgejoCreateRepo,
+    ForgejoCreateUser, ForgejoError, ForgejoOrg, ForgejoPullRequest, ForgejoRepo, ForgejoTransport,
+    ForgejoUser,
+};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +59,7 @@ impl std::error::Error for ControlConfigError {
 #[derive(Debug)]
 pub enum ControlError {
     Config(ControlConfigError),
+    Forgejo(ForgejoError),
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
     Serve(String),
@@ -63,6 +69,7 @@ impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ControlError::Config(err) => write!(f, "control error: {err}"),
+            ControlError::Forgejo(err) => write!(f, "control forgejo error: {err}"),
             ControlError::ObservabilityConfig(err) => {
                 write!(f, "control observability config error: {err}")
             }
@@ -76,6 +83,7 @@ impl std::error::Error for ControlError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ControlError::Config(err) => Some(err),
+            ControlError::Forgejo(err) => Some(err),
             ControlError::ObservabilityConfig(err) => Some(err),
             ControlError::Observability(err) => Some(err),
             ControlError::Serve(_) => None,
@@ -91,16 +99,17 @@ pub fn init_observability() -> Result<ObservabilityHandle, ControlError> {
 }
 
 #[derive(Clone)]
-struct ControlAppState {
+struct ControlAppState<T> {
     auth: ControlAuthConfig,
-    forgejo: ForgejoConfig,
+    forgejo: ForgejoClient<T>,
 }
 
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
+    let forgejo = ForgejoClient::new(config.forgejo).map_err(ControlError::Forgejo)?;
     let state = ControlAppState {
         auth: config.auth,
-        forgejo: config.forgejo,
+        forgejo,
     };
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind)
@@ -112,13 +121,23 @@ pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     Ok(())
 }
 
-fn build_router(state: ControlAppState) -> Router {
+fn build_router<T>(state: ControlAppState<T>) -> Router
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
     Router::new()
         .route("/health", get(health_handler))
+        .route("/control/users", post(create_user_handler))
+        .route("/control/orgs", post(create_org_handler))
+        .route("/control/repos", post(create_repo_handler))
+        .route("/control/pulls", post(create_pull_handler))
         .with_state(state)
 }
 
-async fn health_handler(State(state): State<ControlAppState>) -> &'static str {
+async fn health_handler<T>(State(state): State<ControlAppState<T>>) -> &'static str
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
     let _ = (&state.auth, &state.forgejo);
     "ok"
 }
@@ -143,6 +162,246 @@ fn authorize(headers: &HeaderMap, token: &str) -> Result<(), ControlHttpError> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct ControlCreateUserRequest {
+    username: String,
+    email: String,
+    password: String,
+    full_name: Option<String>,
+    must_change_password: Option<bool>,
+    send_notify: Option<bool>,
+}
+
+impl From<ControlCreateUserRequest> for ForgejoCreateUser {
+    fn from(value: ControlCreateUserRequest) -> Self {
+        ForgejoCreateUser {
+            username: value.username,
+            email: value.email,
+            password: value.password,
+            full_name: value.full_name,
+            must_change_password: value.must_change_password,
+            send_notify: value.send_notify,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlCreateOrgRequest {
+    owner: String,
+    name: String,
+    full_name: Option<String>,
+    description: Option<String>,
+    visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlCreateRepoRequest {
+    owner: String,
+    name: String,
+    description: Option<String>,
+    private: Option<bool>,
+    auto_init: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlCreatePullRequest {
+    owner: String,
+    repo: String,
+    head: String,
+    base: String,
+    title: String,
+    body: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlUserResponse {
+    username: String,
+    email: Option<String>,
+}
+
+impl From<ForgejoUser> for ControlUserResponse {
+    fn from(value: ForgejoUser) -> Self {
+        Self {
+            username: value.username,
+            email: value.email,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ControlOrgResponse {
+    name: String,
+    full_name: Option<String>,
+}
+
+impl From<ForgejoOrg> for ControlOrgResponse {
+    fn from(value: ForgejoOrg) -> Self {
+        Self {
+            name: value.name,
+            full_name: value.full_name,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ControlRepoResponse {
+    owner: String,
+    name: String,
+    full_name: String,
+    html_url: Option<String>,
+}
+
+impl From<ForgejoRepo> for ControlRepoResponse {
+    fn from(value: ForgejoRepo) -> Self {
+        Self {
+            owner: value.owner,
+            name: value.name,
+            full_name: value.full_name,
+            html_url: value.html_url,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ControlPullResponse {
+    number: u64,
+    url: String,
+    html_url: Option<String>,
+}
+
+impl From<ForgejoPullRequest> for ControlPullResponse {
+    fn from(value: ForgejoPullRequest) -> Self {
+        Self {
+            number: value.number,
+            url: value.url,
+            html_url: value.html_url,
+        }
+    }
+}
+
+async fn create_user_handler<T>(
+    State(state): State<ControlAppState<T>>,
+    headers: HeaderMap,
+    Json(payload): Json<ControlCreateUserRequest>,
+) -> Result<Json<ControlUserResponse>, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    authorize(&headers, &state.auth.token)?;
+    require_non_empty("username", &payload.username)?;
+    require_non_empty("email", &payload.email)?;
+    require_non_empty("password", &payload.password)?;
+    let user = state
+        .forgejo
+        .create_user(payload.into())
+        .await
+        .map_err(map_forgejo_error)?;
+    Ok(Json(user.into()))
+}
+
+async fn create_org_handler<T>(
+    State(state): State<ControlAppState<T>>,
+    headers: HeaderMap,
+    Json(payload): Json<ControlCreateOrgRequest>,
+) -> Result<Json<ControlOrgResponse>, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    authorize(&headers, &state.auth.token)?;
+    require_non_empty("owner", &payload.owner)?;
+    require_non_empty("name", &payload.name)?;
+    let org = state
+        .forgejo
+        .create_org(
+            &payload.owner,
+            ForgejoCreateOrg {
+                username: payload.name,
+                full_name: payload.full_name,
+                description: payload.description,
+                visibility: payload.visibility,
+            },
+        )
+        .await
+        .map_err(map_forgejo_error)?;
+    Ok(Json(org.into()))
+}
+
+async fn create_repo_handler<T>(
+    State(state): State<ControlAppState<T>>,
+    headers: HeaderMap,
+    Json(payload): Json<ControlCreateRepoRequest>,
+) -> Result<Json<ControlRepoResponse>, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    authorize(&headers, &state.auth.token)?;
+    require_non_empty("owner", &payload.owner)?;
+    require_non_empty("name", &payload.name)?;
+    let repo = state
+        .forgejo
+        .create_repo_for_owner(
+            &payload.owner,
+            ForgejoCreateRepo {
+                name: payload.name,
+                description: payload.description,
+                private: payload.private,
+                auto_init: payload.auto_init,
+            },
+        )
+        .await
+        .map_err(map_forgejo_error)?;
+    Ok(Json(repo.into()))
+}
+
+async fn create_pull_handler<T>(
+    State(state): State<ControlAppState<T>>,
+    headers: HeaderMap,
+    Json(payload): Json<ControlCreatePullRequest>,
+) -> Result<Json<ControlPullResponse>, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    authorize(&headers, &state.auth.token)?;
+    require_non_empty("owner", &payload.owner)?;
+    require_non_empty("repo", &payload.repo)?;
+    require_non_empty("head", &payload.head)?;
+    require_non_empty("base", &payload.base)?;
+    require_non_empty("title", &payload.title)?;
+    let pr = state
+        .forgejo
+        .create_pull_request(
+            &payload.owner,
+            &payload.repo,
+            ForgejoCreatePullRequest {
+                head: payload.head,
+                base: payload.base,
+                title: payload.title,
+                body: payload.body,
+            },
+        )
+        .await
+        .map_err(map_forgejo_error)?;
+    Ok(Json(pr.into()))
+}
+
+fn require_non_empty(field: &'static str, value: &str) -> Result<(), ControlHttpError> {
+    if value.trim().is_empty() {
+        return Err(ControlHttpError::BadRequest(format!(
+            "missing {field}"
+        )));
+    }
+    Ok(())
+}
+
+fn map_forgejo_error(error: ForgejoError) -> ControlHttpError {
+    match error {
+        ForgejoError::Response { status, body } if status >= 400 && status < 500 => {
+            ControlHttpError::BadRequest(format!("forgejo error {status}: {body}"))
+        }
+        err => ControlHttpError::Internal(err.to_string()),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "error", rename_all = "snake_case")]
 pub enum ControlHttpError {
@@ -165,13 +424,76 @@ impl IntoResponse for ControlHttpError {
 #[cfg(test)]
 mod tests {
     use super::{AUTH_HEADER, ControlConfig, ControlHttpError, authorize, build_router};
-    use axum::body::Body;
+    use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
     use axum::http::{HeaderMap, Request};
     use gittree_config::{ControlAuthConfig, ForgejoConfig};
+    use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
-    use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Default)]
+    struct MockTransport {
+        requests: Arc<Mutex<Vec<ForgejoRequest>>>,
+        responses: Arc<Mutex<VecDeque<ForgejoResponse>>>,
+    }
+
+    impl MockTransport {
+        fn new(responses: Vec<ForgejoResponse>) -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                responses: Arc::new(Mutex::new(VecDeque::from(responses))),
+            }
+        }
+
+        fn requests(&self) -> Vec<ForgejoRequest> {
+            self.requests.lock().expect("requests").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ForgejoTransport for MockTransport {
+        async fn send(&self, request: ForgejoRequest) -> Result<ForgejoResponse, gittree_forgejo::ForgejoError> {
+            self.requests.lock().expect("requests").push(request);
+            self.responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .ok_or_else(|| gittree_forgejo::ForgejoError::Request("missing mock response".to_string()))
+        }
+    }
+
+    fn test_config() -> ForgejoConfig {
+        ForgejoConfig {
+            base_url: "http://localhost:3000".to_string(),
+            api_token: "token".to_string(),
+            owner: "gittree".to_string(),
+            webhook_url: "http://localhost:8087/".to_string(),
+            webhook_secret: "secret".to_string(),
+            repo_private: true,
+        }
+    }
+
+    fn test_state(
+        responses: Vec<ForgejoResponse>,
+    ) -> (super::ControlAppState<MockTransport>, MockTransport) {
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+        (
+            super::ControlAppState {
+                auth: ControlAuthConfig {
+                    token: "token".to_string(),
+                    admin_keys: Vec::new(),
+                },
+                forgejo: client,
+            },
+            transport,
+        )
+    }
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -224,25 +546,175 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
-        let state = super::ControlAppState {
-            auth: ControlAuthConfig {
-                token: "token".to_string(),
-                admin_keys: Vec::new(),
-            },
-            forgejo: ForgejoConfig {
-                base_url: "http://localhost:3000".to_string(),
-                api_token: "token".to_string(),
-                owner: "gittree".to_string(),
-                webhook_url: "http://localhost:8087/".to_string(),
-                webhook_secret: "secret".to_string(),
-                repo_private: true,
-            },
-        };
+        let (state, _transport) = test_state(Vec::new());
         let app = build_router(state);
         let response = app
             .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_missing_auth() {
+        let (state, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/users")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "username":"alice",
+                            "email":"alice@example.com",
+                            "password":"secret"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_user_posts_to_admin_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"login":"alice","email":"alice@example.com"}"#.to_string(),
+        }];
+        let (state, transport) = test_state(responses);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/users")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "username":"alice",
+                            "email":"alice@example.com",
+                            "password":"secret"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let requests = transport.requests();
+        assert!(requests[0].url.ends_with("/api/v1/admin/users"));
+    }
+
+    #[tokio::test]
+    async fn create_org_posts_to_admin_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"name":"acme","full_name":"Acme Org"}"#.to_string(),
+        }];
+        let (state, transport) = test_state(responses);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/orgs")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"admin",
+                            "name":"acme",
+                            "full_name":"Acme Org"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let requests = transport.requests();
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/admin/users/admin/orgs"));
+    }
+
+    #[tokio::test]
+    async fn create_repo_posts_to_admin_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"full_name":"alice/demo","name":"demo","owner":{"username":"alice"},"html_url":"http://localhost/alice/demo"}"#.to_string(),
+        }];
+        let (state, transport) = test_state(responses);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "auto_init":true
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let requests = transport.requests();
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/admin/users/alice/repos"));
+    }
+
+    #[tokio::test]
+    async fn create_pull_posts_to_repo_endpoint() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"number":5,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/5"}"#.to_string(),
+        }];
+        let (state, transport) = test_state(responses);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/pulls")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "repo":"demo",
+                            "head":"feature",
+                            "base":"main",
+                            "title":"Add thing"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let requests = transport.requests();
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/repos/gittree/demo/pulls"));
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert!(!body.is_empty());
     }
 }
