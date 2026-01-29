@@ -10,6 +10,7 @@ members = [
   "crates/migrate",
   "services/admin",
   "services/admission",
+  "services/control",
   "services/coordinator",
   "services/git-hook",
   "services/git-http",

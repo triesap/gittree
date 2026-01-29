@@ -1,0 +1,16 @@
+[package]
+name = "gittree-control"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.7"
+dotenvy = "0.15"
+gittree-config = { path = "../../crates/config" }
+gittree-observability = { path = "../../crates/observability" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tower = "0.4"
