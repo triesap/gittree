@@ -834,11 +834,9 @@ mod tests {
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(
-            ENV_STORAGE_READ_URL,
-            "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
                     let config = StateConfig::from_env().expect("config");
                     assert_eq!(config.bind, "127.0.0.1:8082");
                     assert_eq!(
@@ -850,17 +848,15 @@ mod tests {
                         vec!["wss://relay.example".to_string()]
                     );
                 });
-            },
-        );
+            });
+        });
     }
 
     #[test]
     fn config_ignores_empty_pool_timeouts() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(
-            ENV_STORAGE_READ_URL,
-            "postgres://user:pass@localhost:5432/gittree",
-            || {
+        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
                 with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
                     with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
                         let config = StateConfig::from_env().expect("config");
@@ -868,19 +864,21 @@ mod tests {
                         assert_eq!(config.storage.max_lifetime_secs, None);
                     });
                 });
-            },
-        );
+            });
+        });
     }
 
     #[test]
     fn config_requires_storage_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        without_env_var(ENV_STORAGE_READ_URL, || {
-            let err = StateConfig::from_env().unwrap_err();
-            assert!(matches!(
-                err,
-                super::StateConfigError::Storage(StorageConfigError::MissingEnv(_))
-            ));
+        with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
+            without_env_var(ENV_STORAGE_READ_URL, || {
+                let err = StateConfig::from_env().unwrap_err();
+                assert!(matches!(
+                    err,
+                    super::StateConfigError::Storage(StorageConfigError::MissingEnv(_))
+                ));
+            });
         });
     }
 
