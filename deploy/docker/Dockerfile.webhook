@@ -1,4 +1,4 @@
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -7,6 +7,9 @@ COPY migrations ./migrations
 RUN cargo build -p gittree-webhook --release
 
 FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libssl3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -u 10001 gittree
 COPY --from=builder /app/target/release/gittree-webhook /usr/local/bin/gittree-webhook
 USER gittree

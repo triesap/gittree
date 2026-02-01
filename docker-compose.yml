@@ -158,6 +158,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./logs:/var/log/gittree
+      - gittree-repos:/var/lib/gittree/repos
     networks:
       - default
       - internal
@@ -185,6 +186,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./logs:/var/log/gittree
+      - gittree-repos:/var/lib/gittree/repos
 
   webhook:
     build:
@@ -265,6 +267,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./logs:/var/log/gittree
+      - gittree-repos:/var/lib/gittree/repos
 
   git-http:
     build:
@@ -386,6 +389,7 @@ services:
 volumes:
   pgdata: {}
   forgejo-data: {}
+  gittree-repos: {}
 
 networks:
   internal:
