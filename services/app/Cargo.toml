@@ -22,3 +22,6 @@ gittree-app-ui = { path = "../../crates/app-ui", features = ["ssr"] }
 gittree-config = { path = "../../crates/config" }
 gittree-observability = { path = "../../crates/observability" }
 gittree-storage = { path = "../../crates/storage" }
+
+[dev-dependencies]
+tower = "0.4"

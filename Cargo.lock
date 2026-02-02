@@ -1095,6 +1095,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower 0.4.13",
  "tracing",
 ]
 
@@ -1110,8 +1111,11 @@ dependencies = [
 name = "gittree-app-ui"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.8",
  "console_error_panic_hook",
  "gittree-app-core",
+ "gittree-core",
+ "gittree-storage",
  "hex",
  "leptos",
  "leptos_router",
@@ -1119,6 +1123,7 @@ dependencies = [
  "mf2-i18n-embedded",
  "serde",
  "serde_json",
+ "tokio",
  "tracing-wasm",
  "wasm-bindgen",
 ]

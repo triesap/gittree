@@ -1,8 +1,14 @@
 #![forbid(unsafe_code)]
 
-use axum::extract::FromRef;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
+use gittree_app_core::{RepoDetail, RepoListResponse};
+use gittree_app_ui::server::{list_repo_items, repo_detail_item, AppUiError};
+use gittree_app_ui::AppUiState;
 use gittree_config::{ConfigError, UiConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{PostgresRepositories, RepoMappingRepository, StorageConfig, StorageError};
@@ -263,43 +269,18 @@ pub fn build_repositories(config: &AppServiceConfig) -> Result<PostgresRepositor
     Ok(PostgresRepositories::new(pool))
 }
 
-struct AppState<R> {
-    repositories: Arc<R>,
-    repo_root: PathBuf,
-    public_git_url: String,
-    base_path: String,
-    leptos_options: LeptosOptions,
-}
-
-impl<R> Clone for AppState<R> {
-    fn clone(&self) -> Self {
-        Self {
-            repositories: self.repositories.clone(),
-            repo_root: self.repo_root.clone(),
-            public_git_url: self.public_git_url.clone(),
-            base_path: self.base_path.clone(),
-            leptos_options: self.leptos_options.clone(),
-        }
-    }
-}
-
-impl<R> FromRef<AppState<R>> for LeptosOptions {
-    fn from_ref(state: &AppState<R>) -> Self {
-        state.leptos_options.clone()
-    }
-}
-
 pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
     let _observability = init_observability()?;
     let repositories = build_repositories(&config)?;
     let leptos_options = build_leptos_options(&config);
-    let state = AppState {
-        repositories: Arc::new(repositories),
-        repo_root: config.ui.repo_root,
-        public_git_url: config.ui.public_git_url,
-        base_path: config.base_path,
+    let repositories: Arc<dyn RepoMappingRepository> = Arc::new(repositories);
+    let state = AppUiState::new(
+        repositories,
+        config.ui.repo_root,
+        config.ui.public_git_url,
+        config.base_path,
         leptos_options,
-    };
+    );
 
     let router = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind(state.leptos_options.site_addr)
@@ -320,10 +301,7 @@ fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
         .build()
 }
 
-fn build_router<R>(state: AppState<R>) -> Router
-where
-    R: RepoMappingRepository + Send + Sync + 'static,
-{
+fn build_router(state: AppUiState) -> Router {
     let routes = leptos_axum::generate_route_list(gittree_app_ui::GittreeApp);
     let base_path = state.base_path.clone();
     let server_fn_state = state.clone();
@@ -334,15 +312,17 @@ where
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/api/repos", get(api_list_repos_handler))
+        .route("/api/repos/{npub}/{identifier}", get(api_repo_detail_handler))
         .route(
-            "/api/*fn_name",
+            "/api/{*fn_name}",
             post({
                 let server_fn_context = server_fn_context.clone();
                 move |req| handle_server_fns_with_context(server_fn_context.clone(), req)
             }),
         )
         .leptos_routes_with_context(&state, routes, || {}, gittree_app_ui::GittreeApp)
-        .fallback(leptos_axum::file_and_error_handler::<AppState<R>, _>(shell));
+        .fallback(leptos_axum::file_and_error_handler::<AppUiState, _>(shell));
 
     let app = app.with_state(state);
 
@@ -353,6 +333,158 @@ where
     }
 }
 
+#[derive(Debug)]
+enum AppApiError {
+    Ui(AppUiError),
+}
+
+impl From<AppUiError> for AppApiError {
+    fn from(value: AppUiError) -> Self {
+        AppApiError::Ui(value)
+    }
+}
+
+impl IntoResponse for AppApiError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, message) = match self {
+            AppApiError::Ui(AppUiError::BadRequest(message)) => (StatusCode::BAD_REQUEST, message),
+            AppApiError::Ui(AppUiError::NotFound(message)) => (StatusCode::NOT_FOUND, message),
+            AppApiError::Ui(AppUiError::Storage(message)) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+            AppApiError::Ui(AppUiError::Internal(message)) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+        };
+        (status, message).into_response()
+    }
+}
+
+async fn api_list_repos_handler(
+    State(state): State<AppUiState>,
+) -> Result<Json<RepoListResponse>, AppApiError> {
+    let items = list_repo_items(&state).await?;
+    Ok(Json(RepoListResponse { items }))
+}
+
+async fn api_repo_detail_handler(
+    State(state): State<AppUiState>,
+    Path((npub, identifier)): Path<(String, String)>,
+) -> Result<Json<RepoDetail>, AppApiError> {
+    let detail = repo_detail_item(&state, &npub, &identifier).await?;
+    Ok(Json(detail))
+}
+
 async fn health_handler() -> &'static str {
     "ok"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_router, AppUiState};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use gittree_app_core::RepoListResponse;
+    use gittree_storage::{InMemoryRepositories, RepoMappingRecord, RepoMappingRepository};
+    use leptos::config::LeptosOptions;
+    use std::sync::Arc;
+    use tower::util::ServiceExt;
+
+    fn test_state(repositories: Arc<dyn RepoMappingRepository>) -> AppUiState {
+        AppUiState::new(
+            repositories,
+            "/tmp/gittree".into(),
+            "http://localhost:8085".to_string(),
+            "/".to_string(),
+            LeptosOptions::builder()
+                .output_name("gittree-app-ui")
+                .site_root("crates/app-ui/dist")
+                .site_pkg_dir("pkg")
+                .site_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().expect("addr"))
+                .build(),
+        )
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let repositories: Arc<dyn RepoMappingRepository> = Arc::new(InMemoryRepositories::new());
+        let state = test_state(repositories);
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_list_repos_returns_entries() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let record = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            pubkey: vec![0x11; 32],
+            identifier: "repo".to_string(),
+        };
+        repositories
+            .upsert_mapping(record)
+            .await
+            .expect("insert mapping");
+
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/repos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let parsed: RepoListResponse = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].forgejo, "owner/repo");
+    }
+
+    #[tokio::test]
+    async fn api_repo_detail_returns_entry() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let record = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            pubkey: vec![0x11; 32],
+            identifier: "repo".to_string(),
+        };
+        let npub = gittree_app_core::npub_from_bytes(&record.pubkey).expect("npub");
+        repositories
+            .upsert_mapping(record)
+            .await
+            .expect("insert mapping");
+
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/repos/{npub}/repo"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let parsed: gittree_app_core::RepoDetail = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed.identifier, "repo");
+        assert_eq!(parsed.forgejo, "owner/repo");
+    }
 }

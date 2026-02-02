@@ -1,5 +1,12 @@
 {
+  "app.repo.back": 749114603,
+  "app.repo.clone": 1767216016,
+  "app.repo.detail_error": 60010376,
+  "app.repo.empty": 203486404,
+  "app.repo.error": 2478084378,
+  "app.repo.forgejo": 3977143217,
   "app.repo.loading": 3921006907,
+  "app.repo.not_found": 1043758758,
   "app.tagline": 1135734915,
   "app.title": 4076351995
 }

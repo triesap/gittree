@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["hydrate"]
 hydrate = ["leptos/hydrate"]
-ssr = ["leptos/ssr", "leptos_router/ssr"]
+ssr = ["leptos/ssr", "leptos_router/ssr", "axum", "gittree-core", "gittree-storage"]
 
 [dependencies]
 leptos.workspace = true
@@ -21,6 +21,7 @@ serde_json.workspace = true
 wasm-bindgen.workspace = true
 hex.workspace = true
 
+axum = { version = "0.8", optional = true }
 console_error_panic_hook = "0.1"
 tracing-wasm = "0.2"
 
@@ -28,3 +29,8 @@ mf2-i18n-core.workspace = true
 mf2-i18n-embedded.workspace = true
 
 gittree-app-core = { path = "../app-core" }
+gittree-core = { path = "../core", optional = true }
+gittree-storage = { path = "../storage", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -1,3 +1,19 @@
 app.title = gittree
+
 app.tagline = nostr repositories synced through gittree.
+
 app.repo.loading = loading repositories...
+
+app.repo.empty = no repositories yet.
+
+app.repo.error = unable to load repositories.
+
+app.repo.detail_error = repository not found.
+
+app.repo.not_found = not found.
+
+app.repo.clone = clone:
+
+app.repo.forgejo = forgejo:
+
+app.repo.back = back to list

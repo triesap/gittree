@@ -1,12 +1,89 @@
 {
   "schema": 1,
-  "project": "gittree-app",
-  "generated_at": "2026-02-02T00:00:00Z",
+  "project": "gittree-app-ui",
+  "generated_at": "2026-02-02T23:48:23Z",
   "default_locale": "en",
   "messages": [
     {
+      "key": "app.repo.back",
+      "id": 749114603,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.repo.clone",
+      "id": 1767216016,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.repo.detail_error",
+      "id": 60010376,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.repo.empty",
+      "id": 203486404,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.repo.error",
+      "id": 2478084378,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.repo.forgejo",
+      "id": 3977143217,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
       "key": "app.repo.loading",
       "id": 3921006907,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.repo.not_found",
+      "id": 1043758758,
       "args": [],
       "features": {
         "select": false,
