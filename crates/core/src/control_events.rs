@@ -19,8 +19,11 @@ pub enum ControlAction {
     CreateRepo {
         name: String,
         owner: Option<String>,
+        identifier: Option<String>,
         description: Option<String>,
         private: Option<bool>,
+        pubkey: String,
+        privkey: String,
     },
     CreatePullRequest {
         owner: String,
@@ -74,11 +77,23 @@ impl ControlAction {
                     require_non_empty("full_name", value)?;
                 }
             }
-            ControlAction::CreateRepo { name, owner, .. } => {
+            ControlAction::CreateRepo {
+                name,
+                owner,
+                identifier,
+                pubkey,
+                privkey,
+                ..
+            } => {
                 require_non_empty("name", name)?;
                 if let Some(value) = owner {
                     require_non_empty("owner", value)?;
                 }
+                if let Some(value) = identifier {
+                    require_non_empty("identifier", value)?;
+                }
+                require_hex64("pubkey", pubkey)?;
+                require_hex64("privkey", privkey)?;
             }
             ControlAction::CreatePullRequest {
                 owner,
@@ -109,6 +124,20 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_hex64(field: &'static str, value: &str) -> Result<()> {
+    if value.len() != 64 || !is_hex(value) {
+        return Err(CoreError::InvalidField {
+            field,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn is_hex(value: &str) -> bool {
+    value.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::ControlAction;
@@ -117,7 +146,7 @@ mod tests {
 
     #[test]
     fn parse_accepts_valid_payload() {
-        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree"}"#;
+        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
@@ -156,6 +185,20 @@ mod tests {
             err,
             CoreError::InvalidField {
                 field: "name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_pubkey() {
+        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"not-hex","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
+        let err =
+            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::InvalidField {
+                field: "pubkey",
                 ..
             }
         ));
