@@ -22,6 +22,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_relay_compatibility_metadata(),
         migration_nostr_events(),
         migration_nostr_event_indexes(),
+        migration_relay_publish_outbox(),
     ]
 }
 
@@ -155,6 +156,16 @@ fn migration_nostr_event_indexes() -> Migration {
     }
 }
 
+fn migration_relay_publish_outbox() -> Migration {
+    const RELAY_PUBLISH_OUTBOX_SQL: &str =
+        include_str!("../../../migrations/0007_relay_publish_outbox.sql");
+    Migration {
+        version: 7,
+        description: "relay publish outbox",
+        sql: RELAY_PUBLISH_OUTBOX_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -223,12 +234,13 @@ mod tests {
         assert!(sql.contains("CREATE TABLE repo_mapping"));
         assert!(sql.contains("CREATE TABLE relay_compatibility"));
         assert!(sql.contains("CREATE TABLE nostr_event"));
+        assert!(sql.contains("CREATE TABLE relay_publish_outbox"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 }

@@ -1,10 +1,11 @@
 use crate::repositories::{
-    AnnouncementRepository, EventRepository, RelayCompatibilityRepository, RepoMappingRepository,
-    StateRepository,
+    AnnouncementRepository, EventRepository, RelayCompatibilityRepository, RelayPublishRepository,
+    RepoMappingRepository, StateRepository,
 };
 use crate::{
-    EventQuery, EventRecord, RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord,
-    RepoStateRecord, TagRecord, StorageError,
+    EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob, RelayPublishRequest,
+    RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
+    StorageError,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
@@ -676,10 +677,205 @@ WHERE id = $1
     }
 }
 
+#[async_trait]
+impl RelayPublishRepository for PostgresRepositories {
+    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError> {
+        let entry = request.decode()?;
+        let tags = serde_json::to_value(&entry.tags).map_err(|source| StorageError::Serialization {
+            field: "tags",
+            source,
+        })?;
+        sqlx::query(
+            r#"
+INSERT INTO relay_publish_outbox (
+    relay_url,
+    event_id,
+    pubkey,
+    created_at,
+    kind,
+    tags,
+    content,
+    sig,
+    forgejo_owner,
+    forgejo_repo,
+    identifier,
+    status,
+    attempt_count,
+    publish_after
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, now())
+"#,
+        )
+        .bind(entry.relay_url)
+        .bind(entry.event_id)
+        .bind(entry.pubkey)
+        .bind(entry.created_at)
+        .bind(entry.kind as i32)
+        .bind(tags)
+        .bind(entry.content)
+        .bind(entry.sig)
+        .bind(entry.forgejo_owner)
+        .bind(entry.forgejo_repo)
+        .bind(entry.identifier)
+        .bind(RelayPublishStatus::Pending.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn claim_relay_publish(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Option<RelayPublishJob>, StorageError> {
+        let row = sqlx::query(
+            r#"
+UPDATE relay_publish_outbox
+SET status = $1,
+    attempt_count = attempt_count + 1,
+    updated_at_ts = now()
+WHERE id = (
+    SELECT id
+    FROM relay_publish_outbox
+    WHERE status = $2
+      AND publish_after <= $3
+    ORDER BY id
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id,
+          relay_url,
+          event_id,
+          pubkey,
+          created_at,
+          kind,
+          tags,
+          content,
+          sig,
+          forgejo_owner,
+          forgejo_repo,
+          identifier,
+          attempt_count,
+          publish_after
+"#,
+        )
+        .bind(RelayPublishStatus::Publishing.as_str())
+        .bind(RelayPublishStatus::Pending.as_str())
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let tags_value: serde_json::Value = row.try_get("tags")?;
+        let tags: Vec<Vec<String>> =
+            serde_json::from_value(tags_value).map_err(|source| StorageError::Serialization {
+                field: "tags",
+                source,
+            })?;
+        Ok(Some(RelayPublishJob {
+            id: row.try_get("id")?,
+            relay_url: row.try_get("relay_url")?,
+            event_id: row.try_get("event_id")?,
+            pubkey: row.try_get("pubkey")?,
+            created_at: row.try_get("created_at")?,
+            kind: row.try_get::<i32, _>("kind")? as u32,
+            tags,
+            content: row.try_get("content")?,
+            sig: row.try_get("sig")?,
+            forgejo_owner: row.try_get("forgejo_owner")?,
+            forgejo_repo: row.try_get("forgejo_repo")?,
+            identifier: row.try_get("identifier")?,
+            attempt_count: row.try_get("attempt_count")?,
+            publish_after: row.try_get("publish_after")?,
+        }))
+    }
+
+    async fn mark_relay_publish_succeeded(&self, id: i64) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            r#"
+UPDATE relay_publish_outbox
+SET status = $1,
+    last_error = NULL,
+    updated_at_ts = now()
+WHERE id = $2
+"#,
+        )
+        .bind(RelayPublishStatus::Published.as_str())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::Internal {
+                message: "outbox entry not found".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn mark_relay_publish_failed(
+        &self,
+        id: i64,
+        error: &str,
+        retry_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            r#"
+UPDATE relay_publish_outbox
+SET status = $1,
+    last_error = $2,
+    publish_after = $3,
+    updated_at_ts = now()
+WHERE id = $4
+"#,
+        )
+        .bind(RelayPublishStatus::Pending.as_str())
+        .bind(error)
+        .bind(retry_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::Internal {
+                message: "outbox entry not found".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn pending_relay_publishes(
+        &self,
+        pubkey: &[u8],
+        identifier: &str,
+        kind: u32,
+    ) -> Result<i64, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+SELECT count(*)
+FROM relay_publish_outbox
+WHERE pubkey = $1
+  AND identifier = $2
+  AND kind = $3
+  AND status != $4
+"#,
+        )
+        .bind(pubkey)
+        .bind(identifier)
+        .bind(kind as i32)
+        .bind(RelayPublishStatus::Published.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PostgresRepositories;
-    use crate::repositories::{EventRepository, RelayCompatibilityRepository, RepoMappingRepository};
+    use crate::repositories::{
+        EventRepository, RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository,
+    };
     use crate::StorageError;
 
     #[test]
@@ -709,6 +905,12 @@ mod tests {
     #[test]
     fn postgres_repos_implements_event_repo() {
         fn assert_impl<T: EventRepository>() {}
+        assert_impl::<PostgresRepositories>();
+    }
+
+    #[test]
+    fn postgres_repos_implements_relay_publish_repo() {
+        fn assert_impl<T: RelayPublishRepository>() {}
         assert_impl::<PostgresRepositories>();
     }
 }

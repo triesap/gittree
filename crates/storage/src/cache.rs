@@ -1,12 +1,14 @@
 use crate::{
     AnnouncementRepository, RelayCompatibilityRecord, RelayCompatibilityRepository,
-    RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
+    RelayPublishJob, RelayPublishRepository, RelayPublishRequest, RepoAnnouncementRecord,
+    RepoStateRecord, StateRepository, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
@@ -510,6 +512,49 @@ where
         }
 
         Ok(record)
+    }
+}
+
+#[async_trait]
+impl<R> RelayPublishRepository for CachedRepositories<R>
+where
+    R: RelayPublishRepository,
+{
+    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError> {
+        self.inner.enqueue_relay_publish(request).await
+    }
+
+    async fn claim_relay_publish(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Option<RelayPublishJob>, StorageError> {
+        self.inner.claim_relay_publish(now).await
+    }
+
+    async fn mark_relay_publish_succeeded(&self, id: i64) -> Result<(), StorageError> {
+        self.inner.mark_relay_publish_succeeded(id).await
+    }
+
+    async fn mark_relay_publish_failed(
+        &self,
+        id: i64,
+        error: &str,
+        retry_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .mark_relay_publish_failed(id, error, retry_at)
+            .await
+    }
+
+    async fn pending_relay_publishes(
+        &self,
+        pubkey: &[u8],
+        identifier: &str,
+        kind: u32,
+    ) -> Result<i64, StorageError> {
+        self.inner
+            .pending_relay_publishes(pubkey, identifier, kind)
+            .await
     }
 }
 

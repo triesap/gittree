@@ -1,10 +1,12 @@
 use crate::{
-    EventQuery, EventRecord, RelayCompatibilityRecord, RepoAnnouncementRecord, RepoMappingRecord,
-    RepoStateRecord, StorageError,
+    EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob, RelayPublishRequest,
+    RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
+use time::OffsetDateTime;
 
 #[async_trait]
 pub trait AnnouncementRepository: Send + Sync {
@@ -68,6 +70,35 @@ pub trait EventRepository: Send + Sync {
     async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError>;
 }
 
+#[async_trait]
+pub trait RelayPublishRepository: Send + Sync {
+    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError>;
+    async fn claim_relay_publish(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Option<RelayPublishJob>, StorageError>;
+    async fn mark_relay_publish_succeeded(&self, id: i64) -> Result<(), StorageError>;
+    async fn mark_relay_publish_failed(
+        &self,
+        id: i64,
+        error: &str,
+        retry_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+    async fn pending_relay_publishes(
+        &self,
+        pubkey: &[u8],
+        identifier: &str,
+        kind: u32,
+    ) -> Result<i64, StorageError>;
+}
+
+#[derive(Debug, Clone)]
+struct OutboxEntry {
+    job: RelayPublishJob,
+    status: RelayPublishStatus,
+    last_error: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryRepositories {
     announcements: RwLock<HashMap<String, Vec<RepoAnnouncementRecord>>>,
@@ -76,6 +107,8 @@ pub struct InMemoryRepositories {
     mappings_by_repo: RwLock<HashMap<String, RepoMappingRecord>>,
     relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
     events: RwLock<HashMap<String, EventRecord>>,
+    outbox: RwLock<HashMap<i64, OutboxEntry>>,
+    outbox_seq: AtomicI64,
 }
 
 impl InMemoryRepositories {
@@ -93,6 +126,10 @@ impl InMemoryRepositories {
 
     fn event_key(event_id: &[u8]) -> String {
         hex::encode(event_id)
+    }
+
+    fn next_outbox_id(&self) -> i64 {
+        self.outbox_seq.fetch_add(1, Ordering::SeqCst) + 1
     }
 }
 
@@ -376,19 +413,137 @@ impl EventRepository for InMemoryRepositories {
     }
 }
 
+#[async_trait]
+impl RelayPublishRepository for InMemoryRepositories {
+    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError> {
+        let entry = request.decode()?;
+        let id = self.next_outbox_id();
+        let job = RelayPublishJob {
+            id,
+            relay_url: entry.relay_url,
+            event_id: entry.event_id,
+            pubkey: entry.pubkey,
+            created_at: entry.created_at,
+            kind: entry.kind,
+            tags: entry.tags,
+            content: entry.content,
+            sig: entry.sig,
+            forgejo_owner: entry.forgejo_owner,
+            forgejo_repo: entry.forgejo_repo,
+            identifier: entry.identifier,
+            attempt_count: 0,
+            publish_after: OffsetDateTime::now_utc(),
+        };
+        let mut outbox = self.outbox.write().map_err(|_| StorageError::Internal {
+            message: "outbox store poisoned".to_string(),
+        })?;
+        outbox.insert(
+            id,
+            OutboxEntry {
+                job,
+                status: RelayPublishStatus::Pending,
+                last_error: None,
+            },
+        );
+        Ok(())
+    }
+
+    async fn claim_relay_publish(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Option<RelayPublishJob>, StorageError> {
+        let mut outbox = self.outbox.write().map_err(|_| StorageError::Internal {
+            message: "outbox store poisoned".to_string(),
+        })?;
+        let mut selected: Option<i64> = None;
+        for (id, entry) in outbox.iter() {
+            if entry.status != RelayPublishStatus::Pending {
+                continue;
+            }
+            if entry.job.publish_after > now {
+                continue;
+            }
+            selected = match selected {
+                Some(current) if current <= *id => Some(current),
+                _ => Some(*id),
+            };
+        }
+        let Some(id) = selected else {
+            return Ok(None);
+        };
+        let entry = outbox.get_mut(&id).expect("entry");
+        entry.status = RelayPublishStatus::Publishing;
+        entry.job.attempt_count += 1;
+        entry.job.publish_after = now;
+        Ok(Some(entry.job.clone()))
+    }
+
+    async fn mark_relay_publish_succeeded(&self, id: i64) -> Result<(), StorageError> {
+        let mut outbox = self.outbox.write().map_err(|_| StorageError::Internal {
+            message: "outbox store poisoned".to_string(),
+        })?;
+        let entry = outbox.get_mut(&id).ok_or_else(|| StorageError::Internal {
+            message: "outbox entry not found".to_string(),
+        })?;
+        entry.status = RelayPublishStatus::Published;
+        entry.last_error = None;
+        Ok(())
+    }
+
+    async fn mark_relay_publish_failed(
+        &self,
+        id: i64,
+        error: &str,
+        retry_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let mut outbox = self.outbox.write().map_err(|_| StorageError::Internal {
+            message: "outbox store poisoned".to_string(),
+        })?;
+        let entry = outbox.get_mut(&id).ok_or_else(|| StorageError::Internal {
+            message: "outbox entry not found".to_string(),
+        })?;
+        entry.status = RelayPublishStatus::Pending;
+        entry.job.publish_after = retry_at;
+        entry.last_error = Some(error.to_string());
+        Ok(())
+    }
+
+    async fn pending_relay_publishes(
+        &self,
+        pubkey: &[u8],
+        identifier: &str,
+        kind: u32,
+    ) -> Result<i64, StorageError> {
+        let outbox = self.outbox.read().map_err(|_| StorageError::Internal {
+            message: "outbox store poisoned".to_string(),
+        })?;
+        let count = outbox
+            .values()
+            .filter(|entry| {
+                entry.status != RelayPublishStatus::Published
+                    && entry.job.kind == kind
+                    && entry.job.identifier == identifier
+                    && entry.job.pubkey == pubkey
+            })
+            .count();
+        Ok(count as i64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AnnouncementRepository, EventQuery, EventRecord, EventRepository, InMemoryRepositories,
-        RelayCompatibilityRepository, RepoMappingRepository, StateRepository,
+        RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository, StateRepository,
     };
     use crate::{
-        RelayCompatibilityRecord, RelayProbeMetadata, RepoAnnouncementRecord, RepoMappingRecord,
-        RepoStateRecord, TagRecord,
+        RelayCompatibilityRecord, RelayProbeMetadata, RelayPublishRequest, RepoAnnouncementRecord,
+        RepoMappingRecord, RepoStateRecord, TagRecord,
     };
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
     use std::collections::HashMap;
+    use time::OffsetDateTime;
 
     fn hex_32(byte: u8) -> String {
         format!("{:02x}", byte).repeat(32)
@@ -571,6 +726,43 @@ mod tests {
             .await
             .expect("lookup");
         assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_outbox_claims_and_marks_success() {
+        let store = InMemoryRepositories::new();
+        let request = RelayPublishRequest {
+            relay_url: "wss://relay.example".to_string(),
+            event_id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 1,
+            kind: 1,
+            tags: vec![vec!["d".to_string(), "repo".to_string()]],
+            content: String::new(),
+            sig: "33".repeat(64),
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            identifier: "repo".to_string(),
+        };
+        store
+            .enqueue_relay_publish(request)
+            .await
+            .expect("enqueue");
+        let job = store
+            .claim_relay_publish(OffsetDateTime::now_utc())
+            .await
+            .expect("claim")
+            .expect("job");
+        assert_eq!(job.relay_url, "wss://relay.example");
+        store
+            .mark_relay_publish_succeeded(job.id)
+            .await
+            .expect("mark");
+        let remaining = store
+            .pending_relay_publishes(&job.pubkey, &job.identifier, job.kind)
+            .await
+            .expect("count");
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]
