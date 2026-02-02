@@ -218,7 +218,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
         match response.status {
             200 | 201 => {
                 let user = parse_json::<ForgejoUserResponse>(&response.body)?;
-                Ok(user.into_user())
+                user.into_user()
             }
             status => Err(ForgejoError::Response {
                 status,
@@ -512,17 +512,31 @@ impl ForgejoRepoResponse {
 
 #[derive(Debug, Deserialize)]
 struct ForgejoUserResponse {
-    #[serde(alias = "login", alias = "username")]
-    username: String,
+    login: Option<String>,
+    username: Option<String>,
     email: Option<String>,
 }
 
 impl ForgejoUserResponse {
-    fn into_user(self) -> ForgejoUser {
-        ForgejoUser {
-            username: self.username,
+    fn into_user(self) -> Result<ForgejoUser, ForgejoError> {
+        let username = match (self.login, self.username) {
+            (Some(login), Some(username)) if login != username => {
+                return Err(ForgejoError::Parse(
+                    "forgejo user response has mismatched login and username".to_string(),
+                ));
+            }
+            (Some(login), _) => login,
+            (None, Some(username)) => username,
+            (None, None) => {
+                return Err(ForgejoError::Parse(
+                    "forgejo user response missing username".to_string(),
+                ));
+            }
+        };
+        Ok(ForgejoUser {
+            username,
             email: self.email,
-        }
+        })
     }
 }
 
@@ -759,7 +773,7 @@ mod tests {
     async fn create_user_posts_admin_endpoint() {
         let responses = vec![ForgejoResponse {
             status: 201,
-            body: r#"{"login":"alice","email":"alice@example.com"}"#.to_string(),
+            body: r#"{"login":"alice","username":"alice","email":"alice@example.com"}"#.to_string(),
         }];
         let transport = MockTransport::new(responses);
         let client = ForgejoClient::with_transport(test_config(), transport.clone());
