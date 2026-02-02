@@ -239,6 +239,13 @@ mod tests {
         async fn probe_write_read(&self) -> Result<(), RelayAdapterError> {
             Ok(())
         }
+
+        async fn publish_event(
+            &self,
+            _event: &gittree_relay_adapter::SignedNostrEvent,
+        ) -> Result<(), RelayAdapterError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

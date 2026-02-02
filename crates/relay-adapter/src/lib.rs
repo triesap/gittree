@@ -63,10 +63,75 @@ impl std::fmt::Display for RelayAdapterError {
 
 impl std::error::Error for RelayAdapterError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SignedNostrEvent {
+    pub id: String,
+    pub pubkey: String,
+    pub created_at: i64,
+    pub kind: u32,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+    pub sig: String,
+}
+
+impl SignedNostrEvent {
+    pub fn from_announcement(
+        announcement: &RepoAnnouncement,
+        secret_key: &SecretKey,
+    ) -> Result<Self, RelayAdapterError> {
+        Self::from_announcement_with_created_at(announcement, secret_key, unix_timestamp())
+    }
+
+    pub fn from_announcement_with_created_at(
+        announcement: &RepoAnnouncement,
+        secret_key: &SecretKey,
+        created_at: i64,
+    ) -> Result<Self, RelayAdapterError> {
+        announcement
+            .validate()
+            .map_err(|err| RelayAdapterError::InvalidConfig(err.to_string()))?;
+        let tags = announcement.to_tags();
+        Self::signed(
+            created_at,
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            tags,
+            String::new(),
+            secret_key,
+        )
+    }
+
+    pub fn signed(
+        created_at: i64,
+        kind: u32,
+        tags: Vec<Vec<String>>,
+        content: String,
+        secret_key: &SecretKey,
+    ) -> Result<Self, RelayAdapterError> {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, secret_key);
+        let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
+        let pubkey_hex = hex::encode(pubkey.serialize());
+
+        let event_id = build_event_id(&pubkey_hex, created_at, kind, &tags, &content)?;
+        let sig = sign_event_id(&secp, &keypair, &event_id)?;
+
+        Ok(Self {
+            id: event_id,
+            pubkey: pubkey_hex,
+            created_at,
+            kind,
+            tags,
+            content,
+            sig,
+        })
+    }
+}
+
 #[async_trait]
 pub trait RelayAdapter: Send + Sync {
     async fn relay_info(&self) -> Result<Option<RelayInfoDocument>, RelayAdapterError>;
     async fn probe_write_read(&self) -> Result<(), RelayAdapterError>;
+    async fn publish_event(&self, event: &SignedNostrEvent) -> Result<(), RelayAdapterError>;
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +162,12 @@ impl RelayAdapter for NostrRsRelayAdapter {
             "nostr-rs-relay adapter not enabled".to_string(),
         ))
     }
+
+    async fn publish_event(&self, _event: &SignedNostrEvent) -> Result<(), RelayAdapterError> {
+        Err(RelayAdapterError::Unsupported(
+            "nostr-rs-relay adapter not enabled".to_string(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +194,12 @@ impl RelayAdapter for WebhookRelayAdapter {
     }
 
     async fn probe_write_read(&self) -> Result<(), RelayAdapterError> {
+        Err(RelayAdapterError::Unsupported(
+            "webhook adapter not configured".to_string(),
+        ))
+    }
+
+    async fn publish_event(&self, _event: &SignedNostrEvent) -> Result<(), RelayAdapterError> {
         Err(RelayAdapterError::Unsupported(
             "webhook adapter not configured".to_string(),
         ))
@@ -203,17 +280,23 @@ impl RelayAdapter for WebsocketRelayAdapter {
         let _ = write.send(WsMessage::Text(close_message)).await;
         Ok(())
     }
-}
 
-#[derive(Debug, Clone, Serialize)]
-struct ProbeEvent {
-    id: String,
-    pubkey: String,
-    created_at: i64,
-    kind: u32,
-    tags: Vec<Vec<String>>,
-    content: String,
-    sig: String,
+    async fn publish_event(&self, event: &SignedNostrEvent) -> Result<(), RelayAdapterError> {
+        let url = self.normalized_url()?;
+        let (stream, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+        let (mut write, mut read) = stream.split();
+        let event_json = serde_json::to_string(event)
+            .map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
+        let event_message = format!("[\"EVENT\",{event_json}]");
+        write
+            .send(WsMessage::Text(event_message))
+            .await
+            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+        wait_for_ok(&mut read, &event.id, self.config.timeout).await?;
+        Ok(())
+    }
 }
 
 fn normalize_ws_url(input: &str) -> Result<Url, RelayAdapterError> {
@@ -238,7 +321,10 @@ fn normalize_ws_url(input: &str) -> Result<Url, RelayAdapterError> {
     Ok(url)
 }
 
-fn build_probe_event(relay_url: &str, secret_key: &SecretKey) -> Result<ProbeEvent, RelayAdapterError> {
+fn build_probe_event(
+    relay_url: &str,
+    secret_key: &SecretKey,
+) -> Result<SignedNostrEvent, RelayAdapterError> {
     let now = unix_timestamp();
     let identifier = format!("probe-{now}");
     let announcement = RepoAnnouncement {
@@ -253,31 +339,7 @@ fn build_probe_event(relay_url: &str, secret_key: &SecretKey) -> Result<ProbeEve
         hashtags: Vec::new(),
         maintainers: Vec::new(),
     };
-    announcement
-        .validate()
-        .map_err(|err| RelayAdapterError::InvalidConfig(err.to_string()))?;
-
-    let tags = announcement.to_tags();
-    let kind = KIND_GIT_REPO_ANNOUNCEMENT.0;
-    let content = String::new();
-
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, secret_key);
-    let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
-    let pubkey_hex = hex::encode(pubkey.serialize());
-
-    let event_id = build_event_id(&pubkey_hex, now, kind, &tags, &content)?;
-    let sig = sign_event_id(&secp, &keypair, &event_id)?;
-
-    Ok(ProbeEvent {
-        id: event_id,
-        pubkey: pubkey_hex,
-        created_at: now,
-        kind,
-        tags,
-        content,
-        sig,
-    })
+    SignedNostrEvent::from_announcement_with_created_at(&announcement, secret_key, now)
 }
 
 fn build_event_id(
@@ -447,9 +509,10 @@ fn parse_eose_message(message: &WsMessage) -> Result<Option<String>, RelayAdapte
 #[cfg(test)]
 mod tests {
     use super::{
-        RelayAdapter, RelayAdapterConfig, RelayAdapterError, WebsocketRelayAdapter,
-        normalize_ws_url,
+        RelayAdapter, RelayAdapterConfig, RelayAdapterError, SignedNostrEvent,
+        WebsocketRelayAdapter, normalize_ws_url,
     };
+    use secp256k1::{Message, Secp256k1, SecretKey, XOnlyPublicKey};
 
     #[test]
     fn normalize_ws_url_converts_https() {
@@ -468,5 +531,39 @@ mod tests {
         let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("ftp://relay.example"));
         let err = adapter.probe_write_read().await.unwrap_err();
         assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn signed_event_has_valid_signature() {
+        let secret_key =
+            SecretKey::from_slice(&[7u8; 32]).expect("secret");
+        let announcement = gittree_core::RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: Some("repo".to_string()),
+            description: None,
+            root_commit: None,
+            clone: vec![
+                "https://relay.example/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git"
+                    .to_string(),
+            ],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let event =
+            SignedNostrEvent::from_announcement_with_created_at(&announcement, &secret_key, 123)
+                .expect("event");
+        let secp = Secp256k1::new();
+        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
+        assert_eq!(event.pubkey, hex::encode(pubkey.serialize()));
+        let id_bytes = hex::decode(&event.id).expect("id bytes");
+        let msg = Message::from_digest_slice(&id_bytes).expect("msg");
+        let sig_bytes = hex::decode(&event.sig).expect("sig bytes");
+        let sig = secp256k1::schnorr::Signature::from_slice(&sig_bytes).expect("sig");
+        secp.verify_schnorr(&sig, &msg, &pubkey)
+            .expect("signature valid");
     }
 }
