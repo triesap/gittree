@@ -12,6 +12,7 @@ members = [
   "crates/migrate",
   "services/admin",
   "services/admission",
+  "services/app",
   "services/control",
   "services/coordinator",
   "services/git-hook",
@@ -45,7 +46,7 @@ keywords = ["nostr", "git", "nip-34", "grasp", "relay"]
 [workspace.dependencies]
 leptos = { version = "0.8.5", default-features = false }
 leptos_router = { version = "0.8.5", default-features = false }
-leptos_axum = { version = "0.8.5", default-features = false }
+leptos_axum = { version = "0.8.5" }
 wasm-bindgen = "=0.2.100"
 wasm-bindgen-futures = "0.4"
 serde = { version = "1", features = ["derive"] }

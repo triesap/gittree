@@ -1,0 +1,24 @@
+[package]
+name = "gittree-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum = "0.8"
+leptos = { workspace = true, features = ["ssr"] }
+leptos_axum.workspace = true
+leptos_router.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+
+dotenvy = "0.15"
+
+gittree-app-core = { path = "../../crates/app-core" }
+gittree-app-ui = { path = "../../crates/app-ui", features = ["ssr"] }
+gittree-config = { path = "../../crates/config" }
+gittree-observability = { path = "../../crates/observability" }
+gittree-storage = { path = "../../crates/storage" }

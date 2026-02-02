@@ -1,0 +1,358 @@
+#![forbid(unsafe_code)]
+
+use axum::extract::FromRef;
+use axum::routing::{get, post};
+use axum::Router;
+use gittree_config::{ConfigError, UiConfig};
+use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
+use gittree_storage::{PostgresRepositories, RepoMappingRepository, StorageConfig, StorageError};
+use leptos::config::LeptosOptions;
+use leptos::prelude::provide_context;
+use leptos_axum::{handle_server_fns_with_context, LeptosRoutes};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+const ENV_APP_BIND: &str = "GITTREE_APP_BIND";
+const ENV_APP_BASE_PATH: &str = "GITTREE_APP_BASE_PATH";
+const ENV_APP_SITE_ROOT: &str = "GITTREE_APP_SITE_ROOT";
+const ENV_APP_SITE_PKG_DIR: &str = "GITTREE_APP_SITE_PKG_DIR";
+
+const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
+const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
+const ENV_STORAGE_MAX_CONNECTIONS: &str = "GITTREE_STORAGE_MAX_CONNECTIONS";
+const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
+const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
+const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
+const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+
+const DEFAULT_APP_BIND: &str = "127.0.0.1:8090";
+const DEFAULT_APP_BASE_PATH: &str = "/ui";
+const DEFAULT_APP_SITE_ROOT: &str = "crates/app-ui/dist";
+const DEFAULT_APP_SITE_PKG_DIR: &str = "pkg";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppServiceConfig {
+    pub bind: SocketAddr,
+    pub base_path: String,
+    pub site_root: PathBuf,
+    pub site_pkg_dir: String,
+    pub storage: StorageConfig,
+    pub ui: UiConfig,
+}
+
+impl AppServiceConfig {
+    pub fn from_env() -> Result<Self, AppServiceConfigError> {
+        let storage = storage_from_env()?;
+        let ui = UiConfig::from_env().map_err(AppServiceConfigError::Config)?;
+
+        let bind = env_socket_addr(ENV_APP_BIND)?.unwrap_or_else(|| {
+            DEFAULT_APP_BIND
+                .parse()
+                .expect("default app bind")
+        });
+        let base_path = env_string(ENV_APP_BASE_PATH)?.unwrap_or_else(|| DEFAULT_APP_BASE_PATH.to_string());
+        let base_path = normalize_base_path(&base_path);
+        let site_root = env_path(ENV_APP_SITE_ROOT)?.unwrap_or_else(|| PathBuf::from(DEFAULT_APP_SITE_ROOT));
+        let site_pkg_dir = env_string(ENV_APP_SITE_PKG_DIR)?.unwrap_or_else(|| DEFAULT_APP_SITE_PKG_DIR.to_string());
+
+        Ok(Self {
+            bind,
+            base_path,
+            site_root,
+            site_pkg_dir,
+            storage,
+            ui,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum AppServiceConfigError {
+    Config(ConfigError),
+    Storage(StorageConfigError),
+    MissingEnv(&'static str),
+    InvalidEnv { key: &'static str, value: String },
+}
+
+impl std::fmt::Display for AppServiceConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppServiceConfigError::Config(err) => write!(f, "app config error: {err}"),
+            AppServiceConfigError::Storage(err) => write!(f, "app storage config error: {err}"),
+            AppServiceConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
+            AppServiceConfigError::InvalidEnv { key, value } => write!(f, "invalid env {key}: {value}"),
+        }
+    }
+}
+
+impl std::error::Error for AppServiceConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AppServiceConfigError::Config(err) => Some(err),
+            AppServiceConfigError::Storage(err) => Some(err),
+            AppServiceConfigError::MissingEnv(_) => None,
+            AppServiceConfigError::InvalidEnv { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum StorageConfigError {
+    MissingEnv(&'static str),
+    InvalidEnv { key: &'static str, value: String },
+    InvalidConfig(String),
+}
+
+impl std::fmt::Display for StorageConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
+            StorageConfigError::InvalidEnv { key, value } => write!(f, "invalid env {key}: {value}"),
+            StorageConfigError::InvalidConfig(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for StorageConfigError {}
+
+fn storage_from_env() -> Result<StorageConfig, AppServiceConfigError> {
+    let read_connection = std::env::var(ENV_STORAGE_READ_URL)
+        .map_err(|_| AppServiceConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL)))?;
+    let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
+    let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
+    let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
+    let idle_timeout_secs = env_u64(ENV_STORAGE_IDLE_TIMEOUT_SECS)?;
+    let max_lifetime_secs = env_u64(ENV_STORAGE_MAX_LIFETIME_SECS)?;
+    let application_name = std::env::var(ENV_STORAGE_APP_NAME).ok();
+
+    let config = StorageConfig {
+        read_connection,
+        write_connection,
+        max_connections,
+        min_connections,
+        idle_timeout_secs,
+        max_lifetime_secs,
+        application_name,
+    };
+
+    config.validate().map_err(|err| {
+        AppServiceConfigError::Storage(StorageConfigError::InvalidConfig(err.to_string()))
+    })?;
+
+    Ok(config)
+}
+
+fn env_u32(key: &'static str) -> Result<Option<u32>, AppServiceConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| AppServiceConfigError::Storage(StorageConfigError::InvalidEnv { key, value }))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn env_u64(key: &'static str) -> Result<Option<u64>, AppServiceConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| AppServiceConfigError::Storage(StorageConfigError::InvalidEnv { key, value }))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn env_socket_addr(key: &'static str) -> Result<Option<SocketAddr>, AppServiceConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            value.parse::<SocketAddr>().map(Some).map_err(|_| {
+                AppServiceConfigError::InvalidEnv { key, value }
+            })
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn env_string(key: &'static str) -> Result<Option<String>, AppServiceConfigError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(value))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn env_path(key: &'static str) -> Result<Option<PathBuf>, AppServiceConfigError> {
+    env_string(key).map(|value| value.map(PathBuf::from))
+}
+
+fn normalize_base_path(base_path: &str) -> String {
+    let trimmed = base_path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+#[derive(Debug)]
+pub enum AppError {
+    Config(AppServiceConfigError),
+    ObservabilityConfig(ObservabilityConfigError),
+    Observability(ObservabilityError),
+    Storage(StorageError),
+    Serve(String),
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppError::Config(err) => write!(f, "app error: {err}"),
+            AppError::ObservabilityConfig(err) => write!(f, "app observability config error: {err}"),
+            AppError::Observability(err) => write!(f, "app observability error: {err}"),
+            AppError::Storage(err) => write!(f, "app storage error: {err}"),
+            AppError::Serve(err) => write!(f, "app serve error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for AppError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AppError::Config(err) => Some(err),
+            AppError::ObservabilityConfig(err) => Some(err),
+            AppError::Observability(err) => Some(err),
+            AppError::Storage(err) => Some(err),
+            AppError::Serve(_) => None,
+        }
+    }
+}
+
+pub fn init_observability() -> Result<ObservabilityHandle, AppError> {
+    let config = gittree_observability::ObservabilityConfig::from_env("gittree-app")
+        .map_err(AppError::ObservabilityConfig)?;
+    let handle = gittree_observability::init(&config).map_err(AppError::Observability)?;
+    Ok(handle)
+}
+
+pub fn build_repositories(config: &AppServiceConfig) -> Result<PostgresRepositories, AppError> {
+    let pool_options = config.storage.pool_options().map_err(AppError::Storage)?;
+    let connect_options = config.storage.read_connect_options().map_err(AppError::Storage)?;
+    let pool = pool_options.connect_lazy_with(connect_options);
+    Ok(PostgresRepositories::new(pool))
+}
+
+struct AppState<R> {
+    repositories: Arc<R>,
+    repo_root: PathBuf,
+    public_git_url: String,
+    base_path: String,
+    leptos_options: LeptosOptions,
+}
+
+impl<R> Clone for AppState<R> {
+    fn clone(&self) -> Self {
+        Self {
+            repositories: self.repositories.clone(),
+            repo_root: self.repo_root.clone(),
+            public_git_url: self.public_git_url.clone(),
+            base_path: self.base_path.clone(),
+            leptos_options: self.leptos_options.clone(),
+        }
+    }
+}
+
+impl<R> FromRef<AppState<R>> for LeptosOptions {
+    fn from_ref(state: &AppState<R>) -> Self {
+        state.leptos_options.clone()
+    }
+}
+
+pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
+    let _observability = init_observability()?;
+    let repositories = build_repositories(&config)?;
+    let leptos_options = build_leptos_options(&config);
+    let state = AppState {
+        repositories: Arc::new(repositories),
+        repo_root: config.ui.repo_root,
+        public_git_url: config.ui.public_git_url,
+        base_path: config.base_path,
+        leptos_options,
+    };
+
+    let router = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind(state.leptos_options.site_addr)
+        .await
+        .map_err(|err| AppError::Serve(err.to_string()))?;
+    axum::serve(listener, router)
+        .await
+        .map_err(|err| AppError::Serve(err.to_string()))?;
+    Ok(())
+}
+
+fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
+    LeptosOptions::builder()
+        .output_name("gittree-app-ui")
+        .site_root(config.site_root.to_string_lossy())
+        .site_pkg_dir(config.site_pkg_dir.clone())
+        .site_addr(config.bind)
+        .build()
+}
+
+fn build_router<R>(state: AppState<R>) -> Router
+where
+    R: RepoMappingRepository + Send + Sync + 'static,
+{
+    let routes = leptos_axum::generate_route_list(gittree_app_ui::GittreeApp);
+    let base_path = state.base_path.clone();
+    let server_fn_state = state.clone();
+    let server_fn_context = move || {
+        provide_context(server_fn_state.clone());
+    };
+    let shell = |_options: LeptosOptions| gittree_app_ui::GittreeApp();
+
+    let app = Router::new()
+        .route("/health", get(health_handler))
+        .route(
+            "/api/*fn_name",
+            post({
+                let server_fn_context = server_fn_context.clone();
+                move |req| handle_server_fns_with_context(server_fn_context.clone(), req)
+            }),
+        )
+        .leptos_routes_with_context(&state, routes, || {}, gittree_app_ui::GittreeApp)
+        .fallback(leptos_axum::file_and_error_handler::<AppState<R>, _>(shell));
+
+    let app = app.with_state(state);
+
+    if base_path == "/" {
+        app
+    } else {
+        Router::new().nest(&base_path, app)
+    }
+}
+
+async fn health_handler() -> &'static str {
+    "ok"
+}
