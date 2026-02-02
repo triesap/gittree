@@ -191,6 +191,27 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
         self.create_repo(name, description).await
     }
 
+    pub async fn ensure_repo_for_owner(
+        &self,
+        owner: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ForgejoRepo, ForgejoError> {
+        if let Some(repo) = self.get_repo_for_owner(owner, name).await? {
+            return Ok(repo);
+        }
+        self.create_repo_for_owner(
+            owner,
+            ForgejoCreateRepo {
+                name: name.to_string(),
+                description: description.map(|value| value.to_string()),
+                private: None,
+                auto_init: None,
+            },
+        )
+        .await
+    }
+
     pub async fn ensure_webhook(&self, repo: &str) -> Result<(), ForgejoError> {
         let hooks = self.list_hooks(repo).await?;
         if hooks.iter().any(|hook| {
@@ -203,6 +224,24 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             return Ok(());
         }
         self.create_hook(repo).await
+    }
+
+    pub async fn ensure_webhook_for_owner(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(), ForgejoError> {
+        let hooks = self.list_hooks_for_owner(owner, repo).await?;
+        if hooks.iter().any(|hook| {
+            hook.config
+                .url
+                .as_deref()
+                .map(|url| url == self.config.webhook_url)
+                .unwrap_or(false)
+        }) {
+            return Ok(());
+        }
+        self.create_hook_for_owner(owner, repo).await
     }
 
     pub async fn create_user(&self, user: ForgejoCreateUser) -> Result<ForgejoUser, ForgejoError> {
@@ -432,9 +471,17 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
     }
 
     async fn list_hooks(&self, repo: &str) -> Result<Vec<ForgejoHookResponse>, ForgejoError> {
+        self.list_hooks_for_owner(&self.config.owner, repo).await
+    }
+
+    async fn list_hooks_for_owner(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<ForgejoHookResponse>, ForgejoError> {
         let url = join_url(
             &self.config.base_url,
-            &format!("/api/v1/repos/{}/{}/hooks", self.config.owner, repo),
+            &format!("/api/v1/repos/{owner}/{repo}/hooks"),
         );
         let response = self
             .transport
@@ -454,9 +501,17 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
     }
 
     async fn create_hook(&self, repo: &str) -> Result<(), ForgejoError> {
+        self.create_hook_for_owner(&self.config.owner, repo).await
+    }
+
+    async fn create_hook_for_owner(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(), ForgejoError> {
         let url = join_url(
             &self.config.base_url,
-            &format!("/api/v1/repos/{}/{}/hooks", self.config.owner, repo),
+            &format!("/api/v1/repos/{owner}/{repo}/hooks"),
         );
         let payload = CreateHookPayload {
             hook_type: "gitea".to_string(),
@@ -767,6 +822,65 @@ mod tests {
         let body = requests[1].body.clone().expect("body");
         assert!(body.contains("\"push\""));
         assert!(body.contains("\"secret\":\"secret\""));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_for_owner_targets_owner() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "not found".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("alice", "delta"),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .ensure_repo_for_owner("alice", "delta", None)
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "alice/delta");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.ends_with("/api/v1/repos/alice/delta"));
+        assert!(requests[1]
+            .url
+            .ends_with("/api/v1/admin/users/alice/repos"));
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_for_owner_targets_owner() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 200,
+                body: r#"[]"#.to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        client
+            .ensure_webhook_for_owner("alice", "repo")
+            .await
+            .expect("hook");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/repos/alice/repo/hooks"));
+        assert!(requests[1]
+            .url
+            .ends_with("/api/v1/repos/alice/repo/hooks"));
     }
 
     #[tokio::test]

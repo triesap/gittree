@@ -10,13 +10,18 @@ use gittree_core::{
 use gittree_forgejo::{ForgejoClient, ForgejoError, ForgejoTransport};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
-    AnnouncementRepository, PostgresRepositories, RepoAnnouncementRecord, RepoMappingRecord,
-    RepoMappingRepository, StorageConfig, StorageError,
+    AnnouncementRepository, PostgresRepositories, RelayPublishJob, RelayPublishRepository,
+    RepoAnnouncementRecord, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
+};
+use gittree_relay_adapter::{
+    RelayAdapter, RelayAdapterConfig, SignedNostrEvent, WebsocketRelayAdapter,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
+use time::{Duration as TimeDuration, OffsetDateTime};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -28,6 +33,9 @@ const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 const ENV_COORDINATOR_REPO_ROOT: &str = "GITTREE_COORDINATOR_REPO_ROOT";
 const ENV_COORDINATOR_PRE_RECEIVE_HOOK: &str = "GITTREE_COORDINATOR_PRE_RECEIVE_HOOK";
 const ENV_COORDINATOR_POST_RECEIVE_HOOK: &str = "GITTREE_COORDINATOR_POST_RECEIVE_HOOK";
+const OUTBOX_POLL_SECS: u64 = 2;
+const OUTBOX_RETRY_BASE_SECS: i64 = 30;
+const OUTBOX_RETRY_MAX_SECS: i64 = 30 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinatorConfig {
@@ -274,6 +282,10 @@ pub async fn serve(config: CoordinatorConfig) -> Result<(), CoordinatorError> {
         hooks: config.hooks,
         forgejo,
     };
+    let publisher_state = state.clone();
+    tokio::spawn(async move {
+        publish_outbox_loop(publisher_state).await;
+    });
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
@@ -297,6 +309,66 @@ where
 
 async fn health_handler() -> &'static str {
     "ok"
+}
+
+async fn publish_outbox_loop<R, T>(state: CoordinatorAppState<R, T>)
+where
+    R: RelayPublishRepository + AnnouncementRepository + RepoMappingRepository + Send + Sync + 'static,
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    let poll_delay = StdDuration::from_secs(OUTBOX_POLL_SECS);
+    loop {
+        let now = OffsetDateTime::now_utc();
+        let job = match state.repositories.claim_relay_publish(now).await {
+            Ok(job) => job,
+            Err(err) => {
+                tracing::error!(error = %err, "outbox claim failed");
+                tokio::time::sleep(poll_delay).await;
+                continue;
+            }
+        };
+
+        let Some(job) = job else {
+            tokio::time::sleep(poll_delay).await;
+            continue;
+        };
+
+        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new(job.relay_url.clone()));
+        let event = signed_event_from_job(&job);
+        match adapter.publish_event(&event).await {
+            Ok(()) => {
+                if let Err(err) = state.repositories.mark_relay_publish_succeeded(job.id).await {
+                    tracing::error!(error = %err, "outbox mark succeeded failed");
+                    continue;
+                }
+                match state
+                    .repositories
+                    .pending_relay_publishes(&job.pubkey, &job.identifier, job.kind)
+                    .await
+                {
+                    Ok(0) => {
+                        if let Err(err) = finalize_outbox_job(&state, &job).await {
+                            tracing::error!(error = %err, "outbox finalize failed");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::error!(error = %err, "outbox pending count failed");
+                    }
+                }
+            }
+            Err(err) => {
+                let retry_at = retry_after(now, job.attempt_count);
+                if let Err(storage_err) = state
+                    .repositories
+                    .mark_relay_publish_failed(job.id, &err.to_string(), retry_at)
+                    .await
+                {
+                    tracing::error!(error = %storage_err, "outbox mark failed failed");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -662,6 +734,93 @@ pub struct RelayEvent {
     pub tags: Vec<Vec<String>>,
 }
 
+fn signed_event_from_job(job: &RelayPublishJob) -> SignedNostrEvent {
+    SignedNostrEvent {
+        id: hex::encode(&job.event_id),
+        pubkey: hex::encode(&job.pubkey),
+        created_at: job.created_at,
+        kind: job.kind,
+        tags: job.tags.clone(),
+        content: job.content.clone(),
+        sig: hex::encode(&job.sig),
+    }
+}
+
+fn relay_event_from_job(job: &RelayPublishJob) -> RelayEvent {
+    RelayEvent {
+        kind: job.kind,
+        event_id: hex::encode(&job.event_id),
+        pubkey: hex::encode(&job.pubkey),
+        created_at: job.created_at,
+        tags: job.tags.clone(),
+    }
+}
+
+fn retry_after(now: OffsetDateTime, attempt_count: i32) -> OffsetDateTime {
+    let attempt = i64::from(attempt_count.max(1));
+    let delay = OUTBOX_RETRY_BASE_SECS
+        .saturating_mul(attempt)
+        .min(OUTBOX_RETRY_MAX_SECS);
+    now + TimeDuration::seconds(delay)
+}
+
+async fn finalize_outbox_job<R, T>(
+    state: &CoordinatorAppState<R, T>,
+    job: &RelayPublishJob,
+) -> Result<(), CoordinatorEventError>
+where
+    R: AnnouncementRepository + RepoMappingRepository,
+    T: ForgejoTransport,
+{
+    let event = relay_event_from_job(job);
+    let parsed = Nip34Event::parse_validated(event.kind, &event.tags)
+        .map_err(|err| CoordinatorEventError::Parse(err.to_string()))?;
+    let Nip34Event::RepoAnnouncement(announcement) = parsed else {
+        return Ok(());
+    };
+    let record = RepoAnnouncementRecord::new(
+        &event.event_id,
+        &event.pubkey,
+        event.created_at,
+        &announcement,
+    )
+    .map_err(CoordinatorEventError::Storage)?;
+    state
+        .repositories
+        .insert_announcement(record)
+        .await
+        .map_err(CoordinatorEventError::Storage)?;
+    let repo = state
+        .forgejo
+        .ensure_repo_for_owner(
+            &job.forgejo_owner,
+            &job.forgejo_repo,
+            announcement.description.as_deref(),
+        )
+        .await
+        .map_err(CoordinatorEventError::Forgejo)?;
+    state
+        .forgejo
+        .ensure_webhook_for_owner(&job.forgejo_owner, &repo.name)
+        .await
+        .map_err(CoordinatorEventError::Forgejo)?;
+    let mapping = RepoMapping::new(
+        repo.owner,
+        repo.name,
+        event.pubkey.clone(),
+        announcement.identifier.clone(),
+    )
+    .map_err(CoordinatorEventError::Mapping)?;
+    let record = RepoMappingRecord::new(&mapping).map_err(CoordinatorEventError::Storage)?;
+    state
+        .repositories
+        .upsert_mapping(record)
+        .await
+        .map_err(CoordinatorEventError::Storage)?;
+    let _ = handle_announcement_event(&state.repo_root, &state.hooks, &event)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorAction {
     Provisioned { repo_path: PathBuf },
@@ -822,11 +981,14 @@ mod tests {
     use gittree_config::ForgejoConfig;
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
-    use gittree_storage::{AnnouncementRepository, InMemoryRepositories, RepoMappingRepository};
+    use gittree_storage::{
+        AnnouncementRepository, InMemoryRepositories, RelayPublishJob, RepoMappingRepository,
+    };
     use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, OnceLock};
+    use time::{Duration as TimeDuration, OffsetDateTime};
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1356,6 +1518,60 @@ mod tests {
     fn observability_init_returns_registry() {
         let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
         assert!(handle.prometheus_registry().is_some());
+    }
+
+    #[test]
+    fn signed_event_from_job_encodes_fields() {
+        let job = sample_job();
+        let signed = super::signed_event_from_job(&job);
+        assert_eq!(signed.id, "11".repeat(32));
+        assert_eq!(signed.pubkey, "22".repeat(32));
+        assert_eq!(signed.sig, "33".repeat(64));
+        assert_eq!(signed.kind, job.kind);
+        assert_eq!(signed.tags, job.tags);
+    }
+
+    #[test]
+    fn relay_event_from_job_encodes_fields() {
+        let job = sample_job();
+        let event = super::relay_event_from_job(&job);
+        assert_eq!(event.event_id, "11".repeat(32));
+        assert_eq!(event.pubkey, "22".repeat(32));
+        assert_eq!(event.kind, job.kind);
+    }
+
+    #[test]
+    fn retry_after_scales_and_caps() {
+        let now = OffsetDateTime::from_unix_timestamp(0).expect("ts");
+        let first = super::retry_after(now, 1);
+        assert_eq!(
+            first - now,
+            TimeDuration::seconds(super::OUTBOX_RETRY_BASE_SECS)
+        );
+        let capped = super::retry_after(now, 999);
+        assert_eq!(
+            capped - now,
+            TimeDuration::seconds(super::OUTBOX_RETRY_MAX_SECS)
+        );
+    }
+
+    fn sample_job() -> RelayPublishJob {
+        RelayPublishJob {
+            id: 1,
+            relay_url: "wss://relay.example".to_string(),
+            event_id: vec![0x11; 32],
+            pubkey: vec![0x22; 32],
+            created_at: 42,
+            kind: 30617,
+            tags: vec![vec!["d".to_string(), "repo".to_string()]],
+            content: "content".to_string(),
+            sig: vec![0x33; 64],
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            identifier: "repo".to_string(),
+            attempt_count: 1,
+            publish_after: OffsetDateTime::from_unix_timestamp(0).expect("ts"),
+        }
     }
 
     fn temp_dir(prefix: &str) -> std::path::PathBuf {
