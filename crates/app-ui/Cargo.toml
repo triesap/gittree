@@ -1,0 +1,30 @@
+[package]
+name = "gittree-app-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["hydrate"]
+hydrate = ["leptos/hydrate"]
+ssr = ["leptos/ssr", "leptos_router/ssr"]
+
+[dependencies]
+leptos.workspace = true
+leptos_router.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+hex.workspace = true
+
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+
+mf2-i18n-core.workspace = true
+mf2-i18n-embedded.workspace = true
+
+gittree-app-core = { path = "../app-core" }

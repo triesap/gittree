@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "project": "gittree-app",
+  "generated_at": "2026-02-02T00:00:00Z",
+  "default_locale": "en",
+  "messages": [
+    {
+      "key": "app.repo.loading",
+      "id": 3921006907,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.tagline",
+      "id": 1135734915,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.title",
+      "id": 4076351995,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    }
+  ]
+}

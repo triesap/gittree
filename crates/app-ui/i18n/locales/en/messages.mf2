@@ -1,0 +1,3 @@
+app.title = gittree
+app.tagline = nostr repositories synced through gittree.
+app.repo.loading = loading repositories...

@@ -1,5 +1,7 @@
 [workspace]
 members = [
+  "crates/app-core",
+  "crates/app-ui",
   "crates/forgejo",
   "crates/config",
   "crates/observability",
@@ -24,12 +26,13 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.92.0"
 license = "Unlicense"
 homepage = "https://github.com/triesap/gittree"
 repository = "https://github.com/triesap/gittree.git"
 version = "0.1.0"
 readme = "README.md"
+authors = ["triesap npub1tr33s4tj2le2kk9yzhfphdtss26gyn8kv7savnnjhj794nqp333q8e7grr"]
 
 [workspace.metadata]
 authors = ["triesap npub1tr33s4tj2le2kk9yzhfphdtss26gyn8kv7savnnjhj794nqp333q8e7grr"]
@@ -62,3 +65,5 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 uuid = { version = "1.8", features = ["v4", "v7", "js"] }
 sha2 = "0.10"
 hex = "0.4"
+mf2-i18n-core = { path = "refs/mf2-i18n/crates/mf2-i18n-core" }
+mf2-i18n-embedded = { path = "refs/mf2-i18n/crates/mf2-i18n-embedded" }
