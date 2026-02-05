@@ -269,6 +269,35 @@ services:
       - ./logs:/var/log/gittree
       - gittree-repos:/var/lib/gittree/repos
 
+  app:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.app
+    env_file:
+      - .env
+    environment:
+      GITTREE_APP_BIND: 0.0.0.0:8090
+      GITTREE_APP_BASE_PATH: /
+      GITTREE_APP_SITE_ROOT: /app/crates/app-ui/dist
+      GITTREE_APP_SITE_PKG_DIR: pkg
+      GITTREE_UI_REPO_ROOT: /var/lib/gittree/repos
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
+    ports:
+      - "8090:8090"
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/var/log/gittree
+      - gittree-repos:/var/lib/gittree/repos
+
   git-http:
     build:
       context: .
@@ -322,7 +351,7 @@ services:
       - "3000"
       - "22"
     volumes:
-      - forgejo-data:/data
+      - ./.local/forgejo:/data
       - ./logs/forgejo:/data/gitea/log
     depends_on:
       log-init:
@@ -357,7 +386,7 @@ services:
           --must-change-password=false \
           --config /data/gitea/conf/app.ini
     volumes:
-      - forgejo-data:/data
+      - ./.local/forgejo:/data
     restart: "no"
     networks:
       - internal
@@ -388,7 +417,6 @@ services:
 
 volumes:
   pgdata: {}
-  forgejo-data: {}
   gittree-repos: {}
 
 networks:

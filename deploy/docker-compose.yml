@@ -24,7 +24,7 @@ services:
       - "3000:3000"
       - "2222:22"
     volumes:
-      - forgejo-data:/data
+      - ../.local/forgejo:/data
 
   relay:
     build:
@@ -131,6 +131,24 @@ services:
     depends_on:
       - postgres
 
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.app
+    environment:
+      GITTREE_APP_BIND: 0.0.0.0:8090
+      GITTREE_APP_BASE_PATH: /
+      GITTREE_APP_SITE_ROOT: /app/crates/app-ui/dist
+      GITTREE_APP_SITE_PKG_DIR: pkg
+      GITTREE_UI_REPO_ROOT: /var/lib/gittree/repos
+      GITTREE_UI_PUBLIC_GIT_URL: http://localhost:8085
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+    ports:
+      - "8090:8090"
+    depends_on:
+      - postgres
+
   nginx:
     image: nginx:1.27
     volumes:
@@ -143,4 +161,3 @@ services:
 
 volumes:
   pgdata: {}
-  forgejo-data: {}
