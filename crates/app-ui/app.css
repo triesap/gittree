@@ -1,87 +1,104 @@
-:root {
-  --bg1: #f4efe4;
-  --bg2: #e8f0f4;
-  --ink: #1c1c1c;
-  --muted: #4b5a66;
-  --accent: #c36b1b;
+@import "tailwindcss";
+
+@source "./index.html";
+@source "./src/**/*.rs";
+
+@theme {
+  --font-mono: "IBM Plex Mono", "Fira Mono", "Menlo", monospace;
+
+  --color-gittree-bg-1: #f4efe4;
+  --color-gittree-bg-2: #e8f0f4;
+  --color-gittree-ink: #1c1c1c;
+  --color-gittree-muted: #4b5a66;
+  --color-gittree-accent: #c36b1b;
+
+  --shadow-gittree-panel: 0 18px 30px rgba(0, 0, 0, 0.08);
 }
 
-* {
-  box-sizing: border-box;
+@layer base {
+  :root {
+    --gittree-bg-gradient: linear-gradient(120deg, var(--color-gittree-bg-1), var(--color-gittree-bg-2));
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-family: var(--font-mono);
+    background: var(--gittree-bg-gradient);
+    color: var(--color-gittree-ink);
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100%;
+    background: var(--gittree-bg-gradient);
+  }
+
+  #app-root {
+    min-height: 100vh;
+  }
 }
 
-html {
-  font-family: "IBM Plex Mono", "Fira Mono", "Menlo", monospace;
-  background: linear-gradient(120deg, var(--bg1), var(--bg2));
-  color: var(--ink);
-  height: 100%;
-}
+@layer components {
+  .gt-app {
+    max-width: 960px;
+    margin: 48px auto;
+    padding: 32px;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: var(--shadow-gittree-panel);
+  }
 
-body {
-  margin: 0;
-  min-height: 100%;
-  background: linear-gradient(120deg, var(--bg1), var(--bg2));
-}
+  .gt-panel {
+    margin: 0;
+  }
 
-#app-root {
-  min-height: 100vh;
-}
+  .gt-title {
+    margin: 0 0 12px;
+    font-size: 28px;
+    letter-spacing: 0.02em;
+  }
 
-.gt-app {
-  max-width: 960px;
-  margin: 48px auto;
-  padding: 32px;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  box-shadow: 0 18px 30px rgba(0, 0, 0, 0.08);
-}
+  .gt-tagline {
+    margin: 0 0 24px;
+    color: var(--color-gittree-muted);
+  }
 
-.gt-panel {
-  margin: 0;
-}
+  .gt-meta {
+    font-size: 13px;
+    color: var(--color-gittree-muted);
+  }
 
-.gt-title {
-  margin: 0 0 12px;
-  font-size: 28px;
-  letter-spacing: 0.02em;
-}
+  .gt-clone {
+    font-size: 13px;
+    color: var(--color-gittree-muted);
+    word-break: break-all;
+  }
 
-.gt-tagline {
-  margin: 0 0 24px;
-  color: var(--muted);
-}
+  .gt-link {
+    color: var(--color-gittree-accent);
+    text-decoration: none;
+  }
 
-.gt-meta {
-  font-size: 13px;
-  color: var(--muted);
-}
+  .gt-link:hover {
+    text-decoration: underline;
+  }
 
-.gt-clone {
-  font-size: 13px;
-  color: var(--muted);
-  word-break: break-all;
-}
+  .gt-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
 
-.gt-link {
-  color: var(--accent);
-  text-decoration: none;
-}
+  .gt-list-item {
+    padding: 14px 0;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  }
 
-.gt-link:hover {
-  text-decoration: underline;
-}
-
-.gt-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.gt-list-item {
-  padding: 14px 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
-}
-
-.gt-list-item:last-child {
-  border-bottom: none;
+  .gt-list-item:last-child {
+    border-bottom: none;
+  }
 }
