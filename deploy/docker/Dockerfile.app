@@ -1,7 +1,7 @@
 FROM rust:1.92-bookworm AS builder
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends binaryen ca-certificates \
+    && apt-get install -y --no-install-recommends binaryen ca-certificates nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install trunk --locked
@@ -12,6 +12,7 @@ COPY migrations ./migrations
 COPY refs/mf2-i18n ./refs/mf2-i18n
 RUN cargo build -p gittree-app --release
 WORKDIR /app/crates/app-ui
+RUN npm ci
 RUN trunk build --release --dist dist
 
 FROM debian:bookworm-slim

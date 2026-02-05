@@ -1,0 +1,4 @@
+[[hooks]]
+stage = "pre_build"
+command = "npm"
+command_arguments = ["run", "tw:build"]
