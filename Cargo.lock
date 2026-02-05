@@ -1126,6 +1126,15 @@ dependencies = [
  "tokio",
  "tracing-wasm",
  "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "gittree-app-ui-primitives"
+version = "0.1.0"
+dependencies = [
+ "ui-primitives-core",
+ "ui-primitives-leptos",
 ]
 
 [[package]]
@@ -4788,6 +4797,21 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+
+[[package]]
+name = "ui-primitives-core"
+version = "0.1.0"
+
+[[package]]
+name = "ui-primitives-leptos"
+version = "0.1.0"
+dependencies = [
+ "leptos",
+ "send_wrapper",
+ "ui-primitives-core",
+ "wasm-bindgen",
+ "web-sys",
+]
 
 [[package]]
 name = "unicase"
