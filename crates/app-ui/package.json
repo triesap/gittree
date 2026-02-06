@@ -2,8 +2,8 @@
   "name": "gittree-app-ui",
   "private": true,
   "scripts": {
-    "tw:build": "tailwindcss -i app.css -o stylesheets/app.generated.css",
-    "tw:watch": "tailwindcss -i app.css -o stylesheets/app.generated.css --watch"
+    "tw:build": "tailwindcss -i app.css -o stylesheets/app.css",
+    "tw:watch": "tailwindcss -i app.css -o stylesheets/app.css --watch"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.18",

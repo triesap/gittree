@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3340",
-    "beforeDevCommand": "cd ../../.. && just dev-app-ui-serve",
-    "beforeBuildCommand": "cd ../../.. && just dev-app-ui-build"
+    "beforeDevCommand": "bash -lc 'root=\"$(git rev-parse --show-toplevel)\"; cd \"$root/crates/app-ui\" && npm install && npm run tw:watch & trunk serve --dist dist --port 3340'",
+    "beforeBuildCommand": "bash -lc 'root=\"$(git rev-parse --show-toplevel)\"; cd \"$root/crates/app-ui\" && npm install && npm run tw:build && trunk build --dist dist'"
   },
   "app": {
     "security": {

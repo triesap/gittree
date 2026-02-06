@@ -8,6 +8,6 @@ if ! command -v cargo-tauri >/dev/null 2>&1; then
   exit 1
 fi
 
-cd "$root_dir"
+cd "$root_dir/crates/app-ui/src-tauri"
 
-cargo tauri dev --manifest-path crates/app-ui/src-tauri/Cargo.toml
+cargo tauri dev
