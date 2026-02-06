@@ -12,6 +12,7 @@ const DEFAULT_GIT_HTTP_BIND: &str = "127.0.0.1:8085";
 const DEFAULT_UI_BIND: &str = "127.0.0.1:8086";
 const DEFAULT_WEBHOOK_BIND: &str = "127.0.0.1:8087";
 const DEFAULT_CONTROL_BIND: &str = "127.0.0.1:8088";
+const DEFAULT_AUTH_BIND: &str = "127.0.0.1:8089";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
 const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
@@ -39,6 +40,7 @@ const ENV_GIT_HTTP_BIND: &str = "GITTREE_GIT_HTTP_BIND";
 const ENV_UI_BIND: &str = "GITTREE_UI_BIND";
 const ENV_WEBHOOK_BIND: &str = "GITTREE_WEBHOOK_BIND";
 const ENV_CONTROL_BIND: &str = "GITTREE_CONTROL_BIND";
+const ENV_AUTH_BIND: &str = "GITTREE_AUTH_BIND";
 const ENV_FORGEJO_BASE_URL: &str = "GITTREE_FORGEJO_BASE_URL";
 const ENV_FORGEJO_API_TOKEN: &str = "GITTREE_FORGEJO_API_TOKEN";
 const ENV_FORGEJO_OWNER: &str = "GITTREE_FORGEJO_OWNER";
@@ -49,6 +51,8 @@ const ENV_UI_REPO_ROOT: &str = "GITTREE_UI_REPO_ROOT";
 const ENV_UI_PUBLIC_GIT_URL: &str = "GITTREE_UI_PUBLIC_GIT_URL";
 const ENV_CONTROL_TOKEN: &str = "GITTREE_CONTROL_TOKEN";
 const ENV_CONTROL_ADMIN_KEYS: &str = "GITTREE_CONTROL_ADMIN_KEYS";
+const ENV_AUTH_EMAIL_DOMAIN: &str = "GITTREE_AUTH_EMAIL_DOMAIN";
+const ENV_AUTH_MAX_SKEW_SECONDS: &str = "GITTREE_AUTH_MAX_SKEW_SECONDS";
 
 const DEFAULT_RELAY_COMPAT_MODE: RelayCompatibilityMode = RelayCompatibilityMode::Strict;
 const DEFAULT_RELAY_PROBE_TIMEOUT_SECS: u64 = 5;
@@ -57,6 +61,8 @@ const DEFAULT_RELAY_POLICY_MAX_TAGS: u64 = 128;
 const DEFAULT_RELAY_POLICY_MAX_TAG_VALUES: u64 = 16;
 const DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN: u64 = 512;
 const DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS: u64 = 60;
+const DEFAULT_AUTH_EMAIL_DOMAIN: &str = "local.test";
+const DEFAULT_AUTH_MAX_SKEW_SECS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -80,6 +86,7 @@ pub struct ServicesConfig {
     pub ui: ServiceConfig,
     pub webhook: ServiceConfig,
     pub control: ServiceConfig,
+    pub auth: ServiceConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +279,48 @@ impl ControlAuthConfig {
             return Err(ConfigError::InvalidConfig {
                 field: "control.admin_keys",
                 value: "empty key".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthConfig {
+    pub email_domain: String,
+    pub max_skew_seconds: u64,
+}
+
+impl AuthConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let email_domain = env_optional_string(ENV_AUTH_EMAIL_DOMAIN)
+            .unwrap_or_else(|| DEFAULT_AUTH_EMAIL_DOMAIN.to_string());
+        let max_skew_seconds = match env_optional_string(ENV_AUTH_MAX_SKEW_SECONDS) {
+            Some(value) => value.parse::<u64>().map_err(|_| ConfigError::InvalidConfig {
+                field: "auth.max_skew_seconds",
+                value,
+            })?,
+            None => DEFAULT_AUTH_MAX_SKEW_SECS,
+        };
+        let config = Self {
+            email_domain,
+            max_skew_seconds,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.email_domain.trim().is_empty() {
+            return Err(ConfigError::InvalidConfig {
+                field: "auth.email_domain",
+                value: self.email_domain.clone(),
+            });
+        }
+        if self.max_skew_seconds == 0 {
+            return Err(ConfigError::InvalidConfig {
+                field: "auth.max_skew_seconds",
+                value: self.max_skew_seconds.to_string(),
             });
         }
         Ok(())
@@ -544,6 +593,7 @@ impl Default for ServicesConfig {
             ui: ServiceConfig::new(DEFAULT_UI_BIND),
             webhook: ServiceConfig::new(DEFAULT_WEBHOOK_BIND),
             control: ServiceConfig::new(DEFAULT_CONTROL_BIND),
+            auth: ServiceConfig::new(DEFAULT_AUTH_BIND),
         }
     }
 }
@@ -566,6 +616,7 @@ impl ServicesConfig {
             ui: ServiceConfig::new(env_or_default(ENV_UI_BIND, DEFAULT_UI_BIND)),
             webhook: ServiceConfig::new(env_or_default(ENV_WEBHOOK_BIND, DEFAULT_WEBHOOK_BIND)),
             control: ServiceConfig::new(env_or_default(ENV_CONTROL_BIND, DEFAULT_CONTROL_BIND)),
+            auth: ServiceConfig::new(env_or_default(ENV_AUTH_BIND, DEFAULT_AUTH_BIND)),
         }
     }
 
@@ -594,6 +645,7 @@ impl ServicesConfig {
         validate_service_bind("ui", &self.ui.bind)?;
         validate_service_bind("webhook", &self.webhook.bind)?;
         validate_service_bind("control", &self.control.bind)?;
+        validate_service_bind("auth", &self.auth.bind)?;
         Ok(())
     }
 
@@ -825,6 +877,7 @@ impl TomlServicesRoot {
             ui: ServiceConfig::new(bind_or_default(services.ui, DEFAULT_UI_BIND)),
             webhook: ServiceConfig::new(bind_or_default(services.webhook, DEFAULT_WEBHOOK_BIND)),
             control: ServiceConfig::new(bind_or_default(services.control, DEFAULT_CONTROL_BIND)),
+            auth: ServiceConfig::new(bind_or_default(services.auth, DEFAULT_AUTH_BIND)),
         }
     }
 }
@@ -1046,6 +1099,7 @@ struct TomlServicesConfig {
     ui: Option<TomlServiceConfig>,
     webhook: Option<TomlServiceConfig>,
     control: Option<TomlServiceConfig>,
+    auth: Option<TomlServiceConfig>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1234,17 +1288,21 @@ impl GittreeConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::AuthConfig;
     use super::ConfigError;
     use super::ControlAuthConfig;
-    use super::GittreeConfig;
     use super::ForgejoConfig;
+    use super::GittreeConfig;
     use super::RelayCompatibilityConfig;
     use super::RelayCompatibilityMode;
-    use super::RelayProbeConfig;
     use super::RelayPolicyConfig;
+    use super::RelayProbeConfig;
     use super::RelayTargetsConfig;
     use super::ServicesConfig;
     use super::UiConfig;
+    use crate::DEFAULT_AUTH_BIND;
+    use crate::DEFAULT_AUTH_EMAIL_DOMAIN;
+    use crate::DEFAULT_AUTH_MAX_SKEW_SECS;
     use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_CONTROL_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
@@ -1259,6 +1317,9 @@ mod tests {
     use crate::DEFAULT_SYNC_BIND;
     use crate::DEFAULT_UI_BIND;
     use crate::DEFAULT_WEBHOOK_BIND;
+    use crate::ENV_AUTH_BIND;
+    use crate::ENV_AUTH_EMAIL_DOMAIN;
+    use crate::ENV_AUTH_MAX_SKEW_SECONDS;
     use crate::ENV_ADMISSION_BIND;
     use crate::ENV_CONTROL_ADMIN_KEYS;
     use crate::ENV_CONTROL_BIND;
@@ -1768,6 +1829,7 @@ max_content_len = 0
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
         assert_eq!(services.webhook.bind, DEFAULT_WEBHOOK_BIND);
         assert_eq!(services.control.bind, DEFAULT_CONTROL_BIND);
+        assert_eq!(services.auth.bind, DEFAULT_AUTH_BIND);
     }
 
     #[test]
@@ -1783,6 +1845,7 @@ max_content_len = 0
             std::env::remove_var(ENV_UI_BIND);
             std::env::remove_var(ENV_WEBHOOK_BIND);
             std::env::remove_var(ENV_CONTROL_BIND);
+            std::env::remove_var(ENV_AUTH_BIND);
         }
 
         let services = ServicesConfig::from_env();
@@ -1795,6 +1858,7 @@ max_content_len = 0
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
         assert_eq!(services.webhook.bind, DEFAULT_WEBHOOK_BIND);
         assert_eq!(services.control.bind, DEFAULT_CONTROL_BIND);
+        assert_eq!(services.auth.bind, DEFAULT_AUTH_BIND);
     }
 
     #[test]
@@ -1817,11 +1881,15 @@ bind = "127.0.0.1:9011"
 
 [services.control]
 bind = "127.0.0.1:9019"
+
+[services.auth]
+bind = "127.0.0.1:9020"
 "#;
         let services = ServicesConfig::from_toml_str(toml).expect("parse services");
         assert_eq!(services.relay.bind, "127.0.0.1:9010");
         assert_eq!(services.admission.bind, "127.0.0.1:9011");
         assert_eq!(services.control.bind, "127.0.0.1:9019");
+        assert_eq!(services.auth.bind, "127.0.0.1:9020");
         assert_eq!(services.state.bind, DEFAULT_STATE_BIND);
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
         assert_eq!(services.ui.bind, DEFAULT_UI_BIND);
@@ -1969,6 +2037,30 @@ public_git_url = "http://localhost:8085"
                 let config = ControlAuthConfig::from_env().expect("control");
                 assert_eq!(config.token, "token");
                 assert_eq!(config.admin_keys, vec!["npub1".to_string(), "npub2".to_string()]);
+            });
+        });
+    }
+
+    #[test]
+    fn auth_config_defaults_apply() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::remove_var(ENV_AUTH_EMAIL_DOMAIN);
+            std::env::remove_var(ENV_AUTH_MAX_SKEW_SECONDS);
+        }
+        let config = AuthConfig::from_env().expect("auth");
+        assert_eq!(config.email_domain, DEFAULT_AUTH_EMAIL_DOMAIN);
+        assert_eq!(config.max_skew_seconds, DEFAULT_AUTH_MAX_SKEW_SECS);
+    }
+
+    #[test]
+    fn auth_config_env_overrides_apply() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_AUTH_EMAIL_DOMAIN, "example.test", || {
+            with_env_var(ENV_AUTH_MAX_SKEW_SECONDS, "120", || {
+                let config = AuthConfig::from_env().expect("auth");
+                assert_eq!(config.email_domain, "example.test");
+                assert_eq!(config.max_skew_seconds, 120);
             });
         });
     }
