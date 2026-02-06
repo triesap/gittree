@@ -4,6 +4,7 @@ use sqlx::postgres::PgConnectOptions;
 use std::time::Duration;
 
 pub mod cache;
+pub mod account;
 pub mod event;
 pub mod migrations;
 pub mod outbox;
@@ -15,6 +16,7 @@ pub mod repositories;
 pub mod relay_compat;
 
 pub use cache::{CacheConfig, CachedRepositories};
+pub use account::AccountRecord;
 pub use event::{EventQuery, EventRecord, TagRecord};
 pub use migrations::{Migration, MigrationRunner};
 pub use outbox::{RelayPublishEntry, RelayPublishJob, RelayPublishRequest, RelayPublishStatus};
@@ -24,7 +26,7 @@ pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
 pub use repo_mapping::RepoMappingRecord;
 pub use relay_compat::{RelayCompatibilityRecord, RelayProbeMetadata};
 pub use repositories::{
-    AnnouncementRepository, EventRepository, InMemoryRepositories,
+    AccountRepository, AnnouncementRepository, EventRepository, InMemoryRepositories,
     RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository, StateRepository,
 };
 

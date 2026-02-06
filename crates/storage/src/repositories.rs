@@ -1,6 +1,7 @@
 use crate::{
-    EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob, RelayPublishRequest,
-    RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError,
+    AccountRecord, EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob,
+    RelayPublishRequest, RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord,
+    RepoStateRecord, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -48,6 +49,16 @@ pub trait RepoMappingRepository: Send + Sync {
         identifier: &str,
     ) -> Result<Option<RepoMappingRecord>, StorageError>;
     async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError>;
+}
+
+#[async_trait]
+pub trait AccountRepository: Send + Sync {
+    async fn upsert_account(&self, record: AccountRecord) -> Result<(), StorageError>;
+    async fn account_by_pubkey(&self, pubkey: &[u8]) -> Result<Option<AccountRecord>, StorageError>;
+    async fn account_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<AccountRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -105,6 +116,8 @@ pub struct InMemoryRepositories {
     states: RwLock<HashMap<String, Vec<RepoStateRecord>>>,
     mappings_by_forgejo: RwLock<HashMap<String, RepoMappingRecord>>,
     mappings_by_repo: RwLock<HashMap<String, RepoMappingRecord>>,
+    accounts_by_pubkey: RwLock<HashMap<String, AccountRecord>>,
+    accounts_by_username: RwLock<HashMap<String, AccountRecord>>,
     relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
     events: RwLock<HashMap<String, EventRecord>>,
     outbox: RwLock<HashMap<i64, OutboxEntry>>,
@@ -126,6 +139,10 @@ impl InMemoryRepositories {
 
     fn event_key(event_id: &[u8]) -> String {
         hex::encode(event_id)
+    }
+
+    fn account_key(pubkey: &[u8]) -> String {
+        hex::encode(pubkey)
     }
 
     fn next_outbox_id(&self) -> i64 {
@@ -264,6 +281,70 @@ impl RepoMappingRepository for InMemoryRepositories {
         let mut records: Vec<RepoMappingRecord> = map.values().cloned().collect();
         records.sort_by(|a, b| a.forgejo_full_name().cmp(&b.forgejo_full_name()));
         Ok(records)
+    }
+}
+
+#[async_trait]
+impl AccountRepository for InMemoryRepositories {
+    async fn upsert_account(&self, record: AccountRecord) -> Result<(), StorageError> {
+        let key = Self::account_key(&record.pubkey);
+        let mut by_pubkey =
+            self.accounts_by_pubkey
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "account pubkey store poisoned".to_string(),
+                })?;
+        let mut by_username =
+            self.accounts_by_username
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "account username store poisoned".to_string(),
+                })?;
+
+        if let Some(existing) = by_username.get(&record.forgejo_username) {
+            if existing.pubkey != record.pubkey {
+                return Err(StorageError::Internal {
+                    message: "account username already exists".to_string(),
+                });
+            }
+        }
+
+        if let Some(existing) = by_pubkey.get(&key) {
+            if existing.forgejo_username != record.forgejo_username {
+                by_username.remove(&existing.forgejo_username);
+            }
+        }
+
+        by_pubkey.insert(key, record.clone());
+        by_username.insert(record.forgejo_username.clone(), record);
+        Ok(())
+    }
+
+    async fn account_by_pubkey(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<AccountRecord>, StorageError> {
+        let key = Self::account_key(pubkey);
+        let map =
+            self.accounts_by_pubkey
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "account pubkey store poisoned".to_string(),
+                })?;
+        Ok(map.get(&key).cloned())
+    }
+
+    async fn account_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<AccountRecord>, StorageError> {
+        let map =
+            self.accounts_by_username
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "account username store poisoned".to_string(),
+                })?;
+        Ok(map.get(username).cloned())
     }
 }
 
@@ -533,12 +614,13 @@ impl RelayPublishRepository for InMemoryRepositories {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnnouncementRepository, EventQuery, EventRecord, EventRepository, InMemoryRepositories,
-        RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository, StateRepository,
+        AccountRepository, AnnouncementRepository, EventQuery, EventRecord, EventRepository,
+        InMemoryRepositories, RelayCompatibilityRepository, RelayPublishRepository,
+        RepoMappingRepository, StateRepository,
     };
     use crate::{
-        RelayCompatibilityRecord, RelayProbeMetadata, RelayPublishRequest, RepoAnnouncementRecord,
-        RepoMappingRecord, RepoStateRecord, TagRecord,
+        AccountRecord, RelayCompatibilityRecord, RelayProbeMetadata, RelayPublishRequest,
+        RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
     };
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
@@ -581,6 +663,10 @@ mod tests {
         let mapping =
             RepoMapping::new("owner", "repo", hex_32(0x11), identifier).expect("mapping");
         RepoMappingRecord::new(&mapping).expect("record")
+    }
+
+    fn sample_account(username: &str, pubkey_byte: u8) -> AccountRecord {
+        AccountRecord::new(&hex_32(pubkey_byte), username).expect("account")
     }
 
     fn sample_compat_report() -> RelayCompatibilityReport {
@@ -707,6 +793,30 @@ mod tests {
 
         let records = store.list_mappings().await.expect("list");
         assert_eq!(records, vec![record_a, record_b]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_returns_account_by_pubkey() {
+        let store = InMemoryRepositories::new();
+        let record = sample_account("alice", 0x11);
+        store.upsert_account(record.clone()).await.expect("upsert");
+        let found = store
+            .account_by_pubkey(&record.pubkey)
+            .await
+            .expect("lookup");
+        assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_returns_account_by_username() {
+        let store = InMemoryRepositories::new();
+        let record = sample_account("alice", 0x11);
+        store.upsert_account(record.clone()).await.expect("upsert");
+        let found = store
+            .account_by_username("alice")
+            .await
+            .expect("lookup");
+        assert_eq!(found, Some(record));
     }
 
     #[tokio::test]

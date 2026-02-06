@@ -1,11 +1,11 @@
 use crate::repositories::{
-    AnnouncementRepository, EventRepository, RelayCompatibilityRepository, RelayPublishRepository,
-    RepoMappingRepository, StateRepository,
+    AccountRepository, AnnouncementRepository, EventRepository, RelayCompatibilityRepository,
+    RelayPublishRepository, RepoMappingRepository, StateRepository,
 };
 use crate::{
-    EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob, RelayPublishRequest,
-    RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
-    StorageError,
+    AccountRecord, EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob,
+    RelayPublishRequest, RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord,
+    RepoStateRecord, TagRecord, StorageError,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
@@ -394,6 +394,67 @@ ORDER BY forgejo_owner, forgejo_repo
             })
             .collect();
         Ok(records)
+    }
+}
+
+#[async_trait]
+impl AccountRepository for PostgresRepositories {
+    async fn upsert_account(&self, record: AccountRecord) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+INSERT INTO gittree_account (pubkey, forgejo_username)
+VALUES ($1, $2)
+ON CONFLICT (pubkey)
+DO UPDATE SET forgejo_username = EXCLUDED.forgejo_username
+"#,
+        )
+        .bind(record.pubkey)
+        .bind(record.forgejo_username)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn account_by_pubkey(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<AccountRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT pubkey, forgejo_username
+FROM gittree_account
+WHERE pubkey = $1
+LIMIT 1
+"#,
+        )
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| AccountRecord {
+            pubkey: row.get("pubkey"),
+            forgejo_username: row.get("forgejo_username"),
+        }))
+    }
+
+    async fn account_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<AccountRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT pubkey, forgejo_username
+FROM gittree_account
+WHERE forgejo_username = $1
+LIMIT 1
+"#,
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| AccountRecord {
+            pubkey: row.get("pubkey"),
+            forgejo_username: row.get("forgejo_username"),
+        }))
     }
 }
 
@@ -874,7 +935,8 @@ WHERE pubkey = $1
 mod tests {
     use super::PostgresRepositories;
     use crate::repositories::{
-        EventRepository, RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository,
+        AccountRepository, EventRepository, RelayCompatibilityRepository, RelayPublishRepository,
+        RepoMappingRepository,
     };
     use crate::StorageError;
 
@@ -893,6 +955,12 @@ mod tests {
     #[test]
     fn postgres_repos_implements_repo_mapping_repo() {
         fn assert_impl<T: RepoMappingRepository>() {}
+        assert_impl::<PostgresRepositories>();
+    }
+
+    #[test]
+    fn postgres_repos_implements_account_repo() {
+        fn assert_impl<T: AccountRepository>() {}
         assert_impl::<PostgresRepositories>();
     }
 
