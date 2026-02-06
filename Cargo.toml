@@ -3,7 +3,6 @@ members = [
   "crates/app-core",
   "crates/app-ui",
   "crates/app-ui/src-tauri",
-  "crates/app-ui-primitives",
   "crates/forgejo",
   "crates/config",
   "crates/observability",

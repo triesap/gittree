@@ -29,6 +29,8 @@ tracing-wasm = "0.2"
 mf2-i18n-core.workspace = true
 mf2-i18n-embedded.workspace = true
 
+ui-primitives = { path = "../../refs/ui-primitives/crates/ui-primitives", features = ["core", "leptos"] }
+
 gittree-app-core = { path = "../app-core" }
 gittree-core = { path = "../core", optional = true }
 gittree-storage = { path = "../storage", optional = true }
