@@ -1830,6 +1830,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-auth"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "dotenvy",
+ "gittree-config",
+ "gittree-forgejo",
+ "gittree-nostr-auth",
+ "gittree-observability",
+ "gittree-storage",
+ "hex",
+ "rand 0.8.5",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+]
+
+[[package]]
 name = "gittree-config"
 version = "0.1.0"
 dependencies = [

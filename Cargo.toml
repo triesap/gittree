@@ -15,6 +15,7 @@ members = [
   "services/admin",
   "services/admission",
   "services/app",
+  "services/auth",
   "services/control",
   "services/coordinator",
   "services/git-hook",
