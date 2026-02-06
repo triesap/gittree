@@ -243,6 +243,36 @@ services:
       - default
       - internal
 
+  auth:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.auth
+    env_file:
+      - .env
+    environment:
+      GITTREE_AUTH_BIND: 0.0.0.0:8089
+      GITTREE_FORGEJO_BASE_URL: http://forgejo:3000
+      GITTREE_STORAGE_READ_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_STORAGE_WRITE_URL: postgres://gittree:gittree@postgres:5432/gittree
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
+    ports:
+      - "8089:8089"
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      forgejo:
+        condition: service_started
+    volumes:
+      - ./logs:/var/log/gittree
+    networks:
+      - default
+      - internal
+
   ui:
     build:
       context: .

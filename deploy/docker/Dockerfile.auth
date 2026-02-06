@@ -1,0 +1,15 @@
+FROM rust:1.92-bookworm AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY services ./services
+COPY migrations ./migrations
+COPY refs/mf2-i18n ./refs/mf2-i18n
+COPY refs/ui-primitives ./refs/ui-primitives
+RUN cargo build -p gittree-auth --release
+
+FROM debian:bookworm-slim
+RUN useradd -m -u 10001 gittree
+COPY --from=builder /app/target/release/gittree-auth /usr/local/bin/gittree-auth
+USER gittree
+ENTRYPOINT ["/usr/local/bin/gittree-auth"]
