@@ -5,20 +5,27 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use gittree_config::{ConfigError, ServicesConfig};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use gittree_config::{AuthConfig, ConfigError, ServicesConfig};
+use gittree_nostr_auth::{Nip98Event, Nip98Request, validate_nip98};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
-    PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
+    AnnouncementRepository, PostgresRepositories, RepoMappingRecord, RepoMappingRepository,
+    StorageConfig, StorageError,
 };
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
+use sha2::Digest;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ENV_UPSTREAM_URL: &str = "GITTREE_GIT_HTTP_UPSTREAM_URL";
 const ENV_TIMEOUT_SECS: &str = "GITTREE_GIT_HTTP_TIMEOUT_SECS";
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
+const AUTH_HEADER: &str = "authorization";
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
 const ENV_STORAGE_MAX_CONNECTIONS: &str = "GITTREE_STORAGE_MAX_CONNECTIONS";
@@ -32,12 +39,14 @@ pub struct GitHttpConfig {
     pub bind: String,
     pub upstream_url: String,
     pub timeout: Duration,
+    pub auth: AuthConfig,
     pub storage: StorageConfig,
 }
 
 impl GitHttpConfig {
     pub fn from_env() -> Result<Self, GitHttpConfigError> {
         let services = ServicesConfig::from_env_validated().map_err(GitHttpConfigError::Config)?;
+        let auth = AuthConfig::from_env().map_err(GitHttpConfigError::Config)?;
         let upstream_url = std::env::var(ENV_UPSTREAM_URL)
             .map_err(|_| GitHttpConfigError::MissingEnv(ENV_UPSTREAM_URL))?;
         if url::Url::parse(&upstream_url).is_err() {
@@ -52,6 +61,7 @@ impl GitHttpConfig {
             bind: services.git_http.bind,
             upstream_url,
             timeout: Duration::from_secs(timeout_secs),
+            auth,
             storage,
         })
     }
@@ -271,11 +281,13 @@ pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
     let metrics = Arc::new(GitHttpMetrics::new());
     let repositories = build_repositories(&config)?;
     let upstream = ReqwestUpstreamClient::new(config.timeout)?;
+    let auth = config.auth;
     let state = GitHttpAppState {
         repositories: Arc::new(repositories),
         upstream: Arc::new(upstream),
         metrics,
         upstream_url: config.upstream_url.trim_end_matches('/').to_string(),
+        auth,
     };
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind)
@@ -298,6 +310,7 @@ fn build_repositories(config: &GitHttpConfig) -> Result<PostgresRepositories, Gi
 }
 
 struct GitHttpAppState<R, U> {
+    auth: AuthConfig,
     repositories: Arc<R>,
     upstream: Arc<U>,
     metrics: Arc<GitHttpMetrics>,
@@ -307,6 +320,7 @@ struct GitHttpAppState<R, U> {
 impl<R, U> Clone for GitHttpAppState<R, U> {
     fn clone(&self) -> Self {
         Self {
+            auth: self.auth.clone(),
             repositories: Arc::clone(&self.repositories),
             upstream: Arc::clone(&self.upstream),
             metrics: Arc::clone(&self.metrics),
@@ -392,6 +406,8 @@ impl UpstreamClient for ReqwestUpstreamClient {
 #[derive(Debug)]
 enum GitHttpHttpError {
     NotFound(String),
+    BadRequest(String),
+    Unauthorized(String),
     Storage(String),
     Upstream(String),
     Internal(String),
@@ -401,6 +417,8 @@ impl IntoResponse for GitHttpHttpError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             GitHttpHttpError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            GitHttpHttpError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            GitHttpHttpError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
             GitHttpHttpError::Storage(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
             GitHttpHttpError::Upstream(message) => (StatusCode::BAD_GATEWAY, message),
             GitHttpHttpError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
@@ -411,7 +429,7 @@ impl IntoResponse for GitHttpHttpError {
 
 fn build_router<R, U>(state: GitHttpAppState<R, U>) -> Router
 where
-    R: RepoMappingRepository + Send + Sync + 'static,
+    R: RepoMappingRepository + AnnouncementRepository + Send + Sync + 'static,
     U: UpstreamClient + Send + Sync + 'static,
 {
     Router::new()
@@ -429,7 +447,7 @@ async fn git_handler<R, U>(
     request: Request<Body>,
 ) -> Result<Response, GitHttpHttpError>
 where
-    R: RepoMappingRepository + Send + Sync,
+    R: RepoMappingRepository + AnnouncementRepository + Send + Sync,
     U: UpstreamClient + Send + Sync,
 {
     let method = request.method().clone();
@@ -454,7 +472,7 @@ async fn handle_git_route<R, U>(
     request: Request<Body>,
 ) -> Result<Response, GitHttpHttpError>
 where
-    R: RepoMappingRepository + Send + Sync,
+    R: RepoMappingRepository + AnnouncementRepository + Send + Sync,
     U: UpstreamClient + Send + Sync,
 {
     let (repo, suffix, query) = match route {
@@ -481,10 +499,25 @@ where
 
     let (parts, body) = request.into_parts();
     let mut headers = parts.headers;
+    let auth_headers = headers.clone();
     headers.remove(axum::http::header::HOST);
+    headers.remove(AUTH_HEADER);
     let body = to_bytes(body, usize::MAX)
         .await
         .map_err(|err| GitHttpHttpError::Internal(err.to_string()))?;
+
+    if matches!(route, GitHttpRoute::ReceivePack { .. }) {
+        authorize_receive_pack(
+            state,
+            repo,
+            &auth_headers,
+            &parts.method,
+            &parts.uri,
+            &body,
+        )
+        .await?;
+    }
+
     let upstream_request = UpstreamRequest {
         method: parts.method,
         url,
@@ -517,6 +550,132 @@ where
         .await
         .map_err(|err| GitHttpHttpError::Storage(err.to_string()))?;
     record.ok_or_else(|| GitHttpHttpError::NotFound("missing repo mapping".to_string()))
+}
+
+async fn authorize_receive_pack<R, U>(
+    state: &GitHttpAppState<R, U>,
+    repo: &NormalizedRepo,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &axum::http::Uri,
+    body: &Bytes,
+) -> Result<(), GitHttpHttpError>
+where
+    R: RepoMappingRepository + AnnouncementRepository + Send + Sync,
+    U: UpstreamClient + Send + Sync,
+{
+    let event = parse_nostr_auth(headers)?;
+    let request_url = build_request_url(headers, uri)?;
+    let payload_hash = payload_hash(body);
+    let request = Nip98Request {
+        method: method.as_str(),
+        url: &request_url,
+        payload_sha256: payload_hash.as_deref(),
+        now: unix_timestamp(),
+        max_skew_seconds: state.auth.max_skew_seconds as i64,
+    };
+    let auth = validate_nip98(&event, &request)
+        .map_err(|err| GitHttpHttpError::Unauthorized(err.to_string()))?;
+    let maintainers = resolve_maintainers(state.repositories.as_ref(), repo).await?;
+    if !maintainers
+        .iter()
+        .any(|pubkey| pubkey.eq_ignore_ascii_case(&auth.pubkey))
+    {
+        return Err(GitHttpHttpError::Unauthorized(
+            "pubkey not authorized".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn resolve_maintainers<R>(
+    repositories: &R,
+    repo: &NormalizedRepo,
+) -> Result<Vec<String>, GitHttpHttpError>
+where
+    R: AnnouncementRepository + Send + Sync,
+{
+    let mut pending = vec![repo.pubkey.to_lowercase()];
+    let mut seen = HashSet::new();
+
+    while let Some(pubkey) = pending.pop() {
+        if !seen.insert(pubkey.clone()) {
+            continue;
+        }
+        let pubkey_bytes = hex::decode(&pubkey)
+            .map_err(|_| GitHttpHttpError::Internal("invalid maintainer pubkey".to_string()))?;
+        let announcement = repositories
+            .latest_announcement(&pubkey_bytes, &repo.identifier)
+            .await
+            .map_err(|err| GitHttpHttpError::Storage(err.to_string()))?;
+        let Some(announcement) = announcement else {
+            continue;
+        };
+        for maintainer in announcement.maintainers {
+            let maintainer = maintainer.to_lowercase();
+            if !seen.contains(&maintainer) {
+                pending.push(maintainer);
+            }
+        }
+    }
+
+    let mut maintainers: Vec<String> = seen.into_iter().collect();
+    maintainers.sort();
+    Ok(maintainers)
+}
+
+fn build_request_url(
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+) -> Result<String, GitHttpHttpError> {
+    let host = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| GitHttpHttpError::BadRequest("missing host header".to_string()))?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let path = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or_else(|| uri.path());
+    Ok(format!("{scheme}://{host}{path}"))
+}
+
+fn parse_nostr_auth(headers: &HeaderMap) -> Result<Nip98Event, GitHttpHttpError> {
+    let value = headers
+        .get(AUTH_HEADER)
+        .and_then(|header| header.to_str().ok())
+        .ok_or_else(|| GitHttpHttpError::Unauthorized("missing authorization".to_string()))?;
+    let value = value.trim();
+    let Some(token) = value.strip_prefix("Nostr ") else {
+        return Err(GitHttpHttpError::Unauthorized(
+            "invalid authorization header".to_string(),
+        ));
+    };
+    let decoded = BASE64_STANDARD
+        .decode(token.as_bytes())
+        .map_err(|_| GitHttpHttpError::Unauthorized("invalid nostr authorization".to_string()))?;
+    serde_json::from_slice::<Nip98Event>(&decoded)
+        .map_err(|_| GitHttpHttpError::Unauthorized("invalid nostr event".to_string()))
+}
+
+fn payload_hash(body: &Bytes) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(body);
+    let digest = hasher.finalize();
+    Some(hex::encode(digest))
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -676,27 +835,39 @@ pub enum GitHttpRouteError {
 
 #[cfg(test)]
 mod tests {
+    use super::AUTH_HEADER;
+    use super::AuthConfig;
+    use super::BASE64_STANDARD;
+    use super::ENV_STORAGE_READ_URL;
     use super::ENV_TIMEOUT_SECS;
     use super::ENV_UPSTREAM_URL;
-    use super::ENV_STORAGE_READ_URL;
+    use super::GitHttpAppState;
     use super::GitHttpConfig;
     use super::GitHttpMetrics;
     use super::GitHttpRequest;
     use super::GitHttpRoute;
     use super::GitHttpService;
-    use super::GitHttpAppState;
     use super::ObservabilityHandle;
     use super::UpstreamClient;
     use super::UpstreamError;
     use super::UpstreamRequest;
     use super::UpstreamResponse;
     use super::init_observability;
+    use super::payload_hash;
     use super::route_request;
     use async_trait::async_trait;
     use axum::body::{Body, Bytes, to_bytes};
     use axum::http::{HeaderMap, Request, StatusCode};
-    use gittree_core::RepoMapping;
-    use gittree_storage::{InMemoryRepositories, RepoMappingRecord, RepoMappingRepository};
+    use base64::Engine;
+    use gittree_core::{RepoAnnouncement, RepoMapping};
+    use gittree_nostr_auth::{Nip98Event, NIP98_KIND};
+    use gittree_storage::{
+        AnnouncementRepository, InMemoryRepositories, RepoAnnouncementRecord, RepoMappingRecord,
+        RepoMappingRepository,
+    };
+    use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
+    use serde_json::json;
+    use sha2::Digest;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -796,6 +967,69 @@ mod tests {
         assert!(matches!(route, GitHttpRoute::NotFound));
     }
 
+    fn test_auth() -> AuthConfig {
+        AuthConfig {
+            email_domain: "example.com".to_string(),
+            max_skew_seconds: 60,
+        }
+    }
+
+    fn signed_event(url: &str, method: &str, body: &Bytes, created_at: i64) -> Nip98Event {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[4u8; 32]).expect("secret");
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
+        let pubkey_hex = hex::encode(pubkey.serialize());
+        let mut tags = vec![
+            vec!["u".to_string(), url.to_string()],
+            vec!["method".to_string(), method.to_string()],
+        ];
+        if let Some(hash) = payload_hash(body) {
+            tags.push(vec!["payload".to_string(), hash]);
+        }
+        let mut event = Nip98Event {
+            id: String::new(),
+            pubkey: pubkey_hex,
+            created_at,
+            kind: NIP98_KIND,
+            tags,
+            content: String::new(),
+            sig: String::new(),
+        };
+        let event_id = build_event_id(&event);
+        let sig = sign_event_id(&event_id, &keypair, &secp);
+        event.id = event_id;
+        event.sig = sig;
+        event
+    }
+
+    fn build_event_id(event: &Nip98Event) -> String {
+        let payload = json!([
+            0,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags,
+            event.content
+        ]);
+        let serialized = serde_json::to_string(&payload).expect("serialize");
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(serialized.as_bytes());
+        let digest = hasher.finalize();
+        hex::encode(digest)
+    }
+
+    fn sign_event_id(
+        event_id: &str,
+        keypair: &Keypair,
+        secp: &Secp256k1<secp256k1::All>,
+    ) -> String {
+        let bytes = hex::decode(event_id).expect("decode");
+        let msg = Message::from_digest_slice(&bytes).expect("msg");
+        let sig = secp.sign_schnorr(&msg, keypair);
+        hex::encode(sig.as_ref())
+    }
+
     struct MockUpstreamClient {
         calls: Mutex<Vec<UpstreamRequest>>,
         response: UpstreamResponse,
@@ -828,6 +1062,7 @@ mod tests {
             body: Bytes::from_static(b"ok"),
         }));
         let app = super::build_router(GitHttpAppState {
+            auth: test_auth(),
             repositories,
             upstream,
             metrics: Arc::new(GitHttpMetrics::new()),
@@ -861,6 +1096,7 @@ mod tests {
             body: Bytes::from_static(b"upstream"),
         }));
         let app = super::build_router(GitHttpAppState {
+            auth: test_auth(),
             repositories: Arc::clone(&repositories),
             upstream: Arc::clone(&upstream),
             metrics: Arc::new(GitHttpMetrics::new()),
@@ -889,6 +1125,138 @@ mod tests {
             calls[0].url,
             "https://git.example/owner/repo.git/info/refs?service=git-upload-pack"
         );
+    }
+
+    #[tokio::test]
+    async fn receive_pack_rejects_missing_auth() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
+            .expect("parse");
+        let mapping =
+            RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo").expect("mapping");
+        let record = RepoMappingRecord::new(&mapping).expect("record");
+        repositories
+            .upsert_mapping(record)
+            .await
+            .expect("mapping");
+
+        let maintainer_pubkey = "11".repeat(32);
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![maintainer_pubkey],
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &parsed.pubkey, 1, &announcement)
+                .expect("announcement");
+        repositories
+            .insert_announcement(announcement_record)
+            .await
+            .expect("announcement");
+
+        let upstream = Arc::new(MockUpstreamClient::new(UpstreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"upstream"),
+        }));
+        let app = super::build_router(GitHttpAppState {
+            auth: test_auth(),
+            repositories: Arc::clone(&repositories),
+            upstream: Arc::clone(&upstream),
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/{npub}/repo.git/git-receive-pack"))
+                    .header("host", "localhost")
+                    .body(Body::from(Bytes::from_static(b"payload")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let calls = upstream.calls.lock().expect("calls");
+        assert!(calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_pack_accepts_authorized_pubkey() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
+            .expect("parse");
+        let mapping =
+            RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo").expect("mapping");
+        let record = RepoMappingRecord::new(&mapping).expect("record");
+        repositories
+            .upsert_mapping(record)
+            .await
+            .expect("mapping");
+
+        let body = Bytes::from_static(b"payload");
+        let url = format!("http://localhost/{npub}/repo.git/git-receive-pack");
+        let event = signed_event(&url, "POST", &body, super::unix_timestamp());
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![event.pubkey.clone()],
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &parsed.pubkey, 1, &announcement)
+                .expect("announcement");
+        repositories
+            .insert_announcement(announcement_record)
+            .await
+            .expect("announcement");
+
+        let upstream = Arc::new(MockUpstreamClient::new(UpstreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"upstream"),
+        }));
+        let app = super::build_router(GitHttpAppState {
+            auth: test_auth(),
+            repositories: Arc::clone(&repositories),
+            upstream: Arc::clone(&upstream),
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        });
+
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/{npub}/repo.git/git-receive-pack"))
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let calls = upstream.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 1);
     }
 
     #[test]
