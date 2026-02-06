@@ -1,0 +1,34 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "identifier": "ee.gittr.app",
+  "productName": "gittree",
+  "mainBinaryName": "gittree",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:3340",
+    "beforeDevCommand": "cd ../../.. && just dev-app-ui-serve",
+    "beforeBuildCommand": "cd ../../.. && just dev-app-ui-build"
+  },
+  "app": {
+    "security": {
+      "assetProtocol": {
+        "enable": true
+      }
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "gittree",
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true,
+        "width": 1240,
+        "height": 775
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all"
+  }
+}

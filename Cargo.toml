@@ -2,6 +2,7 @@
 members = [
   "crates/app-core",
   "crates/app-ui",
+  "crates/app-ui/src-tauri",
   "crates/app-ui-primitives",
   "crates/forgejo",
   "crates/config",
@@ -54,6 +55,8 @@ wasm-bindgen-futures = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-build = { version = "2" }
 js-sys = "0.3.77"
 web-sys = { version = "0.3.77", features = [
   "Window",
