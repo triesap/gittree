@@ -212,6 +212,13 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
         .await
     }
 
+    pub async fn ensure_user(&self, user: ForgejoCreateUser) -> Result<ForgejoUser, ForgejoError> {
+        if let Some(existing) = self.get_user(&user.username).await? {
+            return Ok(existing);
+        }
+        self.create_user(user).await
+    }
+
     pub async fn ensure_webhook(&self, repo: &str) -> Result<(), ForgejoError> {
         let hooks = self.list_hooks(repo).await?;
         if hooks.iter().any(|hook| {
@@ -366,6 +373,32 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
 
     async fn get_repo(&self, name: &str) -> Result<Option<ForgejoRepo>, ForgejoError> {
         self.get_repo_for_owner(&self.config.owner, name).await
+    }
+
+    async fn get_user(&self, username: &str) -> Result<Option<ForgejoUser>, ForgejoError> {
+        let url = join_url(
+            &self.config.base_url,
+            &format!("/api/v1/users/{username}"),
+        );
+        let response = self
+            .transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Get,
+                url,
+                body: None,
+            })
+            .await?;
+        match response.status {
+            200 => {
+                let user = parse_json::<ForgejoUserResponse>(&response.body)?;
+                user.into_user().map(Some)
+            }
+            404 => Ok(None),
+            status => Err(ForgejoError::Response {
+                status,
+                body: response.body,
+            }),
+        }
     }
 
     async fn get_repo_for_owner(
@@ -745,6 +778,12 @@ mod tests {
         )
     }
 
+    fn user_json(username: &str) -> String {
+        format!(
+            r#"{{"login":"{username}","username":"{username}","email":"{username}@example.com"}}"#
+        )
+    }
+
     #[tokio::test]
     async fn ensure_repo_returns_existing() {
         let responses = vec![ForgejoResponse {
@@ -887,7 +926,7 @@ mod tests {
     async fn create_user_posts_admin_endpoint() {
         let responses = vec![ForgejoResponse {
             status: 201,
-            body: r#"{"login":"alice","username":"alice","email":"alice@example.com"}"#.to_string(),
+            body: user_json("alice"),
         }];
         let transport = MockTransport::new(responses);
         let client = ForgejoClient::with_transport(test_config(), transport.clone());
@@ -911,6 +950,70 @@ mod tests {
         let body = requests[0].body.clone().expect("body");
         assert!(body.contains("\"username\":\"alice\""));
         assert!(body.contains("\"email\":\"alice@example.com\""));
+    }
+
+    #[tokio::test]
+    async fn ensure_user_returns_existing() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: user_json("alice"),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let user = client
+            .ensure_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: Some(true),
+                send_notify: Some(false),
+            })
+            .await
+            .expect("user");
+
+        assert_eq!(user.username, "alice");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, ForgejoMethod::Get);
+        assert!(requests[0].url.ends_with("/api/v1/users/alice"));
+    }
+
+    #[tokio::test]
+    async fn ensure_user_creates_when_missing() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: user_json("alice"),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let user = client
+            .ensure_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: Some(true),
+                send_notify: Some(false),
+            })
+            .await
+            .expect("user");
+
+        assert_eq!(user.username, "alice");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, ForgejoMethod::Get);
+        assert!(requests[0].url.ends_with("/api/v1/users/alice"));
+        assert_eq!(requests[1].method, ForgejoMethod::Post);
+        assert!(requests[1].url.ends_with("/api/v1/admin/users"));
     }
 
     #[tokio::test]
