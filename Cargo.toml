@@ -6,6 +6,7 @@ members = [
   "crates/forgejo",
   "crates/config",
   "crates/observability",
+  "crates/nostr-auth",
   "crates/core",
   "crates/storage",
   "crates/relay-adapter",

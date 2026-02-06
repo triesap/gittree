@@ -1959,6 +1959,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-nostr-auth"
+version = "0.1.0"
+dependencies = [
+ "gittree-core",
+ "hex",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "gittree-observability"
 version = "0.1.0"
 dependencies = [
