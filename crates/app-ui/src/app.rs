@@ -18,6 +18,7 @@ pub fn GittreeApp() -> impl IntoView {
     provide_context(app_i18n_init());
     let base_path = resolve_base_path();
     provide_context(AppBasePath(base_path.clone()));
+    let auth_url = resolve_auth_url();
 
     view! {
         <Router>
@@ -25,6 +26,7 @@ pub fn GittreeApp() -> impl IntoView {
                 id="gittree-app"
                 class="gt-app"
                 data-base-path=base_path
+                data-auth-url=auth_url
             >
                 <Routes fallback=|| view! { <NotFoundPage /> }>
                     <Route path=path!("/") view=RepoListPage />
@@ -147,6 +149,12 @@ fn resolve_base_path() -> String {
     normalize_base_path(&value)
 }
 
+fn resolve_auth_url() -> String {
+    auth_url_from_context()
+        .or_else(auth_url_from_dom)
+        .unwrap_or_default()
+}
+
 #[cfg(feature = "ssr")]
 fn base_path_from_context() -> Option<String> {
     use crate::AppUiState;
@@ -159,6 +167,18 @@ fn base_path_from_context() -> Option<String> {
     None
 }
 
+#[cfg(feature = "ssr")]
+fn auth_url_from_context() -> Option<String> {
+    use crate::AppUiState;
+
+    use_context::<AppUiState>().map(|state| state.auth_url)
+}
+
+#[cfg(not(feature = "ssr"))]
+fn auth_url_from_context() -> Option<String> {
+    None
+}
+
 #[cfg(not(feature = "ssr"))]
 fn base_path_from_dom() -> Option<String> {
     use leptos::prelude::window;
@@ -168,8 +188,22 @@ fn base_path_from_dom() -> Option<String> {
     element.get_attribute("data-base-path")
 }
 
+#[cfg(not(feature = "ssr"))]
+fn auth_url_from_dom() -> Option<String> {
+    use leptos::prelude::window;
+
+    let document = window().document()?;
+    let element = document.get_element_by_id("gittree-app")?;
+    element.get_attribute("data-auth-url")
+}
+
 #[cfg(feature = "ssr")]
 fn base_path_from_dom() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn auth_url_from_dom() -> Option<String> {
     None
 }
 
