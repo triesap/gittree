@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod app;
+#[allow(dead_code)]
+mod auth;
 mod i18n;
 mod logging;
 mod theme;

@@ -1870,21 +1870,25 @@ name = "gittree-app-ui"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.8",
+ "base64 0.22.1",
  "console_error_panic_hook",
  "gittree-app-core",
  "gittree-core",
  "gittree-storage",
  "hex",
+ "js-sys",
  "leptos",
  "leptos_router",
  "mf2-i18n-core",
  "mf2-i18n-embedded",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "tokio",
  "tracing-wasm",
  "ui-primitives",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
@@ -5494,6 +5498,17 @@ dependencies = [
  "serde",
  "serde_core",
  "typeid",
+]
+
+[[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -19,7 +19,11 @@ leptos_router.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+base64.workspace = true
+serde-wasm-bindgen.workspace = true
 hex.workspace = true
+js-sys.workspace = true
 web-sys.workspace = true
 
 axum = { version = "0.8", optional = true }
