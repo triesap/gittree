@@ -13,6 +13,7 @@ const DEFAULT_UI_BIND: &str = "127.0.0.1:8086";
 const DEFAULT_WEBHOOK_BIND: &str = "127.0.0.1:8087";
 const DEFAULT_CONTROL_BIND: &str = "127.0.0.1:8088";
 const DEFAULT_AUTH_BIND: &str = "127.0.0.1:8089";
+const DEFAULT_UI_AUTH_URL: &str = "http://localhost:8089";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
 const ENV_RELAY_COMPAT_MODE: &str = "GITTREE_RELAY_COMPAT_MODE";
@@ -49,6 +50,7 @@ const ENV_FORGEJO_WEBHOOK_SECRET: &str = "GITTREE_FORGEJO_WEBHOOK_SECRET";
 const ENV_FORGEJO_REPO_PRIVATE: &str = "GITTREE_FORGEJO_REPO_PRIVATE";
 const ENV_UI_REPO_ROOT: &str = "GITTREE_UI_REPO_ROOT";
 const ENV_UI_PUBLIC_GIT_URL: &str = "GITTREE_UI_PUBLIC_GIT_URL";
+const ENV_UI_AUTH_URL: &str = "GITTREE_UI_AUTH_URL";
 const ENV_CONTROL_TOKEN: &str = "GITTREE_CONTROL_TOKEN";
 const ENV_CONTROL_ADMIN_KEYS: &str = "GITTREE_CONTROL_ADMIN_KEYS";
 const ENV_AUTH_EMAIL_DOMAIN: &str = "GITTREE_AUTH_EMAIL_DOMAIN";
@@ -208,15 +210,19 @@ impl ForgejoConfig {
 pub struct UiConfig {
     pub repo_root: std::path::PathBuf,
     pub public_git_url: String,
+    pub auth_url: String,
 }
 
 impl UiConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let repo_root = env_required_path(ENV_UI_REPO_ROOT)?;
         let public_git_url = env_required_string(ENV_UI_PUBLIC_GIT_URL)?;
+        let auth_url = env_optional_string(ENV_UI_AUTH_URL)
+            .unwrap_or_else(|| DEFAULT_UI_AUTH_URL.to_string());
         let config = Self {
             repo_root,
             public_git_url,
+            auth_url,
         };
         config.validate()?;
         Ok(config)
@@ -247,6 +253,7 @@ impl UiConfig {
             });
         }
         validate_http_url("ui.public_git_url", &self.public_git_url)?;
+        validate_http_url("ui.auth_url", &self.auth_url)?;
         Ok(())
     }
 }
@@ -951,6 +958,7 @@ struct TomlUiRoot {
 struct TomlUiConfig {
     repo_root: Option<String>,
     public_git_url: Option<String>,
+    auth_url: Option<String>,
 }
 
 impl TomlUiRoot {
@@ -961,9 +969,13 @@ impl TomlUiRoot {
         })?;
         let repo_root = require_toml_field(config.repo_root, "ui.repo_root")?;
         let public_git_url = require_toml_field(config.public_git_url, "ui.public_git_url")?;
+        let auth_url = config
+            .auth_url
+            .unwrap_or_else(|| DEFAULT_UI_AUTH_URL.to_string());
         Ok(UiConfig {
             repo_root: std::path::PathBuf::from(repo_root),
             public_git_url,
+            auth_url,
         })
     }
 }
@@ -1303,6 +1315,7 @@ mod tests {
     use crate::DEFAULT_AUTH_BIND;
     use crate::DEFAULT_AUTH_EMAIL_DOMAIN;
     use crate::DEFAULT_AUTH_MAX_SKEW_SECS;
+    use crate::DEFAULT_UI_AUTH_URL;
     use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_CONTROL_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
@@ -2013,6 +2026,7 @@ repo_private = true
                 let config = UiConfig::from_env().expect("ui");
                 assert_eq!(config.repo_root, std::path::PathBuf::from("/tmp/gittree-ui"));
                 assert_eq!(config.public_git_url, "http://localhost:8085");
+                assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
             });
         });
     }
@@ -2027,6 +2041,7 @@ public_git_url = "http://localhost:8085"
         let config = UiConfig::from_toml_str(toml).expect("ui");
         assert_eq!(config.repo_root, std::path::PathBuf::from("/tmp/gittree-ui"));
         assert_eq!(config.public_git_url, "http://localhost:8085");
+        assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
     }
 
     #[test]
