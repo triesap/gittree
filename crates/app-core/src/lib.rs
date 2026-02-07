@@ -3,6 +3,18 @@
 use bech32::{Bech32, Hrp};
 use serde::{Deserialize, Serialize};
 
+mod nip98;
+
+pub use nip98::{
+    nip98_event_id,
+    nip98_payload_hash,
+    nip98_sign_event,
+    nip98_unsigned_event,
+    Nip98Event,
+    Nip98UnsignedEvent,
+    NIP98_KIND,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoListItem {
     pub npub: String,
@@ -55,12 +67,20 @@ impl From<RepoListItem> for RepoDetail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCoreError {
     InvalidPubkey,
+    InvalidSecretKey,
+    InvalidEventEncoding(String),
+    InvalidSignature,
 }
 
 impl std::fmt::Display for AppCoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppCoreError::InvalidPubkey => write!(f, "invalid pubkey"),
+            AppCoreError::InvalidSecretKey => write!(f, "invalid secret key"),
+            AppCoreError::InvalidEventEncoding(message) => {
+                write!(f, "invalid event encoding: {message}")
+            }
+            AppCoreError::InvalidSignature => write!(f, "invalid signature"),
         }
     }
 }
