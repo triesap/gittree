@@ -45,3 +45,5 @@ tokio = { version = "1", features = ["macros", "rt"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+nostr = { version = "0.44", default-features = false, features = ["std"] }
+nostr-browser-signer = "0.44"

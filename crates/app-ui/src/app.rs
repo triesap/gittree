@@ -846,12 +846,14 @@ fn resolve_base_path() -> String {
 fn resolve_auth_url() -> String {
     auth_url_from_context()
         .or_else(auth_url_from_dom)
+        .or_else(auth_url_from_meta)
         .unwrap_or_default()
 }
 
 fn resolve_app_url() -> String {
     app_url_from_context()
         .or_else(app_url_from_dom)
+        .or_else(app_url_from_meta)
         .or_else(app_url_from_location)
         .unwrap_or_default()
 }
@@ -859,6 +861,7 @@ fn resolve_app_url() -> String {
 fn resolve_control_url() -> String {
     control_url_from_context()
         .or_else(control_url_from_dom)
+        .or_else(control_url_from_meta)
         .unwrap_or_default()
 }
 
@@ -938,6 +941,31 @@ fn app_url_from_dom() -> Option<String> {
 }
 
 #[cfg(not(feature = "ssr"))]
+fn auth_url_from_meta() -> Option<String> {
+    meta_content("gittree-auth-url")
+}
+
+#[cfg(not(feature = "ssr"))]
+fn app_url_from_meta() -> Option<String> {
+    meta_content("gittree-app-url")
+}
+
+#[cfg(not(feature = "ssr"))]
+fn control_url_from_meta() -> Option<String> {
+    meta_content("gittree-control-url")
+}
+
+#[cfg(not(feature = "ssr"))]
+fn meta_content(name: &str) -> Option<String> {
+    use leptos::prelude::window;
+
+    let document = window().document()?;
+    let selector = format!("meta[name=\"{name}\"]");
+    let element = document.query_selector(&selector).ok()??;
+    element.get_attribute("content")
+}
+
+#[cfg(not(feature = "ssr"))]
 fn app_url_from_location() -> Option<String> {
     use leptos::prelude::window;
 
@@ -970,6 +998,21 @@ fn app_url_from_dom() -> Option<String> {
 
 #[cfg(feature = "ssr")]
 fn control_url_from_dom() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn auth_url_from_meta() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn app_url_from_meta() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn control_url_from_meta() -> Option<String> {
     None
 }
 

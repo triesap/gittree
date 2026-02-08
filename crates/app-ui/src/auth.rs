@@ -1,28 +1,20 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use gittree_app_core::{
-    nip98_sign_event,
-    nip98_unsigned_event,
-    AppCoreError,
-    Nip98Event,
-    Nip98UnsignedEvent,
-};
+use gittree_app_core::{nip98_sign_event, AppCoreError, Nip98Event};
+#[cfg(target_family = "wasm")]
+use gittree_app_core::{nip98_unsigned_event, Nip98UnsignedEvent};
 use js_sys::Date;
 use k256::schnorr::SigningKey;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 use web_sys::{Storage, Window};
+#[cfg(target_family = "wasm")]
+use nostr::signer::NostrSigner;
+#[cfg(target_family = "wasm")]
+use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+#[cfg(target_family = "wasm")]
+use nostr_browser_signer::{BrowserSigner, Error as Nip07Error};
 
 const LOCAL_SECRET_KEY: &str = "gittree_local_secret";
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "nostr"], js_name = getPublicKey)]
-    fn nostr_get_public_key() -> js_sys::Promise;
-
-    #[wasm_bindgen(js_namespace = ["window", "nostr"], js_name = signEvent)]
-    fn nostr_sign_event(event: JsValue) -> js_sys::Promise;
-}
 
 #[derive(Debug)]
 pub enum AuthError {
@@ -31,6 +23,8 @@ pub enum AuthError {
     MissingCrypto,
     InvalidSecretKey,
     MissingNip07,
+    #[cfg(target_family = "wasm")]
+    Nip07(String),
     EventEncoding(String),
     Js(String),
     Core(AppCoreError),
@@ -44,6 +38,8 @@ impl std::fmt::Display for AuthError {
             AuthError::MissingCrypto => write!(f, "missing crypto"),
             AuthError::InvalidSecretKey => write!(f, "invalid secret key"),
             AuthError::MissingNip07 => write!(f, "missing nip-07 provider"),
+            #[cfg(target_family = "wasm")]
+            AuthError::Nip07(message) => write!(f, "nip-07 error: {message}"),
             AuthError::EventEncoding(message) => write!(f, "event encoding error: {message}"),
             AuthError::Js(message) => write!(f, "js error: {message}"),
             AuthError::Core(err) => write!(f, "auth core error: {err}"),
@@ -113,16 +109,19 @@ pub fn local_key_material() -> Result<LocalKeyMaterial, AuthError> {
     })
 }
 
+#[cfg(target_family = "wasm")]
 pub async fn nip07_pubkey() -> Result<String, AuthError> {
-    ensure_nostr()?;
-    let value = JsFuture::from(nostr_get_public_key())
-        .await
-        .map_err(|err| AuthError::Js(js_error(err)))?;
-    value
-        .as_string()
-        .ok_or(AuthError::EventEncoding("missing pubkey".to_string()))
+    let signer = browser_signer()?;
+    let pubkey = signer.get_public_key().await.map_err(nip07_error)?;
+    Ok(pubkey.to_hex())
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub async fn nip07_pubkey() -> Result<String, AuthError> {
+    Err(AuthError::MissingNip07)
+}
+
+#[cfg(target_family = "wasm")]
 pub async fn nip07_sign_nip98(
     pubkey: String,
     method: &str,
@@ -130,43 +129,30 @@ pub async fn nip07_sign_nip98(
     payload_sha256: Option<&str>,
     created_at: i64,
 ) -> Result<Nip98Event, AuthError> {
-    ensure_nostr()?;
+    let signer = browser_signer()?;
     let unsigned = nip98_unsigned_event(pubkey, method, url, payload_sha256, created_at);
-    nip07_sign_event(unsigned).await
+    let unsigned = nip98_unsigned_to_nostr(&unsigned)?;
+    let signed = signer.sign_event(unsigned).await.map_err(nip07_error)?;
+    Ok(nip98_event_from_nostr(signed))
 }
 
-async fn nip07_sign_event(event: Nip98UnsignedEvent) -> Result<Nip98Event, AuthError> {
-    let value = serde_wasm_bindgen::to_value(&event)
-        .map_err(|err| AuthError::EventEncoding(err.to_string()))?;
-    let signed = JsFuture::from(nostr_sign_event(value))
-        .await
-        .map_err(|err| AuthError::Js(js_error(err)))?;
-    serde_wasm_bindgen::from_value(signed)
-        .map_err(|err| AuthError::EventEncoding(err.to_string()))
+#[cfg(not(target_family = "wasm"))]
+pub async fn nip07_sign_nip98(
+    _pubkey: String,
+    _method: &str,
+    _url: &str,
+    _payload_sha256: Option<&str>,
+    _created_at: i64,
+) -> Result<Nip98Event, AuthError> {
+    Err(AuthError::MissingNip07)
 }
 
-fn ensure_nostr() -> Result<(), AuthError> {
-    if nostr_available() {
-        Ok(())
-    } else {
-        Err(AuthError::MissingNip07)
-    }
-}
-
-fn nostr_available() -> bool {
-    let window = match window_ref() {
-        Ok(window) => window,
-        Err(_) => return false,
-    };
-    js_sys::Reflect::has(&window, &JsValue::from_str("nostr")).unwrap_or(false)
-}
-
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 pub fn nip07_available() -> bool {
-    nostr_available()
+    browser_signer().is_ok()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub fn nip07_available() -> bool {
     false
 }
@@ -214,6 +200,62 @@ fn js_error(value: JsValue) -> String {
     value
         .as_string()
         .unwrap_or_else(|| format!("{:?}", value))
+}
+
+#[cfg(target_family = "wasm")]
+fn browser_signer() -> Result<BrowserSigner, AuthError> {
+    BrowserSigner::new().map_err(|err| match err {
+        Nip07Error::NoGlobalWindowObject | Nip07Error::NamespaceNotFound(_) => {
+            AuthError::MissingNip07
+        }
+        _ => AuthError::Nip07(err.to_string()),
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn nip07_error(error: impl std::fmt::Display) -> AuthError {
+    AuthError::Nip07(error.to_string())
+}
+
+#[cfg(target_family = "wasm")]
+fn nip98_unsigned_to_nostr(unsigned: &Nip98UnsignedEvent) -> Result<UnsignedEvent, AuthError> {
+    let pubkey =
+        PublicKey::from_hex(&unsigned.pubkey).map_err(|err| AuthError::Nip07(err.to_string()))?;
+    if unsigned.created_at < 0 {
+        return Err(AuthError::Nip07("invalid created_at".to_string()));
+    }
+    let created_at = Timestamp::from_secs(unsigned.created_at as u64);
+    let kind = Kind::from_u16(unsigned.kind as u16);
+    let tags = unsigned
+        .tags
+        .iter()
+        .map(|tag| Tag::parse(tag.clone()).map_err(|err| AuthError::Nip07(err.to_string())))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(UnsignedEvent::new(
+        pubkey,
+        created_at,
+        kind,
+        tags,
+        unsigned.content.clone(),
+    ))
+}
+
+#[cfg(target_family = "wasm")]
+fn nip98_event_from_nostr(event: nostr::Event) -> Nip98Event {
+    let tags = event
+        .tags
+        .into_iter()
+        .map(|tag| tag.to_vec())
+        .collect::<Vec<_>>();
+    Nip98Event {
+        id: event.id.to_hex(),
+        pubkey: event.pubkey.to_hex(),
+        created_at: event.created_at.as_secs() as i64,
+        kind: event.kind.as_u16() as u32,
+        tags,
+        content: event.content,
+        sig: hex::encode(event.sig.as_ref()),
+    }
 }
 
 #[cfg(test)]
