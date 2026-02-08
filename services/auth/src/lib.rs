@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use axum::body::Bytes;
-use axum::extract::{OriginalUri, State};
+use axum::extract::{OriginalUri, Path, State};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -9,7 +9,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use gittree_app_core::{Profile, ProfileUpdate, ProfileVisibility as ApiProfileVisibility};
+use gittree_app_core::{
+    pubkey_bytes_from_npub, Profile, ProfileUpdate,
+    ProfileVisibility as ApiProfileVisibility,
+};
 use gittree_config::{AuthConfig as AuthSettings, ConfigError, ForgejoConfig, ServicesConfig};
 use gittree_forgejo::{
     ForgejoClient, ForgejoCreateUser, ForgejoError, ForgejoTransport,
@@ -249,6 +252,7 @@ where
             "/v1/profile",
             get(profile_get_handler).patch(profile_patch_handler),
         )
+        .route("/v1/profile/:npub", get(profile_public_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -277,6 +281,7 @@ struct ErrorResponse {
 enum AuthHttpError {
     Unauthorized(String),
     BadRequest(String),
+    NotFound(String),
     Internal(String),
 }
 
@@ -285,6 +290,7 @@ impl IntoResponse for AuthHttpError {
         let (status, message) = match self {
             AuthHttpError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
             AuthHttpError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            AuthHttpError::NotFound(message) => (StatusCode::NOT_FOUND, message),
             AuthHttpError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
         };
         (status, Json(ErrorResponse { error: message })).into_response()
@@ -470,6 +476,40 @@ where
         &auth.pubkey,
         &account.forgejo_username,
         updated,
+    )))
+}
+
+async fn profile_public_handler<T>(
+    State(state): State<AuthAppState<T>>,
+    Path(npub): Path<String>,
+) -> Result<Json<Profile>, AuthHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    let pubkey_bytes = pubkey_bytes_from_npub(&npub)
+        .map_err(|_| AuthHttpError::BadRequest("invalid npub".to_string()))?;
+    let account = state
+        .accounts
+        .account_by_pubkey(&pubkey_bytes)
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
+        .ok_or_else(|| AuthHttpError::NotFound("profile not found".to_string()))?;
+    let profile = state
+        .profiles
+        .profile_by_pubkey(&pubkey_bytes)
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
+        .ok_or_else(|| AuthHttpError::NotFound("profile not found".to_string()))?;
+
+    if profile.visibility != StorageProfileVisibility::Public {
+        return Err(AuthHttpError::NotFound("profile not found".to_string()));
+    }
+
+    let pubkey_hex = hex::encode(&pubkey_bytes);
+    Ok(Json(profile_response(
+        &pubkey_hex,
+        &account.forgejo_username,
+        profile,
     )))
 }
 
@@ -661,7 +701,9 @@ fn build_repositories(config: &AuthServiceConfig) -> Result<PostgresRepositories
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::body::to_bytes;
     use axum::http::Request;
+    use gittree_app_core::npub_from_bytes;
     use gittree_forgejo::{ForgejoRequest, ForgejoResponse};
     use gittree_nostr_auth::NIP98_KIND;
     use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
@@ -959,5 +1001,86 @@ mod tests {
         assert_eq!(stored.display_name.as_deref(), Some("Ada"));
         assert_eq!(stored.bio.as_deref(), Some("Builder"));
         assert_eq!(stored.visibility, StorageProfileVisibility::Public);
+    }
+
+    #[tokio::test]
+    async fn profile_public_returns_profile_for_public() {
+        let now = unix_timestamp();
+        let event = signed_event("http://localhost/v1/profile", "GET", now, None);
+        let (state, repos, _transport) = test_state(Vec::new());
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
+        repos.upsert_account(account).await.expect("upsert");
+        let profile = ProfileRecord::new(
+            &event.pubkey,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+            StorageProfileVisibility::Public,
+            now,
+            now,
+        )
+        .expect("profile");
+        repos.upsert_profile(profile).await.expect("upsert");
+
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let npub = npub_from_bytes(&pubkey_bytes).expect("npub");
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/profile/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let profile: Profile = serde_json::from_slice(&body).expect("profile");
+        assert_eq!(profile.username, "alice");
+        assert_eq!(profile.visibility, ApiProfileVisibility::Public);
+    }
+
+    #[tokio::test]
+    async fn profile_public_hides_private_profiles() {
+        let now = unix_timestamp();
+        let event = signed_event("http://localhost/v1/profile", "GET", now, None);
+        let (state, repos, _transport) = test_state(Vec::new());
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
+        repos.upsert_account(account).await.expect("upsert");
+        let profile = ProfileRecord::new(
+            &event.pubkey,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+            StorageProfileVisibility::Private,
+            now,
+            now,
+        )
+        .expect("profile");
+        repos.upsert_profile(profile).await.expect("upsert");
+
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let npub = npub_from_bytes(&pubkey_bytes).expect("npub");
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/profile/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

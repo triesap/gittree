@@ -135,9 +135,20 @@ pub fn npub_from_bytes(bytes: &[u8]) -> Result<String, AppCoreError> {
     bech32::encode::<Bech32>(hrp, bytes).map_err(|_| AppCoreError::InvalidPubkey)
 }
 
+pub fn pubkey_bytes_from_npub(npub: &str) -> Result<Vec<u8>, AppCoreError> {
+    let (hrp, data) = bech32::decode(npub).map_err(|_| AppCoreError::InvalidPubkey)?;
+    if hrp.as_str() != "npub" || data.len() != 32 {
+        return Err(AppCoreError::InvalidPubkey);
+    }
+    Ok(data)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{clone_url, normalize_identifier, npub_from_bytes, ProfileVisibility};
+    use super::{
+        clone_url, normalize_identifier, npub_from_bytes, pubkey_bytes_from_npub,
+        ProfileVisibility,
+    };
 
     #[test]
     fn normalize_identifier_strips_git_suffix() {
@@ -155,6 +166,14 @@ mod tests {
     fn npub_from_bytes_returns_npub_prefix() {
         let npub = npub_from_bytes(&[0u8; 32]).expect("npub");
         assert!(npub.starts_with("npub1"));
+    }
+
+    #[test]
+    fn pubkey_bytes_from_npub_round_trips() {
+        let bytes = [3u8; 32];
+        let npub = npub_from_bytes(&bytes).expect("npub");
+        let decoded = pubkey_bytes_from_npub(&npub).expect("decoded");
+        assert_eq!(decoded, bytes);
     }
 
     #[test]
