@@ -280,6 +280,7 @@ pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
         config.ui.public_git_url,
         config.ui.auth_url,
         config.ui.app_url,
+        config.ui.control_url,
         config.base_path,
         leptos_options,
     );
@@ -399,6 +400,7 @@ mod tests {
             "http://localhost:8085".to_string(),
             "http://localhost:8089".to_string(),
             "http://localhost:8090".to_string(),
+            "http://localhost:8088".to_string(),
             "/".to_string(),
             LeptosOptions::builder()
                 .output_name("gittree-app-ui")

@@ -26,6 +26,7 @@ pub fn GittreeApp() -> impl IntoView {
     provide_context(AppBasePath(base_path.clone()));
     let auth_url = resolve_auth_url();
     let app_url = resolve_app_url();
+    let control_url = resolve_control_url();
 
     view! {
         <Router>
@@ -35,6 +36,7 @@ pub fn GittreeApp() -> impl IntoView {
                 data-base-path=base_path
                 data-auth-url=auth_url
                 data-app-url=app_url
+                data-control-url=control_url
             >
                 <Routes fallback=|| view! { <NotFoundPage /> }>
                     <Route path=path!("/") view=RepoListPage />
@@ -573,6 +575,12 @@ fn resolve_app_url() -> String {
         .unwrap_or_default()
 }
 
+fn resolve_control_url() -> String {
+    control_url_from_context()
+        .or_else(control_url_from_dom)
+        .unwrap_or_default()
+}
+
 #[cfg(feature = "ssr")]
 fn base_path_from_context() -> Option<String> {
     use crate::AppUiState;
@@ -606,6 +614,18 @@ fn app_url_from_context() -> Option<String> {
 
 #[cfg(not(feature = "ssr"))]
 fn app_url_from_context() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn control_url_from_context() -> Option<String> {
+    use crate::AppUiState;
+
+    use_context::<AppUiState>().map(|state| state.control_url)
+}
+
+#[cfg(not(feature = "ssr"))]
+fn control_url_from_context() -> Option<String> {
     None
 }
 
@@ -643,6 +663,15 @@ fn app_url_from_location() -> Option<String> {
     window().location().origin().ok()
 }
 
+#[cfg(not(feature = "ssr"))]
+fn control_url_from_dom() -> Option<String> {
+    use leptos::prelude::window;
+
+    let document = window().document()?;
+    let element = document.get_element_by_id("gittree-app")?;
+    element.get_attribute("data-control-url")
+}
+
 #[cfg(feature = "ssr")]
 fn base_path_from_dom() -> Option<String> {
     None
@@ -655,6 +684,11 @@ fn auth_url_from_dom() -> Option<String> {
 
 #[cfg(feature = "ssr")]
 fn app_url_from_dom() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn control_url_from_dom() -> Option<String> {
     None
 }
 
