@@ -2,6 +2,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -22,6 +23,7 @@ use serde::Serialize;
 use sha2::Digest;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tower_http::cors::{Any, CorsLayer};
 
 const AUTH_HEADER: &str = "authorization";
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
@@ -232,9 +234,14 @@ fn build_router<T>(state: AuthAppState<T>) -> Router
 where
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT]);
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/signup", post(signup_handler))
+        .layer(cors)
         .with_state(state)
 }
 
