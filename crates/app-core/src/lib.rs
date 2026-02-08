@@ -67,6 +67,30 @@ pub struct ProfileUpdate {
     pub visibility: Option<ProfileVisibility>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedNostrEvent {
+    pub id: String,
+    pub pubkey: String,
+    pub created_at: i64,
+    pub kind: u32,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+    pub sig: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoCreateRequest {
+    pub event: SignedNostrEvent,
+    pub private: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoCreateResponse {
+    pub owner: String,
+    pub name: String,
+    pub html_url: Option<String>,
+}
+
 impl RepoListItem {
     pub fn new(npub: String, identifier: String, forgejo: String, clone_url: String) -> Self {
         Self {
@@ -147,7 +171,7 @@ pub fn pubkey_bytes_from_npub(npub: &str) -> Result<Vec<u8>, AppCoreError> {
 mod tests {
     use super::{
         clone_url, normalize_identifier, npub_from_bytes, pubkey_bytes_from_npub,
-        ProfileVisibility,
+        ProfileVisibility, RepoCreateRequest, RepoCreateResponse, SignedNostrEvent,
     };
 
     #[test]
@@ -166,6 +190,40 @@ mod tests {
     fn npub_from_bytes_returns_npub_prefix() {
         let npub = npub_from_bytes(&[0u8; 32]).expect("npub");
         assert!(npub.starts_with("npub1"));
+    }
+
+    #[test]
+    fn repo_create_request_round_trips() {
+        let event = SignedNostrEvent {
+            id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 1_700_000_000,
+            kind: 30_617,
+            tags: vec![vec!["d".to_string(), "demo".to_string()]],
+            content: String::new(),
+            sig: "33".repeat(64),
+        };
+        let request = RepoCreateRequest {
+            event,
+            private: Some(true),
+        };
+        let json = serde_json::to_string(&request).expect("json");
+        let decoded: RepoCreateRequest =
+            serde_json::from_str(&json).expect("decode");
+        assert_eq!(request, decoded);
+    }
+
+    #[test]
+    fn repo_create_response_round_trips() {
+        let response = RepoCreateResponse {
+            owner: "alice".to_string(),
+            name: "demo".to_string(),
+            html_url: Some("http://localhost/demo".to_string()),
+        };
+        let json = serde_json::to_string(&response).expect("json");
+        let decoded: RepoCreateResponse =
+            serde_json::from_str(&json).expect("decode");
+        assert_eq!(response, decoded);
     }
 
     #[test]
