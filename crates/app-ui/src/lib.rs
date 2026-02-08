@@ -4,6 +4,7 @@ mod app;
 mod auth;
 mod i18n;
 mod logging;
+mod session;
 mod theme;
 pub mod server;
 

@@ -13,6 +13,7 @@ use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
 
 use crate::auth::{auth_header, local_key_event, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
 use crate::i18n::app_i18n_init;
+use crate::session::{AuthSession, AuthSource, store_session};
 use crate::server::{list_repositories, repo_detail};
 use crate::t;
 
@@ -197,7 +198,13 @@ fn SignupPage() -> impl IntoView {
 
             match event {
                 Ok(event) => match request_signup(&auth_endpoint, event).await {
-                    Ok(response) => set_status.set(Some(response)),
+                    Ok(response) => {
+                        if let Err(message) = persist_session(&response.pubkey, AuthSource::Nip07)
+                        {
+                            set_error.set(Some(message));
+                        }
+                        set_status.set(Some(response));
+                    }
                     Err(message) => set_error.set(Some(message)),
                 },
                 Err(err) => set_error.set(Some(err.to_string())),
@@ -225,7 +232,13 @@ fn SignupPage() -> impl IntoView {
             let now = unix_timestamp();
             match local_key_event("POST", &auth_endpoint, None, now) {
                 Ok(event) => match request_signup(&auth_endpoint, event).await {
-                    Ok(response) => set_status.set(Some(response)),
+                    Ok(response) => {
+                        if let Err(message) = persist_session(&response.pubkey, AuthSource::Local)
+                        {
+                            set_error.set(Some(message));
+                        }
+                        set_status.set(Some(response));
+                    }
                     Err(message) => set_error.set(Some(message)),
                 },
                 Err(err) => set_error.set(Some(err.to_string())),
@@ -420,6 +433,12 @@ fn build_signup_endpoint(auth_url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}/v1/signup", trimmed.trim_end_matches('/')))
+}
+
+fn persist_session(pubkey: &str, source: AuthSource) -> Result<(), String> {
+    let session = AuthSession::from_pubkey_hex(pubkey, source)
+        .map_err(|err| err.to_string())?;
+    store_session(&session).map_err(|err| err.to_string())
 }
 
 async fn request_signup(auth_endpoint: &str, event: Nip98Event) -> Result<SignupResponse, String> {
