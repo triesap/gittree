@@ -24,6 +24,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_nostr_event_indexes(),
         migration_relay_publish_outbox(),
         migration_gittree_accounts(),
+        migration_gittree_profiles(),
     ]
 }
 
@@ -177,6 +178,16 @@ fn migration_gittree_accounts() -> Migration {
     }
 }
 
+fn migration_gittree_profiles() -> Migration {
+    const GITTREE_PROFILES_SQL: &str =
+        include_str!("../../../migrations/0009_gittree_profiles.sql");
+    Migration {
+        version: 9,
+        description: "gittree profiles",
+        sql: GITTREE_PROFILES_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -247,12 +258,13 @@ mod tests {
         assert!(sql.contains("CREATE TABLE nostr_event"));
         assert!(sql.contains("CREATE TABLE relay_publish_outbox"));
         assert!(sql.contains("CREATE TABLE gittree_account"));
+        assert!(sql.contains("CREATE TABLE gittree_profile"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 }

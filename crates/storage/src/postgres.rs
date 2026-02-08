@@ -1,11 +1,11 @@
 use crate::repositories::{
-    AccountRepository, AnnouncementRepository, EventRepository, RelayCompatibilityRepository,
-    RelayPublishRepository, RepoMappingRepository, StateRepository,
+    AccountRepository, AnnouncementRepository, EventRepository, ProfileRepository,
+    RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository, StateRepository,
 };
 use crate::{
-    AccountRecord, EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob,
-    RelayPublishRequest, RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord,
-    RepoStateRecord, TagRecord, StorageError,
+    AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
+    RelayCompatibilityRecord, RelayPublishJob, RelayPublishRequest, RelayPublishStatus,
+    RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord, StorageError,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
@@ -454,6 +454,96 @@ LIMIT 1
         Ok(row.map(|row| AccountRecord {
             pubkey: row.get("pubkey"),
             forgejo_username: row.get("forgejo_username"),
+        }))
+    }
+}
+
+#[async_trait]
+impl ProfileRepository for PostgresRepositories {
+    async fn upsert_profile(&self, record: ProfileRecord) -> Result<(), StorageError> {
+        let created_at = Self::to_offset_datetime(record.created_at)?;
+        let updated_at = Self::to_offset_datetime(record.updated_at)?;
+        sqlx::query(
+            r#"
+INSERT INTO gittree_profile (
+    pubkey,
+    display_name,
+    bio,
+    avatar_url,
+    website_url,
+    location,
+    visibility,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (pubkey)
+DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    bio = EXCLUDED.bio,
+    avatar_url = EXCLUDED.avatar_url,
+    website_url = EXCLUDED.website_url,
+    location = EXCLUDED.location,
+    visibility = EXCLUDED.visibility,
+    updated_at = EXCLUDED.updated_at
+"#,
+        )
+        .bind(record.pubkey)
+        .bind(record.display_name)
+        .bind(record.bio)
+        .bind(record.avatar_url)
+        .bind(record.website_url)
+        .bind(record.location)
+        .bind(record.visibility.as_str())
+        .bind(created_at)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn profile_by_pubkey(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<ProfileRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+    pubkey,
+    display_name,
+    bio,
+    avatar_url,
+    website_url,
+    location,
+    visibility,
+    created_at,
+    updated_at
+FROM gittree_profile
+WHERE pubkey = $1
+LIMIT 1
+"#,
+        )
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let created_at: OffsetDateTime = row.get("created_at");
+        let updated_at: OffsetDateTime = row.get("updated_at");
+        let visibility: String = row.get("visibility");
+        let visibility = ProfileVisibility::parse(&visibility)?;
+        Ok(Some(ProfileRecord {
+            pubkey: row.get("pubkey"),
+            display_name: row.get("display_name"),
+            bio: row.get("bio"),
+            avatar_url: row.get("avatar_url"),
+            website_url: row.get("website_url"),
+            location: row.get("location"),
+            visibility,
+            created_at: Self::from_offset_datetime(created_at),
+            updated_at: Self::from_offset_datetime(updated_at),
         }))
     }
 }
@@ -935,8 +1025,8 @@ WHERE pubkey = $1
 mod tests {
     use super::PostgresRepositories;
     use crate::repositories::{
-        AccountRepository, EventRepository, RelayCompatibilityRepository, RelayPublishRepository,
-        RepoMappingRepository,
+        AccountRepository, EventRepository, ProfileRepository, RelayCompatibilityRepository,
+        RelayPublishRepository, RepoMappingRepository,
     };
     use crate::StorageError;
 
@@ -961,6 +1051,12 @@ mod tests {
     #[test]
     fn postgres_repos_implements_account_repo() {
         fn assert_impl<T: AccountRepository>() {}
+        assert_impl::<PostgresRepositories>();
+    }
+
+    #[test]
+    fn postgres_repos_implements_profile_repo() {
+        fn assert_impl<T: ProfileRepository>() {}
         assert_impl::<PostgresRepositories>();
     }
 

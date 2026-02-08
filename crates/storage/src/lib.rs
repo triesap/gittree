@@ -29,7 +29,8 @@ pub use repo_mapping::RepoMappingRecord;
 pub use relay_compat::{RelayCompatibilityRecord, RelayProbeMetadata};
 pub use repositories::{
     AccountRepository, AnnouncementRepository, EventRepository, InMemoryRepositories,
-    RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository, StateRepository,
+    ProfileRepository, RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository,
+    StateRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
