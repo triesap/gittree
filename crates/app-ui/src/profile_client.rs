@@ -39,6 +39,19 @@ pub fn profile_endpoint(auth_url: &str) -> Option<String> {
     Some(format!("{}/v1/profile", trimmed.trim_end_matches('/')))
 }
 
+pub fn public_profile_endpoint(auth_url: &str, npub: &str) -> Option<String> {
+    let trimmed = auth_url.trim();
+    let npub = npub.trim();
+    if trimmed.is_empty() || npub.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}/v1/profile/{}",
+        trimmed.trim_end_matches('/'),
+        npub
+    ))
+}
+
 pub async fn fetch_profile(
     auth_endpoint: &str,
     event: Nip98Event,
@@ -52,6 +65,26 @@ pub async fn fetch_profile(
     headers
         .set("Authorization", &header)
         .map_err(request_error)?;
+    headers.set("Accept", "application/json").map_err(request_error)?;
+    init.set_headers(&headers);
+
+    let request =
+        Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
+    let window = web_sys::window().ok_or(ProfileClientError::MissingWindow)?;
+    let response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(request_error)?;
+    let response: Response = response.dyn_into().map_err(request_error)?;
+    read_profile_response(response).await
+}
+
+pub async fn fetch_public_profile(
+    auth_endpoint: &str,
+) -> Result<Profile, ProfileClientError> {
+    let init = RequestInit::new();
+    init.set_method("GET");
+    init.set_mode(RequestMode::Cors);
+    let headers = Headers::new().map_err(request_error)?;
     headers.set("Accept", "application/json").map_err(request_error)?;
     init.set_headers(&headers);
 
@@ -135,7 +168,7 @@ fn js_error(value: JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_profile_error, profile_endpoint};
+    use super::{parse_profile_error, profile_endpoint, public_profile_endpoint};
 
     #[test]
     fn profile_endpoint_joins_paths() {
@@ -146,6 +179,19 @@ mod tests {
     #[test]
     fn profile_endpoint_rejects_empty() {
         assert!(profile_endpoint("").is_none());
+    }
+
+    #[test]
+    fn public_profile_endpoint_joins_paths() {
+        let endpoint =
+            public_profile_endpoint("http://localhost:8089", "npub1test").expect("endpoint");
+        assert_eq!(endpoint, "http://localhost:8089/v1/profile/npub1test");
+    }
+
+    #[test]
+    fn public_profile_endpoint_rejects_empty() {
+        assert!(public_profile_endpoint("", "npub1").is_none());
+        assert!(public_profile_endpoint("http://localhost:8089", "").is_none());
     }
 
     #[test]

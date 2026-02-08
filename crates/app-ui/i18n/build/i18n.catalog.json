@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "project": "gittree-app-ui",
-  "generated_at": "2026-02-08T21:11:14Z",
+  "generated_at": "2026-02-08T22:42:45Z",
   "default_locale": "en",
   "messages": [
     {
@@ -139,6 +139,72 @@
     {
       "key": "app.profile.pubkey",
       "id": 393195669,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.public.cta",
+      "id": 2543759450,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.public.error",
+      "id": 1655726134,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.public.repos",
+      "id": 657117481,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.public.repos_empty",
+      "id": 3838848479,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.public.tagline",
+      "id": 2985981527,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.public.title",
+      "id": 2663051772,
       "args": [],
       "features": {
         "select": false,

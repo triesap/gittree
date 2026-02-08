@@ -25,7 +25,10 @@ use crate::auth_client::{signup, signup_endpoint, SignupResponse};
 use crate::control_client::{create_repo, ControlRepoInput, ControlRepoResponse};
 use crate::control_token::{clear_control_token, load_control_token, store_control_token};
 use crate::i18n::app_i18n_init;
-use crate::profile_client::{fetch_profile, profile_endpoint, update_profile};
+use crate::profile_client::{
+    fetch_profile, fetch_public_profile, profile_endpoint, public_profile_endpoint,
+    update_profile,
+};
 use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
 use crate::server::{list_repositories, repo_detail};
 use crate::t;
@@ -63,6 +66,7 @@ pub fn GittreeApp() -> impl IntoView {
                     <Route path=path!("/") view=RepoListPage />
                     <Route path=path!("/signup") view=SignupPage />
                     <Route path=path!("/profile") view=ProfilePage />
+                    <Route path=path!("/u/:npub") view=PublicProfilePage />
                     <Route path=path!("/test") view=TestConsolePage />
                     <Route path=path!("/:npub/:identifier") view=RepoDetailPage />
                 </Routes>
@@ -513,6 +517,11 @@ fn ProfilePage() -> impl IntoView {
                         <div class="gt-meta">
                             {format!("{} {}", t!("app.profile.npub"), session.npub)}
                         </div>
+                        <div class="gt-meta">
+                            <a class="gt-link" href=public_profile_href(&base_path, &session.npub)>
+                                {t!("app.profile.public.cta")}
+                            </a>
+                        </div>
                         <form class="gt-form">
                             <div class="gt-field">
                                 <label class="gt-label">{t!("app.profile.display_name")}</label>
@@ -606,6 +615,137 @@ fn ProfilePage() -> impl IntoView {
                         .into_any()
                 }
             }}
+        </section>
+    }
+}
+
+#[component]
+fn PublicProfilePage() -> impl IntoView {
+    let base_path = app_base_path();
+    let auth_url = resolve_auth_url();
+    let app_url = resolve_app_url();
+    let params = use_params_map();
+    let list_href = base_href(&base_path);
+
+    let (profile, set_profile) = signal::<Option<Result<Profile, String>>>(None);
+    let (repos, set_repos) = signal::<Option<Result<RepoListResponse, String>>>(None);
+    let (loading, set_loading) = signal(false);
+    let missing_auth_message = t!("app.profile.missing_auth").to_string();
+
+    create_effect(move |_| {
+        let npub = params.get().get("npub").unwrap_or_default();
+        let auth_url = auth_url.clone();
+        let app_url = app_url.clone();
+        let set_profile = set_profile.clone();
+        let set_repos = set_repos.clone();
+        let set_loading = set_loading.clone();
+        let missing_auth_message = missing_auth_message.clone();
+
+        set_profile.set(None);
+        set_repos.set(None);
+
+        if npub.trim().is_empty() {
+            set_profile.set(Some(Err("missing npub".to_string())));
+            set_repos.set(Some(Err("missing npub".to_string())));
+            return;
+        }
+
+        set_loading.set(true);
+        leptos::task::spawn_local(async move {
+            let profile_result = match public_profile_endpoint(&auth_url, &npub) {
+                Some(endpoint) => fetch_public_profile(&endpoint)
+                    .await
+                    .map_err(|err| err.to_string()),
+                None => Err(missing_auth_message),
+            };
+            set_profile.set(Some(profile_result));
+
+            let repos_result = {
+                let endpoint = repo_list_by_owner_endpoint(&app_url, &npub);
+                fetch_repo_list(&endpoint).await
+            };
+            set_repos.set(Some(repos_result));
+            set_loading.set(false);
+        });
+    });
+
+    view! {
+        <section class="gt-panel">
+            <h1 class="gt-title">{t!("app.profile.public.title")}</h1>
+            <p class="gt-tagline">{t!("app.profile.public.tagline")}</p>
+            {move || {
+                if loading.get() && profile.get().is_none() {
+                    return view! { <p class="gt-meta">{t!("app.profile.loading")}</p> }.into_any();
+                }
+                match profile.get() {
+                    None => ().into_any(),
+                    Some(Ok(profile)) => {
+                        let display_name =
+                            profile.display_name.clone().unwrap_or_else(|| profile.username.clone());
+                        let npub_label = params.get().get("npub").unwrap_or_default();
+                        view! {
+                            <>
+                                <h2 class="gt-title">{display_name}</h2>
+                                <p class="gt-meta">{format!("@{}", profile.username)}</p>
+                                <p class="gt-meta">{format!("{} {}", t!("app.profile.npub"), npub_label)}</p>
+                                {move || match profile.bio.clone() {
+                                    None => ().into_any(),
+                                    Some(bio) => view! { <p class="gt-meta">{bio}</p> }.into_any(),
+                                }}
+                            </>
+                        }
+                        .into_any()
+                    }
+                    Some(Err(message)) => view! {
+                        <p class="gt-meta">{format!("{} {}", t!("app.profile.public.error"), message)}</p>
+                    }
+                    .into_any(),
+                }
+            }}
+            <h3 class="gt-meta">{t!("app.profile.public.repos")}</h3>
+            {move || {
+                if loading.get() && repos.get().is_none() {
+                    return view! { <p class="gt-meta">{t!("app.repo.loading")}</p> }.into_any();
+                }
+                match repos.get() {
+                    None => ().into_any(),
+                    Some(Ok(response)) => {
+                        if response.items.is_empty() {
+                            view! { <p class="gt-meta">{t!("app.profile.public.repos_empty")}</p> }
+                                .into_any()
+                        } else {
+                            let items = response.items;
+                            view! {
+                                <ul class="gt-list">
+                                    {items
+                                        .into_iter()
+                                        .map(|item| {
+                                            let href = repo_href(&base_path, &item.npub, &item.identifier);
+                                            view! {
+                                                <li class="gt-list-item">
+                                                    <div>
+                                                        <a class="gt-link" href=href>{item.identifier}</a>
+                                                    </div>
+                                                    <div class="gt-meta">{item.npub}</div>
+                                                    <div class="gt-meta">{format!("{} {}", t!("app.repo.forgejo"), item.forgejo)}</div>
+                                                </li>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </ul>
+                            }
+                            .into_any()
+                        }
+                    }
+                    Some(Err(message)) => view! {
+                        <p class="gt-meta">{format!("{} {}", t!("app.profile.public.error"), message)}</p>
+                    }
+                    .into_any(),
+                }
+            }}
+            <p>
+                <a class="gt-link" href=list_href>{t!("app.repo.back")}</a>
+            </p>
         </section>
     }
 }
@@ -1366,6 +1506,15 @@ fn profile_href(base_path: &str) -> String {
     }
 }
 
+fn public_profile_href(base_path: &str, npub: &str) -> String {
+    let base = base_path.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        format!("/u/{npub}")
+    } else {
+        format!("{base}/u/{npub}")
+    }
+}
+
 fn test_href(base_path: &str) -> String {
     let base = base_path.trim_end_matches('/');
     if base.is_empty() || base == "/" {
@@ -1381,6 +1530,15 @@ fn repo_list_endpoint(app_url: &str) -> String {
         "/api/repos".to_string()
     } else {
         format!("{}/api/repos", trimmed.trim_end_matches('/'))
+    }
+}
+
+fn repo_list_by_owner_endpoint(app_url: &str, npub: &str) -> String {
+    let trimmed = app_url.trim();
+    if trimmed.is_empty() {
+        format!("/api/users/{npub}/repos")
+    } else {
+        format!("{}/api/users/{npub}/repos", trimmed.trim_end_matches('/'))
     }
 }
 
@@ -1523,7 +1681,10 @@ fn event_checked(event: &leptos::ev::Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{health_endpoint, repo_list_endpoint, signup_href, test_href};
+    use super::{
+        health_endpoint, public_profile_href, repo_list_by_owner_endpoint, repo_list_endpoint,
+        signup_href, test_href,
+    };
 
     #[test]
     fn repo_list_endpoint_defaults_for_empty() {
@@ -1535,6 +1696,18 @@ mod tests {
         assert_eq!(
             repo_list_endpoint("http://localhost:8090/"),
             "http://localhost:8090/api/repos"
+        );
+    }
+
+    #[test]
+    fn repo_list_by_owner_endpoint_trims_trailing_slash() {
+        assert_eq!(
+            repo_list_by_owner_endpoint("http://localhost:8090/", "npub1"),
+            "http://localhost:8090/api/users/npub1/repos"
+        );
+        assert_eq!(
+            repo_list_by_owner_endpoint("", "npub1"),
+            "/api/users/npub1/repos"
         );
     }
 
@@ -1561,5 +1734,11 @@ mod tests {
     fn signup_href_joins_base_path() {
         assert_eq!(signup_href("/ui"), "/ui/signup");
         assert_eq!(signup_href("/"), "/signup");
+    }
+
+    #[test]
+    fn public_profile_href_joins_base_path() {
+        assert_eq!(public_profile_href("/ui", "npub1"), "/ui/u/npub1");
+        assert_eq!(public_profile_href("/", "npub1"), "/u/npub1");
     }
 }
