@@ -283,4 +283,38 @@
     background: rgba(255, 240, 240, 0.8);
     color: #7a1111;
   }
+  .gt-form {
+    display: grid;
+    gap: 12px;
+    margin: 12px 0 24px;
+  }
+  .gt-field {
+    display: grid;
+    gap: 6px;
+  }
+  .gt-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-gittree-muted);
+  }
+  .gt-input {
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 13px;
+    background: #fff;
+  }
+  .gt-textarea {
+    min-height: 80px;
+  }
+  .gt-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .gt-checkbox {
+    width: 16px;
+    height: 16px;
+  }
 }

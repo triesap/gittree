@@ -20,7 +20,6 @@ pub struct ControlRepoInput {
 pub struct ControlRepoResponse {
     pub owner: String,
     pub name: String,
-    pub full_name: String,
     pub html_url: Option<String>,
 }
 
@@ -131,7 +130,7 @@ pub async fn create_repo(
     let init = RequestInit::new();
     init.set_method("POST");
     init.set_mode(RequestMode::Cors);
-    init.set_body(Some(&JsValue::from_str(&body)));
+    init.set_body(&JsValue::from_str(&body));
 
     let headers = Headers::new().map_err(request_error)?;
     headers

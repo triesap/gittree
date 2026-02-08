@@ -6,11 +6,21 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::hooks::use_params_map;
 use leptos_router::path;
 use gittree_app_core::RepoListResponse;
+use js_sys::Reflect;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
-use crate::auth::{local_key_event, nip07_available, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
+use crate::auth::{
+    local_key_event,
+    local_key_material,
+    nip07_available,
+    nip07_pubkey,
+    nip07_sign_nip98,
+    unix_timestamp,
+};
 use crate::auth_client::{signup, signup_endpoint, SignupResponse};
+use crate::control_client::{create_repo, ControlRepoInput, ControlRepoResponse};
+use crate::control_token::{clear_control_token, load_control_token, store_control_token};
 use crate::i18n::app_i18n_init;
 use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
 use crate::server::{list_repositories, repo_detail};
@@ -329,11 +339,26 @@ fn TestConsolePage() -> impl IntoView {
     let (auth_health, set_auth_health) = signal(HealthState::Idle);
     let (app_health, set_app_health) = signal(HealthState::Idle);
     let (control_health, set_control_health) = signal(HealthState::Idle);
+    let (control_token, set_control_token) = signal(String::new());
+    let (control_repo_name, set_control_repo_name) = signal(String::new());
+    let (control_repo_identifier, set_control_repo_identifier) = signal(String::new());
+    let (control_repo_owner, set_control_repo_owner) = signal(String::new());
+    let (control_repo_description, set_control_repo_description) = signal(String::new());
+    let (control_repo_private, set_control_repo_private) = signal(true);
+    let (control_repo_status, set_control_repo_status) =
+        signal::<Option<ControlRepoResponse>>(None);
+    let (control_repo_pubkey, set_control_repo_pubkey) =
+        signal::<Option<String>>(None);
     let (error, set_error) = signal::<Option<String>>(None);
     let (busy, set_busy) = signal(false);
 
     if let Err(err) = load_session().map(|value| set_session.set(value)) {
         set_error.set(Some(err.to_string()));
+    }
+    match load_control_token() {
+        Ok(Some(token)) => set_control_token.set(token),
+        Ok(None) => {}
+        Err(err) => set_error.set(Some(err.to_string())),
     }
 
     let auth_endpoint_nip07 = auth_endpoint.clone();
@@ -345,6 +370,7 @@ fn TestConsolePage() -> impl IntoView {
     let app_health_disabled = app_health_url.clone();
     let control_health_endpoint = control_health_url.clone();
     let control_health_disabled = control_health_url.clone();
+    let control_url_for_repo = control_url.clone();
 
     let refresh_session = move |_| match load_session() {
         Ok(value) => set_session.set(value),
@@ -356,6 +382,20 @@ fn TestConsolePage() -> impl IntoView {
             set_error.set(Some(err.to_string()));
         }
         set_session.set(None);
+    };
+
+    let save_control_token_action = move |_| {
+        if let Err(err) = store_control_token(&control_token.get()) {
+            set_error.set(Some(err.to_string()));
+        }
+    };
+
+    let clear_control_token_action = move |_| {
+        if let Err(err) = clear_control_token() {
+            set_error.set(Some(err.to_string()));
+            return;
+        }
+        set_control_token.set(String::new());
     };
 
     let signup_nip07 = move |_| {
@@ -453,6 +493,77 @@ fn TestConsolePage() -> impl IntoView {
         });
     };
 
+    let create_repo_action = move |_| {
+        let control_url = control_url_for_repo.clone();
+        let token = control_token.get();
+        let name = control_repo_name.get();
+        let identifier = control_repo_identifier.get();
+        let owner = control_repo_owner.get();
+        let description = control_repo_description.get();
+        let private = control_repo_private.get();
+        let set_error = set_error.clone();
+        let set_busy = set_busy.clone();
+        let set_repo_status = set_control_repo_status.clone();
+        let set_repo_pubkey = set_control_repo_pubkey.clone();
+
+        if token.trim().is_empty() {
+            set_error.set(Some(t!("app.test.control.missing_token").to_string()));
+            return;
+        }
+        if name.trim().is_empty() {
+            set_error.set(Some(t!("app.test.control.missing_name").to_string()));
+            return;
+        }
+
+        leptos::task::spawn_local(async move {
+            set_busy.set(true);
+            set_error.set(None);
+            set_repo_status.set(None);
+            set_repo_pubkey.set(None);
+
+            let material = match local_key_material() {
+                Ok(material) => material,
+                Err(err) => {
+                    set_error.set(Some(err.to_string()));
+                    set_busy.set(false);
+                    return;
+                }
+            };
+
+            let input = ControlRepoInput {
+                name: name.trim().to_string(),
+                owner: if owner.trim().is_empty() {
+                    None
+                } else {
+                    Some(owner.trim().to_string())
+                },
+                identifier: if identifier.trim().is_empty() {
+                    None
+                } else {
+                    Some(identifier.trim().to_string())
+                },
+                description: if description.trim().is_empty() {
+                    None
+                } else {
+                    Some(description.trim().to_string())
+                },
+                private: Some(private),
+                pubkey: material.pubkey.clone(),
+                privkey: material.privkey,
+            };
+
+            match create_repo(&control_url, &token, input).await {
+                Ok(repo) => {
+                    set_repo_pubkey.set(Some(material.pubkey));
+                    set_repo_status.set(Some(repo));
+                }
+                Err(err) => set_error.set(Some(err.to_string())),
+            }
+
+            set_busy.set(false);
+        });
+    };
+
     let list_href = base_href(&base_path);
 
     view! {
@@ -514,6 +625,124 @@ fn TestConsolePage() -> impl IntoView {
                 <p class="gt-meta">{format!("{} {}", t!("app.test.health.app"), render_health(&app_health.get()))}</p>
                 <p class="gt-meta">{format!("{} {}", t!("app.test.health.control"), render_health(&control_health.get()))}</p>
             </div>
+
+            <p class="gt-meta">{t!("app.test.section.control")}</p>
+            <div class="gt-form">
+                <div class="gt-field">
+                    <label class="gt-label">{t!("app.test.control.token")}</label>
+                    <input
+                        class="gt-input"
+                        type="password"
+                        placeholder=t!("app.test.control.token.placeholder")
+                        value=move || control_token.get()
+                        on:input=move |ev| set_control_token.set(event_value(&ev))
+                    />
+                </div>
+                <div class="gt-actions">
+                    <button
+                        class="gt-button gt-button-secondary"
+                        disabled=move || busy.get()
+                        on:click=save_control_token_action
+                    >
+                        {t!("app.test.control.token.save")}
+                    </button>
+                    <button
+                        class="gt-button gt-button-secondary"
+                        disabled=move || busy.get()
+                        on:click=clear_control_token_action
+                    >
+                        {t!("app.test.control.token.clear")}
+                    </button>
+                </div>
+            </div>
+            <div class="gt-form">
+                <div class="gt-field">
+                    <label class="gt-label">{t!("app.test.control.repo.name")}</label>
+                    <input
+                        class="gt-input"
+                        type="text"
+                        placeholder=t!("app.test.control.repo.name_placeholder")
+                        value=move || control_repo_name.get()
+                        on:input=move |ev| set_control_repo_name.set(event_value(&ev))
+                    />
+                </div>
+                <div class="gt-field">
+                    <label class="gt-label">{t!("app.test.control.repo.identifier")}</label>
+                    <input
+                        class="gt-input"
+                        type="text"
+                        placeholder=t!("app.test.control.repo.identifier_placeholder")
+                        value=move || control_repo_identifier.get()
+                        on:input=move |ev| set_control_repo_identifier.set(event_value(&ev))
+                    />
+                </div>
+                <div class="gt-field">
+                    <label class="gt-label">{t!("app.test.control.repo.owner")}</label>
+                    <input
+                        class="gt-input"
+                        type="text"
+                        placeholder=t!("app.test.control.repo.owner_placeholder")
+                        value=move || control_repo_owner.get()
+                        on:input=move |ev| set_control_repo_owner.set(event_value(&ev))
+                    />
+                </div>
+                <div class="gt-field">
+                    <label class="gt-label">{t!("app.test.control.repo.description")}</label>
+                    <textarea
+                        class="gt-input gt-textarea"
+                        placeholder=t!("app.test.control.repo.description_placeholder")
+                        prop:value=move || control_repo_description.get()
+                        on:input=move |ev| set_control_repo_description.set(event_value(&ev))
+                    ></textarea>
+                </div>
+                <div class="gt-inline">
+                    <input
+                        class="gt-checkbox"
+                        type="checkbox"
+                        checked=move || control_repo_private.get()
+                        on:change=move |ev| set_control_repo_private.set(event_checked(&ev))
+                    />
+                    <span class="gt-meta">{t!("app.test.control.repo.private")}</span>
+                </div>
+                <div class="gt-actions">
+                    <button
+                        class="gt-button gt-button-secondary"
+                        disabled=move || {
+                            busy.get()
+                                || control_repo_name.get().trim().is_empty()
+                                || control_token.get().trim().is_empty()
+                        }
+                        on:click=create_repo_action
+                    >
+                        {t!("app.test.control.repo.create")}
+                    </button>
+                </div>
+            </div>
+            {move || match control_repo_pubkey.get() {
+                Some(pubkey) => view! {
+                    <div class="gt-status">
+                        <p class="gt-meta">{format!("{} {}", t!("app.test.control.repo.pubkey"), pubkey)}</p>
+                    </div>
+                }
+                .into_any(),
+                None => ().into_any(),
+            }}
+            {move || match control_repo_status.get() {
+                Some(repo) => view! {
+                    <div class="gt-status">
+                        <p class="gt-meta">{format!("{} {}/{}", t!("app.test.control.repo.full_name"), repo.owner, repo.name)}</p>
+                        {match repo.html_url.clone() {
+                            Some(url) => view! {
+                                <p class="gt-meta">{format!("{} {}", t!("app.test.control.repo.url"), url)}</p>
+                            }
+                            .into_any(),
+                            None => ().into_any(),
+                        }}
+                    </div>
+                }
+                .into_any(),
+                None => ().into_any(),
+            }}
 
             <p class="gt-meta">{t!("app.test.section.session")}</p>
             {move || match session.get() {
@@ -912,6 +1141,22 @@ fn request_error(value: JsValue) -> String {
     value
         .as_string()
         .unwrap_or_else(|| format!("{:?}", value))
+}
+
+fn event_value(event: &leptos::ev::Event) -> String {
+    event
+        .target()
+        .and_then(|target| Reflect::get(&target, &JsValue::from_str("value")).ok())
+        .and_then(|value| value.as_string())
+        .unwrap_or_default()
+}
+
+fn event_checked(event: &leptos::ev::Event) -> bool {
+    event
+        .target()
+        .and_then(|target| Reflect::get(&target, &JsValue::from_str("checked")).ok())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

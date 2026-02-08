@@ -74,6 +74,46 @@ app.test.health.ok = ok
 
 app.test.health.fail = failed
 
+app.test.section.control = control
+
+app.test.control.token = control token
+
+app.test.control.token.placeholder = paste control token
+
+app.test.control.token.save = save token
+
+app.test.control.token.clear = clear token
+
+app.test.control.repo.name = repo name
+
+app.test.control.repo.name_placeholder = hello-gittree
+
+app.test.control.repo.identifier = repo identifier
+
+app.test.control.repo.identifier_placeholder = hello-gittree
+
+app.test.control.repo.owner = forgejo owner (optional)
+
+app.test.control.repo.owner_placeholder = leave empty for default owner
+
+app.test.control.repo.description = description (optional)
+
+app.test.control.repo.description_placeholder = short description
+
+app.test.control.repo.private = private repo
+
+app.test.control.repo.create = create repo
+
+app.test.control.repo.pubkey = local pubkey:
+
+app.test.control.repo.full_name = repo:
+
+app.test.control.repo.url = web:
+
+app.test.control.missing_token = missing control token
+
+app.test.control.missing_name = missing repo name
+
 app.test.section.repos = repo list
 
 app.test.repos.empty = no repositories returned.

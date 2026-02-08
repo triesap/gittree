@@ -1877,6 +1877,7 @@ dependencies = [
  "gittree-storage",
  "hex",
  "js-sys",
+ "k256",
  "leptos",
  "leptos_router",
  "mf2-i18n-core",
