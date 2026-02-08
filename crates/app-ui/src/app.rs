@@ -9,7 +9,7 @@ use gittree_app_core::RepoListResponse;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
-use crate::auth::{local_key_event, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
+use crate::auth::{local_key_event, nip07_available, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
 use crate::auth_client::{signup, signup_endpoint, SignupResponse};
 use crate::i18n::app_i18n_init;
 use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
@@ -18,6 +18,13 @@ use crate::t;
 
 #[derive(Clone)]
 struct AppBasePath(String);
+
+#[derive(Clone, Debug)]
+enum HealthState {
+    Idle,
+    Ok(u16),
+    Error(String),
+}
 
 #[component]
 pub fn GittreeApp() -> impl IntoView {
@@ -157,6 +164,7 @@ fn SignupPage() -> impl IntoView {
     let auth_endpoint = signup_endpoint(&auth_url);
     let auth_ready = auth_endpoint.is_some();
     let auth_endpoint = auth_endpoint.unwrap_or_default();
+    let nip07_ready = nip07_available();
     let missing_auth_message = t!("app.signup.missing_auth").to_string();
 
     let (status, set_status) = signal::<Option<SignupResponse>>(None);
@@ -251,7 +259,7 @@ fn SignupPage() -> impl IntoView {
             <div class="gt-actions">
                 <button
                     class="gt-button"
-                    disabled=move || busy.get() || !auth_ready
+                    disabled=move || busy.get() || !auth_ready || !nip07_ready
                     on:click=signup_nip07
                 >
                     {t!("app.signup.action_nip07")}
@@ -307,12 +315,20 @@ fn TestConsolePage() -> impl IntoView {
     let auth_url = resolve_auth_url();
     let auth_endpoint = signup_endpoint(&auth_url).unwrap_or_default();
     let auth_ready = !auth_endpoint.is_empty();
+    let nip07_ready = nip07_available();
     let api_url = resolve_app_url();
     let repos_endpoint = repo_list_endpoint(&api_url);
+    let auth_health_url = health_endpoint(&auth_url);
+    let app_health_url = health_endpoint(&api_url);
+    let control_url = resolve_control_url();
+    let control_health_url = health_endpoint(&control_url);
 
     let (session, set_session) = signal::<Option<AuthSession>>(None);
     let (signup_status, set_signup_status) = signal::<Option<SignupResponse>>(None);
     let (repos_status, set_repos_status) = signal::<Option<RepoListResponse>>(None);
+    let (auth_health, set_auth_health) = signal(HealthState::Idle);
+    let (app_health, set_app_health) = signal(HealthState::Idle);
+    let (control_health, set_control_health) = signal(HealthState::Idle);
     let (error, set_error) = signal::<Option<String>>(None);
     let (busy, set_busy) = signal(false);
 
@@ -323,6 +339,12 @@ fn TestConsolePage() -> impl IntoView {
     let auth_endpoint_nip07 = auth_endpoint.clone();
     let auth_endpoint_local = auth_endpoint.clone();
     let repos_endpoint_fetch = repos_endpoint.clone();
+    let auth_health_endpoint = auth_health_url.clone();
+    let auth_health_disabled = auth_health_url.clone();
+    let app_health_endpoint = app_health_url.clone();
+    let app_health_disabled = app_health_url.clone();
+    let control_health_endpoint = control_health_url.clone();
+    let control_health_disabled = control_health_url.clone();
 
     let refresh_session = move |_| match load_session() {
         Ok(value) => set_session.set(value),
@@ -442,7 +464,7 @@ fn TestConsolePage() -> impl IntoView {
             <div class="gt-actions">
                 <button
                     class="gt-button"
-                    disabled=move || busy.get() || !auth_ready
+                    disabled=move || busy.get() || !auth_ready || !nip07_ready
                     on:click=signup_nip07
                 >
                     {t!("app.signup.action_nip07")}
@@ -461,6 +483,36 @@ fn TestConsolePage() -> impl IntoView {
                 >
                     {t!("app.test.actions.list_repos")}
                 </button>
+            </div>
+
+            <p class="gt-meta">{t!("app.test.section.health")}</p>
+            <div class="gt-actions">
+                <button
+                    class="gt-button gt-button-secondary"
+                    disabled=move || busy.get() || auth_health_disabled.is_empty()
+                    on:click=move |_| run_health_check(auth_health_endpoint.clone(), set_auth_health.clone(), set_error.clone(), set_busy.clone())
+                >
+                    {t!("app.test.health.auth")}
+                </button>
+                <button
+                    class="gt-button gt-button-secondary"
+                    disabled=move || busy.get() || app_health_disabled.is_empty()
+                    on:click=move |_| run_health_check(app_health_endpoint.clone(), set_app_health.clone(), set_error.clone(), set_busy.clone())
+                >
+                    {t!("app.test.health.app")}
+                </button>
+                <button
+                    class="gt-button gt-button-secondary"
+                    disabled=move || busy.get() || control_health_disabled.is_empty()
+                    on:click=move |_| run_health_check(control_health_endpoint.clone(), set_control_health.clone(), set_error.clone(), set_busy.clone())
+                >
+                    {t!("app.test.health.control")}
+                </button>
+            </div>
+            <div class="gt-status">
+                <p class="gt-meta">{format!("{} {}", t!("app.test.health.auth"), render_health(&auth_health.get()))}</p>
+                <p class="gt-meta">{format!("{} {}", t!("app.test.health.app"), render_health(&app_health.get()))}</p>
+                <p class="gt-meta">{format!("{} {}", t!("app.test.health.control"), render_health(&control_health.get()))}</p>
             </div>
 
             <p class="gt-meta">{t!("app.test.section.session")}</p>
@@ -760,6 +812,15 @@ fn repo_list_endpoint(app_url: &str) -> String {
     }
 }
 
+fn health_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{}/health", trimmed.trim_end_matches('/'))
+    }
+}
+
 fn persist_session(pubkey: &str, source: AuthSource) -> Result<AuthSession, String> {
     let session = AuthSession::from_pubkey_hex(pubkey, source)
         .map_err(|err| err.to_string())?;
@@ -794,8 +855,104 @@ async fn fetch_repo_list(endpoint: &str) -> Result<RepoListResponse, String> {
     }
 }
 
+async fn fetch_health(endpoint: &str) -> Result<u16, String> {
+    let init = RequestInit::new();
+    init.set_method("GET");
+    init.set_mode(RequestMode::Cors);
+
+    let request =
+        Request::new_with_str_and_init(endpoint, &init).map_err(request_error)?;
+    let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
+    let response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(request_error)?;
+    let response: Response = response.dyn_into().map_err(request_error)?;
+    let status = response.status();
+    if (200..300).contains(&status) {
+        Ok(status)
+    } else {
+        Err(format!("status {status}"))
+    }
+}
+
+fn render_health(state: &HealthState) -> String {
+    match state {
+        HealthState::Idle => t!("app.test.health.idle").to_string(),
+        HealthState::Ok(status) => format!("{} ({status})", t!("app.test.health.ok")),
+        HealthState::Error(message) => format!("{} ({message})", t!("app.test.health.fail")),
+    }
+}
+
+fn run_health_check(
+    endpoint: String,
+    set_health: WriteSignal<HealthState>,
+    set_error: WriteSignal<Option<String>>,
+    set_busy: WriteSignal<bool>,
+) {
+    if endpoint.is_empty() {
+        set_health.set(HealthState::Error("missing url".to_string()));
+        return;
+    }
+
+    leptos::task::spawn_local(async move {
+        set_busy.set(true);
+        set_error.set(None);
+        match fetch_health(&endpoint).await {
+            Ok(status) => set_health.set(HealthState::Ok(status)),
+            Err(err) => {
+                set_health.set(HealthState::Error(err.clone()));
+                set_error.set(Some(err));
+            }
+        }
+        set_busy.set(false);
+    });
+}
+
 fn request_error(value: JsValue) -> String {
     value
         .as_string()
         .unwrap_or_else(|| format!("{:?}", value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{health_endpoint, repo_list_endpoint, signup_href, test_href};
+
+    #[test]
+    fn repo_list_endpoint_defaults_for_empty() {
+        assert_eq!(repo_list_endpoint(""), "/api/repos");
+    }
+
+    #[test]
+    fn repo_list_endpoint_trims_trailing_slash() {
+        assert_eq!(
+            repo_list_endpoint("http://localhost:8090/"),
+            "http://localhost:8090/api/repos"
+        );
+    }
+
+    #[test]
+    fn health_endpoint_defaults_for_empty() {
+        assert_eq!(health_endpoint(""), "");
+    }
+
+    #[test]
+    fn health_endpoint_trims_trailing_slash() {
+        assert_eq!(
+            health_endpoint("http://localhost:8090/"),
+            "http://localhost:8090/health"
+        );
+    }
+
+    #[test]
+    fn test_href_joins_base_path() {
+        assert_eq!(test_href("/ui"), "/ui/test");
+        assert_eq!(test_href("/"), "/test");
+    }
+
+    #[test]
+    fn signup_href_joins_base_path() {
+        assert_eq!(signup_href("/ui"), "/ui/signup");
+        assert_eq!(signup_href("/"), "/signup");
+    }
 }

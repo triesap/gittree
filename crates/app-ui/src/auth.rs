@@ -145,6 +145,16 @@ fn nostr_available() -> bool {
     js_sys::Reflect::has(&window, &JsValue::from_str("nostr")).unwrap_or(false)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn nip07_available() -> bool {
+    nostr_available()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn nip07_available() -> bool {
+    false
+}
+
 fn local_storage() -> Result<Storage, AuthError> {
     let window = window_ref()?;
     window
@@ -181,4 +191,14 @@ fn js_error(value: JsValue) -> String {
     value
         .as_string()
         .unwrap_or_else(|| format!("{:?}", value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nip07_available;
+
+    #[test]
+    fn nip07_available_defaults_false_on_native() {
+        assert!(!nip07_available());
+    }
 }

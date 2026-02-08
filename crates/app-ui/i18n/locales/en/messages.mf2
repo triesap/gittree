@@ -60,6 +60,20 @@ app.test.section.actions = actions
 
 app.test.actions.list_repos = list repos
 
+app.test.section.health = health
+
+app.test.health.auth = auth health
+
+app.test.health.app = app health
+
+app.test.health.control = control health
+
+app.test.health.idle = idle
+
+app.test.health.ok = ok
+
+app.test.health.fail = failed
+
 app.test.section.repos = repo list
 
 app.test.repos.empty = no repositories returned.
