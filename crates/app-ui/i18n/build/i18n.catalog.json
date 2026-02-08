@@ -1,9 +1,119 @@
 {
   "schema": 1,
   "project": "gittree-app-ui",
-  "generated_at": "2026-02-08T22:42:45Z",
+  "generated_at": "2026-02-08T22:56:56Z",
   "default_locale": "en",
   "messages": [
+    {
+      "key": "app.account.clear",
+      "id": 4269820406,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.cta",
+      "id": 27636348,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.error",
+      "id": 208502995,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.none",
+      "id": 1303460267,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.npub",
+      "id": 4138972671,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.pubkey",
+      "id": 3651648600,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.refresh",
+      "id": 885752385,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.source",
+      "id": 3482257626,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.tagline",
+      "id": 4020895283,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.account.title",
+      "id": 2146191965,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
     {
       "key": "app.profile.avatar_url",
       "id": 4057600587,

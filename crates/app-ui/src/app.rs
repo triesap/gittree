@@ -66,6 +66,7 @@ pub fn GittreeApp() -> impl IntoView {
                     <Route path=path!("/") view=RepoListPage />
                     <Route path=path!("/signup") view=SignupPage />
                     <Route path=path!("/profile") view=ProfilePage />
+                    <Route path=path!("/account") view=AccountPage />
                     <Route path=path!("/u/:npub") view=PublicProfilePage />
                     <Route path=path!("/test") view=TestConsolePage />
                     <Route path=path!("/:npub/:identifier") view=RepoDetailPage />
@@ -80,6 +81,7 @@ fn RepoListPage() -> impl IntoView {
     let base_path = app_base_path();
     let signup_href = signup_href(&base_path);
     let profile_href = profile_href(&base_path);
+    let account_href = account_href(&base_path);
     let test_href = test_href(&base_path);
     let repos = Resource::new(|| (), |_| list_repositories());
 
@@ -91,6 +93,8 @@ fn RepoListPage() -> impl IntoView {
                 <a class="gt-link" href=signup_href>{t!("app.signup.cta")}</a>
                 " · "
                 <a class="gt-link" href=profile_href>{t!("app.profile.cta")}</a>
+                " · "
+                <a class="gt-link" href=account_href>{t!("app.account.cta")}</a>
                 " · "
                 <a class="gt-link" href=test_href>{t!("app.test.title")}</a>
             </p>
@@ -612,6 +616,84 @@ fn ProfilePage() -> impl IntoView {
                 None => ().into_any(),
                 Some(message) => {
                     view! { <div class="gt-error">{format!("{} {}", t!("app.profile.error"), message)}</div> }
+                        .into_any()
+                }
+            }}
+        </section>
+    }
+}
+
+#[component]
+fn AccountPage() -> impl IntoView {
+    let base_path = app_base_path();
+    let signup_href = signup_href(&base_path);
+    let profile_href = profile_href(&base_path);
+    let (session, set_session) = signal::<Option<AuthSession>>(None);
+    let (error, set_error) = signal::<Option<String>>(None);
+
+    if let Err(err) = load_session().map(|value| set_session.set(value)) {
+        set_error.set(Some(err.to_string()));
+    }
+
+    let refresh_action = move |_| match load_session() {
+        Ok(value) => set_session.set(value),
+        Err(err) => set_error.set(Some(err.to_string())),
+    };
+
+    let clear_action = move |_| {
+        if let Err(err) = clear_session() {
+            set_error.set(Some(err.to_string()));
+            return;
+        }
+        set_session.set(None);
+    };
+
+    view! {
+        <section class="gt-panel">
+            <h1 class="gt-title">{t!("app.account.title")}</h1>
+            <p class="gt-tagline">{t!("app.account.tagline")}</p>
+            {move || match session.get() {
+                None => view! {
+                    <p class="gt-meta">
+                        {t!("app.account.none")}
+                        " "
+                        <a class="gt-link" href=signup_href.clone()>{t!("app.signup.cta")}</a>
+                    </p>
+                }
+                .into_any(),
+                Some(session) => {
+                    let public_href = public_profile_href(&base_path, &session.npub);
+                    view! {
+                        <div class="gt-meta">
+                            {format!("{} {}", t!("app.account.pubkey"), session.pubkey)}
+                        </div>
+                        <div class="gt-meta">
+                            {format!("{} {}", t!("app.account.npub"), session.npub)}
+                        </div>
+                        <div class="gt-meta">
+                            {format!("{} {}", t!("app.account.source"), auth_source_label(session.source))}
+                        </div>
+                        <div class="gt-meta">
+                            <a class="gt-link" href=profile_href.clone()>{t!("app.profile.cta")}</a>
+                            " · "
+                            <a class="gt-link" href=public_href>{t!("app.profile.public.cta")}</a>
+                        </div>
+                    }
+                    .into_any()
+                }
+            }}
+            <div class="gt-actions">
+                <button class="gt-button" type="button" on:click=refresh_action>
+                    {t!("app.account.refresh")}
+                </button>
+                <button class="gt-button gt-button-secondary" type="button" on:click=clear_action>
+                    {t!("app.account.clear")}
+                </button>
+            </div>
+            {move || match error.get() {
+                None => ().into_any(),
+                Some(message) => {
+                    view! { <div class="gt-error">{format!("{} {}", t!("app.account.error"), message)}</div> }
                         .into_any()
                 }
             }}
@@ -1506,6 +1588,15 @@ fn profile_href(base_path: &str) -> String {
     }
 }
 
+fn account_href(base_path: &str) -> String {
+    let base = base_path.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        "/account".to_string()
+    } else {
+        format!("{base}/account")
+    }
+}
+
 fn public_profile_href(base_path: &str, npub: &str) -> String {
     let base = base_path.trim_end_matches('/');
     if base.is_empty() || base == "/" {
@@ -1556,6 +1647,13 @@ fn persist_session(pubkey: &str, source: AuthSource) -> Result<AuthSession, Stri
         .map_err(|err| err.to_string())?;
     store_session(&session).map_err(|err| err.to_string())?;
     Ok(session)
+}
+
+fn auth_source_label(source: AuthSource) -> &'static str {
+    match source {
+        AuthSource::Nip07 => "nip-07",
+        AuthSource::Local => "local",
+    }
 }
 
 async fn session_sign_nip98(
@@ -1682,8 +1780,8 @@ fn event_checked(event: &leptos::ev::Event) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        health_endpoint, public_profile_href, repo_list_by_owner_endpoint, repo_list_endpoint,
-        signup_href, test_href,
+        account_href, health_endpoint, public_profile_href, repo_list_by_owner_endpoint,
+        repo_list_endpoint, signup_href, test_href,
     };
 
     #[test]
@@ -1734,6 +1832,12 @@ mod tests {
     fn signup_href_joins_base_path() {
         assert_eq!(signup_href("/ui"), "/ui/signup");
         assert_eq!(signup_href("/"), "/signup");
+    }
+
+    #[test]
+    fn account_href_joins_base_path() {
+        assert_eq!(account_href("/ui"), "/ui/account");
+        assert_eq!(account_href("/"), "/account");
     }
 
     #[test]

@@ -98,6 +98,26 @@ app.profile.public.repos_empty = no repositories yet.
 
 app.profile.public.error = unable to load profile:
 
+app.account.cta = account
+
+app.account.title = account
+
+app.account.tagline = manage your local session.
+
+app.account.none = no session found.
+
+app.account.refresh = refresh session
+
+app.account.clear = clear session
+
+app.account.pubkey = pubkey:
+
+app.account.npub = npub:
+
+app.account.source = auth source:
+
+app.account.error = account error:
+
 app.test.title = test console
 
 app.test.tagline = verify auth and api flows from the ui.
