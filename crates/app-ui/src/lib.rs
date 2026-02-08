@@ -3,6 +3,8 @@
 mod app;
 mod auth;
 mod auth_client;
+mod control_client;
+mod control_token;
 mod i18n;
 mod logging;
 mod session;
