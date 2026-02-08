@@ -5,7 +5,13 @@ use leptos::prelude::IntoAny;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::hooks::use_params_map;
 use leptos_router::path;
+use gittree_app_core::Nip98Event;
+use serde::Deserialize;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
 
+use crate::auth::{auth_header, local_key_event, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
 use crate::i18n::app_i18n_init;
 use crate::server::{list_repositories, repo_detail};
 use crate::t;
@@ -30,6 +36,7 @@ pub fn GittreeApp() -> impl IntoView {
             >
                 <Routes fallback=|| view! { <NotFoundPage /> }>
                     <Route path=path!("/") view=RepoListPage />
+                    <Route path=path!("/signup") view=SignupPage />
                     <Route path=path!("/:npub/:identifier") view=RepoDetailPage />
                 </Routes>
             </main>
@@ -40,12 +47,16 @@ pub fn GittreeApp() -> impl IntoView {
 #[component]
 fn RepoListPage() -> impl IntoView {
     let base_path = app_base_path();
+    let signup_href = signup_href(&base_path);
     let repos = Resource::new(|| (), |_| list_repositories());
 
     view! {
         <section class="gt-panel">
             <h1 class="gt-title">{t!("app.title")}</h1>
             <p class="gt-tagline">{t!("app.tagline")}</p>
+            <p class="gt-meta">
+                <a class="gt-link" href=signup_href>{t!("app.signup.cta")}</a>
+            </p>
             <Suspense fallback=|| view! { <p class="gt-meta">{t!("app.repo.loading")}</p> }>
                 {move || match repos.get() {
                     None => view! { <p class="gt-meta">{t!("app.repo.loading")}</p> }.into_any(),
@@ -127,6 +138,157 @@ fn RepoDetailPage() -> impl IntoView {
                     Some(Err(_)) => view! { <p class="gt-meta">{t!("app.repo.detail_error")}</p> }.into_any(),
                 }}
             </Suspense>
+        </section>
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SignupResponse {
+    pub pubkey: String,
+    pub username: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SignupErrorResponse {
+    pub error: String,
+}
+
+#[component]
+fn SignupPage() -> impl IntoView {
+    let base_path = app_base_path();
+    let auth_url = resolve_auth_url();
+    let auth_endpoint = build_signup_endpoint(&auth_url);
+    let auth_ready = auth_endpoint.is_some();
+    let auth_endpoint = auth_endpoint.unwrap_or_default();
+    let missing_auth_message = t!("app.signup.missing_auth").to_string();
+
+    let (status, set_status) = signal::<Option<SignupResponse>>(None);
+    let (error, set_error) = signal::<Option<String>>(None);
+    let (busy, set_busy) = signal(false);
+
+    let auth_endpoint_nip07 = auth_endpoint.clone();
+    let auth_endpoint_local = auth_endpoint.clone();
+    let missing_auth_nip07 = missing_auth_message.clone();
+    let missing_auth_local = missing_auth_message.clone();
+
+    let signup_nip07 = move |_| {
+        let auth_endpoint = auth_endpoint_nip07.clone();
+        let set_error = set_error.clone();
+        let set_status = set_status.clone();
+        let set_busy = set_busy.clone();
+        let missing_auth_message = missing_auth_nip07.clone();
+
+        if auth_endpoint.is_empty() {
+            set_error.set(Some(missing_auth_message));
+            return;
+        }
+
+        leptos::task::spawn_local(async move {
+            set_busy.set(true);
+            set_error.set(None);
+            set_status.set(None);
+
+            let now = unix_timestamp();
+            let event = match nip07_pubkey().await {
+                Ok(pubkey) => nip07_sign_nip98(pubkey, "POST", &auth_endpoint, None, now).await,
+                Err(err) => Err(err),
+            };
+
+            match event {
+                Ok(event) => match request_signup(&auth_endpoint, event).await {
+                    Ok(response) => set_status.set(Some(response)),
+                    Err(message) => set_error.set(Some(message)),
+                },
+                Err(err) => set_error.set(Some(err.to_string())),
+            }
+            set_busy.set(false);
+        });
+    };
+
+    let signup_local = move |_| {
+        let auth_endpoint = auth_endpoint_local.clone();
+        let set_error = set_error.clone();
+        let set_status = set_status.clone();
+        let set_busy = set_busy.clone();
+        let missing_auth_message = missing_auth_local.clone();
+
+        if auth_endpoint.is_empty() {
+            set_error.set(Some(missing_auth_message));
+            return;
+        }
+
+        leptos::task::spawn_local(async move {
+            set_busy.set(true);
+            set_error.set(None);
+            set_status.set(None);
+            let now = unix_timestamp();
+            match local_key_event("POST", &auth_endpoint, None, now) {
+                Ok(event) => match request_signup(&auth_endpoint, event).await {
+                    Ok(response) => set_status.set(Some(response)),
+                    Err(message) => set_error.set(Some(message)),
+                },
+                Err(err) => set_error.set(Some(err.to_string())),
+            }
+            set_busy.set(false);
+        });
+    };
+
+    let list_href = base_href(&base_path);
+
+    view! {
+        <section class="gt-panel">
+            <h1 class="gt-title">{t!("app.signup.title")}</h1>
+            <p class="gt-tagline">{t!("app.signup.tagline")}</p>
+            <div class="gt-actions">
+                <button
+                    class="gt-button"
+                    disabled=move || busy.get() || !auth_ready
+                    on:click=signup_nip07
+                >
+                    {t!("app.signup.action_nip07")}
+                </button>
+                <button
+                    class="gt-button gt-button-secondary"
+                    disabled=move || busy.get() || !auth_ready
+                    on:click=signup_local
+                >
+                    {t!("app.signup.action_local")}
+                </button>
+            </div>
+            <p class="gt-meta">
+                {t!("app.signup.auth")} " " {auth_url.clone()}
+            </p>
+            {move || {
+                if busy.get() {
+                    view! { <p class="gt-meta">{t!("app.signup.pending")}</p> }.into_any()
+                } else {
+                    ().into_any()
+                }
+            }}
+            {move || match status.get() {
+                Some(response) => view! {
+                    <div class="gt-status">
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.status"), response.status)}</p>
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.username"), response.username)}</p>
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.pubkey"), response.pubkey)}</p>
+                    </div>
+                }
+                .into_any(),
+                None => ().into_any(),
+            }}
+            {move || match error.get() {
+                Some(message) => view! {
+                    <div class="gt-error">
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.error"), message)}</p>
+                    </div>
+                }
+                .into_any(),
+                None => ().into_any(),
+            }}
+            <p>
+                <a class="gt-link" href=list_href>{t!("app.signup.back")}</a>
+            </p>
         </section>
     }
 }
@@ -241,4 +403,73 @@ fn repo_href(base_path: &str, npub: &str, identifier: &str) -> String {
     } else {
         format!("{base}/{npub}/{identifier}")
     }
+}
+
+fn signup_href(base_path: &str) -> String {
+    let base = base_path.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        "/signup".to_string()
+    } else {
+        format!("{base}/signup")
+    }
+}
+
+fn build_signup_endpoint(auth_url: &str) -> Option<String> {
+    let trimmed = auth_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("{}/v1/signup", trimmed.trim_end_matches('/')))
+}
+
+async fn request_signup(auth_endpoint: &str, event: Nip98Event) -> Result<SignupResponse, String> {
+    let header = auth_header(&event).map_err(|err| err.to_string())?;
+    let init = RequestInit::new();
+    init.set_method("POST");
+    init.set_mode(RequestMode::Cors);
+
+    let headers = Headers::new().map_err(request_error)?;
+    headers
+        .set("Authorization", &header)
+        .map_err(request_error)?;
+    headers.set("Accept", "application/json").map_err(request_error)?;
+    init.set_headers(&headers);
+
+    let request = Request::new_with_str_and_init(auth_endpoint, &init)
+        .map_err(request_error)?;
+    let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
+    let response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(request_error)?;
+    let response: Response = response.dyn_into().map_err(request_error)?;
+    let status = response.status();
+    let text = response.text().map_err(request_error)?;
+    let text = JsFuture::from(text)
+        .await
+        .map_err(request_error)?;
+    let body = text.as_string().unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        serde_json::from_str::<SignupResponse>(&body)
+            .map_err(|err| format!("invalid response: {err}"))
+    } else {
+        Err(parse_signup_error(&body))
+    }
+}
+
+fn parse_signup_error(body: &str) -> String {
+    if let Ok(parsed) = serde_json::from_str::<SignupErrorResponse>(body) {
+        return parsed.error;
+    }
+    if body.trim().is_empty() {
+        "signup failed".to_string()
+    } else {
+        body.to_string()
+    }
+}
+
+fn request_error(value: JsValue) -> String {
+    value
+        .as_string()
+        .unwrap_or_else(|| format!("{:?}", value))
 }

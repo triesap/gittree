@@ -1,7 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use gittree_app_core::{
-    nip98_payload_hash,
     nip98_sign_event,
     nip98_unsigned_event,
     AppCoreError,
@@ -62,10 +61,6 @@ impl std::error::Error for AuthError {
 
 pub fn unix_timestamp() -> i64 {
     (Date::now() / 1000.0).floor() as i64
-}
-
-pub fn nip98_payload_hash_bytes(payload: &[u8]) -> Option<String> {
-    nip98_payload_hash(payload)
 }
 
 pub fn auth_header(event: &Nip98Event) -> Result<String, AuthError> {
@@ -164,9 +159,7 @@ fn window_ref() -> Result<Window, AuthError> {
 
 fn generate_secret_key() -> Result<[u8; 32], AuthError> {
     let window = window_ref()?;
-    let crypto = window
-        .crypto()
-        .map_err(|err| AuthError::Js(js_error(err)))?;
+    let crypto = window.crypto().map_err(|_| AuthError::MissingCrypto)?;
     let mut bytes = [0u8; 32];
     crypto
         .get_random_values_with_u8_array(&mut bytes)

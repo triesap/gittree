@@ -17,3 +17,29 @@ app.repo.clone = clone:
 app.repo.forgejo = forgejo:
 
 app.repo.back = back to list
+
+app.signup.cta = create account
+
+app.signup.title = create a gittree account
+
+app.signup.tagline = connect with nip-07 or generate a local key.
+
+app.signup.action_nip07 = use nip-07 extension
+
+app.signup.action_local = generate local key
+
+app.signup.auth = auth service:
+
+app.signup.pending = creating account...
+
+app.signup.status = status:
+
+app.signup.username = username:
+
+app.signup.pubkey = pubkey:
+
+app.signup.error = signup failed:
+
+app.signup.back = back to repos
+
+app.signup.missing_auth = missing auth service url
