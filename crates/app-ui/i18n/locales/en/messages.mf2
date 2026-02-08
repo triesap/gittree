@@ -43,3 +43,25 @@ app.signup.error = signup failed:
 app.signup.back = back to repos
 
 app.signup.missing_auth = missing auth service url
+
+app.test.title = test console
+
+app.test.tagline = verify auth and api flows from the ui.
+
+app.test.section.session = session
+
+app.test.session.none = no session stored.
+
+app.test.session.refresh = refresh session
+
+app.test.session.clear = clear session
+
+app.test.section.actions = actions
+
+app.test.actions.list_repos = list repos
+
+app.test.section.repos = repo list
+
+app.test.repos.empty = no repositories returned.
+
+app.test.repos.count = repos:

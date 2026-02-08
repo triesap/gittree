@@ -5,10 +5,14 @@ use leptos::prelude::IntoAny;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::hooks::use_params_map;
 use leptos_router::path;
+use gittree_app_core::RepoListResponse;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{Request, RequestInit, RequestMode, Response};
 use crate::auth::{local_key_event, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
 use crate::auth_client::{signup, signup_endpoint, SignupResponse};
 use crate::i18n::app_i18n_init;
-use crate::session::{AuthSession, AuthSource, store_session};
+use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
 use crate::server::{list_repositories, repo_detail};
 use crate::t;
 
@@ -33,6 +37,7 @@ pub fn GittreeApp() -> impl IntoView {
                 <Routes fallback=|| view! { <NotFoundPage /> }>
                     <Route path=path!("/") view=RepoListPage />
                     <Route path=path!("/signup") view=SignupPage />
+                    <Route path=path!("/test") view=TestConsolePage />
                     <Route path=path!("/:npub/:identifier") view=RepoDetailPage />
                 </Routes>
             </main>
@@ -44,6 +49,7 @@ pub fn GittreeApp() -> impl IntoView {
 fn RepoListPage() -> impl IntoView {
     let base_path = app_base_path();
     let signup_href = signup_href(&base_path);
+    let test_href = test_href(&base_path);
     let repos = Resource::new(|| (), |_| list_repositories());
 
     view! {
@@ -52,6 +58,8 @@ fn RepoListPage() -> impl IntoView {
             <p class="gt-tagline">{t!("app.tagline")}</p>
             <p class="gt-meta">
                 <a class="gt-link" href=signup_href>{t!("app.signup.cta")}</a>
+                " · "
+                <a class="gt-link" href=test_href>{t!("app.test.title")}</a>
             </p>
             <Suspense fallback=|| view! { <p class="gt-meta">{t!("app.repo.loading")}</p> }>
                 {move || match repos.get() {
@@ -290,6 +298,249 @@ fn SignupPage() -> impl IntoView {
 }
 
 #[component]
+fn TestConsolePage() -> impl IntoView {
+    let base_path = app_base_path();
+    let auth_url = resolve_auth_url();
+    let auth_endpoint = signup_endpoint(&auth_url).unwrap_or_default();
+    let auth_ready = !auth_endpoint.is_empty();
+    let api_url = resolve_app_url();
+    let repos_endpoint = repo_list_endpoint(&api_url);
+
+    let (session, set_session) = signal::<Option<AuthSession>>(None);
+    let (signup_status, set_signup_status) = signal::<Option<SignupResponse>>(None);
+    let (repos_status, set_repos_status) = signal::<Option<RepoListResponse>>(None);
+    let (error, set_error) = signal::<Option<String>>(None);
+    let (busy, set_busy) = signal(false);
+
+    if let Err(err) = load_session().map(|value| set_session.set(value)) {
+        set_error.set(Some(err.to_string()));
+    }
+
+    let auth_endpoint_nip07 = auth_endpoint.clone();
+    let auth_endpoint_local = auth_endpoint.clone();
+    let repos_endpoint_fetch = repos_endpoint.clone();
+
+    let refresh_session = move |_| match load_session() {
+        Ok(value) => set_session.set(value),
+        Err(err) => set_error.set(Some(err.to_string())),
+    };
+
+    let clear_session_action = move |_| {
+        if let Err(err) = clear_session() {
+            set_error.set(Some(err.to_string()));
+        }
+        set_session.set(None);
+    };
+
+    let signup_nip07 = move |_| {
+        let auth_endpoint = auth_endpoint_nip07.clone();
+        let set_error = set_error.clone();
+        let set_busy = set_busy.clone();
+        let set_signup_status = set_signup_status.clone();
+        let set_session = set_session.clone();
+
+        if auth_endpoint.is_empty() {
+            set_error.set(Some(t!("app.signup.missing_auth").to_string()));
+            return;
+        }
+
+        leptos::task::spawn_local(async move {
+            set_busy.set(true);
+            set_error.set(None);
+            set_signup_status.set(None);
+
+            let now = unix_timestamp();
+            let event = match nip07_pubkey().await {
+                Ok(pubkey) => nip07_sign_nip98(pubkey, "POST", &auth_endpoint, None, now).await,
+                Err(err) => Err(err),
+            };
+
+            match event {
+                Ok(event) => match signup(&auth_endpoint, event).await {
+                    Ok(response) => {
+                        match persist_session(&response.pubkey, AuthSource::Nip07) {
+                            Ok(session) => set_session.set(Some(session)),
+                            Err(message) => set_error.set(Some(message)),
+                        }
+                        set_signup_status.set(Some(response));
+                    }
+                    Err(err) => set_error.set(Some(err.to_string())),
+                },
+                Err(err) => set_error.set(Some(err.to_string())),
+            }
+            set_busy.set(false);
+        });
+    };
+
+    let signup_local = move |_| {
+        let auth_endpoint = auth_endpoint_local.clone();
+        let set_error = set_error.clone();
+        let set_busy = set_busy.clone();
+        let set_signup_status = set_signup_status.clone();
+        let set_session = set_session.clone();
+
+        if auth_endpoint.is_empty() {
+            set_error.set(Some(t!("app.signup.missing_auth").to_string()));
+            return;
+        }
+
+        leptos::task::spawn_local(async move {
+            set_busy.set(true);
+            set_error.set(None);
+            set_signup_status.set(None);
+
+            let now = unix_timestamp();
+            match local_key_event("POST", &auth_endpoint, None, now) {
+                Ok(event) => match signup(&auth_endpoint, event).await {
+                    Ok(response) => {
+                        match persist_session(&response.pubkey, AuthSource::Local) {
+                            Ok(session) => set_session.set(Some(session)),
+                            Err(message) => set_error.set(Some(message)),
+                        }
+                        set_signup_status.set(Some(response));
+                    }
+                    Err(err) => set_error.set(Some(err.to_string())),
+                },
+                Err(err) => set_error.set(Some(err.to_string())),
+            }
+            set_busy.set(false);
+        });
+    };
+
+    let fetch_repos = move |_| {
+        let endpoint = repos_endpoint_fetch.clone();
+        let set_error = set_error.clone();
+        let set_busy = set_busy.clone();
+        let set_repos_status = set_repos_status.clone();
+
+        leptos::task::spawn_local(async move {
+            set_busy.set(true);
+            set_error.set(None);
+            set_repos_status.set(None);
+
+            match fetch_repo_list(&endpoint).await {
+                Ok(response) => set_repos_status.set(Some(response)),
+                Err(err) => set_error.set(Some(err)),
+            }
+
+            set_busy.set(false);
+        });
+    };
+
+    let list_href = base_href(&base_path);
+
+    view! {
+        <section class="gt-panel">
+            <h1 class="gt-title">{t!("app.test.title")}</h1>
+            <p class="gt-tagline">{t!("app.test.tagline")}</p>
+
+            <p class="gt-meta">{t!("app.test.section.actions")}</p>
+            <div class="gt-actions">
+                <button
+                    class="gt-button"
+                    disabled=move || busy.get() || !auth_ready
+                    on:click=signup_nip07
+                >
+                    {t!("app.signup.action_nip07")}
+                </button>
+                <button
+                    class="gt-button gt-button-secondary"
+                    disabled=move || busy.get() || !auth_ready
+                    on:click=signup_local
+                >
+                    {t!("app.signup.action_local")}
+                </button>
+                <button
+                    class="gt-button gt-button-secondary"
+                    disabled=move || busy.get()
+                    on:click=fetch_repos
+                >
+                    {t!("app.test.actions.list_repos")}
+                </button>
+            </div>
+
+            <p class="gt-meta">{t!("app.test.section.session")}</p>
+            {move || match session.get() {
+                Some(session) => view! {
+                    <div class="gt-status">
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.pubkey"), session.pubkey)}</p>
+                        <p class="gt-meta">{format!("npub: {}", session.npub)}</p>
+                        <p class="gt-meta">{format!("source: {:?}", session.source)}</p>
+                    </div>
+                }
+                .into_any(),
+                None => view! { <p class="gt-meta">{t!("app.test.session.none")}</p> }.into_any(),
+            }}
+            <div class="gt-actions">
+                <button class="gt-button gt-button-secondary" on:click=refresh_session>
+                    {t!("app.test.session.refresh")}
+                </button>
+                <button class="gt-button gt-button-secondary" on:click=clear_session_action>
+                    {t!("app.test.session.clear")}
+                </button>
+            </div>
+
+            {move || match signup_status.get() {
+                Some(response) => view! {
+                    <div class="gt-status">
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.status"), response.status)}</p>
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.username"), response.username)}</p>
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.pubkey"), response.pubkey)}</p>
+                    </div>
+                }
+                .into_any(),
+                None => ().into_any(),
+            }}
+
+            <p class="gt-meta">{t!("app.test.section.repos")}</p>
+            {move || match repos_status.get() {
+                Some(response) => {
+                    if response.items.is_empty() {
+                        view! { <p class="gt-meta">{t!("app.test.repos.empty")}</p> }.into_any()
+                    } else {
+                        let items = response.items;
+                        view! {
+                            <div class="gt-status">
+                                <p class="gt-meta">{format!("{} {}", t!("app.test.repos.count"), items.len())}</p>
+                            </div>
+                            <ul class="gt-list">
+                                {items.into_iter().map(|item| {
+                                    view! {
+                                        <li class="gt-list-item">
+                                            <div>
+                                                <span class="gt-link">{item.identifier}</span>
+                                            </div>
+                                            <div class="gt-meta">{item.npub}</div>
+                                            <div class="gt-meta">{format!("{} {}", t!("app.repo.forgejo"), item.forgejo)}</div>
+                                        </li>
+                                    }
+                                }).collect_view()}
+                            </ul>
+                        }
+                        .into_any()
+                    }
+                }
+                None => ().into_any(),
+            }}
+
+            {move || match error.get() {
+                Some(message) => view! {
+                    <div class="gt-error">
+                        <p class="gt-meta">{format!("{} {}", t!("app.signup.error"), message)}</p>
+                    </div>
+                }
+                .into_any(),
+                None => ().into_any(),
+            }}
+
+            <p>
+                <a class="gt-link" href=list_href>{t!("app.signup.back")}</a>
+            </p>
+        </section>
+    }
+}
+
+#[component]
 fn NotFoundPage() -> impl IntoView {
     view! {
         <section class="gt-panel">
@@ -310,6 +561,13 @@ fn resolve_base_path() -> String {
 fn resolve_auth_url() -> String {
     auth_url_from_context()
         .or_else(auth_url_from_dom)
+        .unwrap_or_default()
+}
+
+fn resolve_app_url() -> String {
+    app_url_from_context()
+        .or_else(app_url_from_dom)
+        .or_else(app_url_from_location)
         .unwrap_or_default()
 }
 
@@ -337,6 +595,10 @@ fn auth_url_from_context() -> Option<String> {
     None
 }
 
+fn app_url_from_context() -> Option<String> {
+    None
+}
+
 #[cfg(not(feature = "ssr"))]
 fn base_path_from_dom() -> Option<String> {
     use leptos::prelude::window;
@@ -355,6 +617,22 @@ fn auth_url_from_dom() -> Option<String> {
     element.get_attribute("data-auth-url")
 }
 
+#[cfg(not(feature = "ssr"))]
+fn app_url_from_dom() -> Option<String> {
+    use leptos::prelude::window;
+
+    let document = window().document()?;
+    let element = document.get_element_by_id("gittree-app")?;
+    element.get_attribute("data-app-url")
+}
+
+#[cfg(not(feature = "ssr"))]
+fn app_url_from_location() -> Option<String> {
+    use leptos::prelude::window;
+
+    window().location().origin().ok()
+}
+
 #[cfg(feature = "ssr")]
 fn base_path_from_dom() -> Option<String> {
     None
@@ -362,6 +640,16 @@ fn base_path_from_dom() -> Option<String> {
 
 #[cfg(feature = "ssr")]
 fn auth_url_from_dom() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn app_url_from_dom() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn app_url_from_location() -> Option<String> {
     None
 }
 
@@ -410,8 +698,60 @@ fn signup_href(base_path: &str) -> String {
     }
 }
 
-fn persist_session(pubkey: &str, source: AuthSource) -> Result<(), String> {
+fn test_href(base_path: &str) -> String {
+    let base = base_path.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        "/test".to_string()
+    } else {
+        format!("{base}/test")
+    }
+}
+
+fn repo_list_endpoint(app_url: &str) -> String {
+    let trimmed = app_url.trim();
+    if trimmed.is_empty() {
+        "/api/repos".to_string()
+    } else {
+        format!("{}/api/repos", trimmed.trim_end_matches('/'))
+    }
+}
+
+fn persist_session(pubkey: &str, source: AuthSource) -> Result<AuthSession, String> {
     let session = AuthSession::from_pubkey_hex(pubkey, source)
         .map_err(|err| err.to_string())?;
-    store_session(&session).map_err(|err| err.to_string())
+    store_session(&session).map_err(|err| err.to_string())?;
+    Ok(session)
+}
+
+async fn fetch_repo_list(endpoint: &str) -> Result<RepoListResponse, String> {
+    let init = RequestInit::new();
+    init.set_method("GET");
+    init.set_mode(RequestMode::Cors);
+
+    let request =
+        Request::new_with_str_and_init(endpoint, &init).map_err(request_error)?;
+    let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
+    let response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(request_error)?;
+    let response: Response = response.dyn_into().map_err(request_error)?;
+    let status = response.status();
+    let text = response.text().map_err(request_error)?;
+    let text = JsFuture::from(text).await.map_err(request_error)?;
+    let body = text.as_string().unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        serde_json::from_str::<RepoListResponse>(&body)
+            .map_err(|err| format!("invalid response: {err}"))
+    } else if body.trim().is_empty() {
+        Err("request failed".to_string())
+    } else {
+        Err(body)
+    }
+}
+
+fn request_error(value: JsValue) -> String {
+    value
+        .as_string()
+        .unwrap_or_else(|| format!("{:?}", value))
 }

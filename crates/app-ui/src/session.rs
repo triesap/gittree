@@ -27,6 +27,8 @@ pub enum SessionError {
     InvalidPubkey,
     Serialization(String),
     #[cfg(target_arch = "wasm32")]
+    InvalidSession(String),
+    #[cfg(target_arch = "wasm32")]
     MissingWindow,
     #[cfg(target_arch = "wasm32")]
     MissingStorage,
@@ -39,6 +41,8 @@ impl std::fmt::Display for SessionError {
         match self {
             SessionError::InvalidPubkey => write!(f, "invalid pubkey"),
             SessionError::Serialization(message) => write!(f, "serialization error: {message}"),
+            #[cfg(target_arch = "wasm32")]
+            SessionError::InvalidSession(message) => write!(f, "invalid session: {message}"),
             #[cfg(target_arch = "wasm32")]
             SessionError::MissingWindow => write!(f, "missing window"),
             #[cfg(target_arch = "wasm32")]
@@ -63,14 +67,46 @@ impl AuthSession {
         })
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_json(value: &str) -> Result<Self, SessionError> {
+        serde_json::from_str::<AuthSession>(value)
+            .map_err(|err| SessionError::InvalidSession(err.to_string()))
+    }
+
     pub fn to_json_string(&self) -> Result<String, SessionError> {
         serde_json::to_string(self).map_err(|err| SessionError::Serialization(err.to_string()))
     }
 }
 
+pub fn load_session() -> Result<Option<AuthSession>, SessionError> {
+    load_session_inner()
+}
+
 pub fn store_session(session: &AuthSession) -> Result<(), SessionError> {
     let payload = session.to_json_string()?;
     store_payload(&payload)
+}
+
+pub fn clear_session() -> Result<(), SessionError> {
+    clear_session_inner()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_session_inner() -> Result<Option<AuthSession>, SessionError> {
+    let storage = local_storage()?;
+    let value = storage
+        .get_item(SESSION_STORAGE_KEY)
+        .map_err(|err| SessionError::Js(js_error(err)))?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let session = AuthSession::from_json(&value)?;
+    Ok(Some(session))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_session_inner() -> Result<Option<AuthSession>, SessionError> {
+    Ok(None)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -83,6 +119,19 @@ fn store_payload(payload: &str) -> Result<(), SessionError> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn store_payload(_payload: &str) -> Result<(), SessionError> {
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clear_session_inner() -> Result<(), SessionError> {
+    let storage = local_storage()?;
+    storage
+        .remove_item(SESSION_STORAGE_KEY)
+        .map_err(|err| SessionError::Js(js_error(err)))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn clear_session_inner() -> Result<(), SessionError> {
     Ok(())
 }
 
