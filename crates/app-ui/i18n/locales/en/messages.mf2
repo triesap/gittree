@@ -44,6 +44,48 @@ app.signup.back = back to repos
 
 app.signup.missing_auth = missing auth service url
 
+app.profile.cta = profile
+
+app.profile.title = profile
+
+app.profile.tagline = view and update your public details.
+
+app.profile.missing_auth = missing auth service url
+
+app.profile.missing_session = no session found. create an account first.
+
+app.profile.loading = loading profile...
+
+app.profile.loaded = profile loaded.
+
+app.profile.saving = saving profile...
+
+app.profile.updated = profile updated.
+
+app.profile.error = profile error:
+
+app.profile.save = save profile
+
+app.profile.load = reload profile
+
+app.profile.pubkey = pubkey:
+
+app.profile.npub = npub:
+
+app.profile.display_name = display name
+
+app.profile.bio = bio
+
+app.profile.avatar_url = avatar url
+
+app.profile.website_url = website url
+
+app.profile.location = location
+
+app.profile.visibility = visibility
+
+app.profile.visibility_public = public profile
+
 app.test.title = test console
 
 app.test.tagline = verify auth and api flows from the ui.

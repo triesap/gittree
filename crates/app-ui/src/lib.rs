@@ -7,6 +7,7 @@ mod control_client;
 mod control_token;
 mod i18n;
 mod logging;
+mod profile_client;
 mod session;
 mod theme;
 pub mod server;

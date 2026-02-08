@@ -5,12 +5,15 @@ use leptos::prelude::IntoAny;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::hooks::use_params_map;
 use leptos_router::path;
-use gittree_app_core::RepoListResponse;
+use gittree_app_core::{
+    nip98_payload_hash, Nip98Event, Profile, ProfileUpdate, ProfileVisibility, RepoListResponse,
+};
 use js_sys::Reflect;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
 use crate::auth::{
+    AuthError,
     local_key_event,
     local_key_material,
     nip07_available,
@@ -22,6 +25,7 @@ use crate::auth_client::{signup, signup_endpoint, SignupResponse};
 use crate::control_client::{create_repo, ControlRepoInput, ControlRepoResponse};
 use crate::control_token::{clear_control_token, load_control_token, store_control_token};
 use crate::i18n::app_i18n_init;
+use crate::profile_client::{fetch_profile, profile_endpoint, update_profile};
 use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
 use crate::server::{list_repositories, repo_detail};
 use crate::t;
@@ -58,6 +62,7 @@ pub fn GittreeApp() -> impl IntoView {
                 <Routes fallback=|| view! { <NotFoundPage /> }>
                     <Route path=path!("/") view=RepoListPage />
                     <Route path=path!("/signup") view=SignupPage />
+                    <Route path=path!("/profile") view=ProfilePage />
                     <Route path=path!("/test") view=TestConsolePage />
                     <Route path=path!("/:npub/:identifier") view=RepoDetailPage />
                 </Routes>
@@ -70,6 +75,7 @@ pub fn GittreeApp() -> impl IntoView {
 fn RepoListPage() -> impl IntoView {
     let base_path = app_base_path();
     let signup_href = signup_href(&base_path);
+    let profile_href = profile_href(&base_path);
     let test_href = test_href(&base_path);
     let repos = Resource::new(|| (), |_| list_repositories());
 
@@ -79,6 +85,8 @@ fn RepoListPage() -> impl IntoView {
             <p class="gt-tagline">{t!("app.tagline")}</p>
             <p class="gt-meta">
                 <a class="gt-link" href=signup_href>{t!("app.signup.cta")}</a>
+                " · "
+                <a class="gt-link" href=profile_href>{t!("app.profile.cta")}</a>
                 " · "
                 <a class="gt-link" href=test_href>{t!("app.test.title")}</a>
             </p>
@@ -315,6 +323,289 @@ fn SignupPage() -> impl IntoView {
             <p>
                 <a class="gt-link" href=list_href>{t!("app.signup.back")}</a>
             </p>
+        </section>
+    }
+}
+
+#[component]
+fn ProfilePage() -> impl IntoView {
+    let base_path = app_base_path();
+    let signup_href = signup_href(&base_path);
+    let auth_url = resolve_auth_url();
+    let auth_endpoint = profile_endpoint(&auth_url);
+    let auth_ready = auth_endpoint.is_some();
+    let auth_endpoint = auth_endpoint.unwrap_or_default();
+
+    let (session, set_session) = signal::<Option<AuthSession>>(None);
+    let (profile, set_profile) = signal::<Option<Profile>>(None);
+    let (status, set_status) = signal::<Option<String>>(None);
+    let (error, set_error) = signal::<Option<String>>(None);
+    let (busy, set_busy) = signal(false);
+
+    let (display_name, set_display_name) = signal(String::new());
+    let (bio, set_bio) = signal(String::new());
+    let (avatar_url, set_avatar_url) = signal(String::new());
+    let (website_url, set_website_url) = signal(String::new());
+    let (location, set_location) = signal(String::new());
+    let (visibility_public, set_visibility_public) = signal(false);
+
+    if let Err(err) = load_session().map(|value| set_session.set(value)) {
+        set_error.set(Some(err.to_string()));
+    }
+
+    create_effect(move |_| {
+        if let Some(profile) = profile.get() {
+            set_display_name.set(profile.display_name.unwrap_or_default());
+            set_bio.set(profile.bio.unwrap_or_default());
+            set_avatar_url.set(profile.avatar_url.unwrap_or_default());
+            set_website_url.set(profile.website_url.unwrap_or_default());
+            set_location.set(profile.location.unwrap_or_default());
+            set_visibility_public.set(profile.visibility == ProfileVisibility::Public);
+        }
+    });
+
+    let fetch_profile_action = Callback::new({
+        let auth_endpoint = auth_endpoint.clone();
+        let set_profile = set_profile.clone();
+        let set_error = set_error.clone();
+        let set_status = set_status.clone();
+        let set_busy = set_busy.clone();
+        move |()| {
+            if auth_endpoint.is_empty() {
+                set_error.set(Some(t!("app.profile.missing_auth").to_string()));
+                return;
+            }
+            let Some(session) = session.get() else {
+                return;
+            };
+            let auth_endpoint = auth_endpoint.clone();
+            let set_profile = set_profile.clone();
+            let set_error = set_error.clone();
+            let set_status = set_status.clone();
+            let set_busy = set_busy.clone();
+            leptos::task::spawn_local(async move {
+                set_busy.set(true);
+                set_error.set(None);
+                set_status.set(Some(t!("app.profile.loading").to_string()));
+
+                let now = unix_timestamp();
+                let event =
+                    session_sign_nip98(&session, "GET", &auth_endpoint, None, now).await;
+                match event {
+                    Ok(event) => match fetch_profile(&auth_endpoint, event).await {
+                        Ok(profile) => {
+                            set_profile.set(Some(profile));
+                            set_status.set(Some(t!("app.profile.loaded").to_string()));
+                        }
+                        Err(err) => set_error.set(Some(err.to_string())),
+                    },
+                    Err(err) => set_error.set(Some(err.to_string())),
+                }
+                set_busy.set(false);
+            });
+        }
+    });
+
+    let fetch_profile_on_mount = fetch_profile_action;
+    create_effect(move |_| {
+        if profile.get().is_none() && session.get().is_some() && auth_ready && !busy.get() {
+            fetch_profile_on_mount.run(());
+        }
+    });
+
+    let save_profile_action = Callback::new({
+        let auth_endpoint = auth_endpoint.clone();
+        let set_profile = set_profile.clone();
+        let set_error = set_error.clone();
+        let set_status = set_status.clone();
+        let set_busy = set_busy.clone();
+        move |()| {
+            if auth_endpoint.is_empty() {
+                set_error.set(Some(t!("app.profile.missing_auth").to_string()));
+                return;
+            }
+            let Some(session) = session.get() else {
+                set_error.set(Some(t!("app.profile.missing_session").to_string()));
+                return;
+            };
+            let auth_endpoint = auth_endpoint.clone();
+            let set_profile = set_profile.clone();
+            let set_error = set_error.clone();
+            let set_status = set_status.clone();
+            let set_busy = set_busy.clone();
+            let update = ProfileUpdate {
+                display_name: Some(display_name.get()),
+                bio: Some(bio.get()),
+                avatar_url: Some(avatar_url.get()),
+                website_url: Some(website_url.get()),
+                location: Some(location.get()),
+                visibility: Some(if visibility_public.get() {
+                    ProfileVisibility::Public
+                } else {
+                    ProfileVisibility::Private
+                }),
+            };
+            leptos::task::spawn_local(async move {
+                set_busy.set(true);
+                set_error.set(None);
+                set_status.set(Some(t!("app.profile.saving").to_string()));
+                let body = match serde_json::to_vec(&update) {
+                    Ok(body) => body,
+                    Err(err) => {
+                        set_error.set(Some(err.to_string()));
+                        set_busy.set(false);
+                        return;
+                    }
+                };
+                let payload_hash = nip98_payload_hash(&body);
+                let payload_hash = match payload_hash {
+                    Some(hash) => hash,
+                    None => {
+                        set_error.set(Some("missing payload hash".to_string()));
+                        set_busy.set(false);
+                        return;
+                    }
+                };
+                let now = unix_timestamp();
+                let event = session_sign_nip98(
+                    &session,
+                    "PATCH",
+                    &auth_endpoint,
+                    Some(&payload_hash),
+                    now,
+                )
+                .await;
+                match event {
+                    Ok(event) => match update_profile(&auth_endpoint, event, body).await {
+                        Ok(profile) => {
+                            set_profile.set(Some(profile));
+                            set_status.set(Some(t!("app.profile.updated").to_string()));
+                        }
+                        Err(err) => set_error.set(Some(err.to_string())),
+                    },
+                    Err(err) => set_error.set(Some(err.to_string())),
+                }
+                set_busy.set(false);
+            });
+        }
+    });
+
+    view! {
+        <section class="gt-panel">
+            <h1 class="gt-title">{t!("app.profile.title")}</h1>
+            <p class="gt-tagline">{t!("app.profile.tagline")}</p>
+            {move || match session.get() {
+                None => {
+                    view! {
+                        <p class="gt-meta">
+                            {t!("app.profile.missing_session")}
+                            " "
+                            <a class="gt-link" href=signup_href.clone()>{t!("app.signup.cta")}</a>
+                        </p>
+                    }
+                        .into_any()
+                }
+                Some(session) => {
+                    view! {
+                        <div class="gt-meta">
+                            {format!("{} {}", t!("app.profile.pubkey"), session.pubkey)}
+                        </div>
+                        <div class="gt-meta">
+                            {format!("{} {}", t!("app.profile.npub"), session.npub)}
+                        </div>
+                        <form class="gt-form">
+                            <div class="gt-field">
+                                <label class="gt-label">{t!("app.profile.display_name")}</label>
+                                <input
+                                    class="gt-input"
+                                    type="text"
+                                    prop:value=display_name
+                                    on:input=move |ev| set_display_name.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="gt-field">
+                                <label class="gt-label">{t!("app.profile.bio")}</label>
+                                <textarea
+                                    class="gt-input gt-textarea"
+                                    prop:value=bio
+                                    on:input=move |ev| set_bio.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="gt-field">
+                                <label class="gt-label">{t!("app.profile.avatar_url")}</label>
+                                <input
+                                    class="gt-input"
+                                    type="text"
+                                    prop:value=avatar_url
+                                    on:input=move |ev| set_avatar_url.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="gt-field">
+                                <label class="gt-label">{t!("app.profile.website_url")}</label>
+                                <input
+                                    class="gt-input"
+                                    type="text"
+                                    prop:value=website_url
+                                    on:input=move |ev| set_website_url.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="gt-field">
+                                <label class="gt-label">{t!("app.profile.location")}</label>
+                                <input
+                                    class="gt-input"
+                                    type="text"
+                                    prop:value=location
+                                    on:input=move |ev| set_location.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="gt-field">
+                                <label class="gt-label">{t!("app.profile.visibility")}</label>
+                                <label class="gt-inline">
+                                    <input
+                                        class="gt-checkbox"
+                                        type="checkbox"
+                                        prop:checked=visibility_public
+                                        on:change=move |ev| {
+                                            set_visibility_public.set(event_target_checked(&ev))
+                                        }
+                                    />
+                                    <span>{t!("app.profile.visibility_public")}</span>
+                                </label>
+                            </div>
+                        </form>
+                        <div class="gt-actions">
+                            <button
+                                class="gt-button"
+                                type="button"
+                                on:click=move |_| save_profile_action.run(())
+                                disabled=move || busy.get()
+                            >
+                                {t!("app.profile.save")}
+                            </button>
+                            <button
+                                class="gt-button gt-button-secondary"
+                                type="button"
+                                on:click=move |_| fetch_profile_action.run(())
+                                disabled=move || busy.get()
+                            >
+                                {t!("app.profile.load")}
+                            </button>
+                        </div>
+                    }
+                        .into_any()
+                }
+            }}
+            {move || match status.get() {
+                None => ().into_any(),
+                Some(message) => view! { <div class="gt-status">{message}</div> }.into_any(),
+            }}
+            {move || match error.get() {
+                None => ().into_any(),
+                Some(message) => {
+                    view! { <div class="gt-error">{format!("{} {}", t!("app.profile.error"), message)}</div> }
+                        .into_any()
+                }
+            }}
         </section>
     }
 }
@@ -1066,6 +1357,15 @@ fn signup_href(base_path: &str) -> String {
     }
 }
 
+fn profile_href(base_path: &str) -> String {
+    let base = base_path.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        "/profile".to_string()
+    } else {
+        format!("{base}/profile")
+    }
+}
+
 fn test_href(base_path: &str) -> String {
     let base = base_path.trim_end_matches('/');
     if base.is_empty() || base == "/" {
@@ -1098,6 +1398,25 @@ fn persist_session(pubkey: &str, source: AuthSource) -> Result<AuthSession, Stri
         .map_err(|err| err.to_string())?;
     store_session(&session).map_err(|err| err.to_string())?;
     Ok(session)
+}
+
+async fn session_sign_nip98(
+    session: &AuthSession,
+    method: &str,
+    url: &str,
+    payload_sha256: Option<&str>,
+    now: i64,
+) -> Result<Nip98Event, AuthError> {
+    match session.source {
+        AuthSource::Nip07 => {
+            let pubkey = nip07_pubkey().await?;
+            if pubkey != session.pubkey {
+                return Err(AuthError::Js("nip-07 pubkey mismatch".to_string()));
+            }
+            nip07_sign_nip98(pubkey, method, url, payload_sha256, now).await
+        }
+        AuthSource::Local => local_key_event(method, url, payload_sha256, now),
+    }
 }
 
 async fn fetch_repo_list(endpoint: &str) -> Result<RepoListResponse, String> {
