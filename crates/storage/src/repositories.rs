@@ -1,7 +1,7 @@
 use crate::{
-    AccountRecord, EventQuery, EventRecord, RelayCompatibilityRecord, RelayPublishJob,
-    RelayPublishRequest, RelayPublishStatus, RepoAnnouncementRecord, RepoMappingRecord,
-    RepoStateRecord, StorageError,
+    AccountRecord, EventQuery, EventRecord, ProfileRecord, RelayCompatibilityRecord,
+    RelayPublishJob, RelayPublishRequest, RelayPublishStatus, RepoAnnouncementRecord,
+    RepoMappingRecord, RepoStateRecord, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -62,6 +62,15 @@ pub trait AccountRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait ProfileRepository: Send + Sync {
+    async fn upsert_profile(&self, record: ProfileRecord) -> Result<(), StorageError>;
+    async fn profile_by_pubkey(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<ProfileRecord>, StorageError>;
+}
+
+#[async_trait]
 pub trait RelayCompatibilityRepository: Send + Sync {
     async fn upsert_relay_compatibility(
         &self,
@@ -118,6 +127,7 @@ pub struct InMemoryRepositories {
     mappings_by_repo: RwLock<HashMap<String, RepoMappingRecord>>,
     accounts_by_pubkey: RwLock<HashMap<String, AccountRecord>>,
     accounts_by_username: RwLock<HashMap<String, AccountRecord>>,
+    profiles_by_pubkey: RwLock<HashMap<String, ProfileRecord>>,
     relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
     events: RwLock<HashMap<String, EventRecord>>,
     outbox: RwLock<HashMap<i64, OutboxEntry>>,
@@ -143,6 +153,10 @@ impl InMemoryRepositories {
 
     fn account_key(pubkey: &[u8]) -> String {
         hex::encode(pubkey)
+    }
+
+    fn profile_key(pubkey: &[u8]) -> String {
+        Self::account_key(pubkey)
     }
 
     fn next_outbox_id(&self) -> i64 {
@@ -345,6 +359,35 @@ impl AccountRepository for InMemoryRepositories {
                     message: "account username store poisoned".to_string(),
                 })?;
         Ok(map.get(username).cloned())
+    }
+}
+
+#[async_trait]
+impl ProfileRepository for InMemoryRepositories {
+    async fn upsert_profile(&self, record: ProfileRecord) -> Result<(), StorageError> {
+        let key = Self::profile_key(&record.pubkey);
+        let mut profiles =
+            self.profiles_by_pubkey
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "profile store poisoned".to_string(),
+                })?;
+        profiles.insert(key, record);
+        Ok(())
+    }
+
+    async fn profile_by_pubkey(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<ProfileRecord>, StorageError> {
+        let key = Self::profile_key(pubkey);
+        let profiles =
+            self.profiles_by_pubkey
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "profile store poisoned".to_string(),
+                })?;
+        Ok(profiles.get(&key).cloned())
     }
 }
 
@@ -615,12 +658,13 @@ impl RelayPublishRepository for InMemoryRepositories {
 mod tests {
     use super::{
         AccountRepository, AnnouncementRepository, EventQuery, EventRecord, EventRepository,
-        InMemoryRepositories, RelayCompatibilityRepository, RelayPublishRepository,
-        RepoMappingRepository, StateRepository,
+        InMemoryRepositories, ProfileRepository, RelayCompatibilityRepository,
+        RelayPublishRepository, RepoMappingRepository, StateRepository,
     };
     use crate::{
-        AccountRecord, RelayCompatibilityRecord, RelayProbeMetadata, RelayPublishRequest,
-        RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
+        AccountRecord, ProfileRecord, ProfileVisibility, RelayCompatibilityRecord,
+        RelayProbeMetadata, RelayPublishRequest, RepoAnnouncementRecord, RepoMappingRecord,
+        RepoStateRecord, TagRecord,
     };
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
@@ -667,6 +711,21 @@ mod tests {
 
     fn sample_account(username: &str, pubkey_byte: u8) -> AccountRecord {
         AccountRecord::new(&hex_32(pubkey_byte), username).expect("account")
+    }
+
+    fn sample_profile(pubkey_byte: u8) -> ProfileRecord {
+        ProfileRecord::new(
+            &hex_32(pubkey_byte),
+            Some("Ada".to_string()),
+            Some("Builder".to_string()),
+            None,
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            20,
+        )
+        .expect("profile")
     }
 
     fn sample_compat_report() -> RelayCompatibilityReport {
@@ -814,6 +873,18 @@ mod tests {
         store.upsert_account(record.clone()).await.expect("upsert");
         let found = store
             .account_by_username("alice")
+            .await
+            .expect("lookup");
+        assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_returns_profile_by_pubkey() {
+        let store = InMemoryRepositories::new();
+        let record = sample_profile(0x33);
+        store.upsert_profile(record.clone()).await.expect("upsert");
+        let found = store
+            .profile_by_pubkey(&record.pubkey)
             .await
             .expect("lookup");
         assert_eq!(found, Some(record));

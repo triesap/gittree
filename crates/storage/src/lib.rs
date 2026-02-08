@@ -5,6 +5,7 @@ use std::time::Duration;
 
 pub mod cache;
 pub mod account;
+pub mod profile;
 pub mod event;
 pub mod migrations;
 pub mod outbox;
@@ -17,6 +18,7 @@ pub mod relay_compat;
 
 pub use cache::{CacheConfig, CachedRepositories};
 pub use account::AccountRecord;
+pub use profile::{ProfileRecord, ProfileVisibility};
 pub use event::{EventQuery, EventRecord, TagRecord};
 pub use migrations::{Migration, MigrationRunner};
 pub use outbox::{RelayPublishEntry, RelayPublishJob, RelayPublishRequest, RelayPublishStatus};

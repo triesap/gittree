@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 use gittree_app_core::{RepoDetail, RepoListResponse};
+#[cfg(feature = "ssr")]
+use gittree_app_core::{clone_url, normalize_identifier, npub_from_bytes, RepoListItem};
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
