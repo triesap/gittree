@@ -23,6 +23,7 @@ wasm-bindgen-futures.workspace = true
 base64.workspace = true
 serde-wasm-bindgen.workspace = true
 hex.workspace = true
+k256.workspace = true
 js-sys.workspace = true
 web-sys.workspace = true
 

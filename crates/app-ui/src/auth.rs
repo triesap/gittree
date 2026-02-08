@@ -8,6 +8,7 @@ use gittree_app_core::{
     Nip98UnsignedEvent,
 };
 use js_sys::Date;
+use k256::schnorr::SigningKey;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Storage, Window};
@@ -59,6 +60,12 @@ impl std::error::Error for AuthError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LocalKeyMaterial {
+    pub pubkey: String,
+    pub privkey: String,
+}
+
 pub fn unix_timestamp() -> i64 {
     (Date::now() / 1000.0).floor() as i64
 }
@@ -95,6 +102,15 @@ pub fn local_secret_key() -> Result<[u8; 32], AuthError> {
         .set_item(LOCAL_SECRET_KEY, &hex::encode(secret))
         .map_err(|err| AuthError::Js(js_error(err)))?;
     Ok(secret)
+}
+
+pub fn local_key_material() -> Result<LocalKeyMaterial, AuthError> {
+    let secret = local_secret_key()?;
+    let pubkey = pubkey_from_secret(&secret)?;
+    Ok(LocalKeyMaterial {
+        pubkey,
+        privkey: hex::encode(secret),
+    })
 }
 
 pub async fn nip07_pubkey() -> Result<String, AuthError> {
@@ -177,6 +193,13 @@ fn generate_secret_key() -> Result<[u8; 32], AuthError> {
     Ok(bytes)
 }
 
+fn pubkey_from_secret(secret: &[u8; 32]) -> Result<String, AuthError> {
+    let signing_key =
+        SigningKey::from_bytes(secret).map_err(|_| AuthError::InvalidSecretKey)?;
+    let verifying_key = signing_key.verifying_key();
+    Ok(hex::encode(verifying_key.to_bytes()))
+}
+
 fn parse_secret_hex(value: &str) -> Result<[u8; 32], AuthError> {
     let bytes = hex::decode(value).map_err(|_| AuthError::InvalidSecretKey)?;
     if bytes.len() != 32 {
@@ -195,10 +218,17 @@ fn js_error(value: JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::nip07_available;
+    use super::{nip07_available, pubkey_from_secret};
 
     #[test]
     fn nip07_available_defaults_false_on_native() {
         assert!(!nip07_available());
+    }
+
+    #[test]
+    fn pubkey_from_secret_returns_hex() {
+        let pubkey = pubkey_from_secret(&[1u8; 32]).expect("pubkey");
+        assert_eq!(pubkey.len(), 64);
+        assert!(pubkey.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
