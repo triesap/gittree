@@ -2,6 +2,7 @@
 
 mod app;
 mod auth;
+mod auth_client;
 mod i18n;
 mod logging;
 mod session;

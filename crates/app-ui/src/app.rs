@@ -5,13 +5,8 @@ use leptos::prelude::IntoAny;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::hooks::use_params_map;
 use leptos_router::path;
-use gittree_app_core::Nip98Event;
-use serde::Deserialize;
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::JsFuture;
-use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
-
-use crate::auth::{auth_header, local_key_event, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
+use crate::auth::{local_key_event, nip07_pubkey, nip07_sign_nip98, unix_timestamp};
+use crate::auth_client::{signup, signup_endpoint, SignupResponse};
 use crate::i18n::app_i18n_init;
 use crate::session::{AuthSession, AuthSource, store_session};
 use crate::server::{list_repositories, repo_detail};
@@ -143,23 +138,11 @@ fn RepoDetailPage() -> impl IntoView {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct SignupResponse {
-    pub pubkey: String,
-    pub username: String,
-    pub status: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SignupErrorResponse {
-    pub error: String,
-}
-
 #[component]
 fn SignupPage() -> impl IntoView {
     let base_path = app_base_path();
     let auth_url = resolve_auth_url();
-    let auth_endpoint = build_signup_endpoint(&auth_url);
+    let auth_endpoint = signup_endpoint(&auth_url);
     let auth_ready = auth_endpoint.is_some();
     let auth_endpoint = auth_endpoint.unwrap_or_default();
     let missing_auth_message = t!("app.signup.missing_auth").to_string();
@@ -197,7 +180,7 @@ fn SignupPage() -> impl IntoView {
             };
 
             match event {
-                Ok(event) => match request_signup(&auth_endpoint, event).await {
+                Ok(event) => match signup(&auth_endpoint, event).await {
                     Ok(response) => {
                         if let Err(message) = persist_session(&response.pubkey, AuthSource::Nip07)
                         {
@@ -205,7 +188,7 @@ fn SignupPage() -> impl IntoView {
                         }
                         set_status.set(Some(response));
                     }
-                    Err(message) => set_error.set(Some(message)),
+                    Err(err) => set_error.set(Some(err.to_string())),
                 },
                 Err(err) => set_error.set(Some(err.to_string())),
             }
@@ -231,7 +214,7 @@ fn SignupPage() -> impl IntoView {
             set_status.set(None);
             let now = unix_timestamp();
             match local_key_event("POST", &auth_endpoint, None, now) {
-                Ok(event) => match request_signup(&auth_endpoint, event).await {
+                Ok(event) => match signup(&auth_endpoint, event).await {
                     Ok(response) => {
                         if let Err(message) = persist_session(&response.pubkey, AuthSource::Local)
                         {
@@ -239,7 +222,7 @@ fn SignupPage() -> impl IntoView {
                         }
                         set_status.set(Some(response));
                     }
-                    Err(message) => set_error.set(Some(message)),
+                    Err(err) => set_error.set(Some(err.to_string())),
                 },
                 Err(err) => set_error.set(Some(err.to_string())),
             }
@@ -427,68 +410,8 @@ fn signup_href(base_path: &str) -> String {
     }
 }
 
-fn build_signup_endpoint(auth_url: &str) -> Option<String> {
-    let trimmed = auth_url.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(format!("{}/v1/signup", trimmed.trim_end_matches('/')))
-}
-
 fn persist_session(pubkey: &str, source: AuthSource) -> Result<(), String> {
     let session = AuthSession::from_pubkey_hex(pubkey, source)
         .map_err(|err| err.to_string())?;
     store_session(&session).map_err(|err| err.to_string())
-}
-
-async fn request_signup(auth_endpoint: &str, event: Nip98Event) -> Result<SignupResponse, String> {
-    let header = auth_header(&event).map_err(|err| err.to_string())?;
-    let init = RequestInit::new();
-    init.set_method("POST");
-    init.set_mode(RequestMode::Cors);
-
-    let headers = Headers::new().map_err(request_error)?;
-    headers
-        .set("Authorization", &header)
-        .map_err(request_error)?;
-    headers.set("Accept", "application/json").map_err(request_error)?;
-    init.set_headers(&headers);
-
-    let request = Request::new_with_str_and_init(auth_endpoint, &init)
-        .map_err(request_error)?;
-    let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
-    let response = JsFuture::from(window.fetch_with_request(&request))
-        .await
-        .map_err(request_error)?;
-    let response: Response = response.dyn_into().map_err(request_error)?;
-    let status = response.status();
-    let text = response.text().map_err(request_error)?;
-    let text = JsFuture::from(text)
-        .await
-        .map_err(request_error)?;
-    let body = text.as_string().unwrap_or_default();
-
-    if (200..300).contains(&status) {
-        serde_json::from_str::<SignupResponse>(&body)
-            .map_err(|err| format!("invalid response: {err}"))
-    } else {
-        Err(parse_signup_error(&body))
-    }
-}
-
-fn parse_signup_error(body: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<SignupErrorResponse>(body) {
-        return parsed.error;
-    }
-    if body.trim().is_empty() {
-        "signup failed".to_string()
-    } else {
-        body.to_string()
-    }
-}
-
-fn request_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
 }
