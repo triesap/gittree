@@ -2010,6 +2010,7 @@ dependencies = [
  "axum 0.7.9",
  "base64 0.22.1",
  "dotenvy",
+ "gittree-app-core",
  "gittree-config",
  "gittree-forgejo",
  "gittree-nostr-auth",

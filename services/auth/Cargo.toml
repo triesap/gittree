@@ -8,6 +8,7 @@ axum = "0.7"
 base64 = "0.22"
 dotenvy = "0.15"
 gittree-config = { path = "../../crates/config" }
+gittree-app-core = { path = "../../crates/app-core" }
 gittree-forgejo = { path = "../../crates/forgejo" }
 gittree-nostr-auth = { path = "../../crates/nostr-auth" }
 gittree-observability = { path = "../../crates/observability" }

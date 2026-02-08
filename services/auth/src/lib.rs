@@ -9,6 +9,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use gittree_app_core::{Profile, ProfileUpdate, ProfileVisibility as ApiProfileVisibility};
 use gittree_config::{AuthConfig as AuthSettings, ConfigError, ForgejoConfig, ServicesConfig};
 use gittree_forgejo::{
     ForgejoClient, ForgejoCreateUser, ForgejoError, ForgejoTransport,
@@ -16,7 +17,8 @@ use gittree_forgejo::{
 use gittree_nostr_auth::{Nip98Event, Nip98Request, validate_nip98};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
-    AccountRecord, AccountRepository, PostgresRepositories, StorageConfig, StorageError,
+    AccountRecord, AccountRepository, PostgresRepositories, ProfileRecord, ProfileRepository,
+    ProfileVisibility as StorageProfileVisibility, StorageConfig, StorageError,
 };
 use rand::RngCore;
 use serde::Serialize;
@@ -206,19 +208,21 @@ pub fn init_observability() -> Result<ObservabilityHandle, AuthError> {
 struct AuthAppState<T> {
     auth: AuthSettings,
     forgejo: ForgejoClient<T>,
-    repositories: Arc<dyn AccountRepository>,
+    accounts: Arc<dyn AccountRepository>,
+    profiles: Arc<dyn ProfileRepository>,
 }
 
 pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
     let _observability = init_observability()?;
-    let repositories = build_repositories(&config)?;
+    let repositories = Arc::new(build_repositories(&config)?);
     let bind = config.bind.clone();
     let auth = config.auth;
     let forgejo = ForgejoClient::new(config.forgejo).map_err(AuthError::Forgejo)?;
     let state = AuthAppState {
         auth,
         forgejo,
-        repositories: Arc::new(repositories),
+        accounts: repositories.clone(),
+        profiles: repositories,
     };
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -236,11 +240,15 @@ where
 {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
         .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT]);
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/signup", post(signup_handler))
+        .route(
+            "/v1/profile",
+            get(profile_get_handler).patch(profile_patch_handler),
+        )
         .layer(cors)
         .with_state(state)
 }
@@ -312,7 +320,7 @@ where
         .map_err(|_| AuthHttpError::BadRequest("invalid pubkey".to_string()))?;
 
     if let Some(existing) = state
-        .repositories
+        .accounts
         .account_by_pubkey(&pubkey_bytes)
         .await
         .map_err(|err| AuthHttpError::Internal(err.to_string()))?
@@ -342,8 +350,26 @@ where
     let record = AccountRecord::new(&auth.pubkey, &forgejo_user.username)
         .map_err(|err| AuthHttpError::BadRequest(err.to_string()))?;
     state
-        .repositories
+        .accounts
         .upsert_account(record)
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
+
+    let profile = ProfileRecord::new(
+        &auth.pubkey,
+        Some(forgejo_user.username.clone()),
+        None,
+        None,
+        None,
+        None,
+        StorageProfileVisibility::Private,
+        now,
+        now,
+    )
+    .map_err(profile_input_error)?;
+    state
+        .profiles
+        .upsert_profile(profile)
         .await
         .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
 
@@ -352,6 +378,99 @@ where
         username: forgejo_user.username,
         status: "created".to_string(),
     }))
+}
+
+async fn profile_get_handler<T>(
+    State(state): State<AuthAppState<T>>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Json<Profile>, AuthHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    let event = parse_nostr_auth(&headers)?;
+    let request_url = build_request_url(&headers, &uri)?;
+    let now = unix_timestamp();
+    let request = Nip98Request {
+        method: method.as_str(),
+        url: &request_url,
+        payload_sha256: None,
+        now,
+        max_skew_seconds: state.auth.max_skew_seconds as i64,
+    };
+    let auth = validate_nip98(&event, &request)
+        .map_err(|err| AuthHttpError::Unauthorized(err.to_string()))?;
+
+    let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
+    let account = state
+        .accounts
+        .account_by_pubkey(&pubkey_bytes)
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
+        .ok_or_else(|| AuthHttpError::BadRequest("account not found".to_string()))?;
+    let profile = ensure_profile(&state.profiles, &auth.pubkey, &account.forgejo_username, now)
+        .await?;
+    Ok(Json(profile_response(
+        &auth.pubkey,
+        &account.forgejo_username,
+        profile,
+    )))
+}
+
+async fn profile_patch_handler<T>(
+    State(state): State<AuthAppState<T>>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Result<Json<Profile>, AuthHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    let event = parse_nostr_auth(&headers)?;
+    let request_url = build_request_url(&headers, &uri)?;
+    let payload_hash = payload_hash(&body);
+    let now = unix_timestamp();
+    let request = Nip98Request {
+        method: method.as_str(),
+        url: &request_url,
+        payload_sha256: payload_hash.as_deref(),
+        now,
+        max_skew_seconds: state.auth.max_skew_seconds as i64,
+    };
+    let auth = validate_nip98(&event, &request)
+        .map_err(|err| AuthHttpError::Unauthorized(err.to_string()))?;
+
+    if body.is_empty() {
+        return Err(AuthHttpError::BadRequest(
+            "missing profile update".to_string(),
+        ));
+    }
+    let update: ProfileUpdate = serde_json::from_slice(&body)
+        .map_err(|err| AuthHttpError::BadRequest(format!("invalid profile update: {err}")))?;
+
+    let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
+    let account = state
+        .accounts
+        .account_by_pubkey(&pubkey_bytes)
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
+        .ok_or_else(|| AuthHttpError::BadRequest("account not found".to_string()))?;
+    let profile = ensure_profile(&state.profiles, &auth.pubkey, &account.forgejo_username, now)
+        .await?;
+    let updated = apply_profile_update(&auth.pubkey, profile, update, now)
+        .map_err(profile_input_error)?;
+    state
+        .profiles
+        .upsert_profile(updated.clone())
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
+    Ok(Json(profile_response(
+        &auth.pubkey,
+        &account.forgejo_username,
+        updated,
+    )))
 }
 
 fn build_request_url(headers: &HeaderMap, uri: &Uri) -> Result<String, AuthHttpError> {
@@ -412,6 +531,114 @@ fn username_from_pubkey(pubkey: &str) -> Result<String, AuthHttpError> {
     let prefix = &pubkey[..12];
     let suffix = &pubkey[pubkey.len() - 12..];
     Ok(format!("gt_{prefix}{suffix}"))
+}
+
+fn parse_pubkey_bytes(pubkey: &str) -> Result<Vec<u8>, AuthHttpError> {
+    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AuthHttpError::BadRequest("invalid pubkey".to_string()));
+    }
+    hex::decode(pubkey)
+        .map_err(|_| AuthHttpError::BadRequest("invalid pubkey".to_string()))
+}
+
+fn profile_input_error(err: StorageError) -> AuthHttpError {
+    match err {
+        StorageError::InvalidField { .. } | StorageError::InvalidHex { .. } => {
+            AuthHttpError::BadRequest(err.to_string())
+        }
+        _ => AuthHttpError::Internal(err.to_string()),
+    }
+}
+
+fn api_visibility_from_storage(value: StorageProfileVisibility) -> ApiProfileVisibility {
+    match value {
+        StorageProfileVisibility::Private => ApiProfileVisibility::Private,
+        StorageProfileVisibility::Public => ApiProfileVisibility::Public,
+    }
+}
+
+fn storage_visibility_from_api(value: ApiProfileVisibility) -> StorageProfileVisibility {
+    match value {
+        ApiProfileVisibility::Private => StorageProfileVisibility::Private,
+        ApiProfileVisibility::Public => StorageProfileVisibility::Public,
+    }
+}
+
+fn profile_response(pubkey: &str, username: &str, profile: ProfileRecord) -> Profile {
+    Profile {
+        pubkey: pubkey.to_string(),
+        username: username.to_string(),
+        display_name: profile.display_name,
+        bio: profile.bio,
+        avatar_url: profile.avatar_url,
+        website_url: profile.website_url,
+        location: profile.location,
+        visibility: api_visibility_from_storage(profile.visibility),
+        created_at: profile.created_at,
+        updated_at: profile.updated_at,
+    }
+}
+
+fn apply_profile_update(
+    pubkey: &str,
+    profile: ProfileRecord,
+    update: ProfileUpdate,
+    now: i64,
+) -> Result<ProfileRecord, StorageError> {
+    let display_name = update.display_name.or(profile.display_name);
+    let bio = update.bio.or(profile.bio);
+    let avatar_url = update.avatar_url.or(profile.avatar_url);
+    let website_url = update.website_url.or(profile.website_url);
+    let location = update.location.or(profile.location);
+    let visibility = update
+        .visibility
+        .map(storage_visibility_from_api)
+        .unwrap_or(profile.visibility);
+    ProfileRecord::new(
+        pubkey,
+        display_name,
+        bio,
+        avatar_url,
+        website_url,
+        location,
+        visibility,
+        profile.created_at,
+        now,
+    )
+}
+
+async fn ensure_profile(
+    profiles: &Arc<dyn ProfileRepository>,
+    pubkey: &str,
+    username: &str,
+    now: i64,
+) -> Result<ProfileRecord, AuthHttpError> {
+    let pubkey_bytes = parse_pubkey_bytes(pubkey)?;
+    if let Some(existing) = profiles
+        .profile_by_pubkey(&pubkey_bytes)
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
+    {
+        return Ok(existing);
+    }
+
+    let record = ProfileRecord::new(
+        pubkey,
+        Some(username.to_string()),
+        None,
+        None,
+        None,
+        None,
+        StorageProfileVisibility::Private,
+        now,
+        now,
+    )
+    .map_err(profile_input_error)?;
+    profiles
+        .upsert_profile(record.clone())
+        .await
+        .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
+    Ok(record)
 }
 
 fn generate_password() -> String {
@@ -503,21 +730,30 @@ mod tests {
                 max_skew_seconds: 60,
             },
             forgejo,
-            repositories: repositories.clone(),
+            accounts: repositories.clone(),
+            profiles: repositories.clone(),
         };
         (state, repositories, transport)
     }
 
-    fn signed_event(url: &str, method: &str, created_at: i64) -> Nip98Event {
+    fn signed_event(
+        url: &str,
+        method: &str,
+        created_at: i64,
+        payload_hash: Option<&str>,
+    ) -> Nip98Event {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[2u8; 32]).expect("secret");
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
         let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
         let pubkey_hex = hex::encode(pubkey.serialize());
-        let tags = vec![
+        let mut tags = vec![
             vec!["u".to_string(), url.to_string()],
             vec!["method".to_string(), method.to_string()],
         ];
+        if let Some(payload) = payload_hash {
+            tags.push(vec!["payload".to_string(), payload.to_string()]);
+        }
         let mut event = Nip98Event {
             id: String::new(),
             pubkey: pubkey_hex,
@@ -578,7 +814,7 @@ mod tests {
     async fn signup_creates_account() {
         let now = unix_timestamp();
         let url = "http://localhost/v1/signup";
-        let event = signed_event(url, "POST", now);
+        let event = signed_event(url, "POST", now, None);
         let username = username_from_pubkey(&event.pubkey).expect("username");
         let responses = vec![
             ForgejoResponse {
@@ -625,5 +861,103 @@ mod tests {
             .expect("lookup");
         assert!(stored.is_some());
         assert_eq!(stored.unwrap().forgejo_username, username);
+    }
+
+    #[tokio::test]
+    async fn profile_get_creates_default_profile() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let event = signed_event(url, "GET", now, None);
+        let (state, repos, _transport) = test_state(Vec::new());
+        let account =
+            AccountRecord::new(&event.pubkey, "alice").expect("account");
+        repos.upsert_account(account).await.expect("upsert");
+
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let stored = repos
+            .profile_by_pubkey(&pubkey_bytes)
+            .await
+            .expect("profile")
+            .expect("stored");
+        assert_eq!(stored.display_name.as_deref(), Some("alice"));
+        assert_eq!(stored.visibility, StorageProfileVisibility::Private);
+    }
+
+    #[tokio::test]
+    async fn profile_patch_updates_profile() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let event = signed_event(url, "PATCH", now, None);
+        let (state, repos, _transport) = test_state(Vec::new());
+        let account =
+            AccountRecord::new(&event.pubkey, "alice").expect("account");
+        repos.upsert_account(account).await.expect("upsert");
+        let existing = ProfileRecord::new(
+            &event.pubkey,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+            StorageProfileVisibility::Private,
+            now,
+            now,
+        )
+        .expect("profile");
+        repos.upsert_profile(existing).await.expect("upsert");
+
+        let update = ProfileUpdate {
+            display_name: Some("Ada".to_string()),
+            bio: Some("Builder".to_string()),
+            visibility: Some(ApiProfileVisibility::Public),
+            ..ProfileUpdate::default()
+        };
+        let body = serde_json::to_vec(&update).expect("update json");
+        let body_bytes = Bytes::from(body);
+        let payload_hash = payload_hash(&body_bytes).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&payload_hash));
+
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body_bytes))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let stored = repos
+            .profile_by_pubkey(&pubkey_bytes)
+            .await
+            .expect("profile")
+            .expect("stored");
+        assert_eq!(stored.display_name.as_deref(), Some("Ada"));
+        assert_eq!(stored.bio.as_deref(), Some("Builder"));
+        assert_eq!(stored.visibility, StorageProfileVisibility::Public);
     }
 }

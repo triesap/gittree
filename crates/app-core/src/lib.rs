@@ -36,6 +36,37 @@ pub struct RepoListResponse {
     pub items: Vec<RepoListItem>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProfileVisibility {
+    Private,
+    Public,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub pubkey: String,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub bio: Option<String>,
+    pub avatar_url: Option<String>,
+    pub website_url: Option<String>,
+    pub location: Option<String>,
+    pub visibility: ProfileVisibility,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProfileUpdate {
+    pub display_name: Option<String>,
+    pub bio: Option<String>,
+    pub avatar_url: Option<String>,
+    pub website_url: Option<String>,
+    pub location: Option<String>,
+    pub visibility: Option<ProfileVisibility>,
+}
+
 impl RepoListItem {
     pub fn new(npub: String, identifier: String, forgejo: String, clone_url: String) -> Self {
         Self {
@@ -106,7 +137,7 @@ pub fn npub_from_bytes(bytes: &[u8]) -> Result<String, AppCoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clone_url, normalize_identifier, npub_from_bytes};
+    use super::{clone_url, normalize_identifier, npub_from_bytes, ProfileVisibility};
 
     #[test]
     fn normalize_identifier_strips_git_suffix() {
@@ -124,5 +155,11 @@ mod tests {
     fn npub_from_bytes_returns_npub_prefix() {
         let npub = npub_from_bytes(&[0u8; 32]).expect("npub");
         assert!(npub.starts_with("npub1"));
+    }
+
+    #[test]
+    fn profile_visibility_serializes_to_strings() {
+        let json = serde_json::to_string(&ProfileVisibility::Private).expect("json");
+        assert_eq!(json, "\"private\"");
     }
 }
