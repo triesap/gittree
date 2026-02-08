@@ -25,6 +25,7 @@ pub fn GittreeApp() -> impl IntoView {
     let base_path = resolve_base_path();
     provide_context(AppBasePath(base_path.clone()));
     let auth_url = resolve_auth_url();
+    let app_url = resolve_app_url();
 
     view! {
         <Router>
@@ -33,6 +34,7 @@ pub fn GittreeApp() -> impl IntoView {
                 class="gt-app"
                 data-base-path=base_path
                 data-auth-url=auth_url
+                data-app-url=app_url
             >
                 <Routes fallback=|| view! { <NotFoundPage /> }>
                     <Route path=path!("/") view=RepoListPage />
@@ -595,6 +597,14 @@ fn auth_url_from_context() -> Option<String> {
     None
 }
 
+#[cfg(feature = "ssr")]
+fn app_url_from_context() -> Option<String> {
+    use crate::AppUiState;
+
+    use_context::<AppUiState>().map(|state| state.app_url)
+}
+
+#[cfg(not(feature = "ssr"))]
 fn app_url_from_context() -> Option<String> {
     None
 }

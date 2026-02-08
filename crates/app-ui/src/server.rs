@@ -44,6 +44,7 @@ pub struct AppUiState {
     pub repo_root: PathBuf,
     pub public_git_url: String,
     pub auth_url: String,
+    pub app_url: String,
     pub base_path: String,
     pub leptos_options: LeptosOptions,
 }
@@ -55,6 +56,7 @@ impl AppUiState {
         repo_root: PathBuf,
         public_git_url: String,
         auth_url: String,
+        app_url: String,
         base_path: String,
         leptos_options: LeptosOptions,
     ) -> Self {
@@ -63,6 +65,7 @@ impl AppUiState {
             repo_root,
             public_git_url,
             auth_url,
+            app_url,
             base_path,
             leptos_options,
         }
@@ -159,6 +162,7 @@ mod tests {
             "/tmp/gittree".into(),
             "http://localhost:8085".to_string(),
             "http://localhost:8089".to_string(),
+            "http://localhost:8090".to_string(),
             "/".to_string(),
             LeptosOptions::builder()
                 .output_name("gittree-app-ui")
@@ -174,6 +178,13 @@ mod tests {
         let repositories: Arc<dyn RepoMappingRepository> = Arc::new(InMemoryRepositories::new());
         let state = test_state(repositories);
         assert_eq!(state.auth_url, "http://localhost:8089");
+    }
+
+    #[test]
+    fn app_ui_state_stores_app_url() {
+        let repositories: Arc<dyn RepoMappingRepository> = Arc::new(InMemoryRepositories::new());
+        let state = test_state(repositories);
+        assert_eq!(state.app_url, "http://localhost:8090");
     }
 
     #[tokio::test]
