@@ -7,7 +7,9 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use gittree_app_core::{RepoDetail, RepoListResponse};
-use gittree_app_ui::server::{list_repo_items, repo_detail_item, AppUiError};
+use gittree_app_ui::server::{
+    list_repo_items, list_repo_items_for_npub, repo_detail_item, AppUiError,
+};
 use gittree_app_ui::AppUiState;
 use gittree_config::{ConfigError, UiConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
@@ -317,6 +319,7 @@ fn build_router(state: AppUiState) -> Router {
         .route("/health", get(health_handler))
         .route("/api/repos", get(api_list_repos_handler))
         .route("/api/repos/{npub}/{identifier}", get(api_repo_detail_handler))
+        .route("/api/users/{npub}/repos", get(api_list_repos_by_owner_handler))
         .route(
             "/api/{*fn_name}",
             post({
@@ -367,6 +370,14 @@ async fn api_list_repos_handler(
     State(state): State<AppUiState>,
 ) -> Result<Json<RepoListResponse>, AppApiError> {
     let items = list_repo_items(&state).await?;
+    Ok(Json(RepoListResponse { items }))
+}
+
+async fn api_list_repos_by_owner_handler(
+    State(state): State<AppUiState>,
+    Path(npub): Path<String>,
+) -> Result<Json<RepoListResponse>, AppApiError> {
+    let items = list_repo_items_for_npub(&state, &npub).await?;
     Ok(Json(RepoListResponse { items }))
 }
 
@@ -444,6 +455,52 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/repos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let parsed: RepoListResponse = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].forgejo, "owner/repo");
+    }
+
+    #[tokio::test]
+    async fn api_list_repos_by_owner_filters_entries() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let record_a = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            pubkey: vec![0x11; 32],
+            identifier: "repo".to_string(),
+        };
+        let record_b = RepoMappingRecord {
+            forgejo_owner: "other".to_string(),
+            forgejo_repo: "else".to_string(),
+            pubkey: vec![0x22; 32],
+            identifier: "else".to_string(),
+        };
+        repositories
+            .upsert_mapping(record_a)
+            .await
+            .expect("insert mapping");
+        repositories
+            .upsert_mapping(record_b)
+            .await
+            .expect("insert mapping");
+
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories);
+        let app = build_router(state);
+        let npub = gittree_app_core::npub_from_bytes(&[0x11; 32]).expect("npub");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/users/{npub}/repos"))
                     .body(Body::empty())
                     .unwrap(),
             )

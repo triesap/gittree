@@ -2,7 +2,9 @@
 
 use gittree_app_core::{RepoDetail, RepoListResponse};
 #[cfg(feature = "ssr")]
-use gittree_app_core::{clone_url, normalize_identifier, npub_from_bytes, RepoListItem};
+use gittree_app_core::{
+    clone_url, normalize_identifier, npub_from_bytes, pubkey_bytes_from_npub, RepoListItem,
+};
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
@@ -94,6 +96,27 @@ pub async fn list_repo_items(state: &AppUiState) -> Result<Vec<RepoListItem>, Ap
     let mut items = Vec::with_capacity(mappings.len());
     for mapping in mappings {
         items.push(repo_list_item(&state.public_git_url, mapping)?);
+    }
+    Ok(items)
+}
+
+#[cfg(feature = "ssr")]
+pub async fn list_repo_items_for_npub(
+    state: &AppUiState,
+    npub: &str,
+) -> Result<Vec<RepoListItem>, AppUiError> {
+    let pubkey_bytes =
+        pubkey_bytes_from_npub(npub).map_err(|err| AppUiError::BadRequest(err.to_string()))?;
+    let mappings = state
+        .repositories
+        .list_mappings()
+        .await
+        .map_err(|err| AppUiError::Storage(err.to_string()))?;
+    let mut items = Vec::new();
+    for mapping in mappings {
+        if mapping.pubkey == pubkey_bytes {
+            items.push(repo_list_item(&state.public_git_url, mapping)?);
+        }
     }
     Ok(items)
 }
