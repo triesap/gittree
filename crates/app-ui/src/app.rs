@@ -350,6 +350,7 @@ fn ProfilePage() -> impl IntoView {
     let (status, set_status) = signal::<Option<String>>(None);
     let (error, set_error) = signal::<Option<String>>(None);
     let (busy, set_busy) = signal(false);
+    let (fetch_attempted, set_fetch_attempted) = signal(false);
 
     let (display_name, set_display_name) = signal(String::new());
     let (bio, set_bio) = signal(String::new());
@@ -396,6 +397,7 @@ fn ProfilePage() -> impl IntoView {
         let set_error = set_error.clone();
         let set_status = set_status.clone();
         let set_busy = set_busy.clone();
+        let set_fetch_attempted = set_fetch_attempted.clone();
         move |()| {
             if auth_endpoint.is_empty() {
                 set_error.set(Some(t!("app.profile.missing_auth").to_string()));
@@ -404,6 +406,7 @@ fn ProfilePage() -> impl IntoView {
             let Some(session) = session.get() else {
                 return;
             };
+            set_fetch_attempted.set(true);
             let auth_endpoint = auth_endpoint.clone();
             let set_profile = set_profile.clone();
             let set_error = set_error.clone();
@@ -434,7 +437,12 @@ fn ProfilePage() -> impl IntoView {
 
     let fetch_profile_on_mount = fetch_profile_action;
     create_effect(move |_| {
-        if profile.get().is_none() && session.get().is_some() && auth_ready && !busy.get() {
+        if !fetch_attempted.get()
+            && profile.get().is_none()
+            && session.get().is_some()
+            && auth_ready
+            && !busy.get()
+        {
             fetch_profile_on_mount.run(());
         }
     });
