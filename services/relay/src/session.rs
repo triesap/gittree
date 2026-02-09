@@ -12,6 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 const AUTH_KIND: u32 = 22242;
+const AUTH_REQUIRED_REASON: &str = "auth-required";
+const AUTH_PUBKEY_MISMATCH_REASON: &str = "auth-pubkey-mismatch";
 
 struct AuthState {
     challenge: String,
@@ -450,7 +452,7 @@ impl<S: EventStore> Session<S> {
                     return vec![ServerMessage::Ok {
                         event_id: event.id.clone(),
                         accepted: false,
-                        message: "auth required".to_string(),
+                        message: AUTH_REQUIRED_REASON.to_string(),
                     }];
                 }
                 Some(pubkey) if pubkey != &event.pubkey => {
@@ -458,7 +460,7 @@ impl<S: EventStore> Session<S> {
                     return vec![ServerMessage::Ok {
                         event_id: event.id.clone(),
                         accepted: false,
-                        message: "auth pubkey mismatch".to_string(),
+                        message: AUTH_PUBKEY_MISMATCH_REASON.to_string(),
                     }];
                 }
                 Some(_) => {}

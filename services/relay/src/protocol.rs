@@ -34,6 +34,10 @@ pub enum ServerMessage {
         accepted: bool,
         message: String,
     },
+    Closed {
+        subscription_id: String,
+        message: String,
+    },
     Auth {
         challenge: String,
     },
@@ -152,6 +156,10 @@ pub fn encode_server_message(message: &ServerMessage) -> Result<String, Protocol
             accepted,
             message,
         } => json!(["OK", event_id, accepted, message]),
+        ServerMessage::Closed {
+            subscription_id,
+            message,
+        } => json!(["CLOSED", subscription_id, message]),
         ServerMessage::Auth { challenge } => json!(["AUTH", challenge]),
         ServerMessage::Count {
             subscription_id,
@@ -233,5 +241,16 @@ mod tests {
         let encoded = encode_server_message(&message).expect("encode");
         let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
         assert_eq!(value, json!(["OK", "id", true, "ok"]));
+    }
+
+    #[test]
+    fn encode_closed_message() {
+        let message = ServerMessage::Closed {
+            subscription_id: "sub".to_string(),
+            message: "auth-required".to_string(),
+        };
+        let encoded = encode_server_message(&message).expect("encode");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
+        assert_eq!(value, json!(["CLOSED", "sub", "auth-required"]));
     }
 }
