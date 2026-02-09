@@ -309,6 +309,7 @@ fn admission_decision_from_payload(
 
 #[cfg(test)]
 mod tests {
+    use super::admission_decision_from_payload;
     use super::AdmissionDecisionPayload;
     use super::AdmissionFallback;
     use super::AdmissionFilter;
@@ -442,5 +443,60 @@ mod tests {
             }
             _ => panic!("expected related-event decision"),
         }
+    }
+
+    #[tokio::test]
+    async fn client_reject_fallback_on_invalid_event_request() {
+        let transport = MockTransport::with_result(Ok(AdmissionDecisionPayload::Accept));
+        let config = AdmissionHookConfig::new(
+            "http://admission.local/decide",
+            Duration::from_secs(1),
+            AdmissionFallback::Reject,
+        );
+        let client = AdmissionHookClient::new(config, transport);
+        let mut event = sample_event();
+        event.pubkey = String::new();
+
+        let decision = client.decide(&event).await;
+        match decision {
+            gittree_core::AdmissionDecision::Reject { reason } => {
+                assert!(reason.contains("admission unavailable"));
+                assert!(reason.contains("invalid request"));
+            }
+            _ => panic!("expected reject fallback"),
+        }
+
+        let calls = client.transport.calls.lock().expect("calls lock");
+        assert!(calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn client_accept_fallback_on_invalid_decision_payload() {
+        let transport = MockTransport::with_result(Ok(AdmissionDecisionPayload::Reject {
+            reason: " ".to_string(),
+        }));
+        let config = AdmissionHookConfig::new(
+            "http://admission.local/decide",
+            Duration::from_secs(1),
+            AdmissionFallback::Accept,
+        );
+        let client = AdmissionHookClient::new(config, transport);
+        let event = sample_event();
+
+        let decision = client.decide(&event).await;
+        assert!(matches!(decision, gittree_core::AdmissionDecision::Accept));
+    }
+
+    #[test]
+    fn decision_payload_validation_rejects_empty_reason_and_filters() {
+        let reject = admission_decision_from_payload(AdmissionDecisionPayload::Reject {
+            reason: String::new(),
+        });
+        assert!(matches!(reject, Err(AdmissionHookError::InvalidDecision(_))));
+
+        let related = admission_decision_from_payload(
+            AdmissionDecisionPayload::RequiresRelatedEvents { filters: Vec::new() },
+        );
+        assert!(matches!(related, Err(AdmissionHookError::InvalidDecision(_))));
     }
 }

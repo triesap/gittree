@@ -886,12 +886,13 @@ mod tests {
     use super::{
         AccountRepository, AnnouncementRepository, EventQuery, EventRecord, EventRepository,
         InMemoryRepositories, ProfileRepository, RelayCompatibilityRepository,
-        RelayPublishRepository, RepoMappingRepository, StateRepository,
+        RelayMembershipRepository, RelayPublishRepository, RelayTenantRepository,
+        RepoMappingRepository, StateRepository,
     };
     use crate::{
-        AccountRecord, ProfileRecord, ProfileVisibility, RelayCompatibilityRecord,
-        RelayProbeMetadata, RelayPublishRequest, RepoAnnouncementRecord, RepoMappingRecord,
-        RepoStateRecord, TagRecord,
+        AccountRecord, ProfileRecord, ProfileVisibility, RelayCompatibilityRecord, RelayInviteRecord,
+        RelayMembershipRecord, RelayProbeMetadata, RelayPublishRequest, RelayTenantRecord,
+        RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
     };
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
@@ -962,6 +963,38 @@ mod tests {
             missing_required: Vec::new(),
             missing_optional: Vec::new(),
         }
+    }
+
+    fn sample_tenant(host: &str) -> RelayTenantRecord {
+        RelayTenantRecord::new(
+            host,
+            host,
+            &hex_32(0x44),
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            "kid",
+            Some("Tenant".to_string()),
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .expect("tenant")
+    }
+
+    fn sample_membership(tenant_id: &str, pubkey_byte: u8) -> RelayMembershipRecord {
+        RelayMembershipRecord::new(tenant_id, &hex_32(pubkey_byte), "member", "active", 1, 1)
+            .expect("membership")
+    }
+
+    fn sample_invite(tenant_id: &str, code: &str) -> RelayInviteRecord {
+        RelayInviteRecord::new(tenant_id, code, "member", &hex_32(0x55), None, None, 1)
+            .expect("invite")
     }
 
     fn event_record(event_id: &str, pubkey: &str, created_at: i64) -> EventRecord {
@@ -1107,6 +1140,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_rejects_account_username_collision() {
+        let store = InMemoryRepositories::new();
+        store
+            .upsert_account(sample_account("alice", 0x11))
+            .await
+            .expect("first");
+        let err = store
+            .upsert_account(sample_account("alice", 0x22))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::StorageError::Internal { .. }));
+    }
+
+    #[tokio::test]
     async fn in_memory_returns_profile_by_pubkey() {
         let store = InMemoryRepositories::new();
         let record = sample_profile(0x33);
@@ -1135,6 +1182,52 @@ mod tests {
             .await
             .expect("lookup");
         assert_eq!(found, Some(record));
+    }
+
+    #[tokio::test]
+    async fn in_memory_tenant_membership_and_invite_flows() {
+        let store = InMemoryRepositories::new();
+        let tenant = sample_tenant("relay.local");
+        store.upsert_tenant(tenant.clone()).await.expect("tenant");
+
+        let looked_up = store.tenant_by_host("relay.local").await.expect("lookup");
+        assert_eq!(looked_up, Some(tenant.clone()));
+        assert!(store.tenant_by_host("missing.local").await.expect("lookup").is_none());
+        assert_eq!(store.list_tenants().await.expect("tenants").len(), 1);
+
+        let member = sample_membership(&tenant.id, 0x33);
+        store.upsert_membership(member.clone()).await.expect("membership");
+        let listed = store.list_memberships(&tenant.id).await.expect("list");
+        assert_eq!(listed, vec![member.clone()]);
+        let removed = store
+            .remove_membership(&tenant.id, &member.pubkey)
+            .await
+            .expect("remove");
+        assert!(removed);
+        let removed_again = store
+            .remove_membership(&tenant.id, &member.pubkey)
+            .await
+            .expect("remove");
+        assert!(!removed_again);
+
+        let invite = sample_invite(&tenant.id, "code-1");
+        store.insert_invite(invite.clone()).await.expect("invite");
+        let found = store
+            .invite_by_code(&tenant.id, "code-1")
+            .await
+            .expect("lookup");
+        assert_eq!(found, Some(invite));
+        store
+            .delete_invite(&tenant.id, "code-1")
+            .await
+            .expect("delete");
+        assert!(
+            store
+                .invite_by_code(&tenant.id, "code-1")
+                .await
+                .expect("lookup")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1172,6 +1265,51 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn in_memory_outbox_marks_failed_and_reclaims_after_retry() {
+        let store = InMemoryRepositories::new();
+        let request = RelayPublishRequest {
+            relay_url: "wss://relay.example".to_string(),
+            event_id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "33".repeat(64),
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            identifier: "repo".to_string(),
+        };
+        store
+            .enqueue_relay_publish(request)
+            .await
+            .expect("enqueue");
+        let now = OffsetDateTime::now_utc();
+        let first = store
+            .claim_relay_publish(now)
+            .await
+            .expect("claim")
+            .expect("job");
+        let retry_at = now + time::Duration::seconds(60);
+        store
+            .mark_relay_publish_failed(first.id, "retry", retry_at)
+            .await
+            .expect("failed");
+        let none_early = store
+            .claim_relay_publish(now + time::Duration::seconds(30))
+            .await
+            .expect("claim");
+        assert!(none_early.is_none());
+        let second = store
+            .claim_relay_publish(now + time::Duration::seconds(90))
+            .await
+            .expect("claim")
+            .expect("job");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.attempt_count, 2);
     }
 
     #[tokio::test]
@@ -1222,5 +1360,44 @@ mod tests {
         let results = store.query_events(&query).await.expect("query");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], record);
+    }
+
+    #[tokio::test]
+    async fn in_memory_event_repo_applies_limits_and_invalid_id_filters() {
+        let store = InMemoryRepositories::new();
+        let first_id = "aa".repeat(32);
+        let second_id = "bb".repeat(32);
+        let pubkey = "cc".repeat(32);
+        let first = event_record(&first_id, &pubkey, 1);
+        let second = event_record(&second_id, &pubkey, 2);
+        store.insert_event(first.clone()).await.expect("insert");
+        store.insert_event(second.clone()).await.expect("insert");
+
+        let limited = store
+            .query_events(&EventQuery {
+                limit: Some(1),
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query");
+        assert_eq!(limited, vec![second.clone()]);
+
+        let none = store
+            .query_events(&EventQuery {
+                ids: vec!["not-hex".to_string()],
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query");
+        assert!(none.is_empty());
+
+        let since_filtered = store
+            .query_events(&EventQuery {
+                since: Some(2),
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query");
+        assert_eq!(since_filtered, vec![second]);
     }
 }
