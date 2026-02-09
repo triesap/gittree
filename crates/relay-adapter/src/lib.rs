@@ -511,11 +511,14 @@ mod tests {
     use super::{
         RelayAdapter, RelayAdapterConfig, RelayAdapterError, SignedNostrEvent,
         WebsocketRelayAdapter, build_event_id, build_probe_event, normalize_ws_url,
-        parse_eose_message, parse_event_message, parse_ok_message, sign_event_id,
+        parse_eose_message, parse_event_message, parse_ok_message, sign_event_id, wait_for_event,
+        wait_for_ok,
     };
+    use futures_util::stream;
     use gittree_core::RepoAnnouncement;
     use serde_json::json;
     use secp256k1::{Message, Secp256k1, SecretKey, XOnlyPublicKey};
+    use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     fn sample_announcement() -> RepoAnnouncement {
@@ -564,6 +567,70 @@ mod tests {
     fn normalize_ws_url_rejects_invalid_input() {
         let err = normalize_ws_url("not a url").unwrap_err();
         assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn relay_adapter_config_builder_applies_values() {
+        let config = RelayAdapterConfig::new("wss://relay.example")
+            .with_timeout(Duration::from_secs(9))
+            .with_secret_key("ab".repeat(32));
+        assert_eq!(config.relay_url, "wss://relay.example");
+        assert_eq!(config.timeout, Duration::from_secs(9));
+        assert!(config.secret_key.is_some());
+    }
+
+    #[tokio::test]
+    async fn nostr_rs_adapter_methods_return_unsupported() {
+        let adapter = super::NostrRsRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
+        assert_eq!(adapter.relay_url(), "wss://relay.example");
+        assert!(matches!(
+            adapter.relay_info().await.unwrap_err(),
+            RelayAdapterError::Unsupported(_)
+        ));
+        assert!(matches!(
+            adapter.probe_write_read().await.unwrap_err(),
+            RelayAdapterError::Unsupported(_)
+        ));
+        let event = SignedNostrEvent {
+            id: "evt".to_string(),
+            pubkey: "pub".to_string(),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "sig".to_string(),
+        };
+        assert!(matches!(
+            adapter.publish_event(&event).await.unwrap_err(),
+            RelayAdapterError::Unsupported(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn webhook_adapter_methods_return_unsupported() {
+        let adapter = super::WebhookRelayAdapter::new(RelayAdapterConfig::new("https://relay.example"));
+        assert_eq!(adapter.relay_url(), "https://relay.example");
+        assert!(matches!(
+            adapter.relay_info().await.unwrap_err(),
+            RelayAdapterError::Unsupported(_)
+        ));
+        assert!(matches!(
+            adapter.probe_write_read().await.unwrap_err(),
+            RelayAdapterError::Unsupported(_)
+        ));
+        let event = SignedNostrEvent {
+            id: "evt".to_string(),
+            pubkey: "pub".to_string(),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "sig".to_string(),
+        };
+        assert!(matches!(
+            adapter.publish_event(&event).await.unwrap_err(),
+            RelayAdapterError::Unsupported(_)
+        ));
     }
 
     #[tokio::test]
@@ -668,6 +735,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_and_eose_ignore_non_text_messages() {
+        let binary = WsMessage::Binary(vec![1, 2, 3]);
+        assert!(parse_event_message(&binary).expect("event").is_none());
+        assert!(parse_eose_message(&binary).expect("eose").is_none());
+    }
+
+    #[test]
     fn parse_eose_message_parses_sub_id() {
         let message = WsMessage::Text("[\"EOSE\",\"sub-1\"]".to_string());
         let parsed = parse_eose_message(&message).expect("parsed");
@@ -712,7 +786,53 @@ mod tests {
     #[tokio::test]
     async fn websocket_adapter_relay_info_returns_none() {
         let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
+        assert_eq!(adapter.relay_url(), "wss://relay.example");
         let info = adapter.relay_info().await.expect("info");
         assert!(info.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_ok_handles_success_and_rejection() {
+        let mut accepted = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text("[\"OK\",\"evt\",true,\"accepted\"]".to_string()),
+        )]);
+        wait_for_ok(&mut accepted, "evt", Duration::from_secs(1))
+            .await
+            .expect("ok");
+
+        let mut rejected = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text("[\"OK\",\"evt\",false,\"denied\"]".to_string()),
+        )]);
+        let err = wait_for_ok(&mut rejected, "evt", Duration::from_secs(1))
+            .await
+            .expect_err("rejected");
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_ok_reports_closed_stream() {
+        let mut empty = stream::iter(Vec::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>::new());
+        let err = wait_for_ok(&mut empty, "evt", Duration::from_secs(1))
+            .await
+            .expect_err("closed");
+        assert!(matches!(err, RelayAdapterError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_handles_match_and_eose() {
+        let mut found = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text(json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string()),
+        )]);
+        wait_for_event(&mut found, "sub-1", "evt-1", Duration::from_secs(1))
+            .await
+            .expect("event");
+
+        let mut eose = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text("[\"EOSE\",\"sub-1\"]".to_string()),
+        )]);
+        let err = wait_for_event(&mut eose, "sub-1", "evt-1", Duration::from_secs(1))
+            .await
+            .expect_err("missing event");
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
     }
 }
