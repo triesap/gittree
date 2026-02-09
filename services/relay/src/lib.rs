@@ -2,7 +2,9 @@ use gittree_config::{ConfigError, RelayPolicyConfig, ServicesConfig};
 use gittree_core::RelayInfoDocument;
 use gittree_core::nip11::RelayLimitation;
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
-use gittree_storage::{CachedRepositories, PostgresRepositories, StorageConfig, StorageError};
+use gittree_storage::{
+    CachedRepositories, PostgresRepositories, RelayTenantRecord, StorageConfig, StorageError,
+};
 use std::time::Duration;
 
 mod admission_client;
@@ -334,21 +336,27 @@ pub fn build_repositories(config: &RelayConfig) -> Result<RelayRepositories, Rel
     Ok(CachedRepositories::new(repos))
 }
 
-pub fn build_nip11_document(config: &RelayConfig, policy: &Policy) -> RelayInfoDocument {
-    let name = config
-        .storage
-        .application_name
-        .clone()
+pub fn build_nip11_document(
+    config: &RelayConfig,
+    policy: &Policy,
+    tenant: Option<&RelayTenantRecord>,
+) -> RelayInfoDocument {
+    let tenant_name = tenant.and_then(|record| record.name.clone());
+    let name = tenant_name
+        .or_else(|| config.storage.application_name.clone())
         .or_else(|| Some("gittree".to_string()));
+    let tenant_pubkey = tenant.map(|record| hex::encode(&record.relay_pubkey));
+    let tenant_auth_required = tenant.map(|record| record.auth_required);
+    let tenant_restricted_writes = tenant.map(|record| !record.public_write);
 
     RelayInfoDocument {
         name,
-        description: None,
-        banner: None,
-        icon: None,
-        pubkey: None,
-        self_pubkey: None,
-        contact: None,
+        description: tenant.and_then(|record| record.description.clone()),
+        banner: tenant.and_then(|record| record.banner.clone()),
+        icon: tenant.and_then(|record| record.icon.clone()),
+        pubkey: tenant_pubkey.clone(),
+        self_pubkey: tenant_pubkey,
+        contact: tenant.and_then(|record| record.contact.clone()),
         supported_nips: Some(vec![1, 11, 34]),
         software: Some("https://github.com/triesap/gittree".to_string()),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -362,9 +370,9 @@ pub fn build_nip11_document(config: &RelayConfig, policy: &Policy) -> RelayInfoD
             max_event_tags: Some(policy.max_tags as u64),
             max_content_length: Some(policy.max_content_len as u64),
             min_pow_difficulty: None,
-            auth_required: Some(config.policy.auth_required),
+            auth_required: Some(tenant_auth_required.unwrap_or(config.policy.auth_required)),
             payment_required: None,
-            restricted_writes: Some(true),
+            restricted_writes: Some(tenant_restricted_writes.unwrap_or(true)),
             created_at_lower_limit: None,
             created_at_upper_limit: None,
             default_limit: None,
@@ -399,6 +407,7 @@ mod tests {
     use super::build_nip11_document;
     use super::build_repositories;
     use super::init_observability;
+    use gittree_storage::RelayTenantRecord;
     use gittree_config::RelayPolicyConfig;
     use std::sync::Mutex;
     use std::sync::OnceLock;
@@ -532,7 +541,7 @@ mod tests {
                                 with_env_var("GITTREE_RELAY_POLICY_AUTH_REQUIRED", "true", || {
                                     let config = RelayConfig::from_env().expect("config");
                                     let policy = Policy::default();
-                                    let doc = build_nip11_document(&config, &policy);
+                                    let doc = build_nip11_document(&config, &policy, None);
                                     assert_eq!(doc.name, Some("gittree-relay".to_string()));
                                     assert!(doc.supported_nips.as_ref().unwrap().contains(&34));
                                     let limitation = doc.limitation.as_ref().expect("limitation");
@@ -551,6 +560,45 @@ mod tests {
                         });
                     });
                 });
+            },
+        );
+    }
+
+    #[test]
+    fn nip11_builder_overrides_with_tenant_metadata() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                let config = RelayConfig::from_env().expect("config");
+                let policy = Policy::default();
+                let tenant = RelayTenantRecord::new(
+                    "tenant-1",
+                    "relay.gittr.ee",
+                    &"11".repeat(32),
+                    vec![1],
+                    vec![2],
+                    "v1",
+                    Some("Tenant Relay".to_string()),
+                    Some("Tenant description".to_string()),
+                    Some("https://example.com/icon.png".to_string()),
+                    None,
+                    Some("ops@example.com".to_string()),
+                    false,
+                    true,
+                    true,
+                    10,
+                    10,
+                )
+                .expect("tenant");
+                let doc = build_nip11_document(&config, &policy, Some(&tenant));
+                assert_eq!(doc.name, Some("Tenant Relay".to_string()));
+                assert_eq!(doc.description, Some("Tenant description".to_string()));
+                assert_eq!(doc.pubkey, Some("11".repeat(32)));
+                let limitation = doc.limitation.as_ref().expect("limitation");
+                assert_eq!(limitation.auth_required, Some(false));
+                assert_eq!(limitation.restricted_writes, Some(false));
             },
         );
     }

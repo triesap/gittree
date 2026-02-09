@@ -113,8 +113,7 @@ fn accepts_nostr_json(headers: &HeaderMap) -> bool {
 }
 
 fn nip11_response(state: &RelayState, tenant: &TenantContext) -> Response {
-    let _ = (&tenant.tenant_id, &tenant.tenant);
-    let doc = build_nip11_document(&state.config, &state.policy);
+    let doc = build_nip11_document(&state.config, &state.policy, tenant.tenant.as_ref());
     let mut response = Json(doc).into_response();
     let headers = response.headers_mut();
     headers.insert(
