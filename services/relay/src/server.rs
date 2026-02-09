@@ -177,6 +177,7 @@ fn normalize_host(value: &str) -> String {
         .split(':')
         .next()
         .unwrap_or(value)
+        .trim_end_matches('.')
         .to_ascii_lowercase()
 }
 
@@ -319,7 +320,10 @@ async fn seed_owner_membership(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_router, nip11_response};
+    use super::{
+        accepts_nostr_json, build_router, extract_host, nip11_response, relay_url_from_host,
+        resolve_tenant,
+    };
     use crate::{MemoryStore, NostrEvent, Policy, RelayConfig, RelayMetrics};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -544,5 +548,51 @@ mod tests {
     #[test]
     fn normalize_host_handles_ipv6() {
         assert_eq!(super::normalize_host("[::1]:8080"), "::1");
+    }
+
+    #[test]
+    fn accepts_nostr_json_matches_mixed_accept_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            "text/html,application/nostr+json;q=0.9".parse().expect("accept"),
+        );
+        assert!(accepts_nostr_json(&headers));
+    }
+
+    #[test]
+    fn extract_host_returns_none_when_missing() {
+        let headers = axum::http::HeaderMap::new();
+        assert!(extract_host(&headers).is_none());
+    }
+
+    #[test]
+    fn extract_host_normalizes_case_and_trailing_dot() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "Relay.Local.:443".parse().expect("host"));
+        assert_eq!(extract_host(&headers).as_deref(), Some("relay.local"));
+    }
+
+    #[test]
+    fn relay_url_from_host_adds_scheme_when_missing() {
+        assert_eq!(relay_url_from_host("relay.local"), "wss://relay.local");
+        assert_eq!(relay_url_from_host("ws://relay.local"), "ws://relay.local");
+    }
+
+    #[tokio::test]
+    async fn resolve_tenant_defaults_without_repository_backing() {
+        let state = super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: None,
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        };
+        let headers = axum::http::HeaderMap::new();
+        let tenant = resolve_tenant(&state, &headers).await.expect("tenant");
+        assert_eq!(tenant.tenant_id, "default");
+        assert!(tenant.tenant.is_none());
     }
 }
