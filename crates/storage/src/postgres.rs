@@ -1,11 +1,13 @@
 use crate::repositories::{
     AccountRepository, AnnouncementRepository, EventRepository, ProfileRepository,
-    RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository, StateRepository,
+    RelayCompatibilityRepository, RelayPublishRepository, RelayTenantRepository,
+    RepoMappingRepository, StateRepository,
 };
 use crate::{
     AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
     RelayCompatibilityRecord, RelayPublishJob, RelayPublishRequest, RelayPublishStatus,
-    RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord, StorageError,
+    RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
+    StorageError,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
@@ -650,6 +652,179 @@ LIMIT 1
 }
 
 #[async_trait]
+impl RelayTenantRepository for PostgresRepositories {
+    async fn upsert_tenant(&self, record: RelayTenantRecord) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+INSERT INTO relay_tenant (
+    id,
+    host,
+    relay_pubkey,
+    relay_secret,
+    relay_secret_nonce,
+    relay_secret_kid,
+    name,
+    description,
+    icon,
+    banner,
+    contact,
+    auth_required,
+    public_read,
+    public_write,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+ON CONFLICT (id) DO UPDATE SET
+    host = EXCLUDED.host,
+    relay_pubkey = EXCLUDED.relay_pubkey,
+    relay_secret = EXCLUDED.relay_secret,
+    relay_secret_nonce = EXCLUDED.relay_secret_nonce,
+    relay_secret_kid = EXCLUDED.relay_secret_kid,
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    icon = EXCLUDED.icon,
+    banner = EXCLUDED.banner,
+    contact = EXCLUDED.contact,
+    auth_required = EXCLUDED.auth_required,
+    public_read = EXCLUDED.public_read,
+    public_write = EXCLUDED.public_write,
+    created_at = EXCLUDED.created_at,
+    updated_at = EXCLUDED.updated_at
+"#,
+        )
+        .bind(&record.id)
+        .bind(&record.host)
+        .bind(&record.relay_pubkey)
+        .bind(&record.relay_secret)
+        .bind(&record.relay_secret_nonce)
+        .bind(&record.relay_secret_kid)
+        .bind(&record.name)
+        .bind(&record.description)
+        .bind(&record.icon)
+        .bind(&record.banner)
+        .bind(&record.contact)
+        .bind(record.auth_required)
+        .bind(record.public_read)
+        .bind(record.public_write)
+        .bind(record.created_at)
+        .bind(record.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn tenant_by_id(&self, tenant_id: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT id,
+       host,
+       relay_pubkey,
+       relay_secret,
+       relay_secret_nonce,
+       relay_secret_kid,
+       name,
+       description,
+       icon,
+       banner,
+       contact,
+       auth_required,
+       public_read,
+       public_write,
+       created_at,
+       updated_at
+FROM relay_tenant
+WHERE id = $1
+LIMIT 1
+"#,
+        )
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(relay_tenant_from_row).transpose()?)
+    }
+
+    async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT id,
+       host,
+       relay_pubkey,
+       relay_secret,
+       relay_secret_nonce,
+       relay_secret_kid,
+       name,
+       description,
+       icon,
+       banner,
+       contact,
+       auth_required,
+       public_read,
+       public_write,
+       created_at,
+       updated_at
+FROM relay_tenant
+WHERE host = $1
+LIMIT 1
+"#,
+        )
+        .bind(host)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(relay_tenant_from_row).transpose()?)
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<RelayTenantRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+SELECT id,
+       host,
+       relay_pubkey,
+       relay_secret,
+       relay_secret_nonce,
+       relay_secret_kid,
+       name,
+       description,
+       icon,
+       banner,
+       contact,
+       auth_required,
+       public_read,
+       public_write,
+       created_at,
+       updated_at
+FROM relay_tenant
+ORDER BY host
+"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(relay_tenant_from_row).collect()
+    }
+}
+
+fn relay_tenant_from_row(row: sqlx::postgres::PgRow) -> Result<RelayTenantRecord, StorageError> {
+    Ok(RelayTenantRecord {
+        id: row.try_get("id")?,
+        host: row.try_get("host")?,
+        relay_pubkey: row.try_get("relay_pubkey")?,
+        relay_secret: row.try_get("relay_secret")?,
+        relay_secret_nonce: row.try_get("relay_secret_nonce")?,
+        relay_secret_kid: row.try_get("relay_secret_kid")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        icon: row.try_get("icon")?,
+        banner: row.try_get("banner")?,
+        contact: row.try_get("contact")?,
+        auth_required: row.try_get("auth_required")?,
+        public_read: row.try_get("public_read")?,
+        public_write: row.try_get("public_write")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+#[async_trait]
 impl EventRepository for PostgresRepositories {
     async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
@@ -1026,7 +1201,7 @@ mod tests {
     use super::PostgresRepositories;
     use crate::repositories::{
         AccountRepository, EventRepository, ProfileRepository, RelayCompatibilityRepository,
-        RelayPublishRepository, RepoMappingRepository,
+        RelayPublishRepository, RelayTenantRepository, RepoMappingRepository,
     };
     use crate::StorageError;
 
@@ -1075,6 +1250,12 @@ mod tests {
     #[test]
     fn postgres_repos_implements_relay_publish_repo() {
         fn assert_impl<T: RelayPublishRepository>() {}
+        assert_impl::<PostgresRepositories>();
+    }
+
+    #[test]
+    fn postgres_repos_implements_relay_tenant_repo() {
+        fn assert_impl<T: RelayTenantRepository>() {}
         assert_impl::<PostgresRepositories>();
     }
 }

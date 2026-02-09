@@ -15,6 +15,7 @@ pub mod repo;
 pub mod repo_mapping;
 pub mod repositories;
 pub mod relay_compat;
+pub mod relay_tenant;
 
 pub use cache::{CacheConfig, CachedRepositories};
 pub use account::AccountRecord;
@@ -27,10 +28,11 @@ pub use queries::RepoFilter;
 pub use repo::{RepoAnnouncementRecord, RepoStateRecord};
 pub use repo_mapping::RepoMappingRecord;
 pub use relay_compat::{RelayCompatibilityRecord, RelayProbeMetadata};
+pub use relay_tenant::RelayTenantRecord;
 pub use repositories::{
     AccountRepository, AnnouncementRepository, EventRepository, InMemoryRepositories,
-    ProfileRepository, RelayCompatibilityRepository, RelayPublishRepository, RepoMappingRepository,
-    StateRepository,
+    ProfileRepository, RelayCompatibilityRepository, RelayPublishRepository, RelayTenantRepository,
+    RepoMappingRepository, StateRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

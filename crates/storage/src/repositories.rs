@@ -1,7 +1,7 @@
 use crate::{
     AccountRecord, EventQuery, EventRecord, ProfileRecord, RelayCompatibilityRecord,
-    RelayPublishJob, RelayPublishRequest, RelayPublishStatus, RepoAnnouncementRecord,
-    RepoMappingRecord, RepoStateRecord, StorageError,
+    RelayPublishJob, RelayPublishRequest, RelayPublishStatus, RelayTenantRecord,
+    RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -83,6 +83,14 @@ pub trait RelayCompatibilityRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait RelayTenantRepository: Send + Sync {
+    async fn upsert_tenant(&self, record: RelayTenantRecord) -> Result<(), StorageError>;
+    async fn tenant_by_id(&self, tenant_id: &str) -> Result<Option<RelayTenantRecord>, StorageError>;
+    async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError>;
+    async fn list_tenants(&self) -> Result<Vec<RelayTenantRecord>, StorageError>;
+}
+
+#[async_trait]
 pub trait EventRepository: Send + Sync {
     async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError>;
     async fn get_event(&self, event_id: &[u8]) -> Result<Option<EventRecord>, StorageError>;
@@ -129,6 +137,8 @@ pub struct InMemoryRepositories {
     accounts_by_username: RwLock<HashMap<String, AccountRecord>>,
     profiles_by_pubkey: RwLock<HashMap<String, ProfileRecord>>,
     relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
+    tenants_by_id: RwLock<HashMap<String, RelayTenantRecord>>,
+    tenants_by_host: RwLock<HashMap<String, String>>,
     events: RwLock<HashMap<String, EventRecord>>,
     outbox: RwLock<HashMap<i64, OutboxEntry>>,
     outbox_seq: AtomicI64,
@@ -157,6 +167,10 @@ impl InMemoryRepositories {
 
     fn profile_key(pubkey: &[u8]) -> String {
         Self::account_key(pubkey)
+    }
+
+    fn tenant_key(tenant_id: &str) -> String {
+        tenant_id.to_string()
     }
 
     fn next_outbox_id(&self) -> i64 {
@@ -419,6 +433,49 @@ impl RelayCompatibilityRepository for InMemoryRepositories {
                     message: "relay compatibility store poisoned".to_string(),
                 })?;
         Ok(map.get(relay_url).cloned())
+    }
+}
+
+#[async_trait]
+impl RelayTenantRepository for InMemoryRepositories {
+    async fn upsert_tenant(&self, record: RelayTenantRecord) -> Result<(), StorageError> {
+        let mut by_id = self.tenants_by_id.write().map_err(|_| StorageError::Internal {
+            message: "tenant store poisoned".to_string(),
+        })?;
+        let mut by_host = self.tenants_by_host.write().map_err(|_| StorageError::Internal {
+            message: "tenant store poisoned".to_string(),
+        })?;
+        let key = Self::tenant_key(&record.id);
+        by_host.insert(record.host.clone(), record.id.clone());
+        by_id.insert(key, record);
+        Ok(())
+    }
+
+    async fn tenant_by_id(&self, tenant_id: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
+        let by_id = self.tenants_by_id.read().map_err(|_| StorageError::Internal {
+            message: "tenant store poisoned".to_string(),
+        })?;
+        Ok(by_id.get(tenant_id).cloned())
+    }
+
+    async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
+        let by_host = self.tenants_by_host.read().map_err(|_| StorageError::Internal {
+            message: "tenant store poisoned".to_string(),
+        })?;
+        let Some(tenant_id) = by_host.get(host) else {
+            return Ok(None);
+        };
+        let by_id = self.tenants_by_id.read().map_err(|_| StorageError::Internal {
+            message: "tenant store poisoned".to_string(),
+        })?;
+        Ok(by_id.get(tenant_id).cloned())
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<RelayTenantRecord>, StorageError> {
+        let by_id = self.tenants_by_id.read().map_err(|_| StorageError::Internal {
+            message: "tenant store poisoned".to_string(),
+        })?;
+        Ok(by_id.values().cloned().collect())
     }
 }
 

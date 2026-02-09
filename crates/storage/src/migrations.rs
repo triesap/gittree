@@ -25,6 +25,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_relay_publish_outbox(),
         migration_gittree_accounts(),
         migration_gittree_profiles(),
+        migration_relay_tenants(),
     ]
 }
 
@@ -188,6 +189,15 @@ fn migration_gittree_profiles() -> Migration {
     }
 }
 
+fn migration_relay_tenants() -> Migration {
+    const RELAY_TENANTS_SQL: &str = include_str!("../../../migrations/0010_relay_tenants.sql");
+    Migration {
+        version: 10,
+        description: "relay tenants",
+        sql: RELAY_TENANTS_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -259,12 +269,13 @@ mod tests {
         assert!(sql.contains("CREATE TABLE relay_publish_outbox"));
         assert!(sql.contains("CREATE TABLE gittree_account"));
         assert!(sql.contains("CREATE TABLE gittree_profile"));
+        assert!(sql.contains("CREATE TABLE relay_tenant"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 }
