@@ -93,11 +93,22 @@ impl MemoryStore {
 #[derive(Debug, Clone)]
 pub struct RepositoryStore<R: EventRepository> {
     repo: R,
+    tenant_id: String,
 }
 
 impl<R: EventRepository> RepositoryStore<R> {
     pub fn new(repo: R) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            tenant_id: DEFAULT_TENANT_ID.to_string(),
+        }
+    }
+
+    pub fn with_tenant(repo: R, tenant_id: impl Into<String>) -> Self {
+        Self {
+            repo,
+            tenant_id: tenant_id.into(),
+        }
     }
 }
 
@@ -202,10 +213,10 @@ where
 #[async_trait]
 impl<R: EventRepository> EventStore for RepositoryStore<R> {
     async fn insert(&self, event: NostrEvent) -> Result<StoreOutcome, StoreError> {
-        let record = event_to_record(&event)?;
+        let record = event_to_record(&event, &self.tenant_id)?;
         if self
             .repo
-            .get_event(&record.id)
+            .get_event(&self.tenant_id, &record.id)
             .await
             .map_err(map_repo_err)?
             .is_some()
@@ -214,11 +225,11 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
         }
 
         if event.kind == 5 {
-            apply_delete_repo(&self.repo, &event).await?;
+            apply_delete_repo(&self.repo, &self.tenant_id, &event).await?;
         }
 
         if let Some(key) = replaceable_key(&event) {
-            if apply_replaceable_repo(&self.repo, &event, &key).await? {
+            if apply_replaceable_repo(&self.repo, &self.tenant_id, &event, &key).await? {
                 return Ok(StoreOutcome::Duplicate);
             }
         }
@@ -234,7 +245,7 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
         let bytes = decode_hex_id(id)?;
         let record = self
             .repo
-            .get_event(&bytes)
+            .get_event(&self.tenant_id, &bytes)
             .await
             .map_err(map_repo_err)?;
         record.map(record_to_event).transpose()
@@ -243,7 +254,7 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
     async fn delete(&self, id: &str) -> Result<bool, StoreError> {
         let bytes = decode_hex_id(id)?;
         self.repo
-            .delete_event(&bytes)
+            .delete_event(&self.tenant_id, &bytes)
             .await
             .map_err(map_repo_err)
     }
@@ -257,9 +268,11 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
         let mut results = Vec::new();
         for filter in filters {
             let plan = build_query_plan(filter);
+            let mut query = plan.query;
+            query.tenant_id = Some(self.tenant_id.clone());
             let records = self
                 .repo
-                .query_events(&plan.query)
+                .query_events(&query)
                 .await
                 .map_err(map_repo_err)?;
             let mut remaining = filter.limit.unwrap_or(u64::MAX);
@@ -297,6 +310,7 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
 
 async fn apply_delete_repo<R: EventRepository>(
     repo: &R,
+    tenant_id: &str,
     event: &NostrEvent,
 ) -> Result<(), StoreError> {
     let author = decode_hex_pubkey(&event.pubkey)?;
@@ -306,12 +320,12 @@ async fn apply_delete_repo<R: EventRepository>(
             continue;
         };
         let record = repo
-            .get_event(&bytes)
+            .get_event(tenant_id, &bytes)
             .await
             .map_err(map_repo_err)?;
         if let Some(record) = record {
             if record.pubkey == author && record.created_at <= event.created_at {
-                repo.delete_event(&record.id)
+                repo.delete_event(tenant_id, &record.id)
                     .await
                     .map_err(map_repo_err)?;
             }
@@ -326,6 +340,7 @@ async fn apply_delete_repo<R: EventRepository>(
             continue;
         }
         let mut query = EventQuery::default();
+        query.tenant_id = Some(tenant_id.to_string());
         query.kinds = vec![key.kind];
         query.authors = vec![key.pubkey.clone()];
         if let Some(identifier) = key.identifier {
@@ -334,7 +349,7 @@ async fn apply_delete_repo<R: EventRepository>(
         let records = repo.query_events(&query).await.map_err(map_repo_err)?;
         for record in records {
             if record.created_at <= event.created_at {
-                repo.delete_event(&record.id)
+                repo.delete_event(tenant_id, &record.id)
                     .await
                     .map_err(map_repo_err)?;
             }
@@ -346,10 +361,12 @@ async fn apply_delete_repo<R: EventRepository>(
 
 async fn apply_replaceable_repo<R: EventRepository>(
     repo: &R,
+    tenant_id: &str,
     event: &NostrEvent,
     key: &ReplaceableKey,
 ) -> Result<bool, StoreError> {
     let mut query = EventQuery::default();
+    query.tenant_id = Some(tenant_id.to_string());
     query.kinds = vec![key.kind];
     query.authors = vec![key.pubkey.clone()];
     if let Some(identifier) = &key.identifier {
@@ -363,7 +380,7 @@ async fn apply_replaceable_repo<R: EventRepository>(
         return Ok(true);
     }
     for record in records {
-        repo.delete_event(&record.id)
+        repo.delete_event(tenant_id, &record.id)
             .await
             .map_err(map_repo_err)?;
     }
@@ -428,8 +445,9 @@ fn parse_address(value: &str) -> Option<ReplaceableKey> {
     })
 }
 
-fn event_to_record(event: &NostrEvent) -> Result<EventRecord, StoreError> {
+fn event_to_record(event: &NostrEvent, tenant_id: &str) -> Result<EventRecord, StoreError> {
     EventRecord::new(
+        tenant_id,
         &event.id,
         &event.pubkey,
         event.created_at,
@@ -477,6 +495,7 @@ fn group_tags(tags: &[TagRecord]) -> Vec<Vec<String>> {
 }
 
 const HEX_32_LEN: usize = 64;
+const DEFAULT_TENANT_ID: &str = "default";
 
 struct QueryPlan {
     query: EventQuery,
@@ -499,6 +518,7 @@ fn build_query_plan(filter: &Filter) -> QueryPlan {
 
     QueryPlan {
         query: EventQuery {
+            tenant_id: None,
             ids,
             authors,
             kinds: filter.kinds.clone(),

@@ -20,6 +20,7 @@ impl TagRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
+    pub tenant_id: String,
     pub id: Vec<u8>,
     pub pubkey: Vec<u8>,
     pub created_at: i64,
@@ -31,6 +32,7 @@ pub struct EventRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EventQuery {
+    pub tenant_id: Option<String>,
     pub ids: Vec<String>,
     pub authors: Vec<String>,
     pub kinds: Vec<u32>,
@@ -41,6 +43,13 @@ pub struct EventQuery {
 }
 
 impl EventQuery {
+    pub fn for_tenant(tenant_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: Some(tenant_id.into()),
+            ..Default::default()
+        }
+    }
+
     pub fn for_ids(ids: Vec<String>) -> Self {
         Self {
             ids,
@@ -77,6 +86,7 @@ impl EventQuery {
 
 impl EventRecord {
     pub fn new(
+        tenant_id: &str,
         id: &str,
         pubkey: &str,
         created_at: i64,
@@ -86,7 +96,14 @@ impl EventRecord {
         tags: Vec<Vec<String>>,
     ) -> Result<Self, StorageError> {
         let tags = flatten_tags(&tags)?;
+        if tenant_id.trim().is_empty() {
+            return Err(StorageError::InvalidField {
+                field: "tenant_id",
+                value: tenant_id.to_string(),
+            });
+        }
         Ok(Self {
+            tenant_id: tenant_id.to_string(),
             id: decode_hex("id", id, HEX_32_LEN)?,
             pubkey: decode_hex("pubkey", pubkey, HEX_32_LEN)?,
             created_at,
@@ -161,6 +178,7 @@ mod tests {
     #[test]
     fn event_record_decodes_hex_fields() {
         let record = EventRecord::new(
+            "default",
             &hex_32(0x11),
             &hex_32(0x22),
             12,
@@ -182,6 +200,7 @@ mod tests {
     #[test]
     fn event_record_rejects_empty_tags() {
         let err = EventRecord::new(
+            "default",
             &hex_32(0x11),
             &hex_32(0x22),
             12,
@@ -198,6 +217,7 @@ mod tests {
     #[test]
     fn event_query_defaults_empty() {
         let query = EventQuery::default();
+        assert!(query.tenant_id.is_none());
         assert!(query.ids.is_empty());
         assert!(query.tags.is_empty());
         assert_eq!(query.limit, None);
@@ -243,5 +263,8 @@ mod tests {
             .tags
             .iter()
             .all(|tag| tag.name == "e"));
+
+        let query = EventQuery::for_tenant("default");
+        assert_eq!(query.tenant_id, Some("default".to_string()));
     }
 }

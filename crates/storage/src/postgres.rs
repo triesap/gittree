@@ -42,15 +42,20 @@ impl PostgresRepositories {
         })
     }
 
-    async fn fetch_tags(&self, event_id: &[u8]) -> Result<Vec<TagRecord>, StorageError> {
+    async fn fetch_tags(
+        &self,
+        tenant_id: &str,
+        event_id: &[u8],
+    ) -> Result<Vec<TagRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
 SELECT name, value
 FROM nostr_tag
-WHERE event_id = $1
+WHERE tenant_id = $1 AND event_id = $2
 ORDER BY id ASC
 "#,
         )
+        .bind(tenant_id)
         .bind(event_id)
         .fetch_all(&self.pool)
         .await?;
@@ -830,11 +835,12 @@ impl EventRepository for PostgresRepositories {
         let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             r#"
-INSERT INTO nostr_event (id, pubkey, created_at, kind, content, sig)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO nostr_event (tenant_id, id, pubkey, created_at, kind, content, sig)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT DO NOTHING
 "#,
         )
+        .bind(&record.tenant_id)
         .bind(&record.id)
         .bind(&record.pubkey)
         .bind(record.created_at)
@@ -852,10 +858,11 @@ ON CONFLICT DO NOTHING
         for tag in &record.tags {
             sqlx::query(
                 r#"
-INSERT INTO nostr_tag (event_id, name, value)
-VALUES ($1, $2, $3)
+INSERT INTO nostr_tag (tenant_id, event_id, name, value)
+VALUES ($1, $2, $3, $4)
 "#,
             )
+            .bind(&record.tenant_id)
             .bind(&record.id)
             .bind(&tag.name)
             .bind(&tag.value)
@@ -867,14 +874,19 @@ VALUES ($1, $2, $3)
         Ok(())
     }
 
-    async fn get_event(&self, event_id: &[u8]) -> Result<Option<EventRecord>, StorageError> {
+    async fn get_event(
+        &self,
+        tenant_id: &str,
+        event_id: &[u8],
+    ) -> Result<Option<EventRecord>, StorageError> {
         let row = sqlx::query(
             r#"
-SELECT id, pubkey, created_at, kind, content, sig
+SELECT tenant_id, id, pubkey, created_at, kind, content, sig
 FROM nostr_event
-WHERE id = $1
+WHERE tenant_id = $1 AND id = $2
 "#,
         )
+        .bind(tenant_id)
         .bind(event_id)
         .fetch_optional(&self.pool)
         .await?;
@@ -884,8 +896,9 @@ WHERE id = $1
         };
 
         let id: Vec<u8> = row.try_get("id")?;
-        let tags = self.fetch_tags(&id).await?;
+        let tags = self.fetch_tags(tenant_id, &id).await?;
         Ok(Some(EventRecord {
+            tenant_id: row.try_get("tenant_id")?,
             id,
             pubkey: row.try_get("pubkey")?,
             created_at: row.try_get("created_at")?,
@@ -896,8 +909,9 @@ WHERE id = $1
         }))
     }
 
-    async fn delete_event(&self, event_id: &[u8]) -> Result<bool, StorageError> {
-        let result = sqlx::query("DELETE FROM nostr_event WHERE id = $1")
+    async fn delete_event(&self, tenant_id: &str, event_id: &[u8]) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM nostr_event WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id)
             .bind(event_id)
             .execute(&self.pool)
             .await?;
@@ -907,10 +921,15 @@ WHERE id = $1
     async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError> {
         use sqlx::QueryBuilder;
         let mut builder = QueryBuilder::new(
-            "SELECT id, pubkey, created_at, kind, content, sig FROM nostr_event",
+            "SELECT tenant_id, id, pubkey, created_at, kind, content, sig FROM nostr_event",
         );
 
         let mut separator = " WHERE ";
+        if let Some(tenant_id) = &query.tenant_id {
+            builder.push(separator).push("tenant_id = ");
+            builder.push_bind(tenant_id);
+            separator = " AND ";
+        }
         if !query.ids.is_empty() {
             builder.push(separator).push("id IN (");
             let mut separated = builder.separated(", ");
@@ -964,7 +983,7 @@ WHERE id = $1
 
             for (name, values) in grouped {
                 builder.push(separator);
-                builder.push("EXISTS (SELECT 1 FROM nostr_tag t WHERE t.event_id = nostr_event.id AND t.name = ");
+                builder.push("EXISTS (SELECT 1 FROM nostr_tag t WHERE t.event_id = nostr_event.id AND t.tenant_id = nostr_event.tenant_id AND t.name = ");
                 builder.push_bind(name);
                 builder.push(" AND t.value IN (");
                 let mut separated = builder.separated(", ");
@@ -987,8 +1006,10 @@ WHERE id = $1
         let mut records = Vec::with_capacity(rows.len());
         for row in rows {
             let id: Vec<u8> = row.try_get("id")?;
-            let tags = self.fetch_tags(&id).await?;
+            let tenant_id: String = row.try_get("tenant_id")?;
+            let tags = self.fetch_tags(&tenant_id, &id).await?;
             records.push(EventRecord {
+                tenant_id,
                 id,
                 pubkey: row.try_get("pubkey")?,
                 created_at: row.try_get("created_at")?,

@@ -93,8 +93,13 @@ pub trait RelayTenantRepository: Send + Sync {
 #[async_trait]
 pub trait EventRepository: Send + Sync {
     async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError>;
-    async fn get_event(&self, event_id: &[u8]) -> Result<Option<EventRecord>, StorageError>;
-    async fn delete_event(&self, event_id: &[u8]) -> Result<bool, StorageError>;
+    async fn get_event(
+        &self,
+        tenant_id: &str,
+        event_id: &[u8],
+    ) -> Result<Option<EventRecord>, StorageError>;
+    async fn delete_event(&self, tenant_id: &str, event_id: &[u8])
+        -> Result<bool, StorageError>;
     async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError>;
 }
 
@@ -490,20 +495,30 @@ impl EventRepository for InMemoryRepositories {
         Ok(())
     }
 
-    async fn get_event(&self, event_id: &[u8]) -> Result<Option<EventRecord>, StorageError> {
+    async fn get_event(
+        &self,
+        tenant_id: &str,
+        event_id: &[u8],
+    ) -> Result<Option<EventRecord>, StorageError> {
         let key = Self::event_key(event_id);
         let map = self.events.read().map_err(|_| StorageError::Internal {
             message: "event store poisoned".to_string(),
         })?;
-        Ok(map.get(&key).cloned())
+        Ok(map
+            .get(&key)
+            .filter(|record| record.tenant_id == tenant_id)
+            .cloned())
     }
 
-    async fn delete_event(&self, event_id: &[u8]) -> Result<bool, StorageError> {
+    async fn delete_event(&self, tenant_id: &str, event_id: &[u8]) -> Result<bool, StorageError> {
         let key = Self::event_key(event_id);
         let mut map = self.events.write().map_err(|_| StorageError::Internal {
             message: "event store poisoned".to_string(),
         })?;
-        Ok(map.remove(&key).is_some())
+        Ok(match map.get(&key) {
+            Some(record) if record.tenant_id == tenant_id => map.remove(&key).is_some(),
+            _ => false,
+        })
     }
 
     async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError> {
@@ -522,6 +537,12 @@ impl EventRepository for InMemoryRepositories {
         let mut results: Vec<EventRecord> = map
             .values()
             .filter(|event| {
+                if let Some(tenant_id) = &query.tenant_id {
+                    if event.tenant_id != *tenant_id {
+                        return false;
+                    }
+                }
+
                 if !query.ids.is_empty()
                     && !query.ids.iter().any(|id| match hex::decode(id) {
                         Ok(bytes) => bytes == event.id,
@@ -796,6 +817,7 @@ mod tests {
 
     fn event_record(event_id: &str, pubkey: &str, created_at: i64) -> EventRecord {
         EventRecord::new(
+            "default",
             event_id,
             pubkey,
             created_at,
@@ -1012,7 +1034,7 @@ mod tests {
 
         store.insert_event(record.clone()).await.expect("insert");
         let fetched = store
-            .get_event(&hex::decode(event_id).expect("id"))
+            .get_event("default", &hex::decode(event_id).expect("id"))
             .await
             .expect("get")
             .expect("record");
