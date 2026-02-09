@@ -26,10 +26,12 @@ use gittree_nostr_auth::{validate_nip98, Nip98Event, Nip98Request};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
 use gittree_storage::{
-    AccountRepository, PostgresRepositories, RelayPublishRepository, RelayPublishRequest,
+    AccountRepository, PostgresRepositories, RelayMembershipRecord, RelayMembershipRepository,
+    RelayPublishRepository, RelayPublishRequest, RelayTenantRecord, RelayTenantRepository,
     StorageConfig, StorageError,
 };
-use secp256k1::{Message, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::rand::{rngs::OsRng, RngCore};
+use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::sync::Arc;
@@ -46,6 +48,7 @@ const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 const DEFAULT_CONTROL_MAX_SKEW_SECONDS: i64 = 300;
+const DEFAULT_RELAY_SECRET_KID: &str = "local";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlConfig {
@@ -246,9 +249,15 @@ struct ControlAppState<T> {
     repo_private_default: bool,
 }
 
-trait ControlRepositories: AccountRepository + RelayPublishRepository {}
+trait ControlRepositories:
+    AccountRepository + RelayPublishRepository + RelayTenantRepository + RelayMembershipRepository
+{
+}
 
-impl<T> ControlRepositories for T where T: AccountRepository + RelayPublishRepository {}
+impl<T> ControlRepositories for T where
+    T: AccountRepository + RelayPublishRepository + RelayTenantRepository + RelayMembershipRepository
+{
+}
 
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
@@ -289,6 +298,7 @@ where
         .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT]);
     Router::new()
         .route("/health", get(health_handler))
+        .route("/v1/relay/tenants", post(create_tenant_handler))
         .route("/v1/repos", post(create_repo_nostr_handler))
         .route("/control/users", post(create_user_handler))
         .route("/control/orgs", post(create_org_handler))
@@ -384,6 +394,29 @@ struct ControlCreateRepoRequest {
     auto_init: Option<bool>,
     pubkey: String,
     privkey: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlCreateTenantRequest {
+    host: String,
+    name: Option<String>,
+    description: Option<String>,
+    icon: Option<String>,
+    banner: Option<String>,
+    contact: Option<String>,
+    auth_required: Option<bool>,
+    public_read: Option<bool>,
+    public_write: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ControlCreateTenantResponse {
+    tenant_id: String,
+    host: String,
+    relay_pubkey: String,
+    relay_url: String,
+    owner_pubkey: String,
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -605,6 +638,120 @@ where
     })?;
     let repo = create_repo_from_signed_event(&state, &auth.pubkey, payload).await?;
     Ok(Json(repo))
+}
+
+async fn create_tenant_handler<T>(
+    State(state): State<ControlAppState<T>>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Result<Json<ControlCreateTenantResponse>, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    let event = parse_nostr_auth(&headers)?;
+    let request_url = build_request_url(&headers, &uri)?;
+    let payload_hash = nip98_payload_hash(&body);
+    let now = unix_timestamp();
+    let request = Nip98Request {
+        method: method.as_str(),
+        url: &request_url,
+        payload_sha256: payload_hash.as_deref(),
+        now,
+        max_skew_seconds: DEFAULT_CONTROL_MAX_SKEW_SECONDS,
+    };
+    let auth = validate_nip98(&event, &request)
+        .map_err(|err| ControlHttpError::Unauthorized(err.to_string()))?;
+
+    if body.is_empty() {
+        return Err(ControlHttpError::BadRequest(
+            "missing tenant create body".to_string(),
+        ));
+    }
+    let payload: ControlCreateTenantRequest = serde_json::from_slice(&body).map_err(|err| {
+        ControlHttpError::BadRequest(format!("invalid tenant create request: {err}"))
+    })?;
+
+    let host = normalize_host(&payload.host)?;
+    require_non_empty("host", &host)?;
+    if let Some(existing) = state
+        .repositories
+        .tenant_by_host(&host)
+        .await
+        .map_err(map_storage_error)?
+    {
+        let _ = existing;
+        return Err(ControlHttpError::BadRequest(
+            "tenant host already exists".to_string(),
+        ));
+    }
+
+    let auth_required = payload.auth_required.unwrap_or(true);
+    let public_read = payload.public_read.unwrap_or(false);
+    let public_write = payload.public_write.unwrap_or(false);
+    let tenant_id = host.clone();
+
+    let secp = Secp256k1::new();
+    let mut rng = OsRng;
+    let secret_key = SecretKey::new(&mut rng);
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let (relay_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
+    let relay_pubkey_hex = hex::encode(relay_pubkey.serialize());
+    let mut relay_secret_nonce = vec![0u8; 24];
+    rng.fill_bytes(&mut relay_secret_nonce);
+
+    let record = RelayTenantRecord::new(
+        tenant_id.clone(),
+        host.clone(),
+        &relay_pubkey_hex,
+        secret_key.secret_bytes().to_vec(),
+        relay_secret_nonce,
+        DEFAULT_RELAY_SECRET_KID,
+        payload.name,
+        payload.description,
+        payload.icon,
+        payload.banner,
+        payload.contact,
+        auth_required,
+        public_read,
+        public_write,
+        now,
+        now,
+    )
+    .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    state
+        .repositories
+        .upsert_tenant(record)
+        .await
+        .map_err(map_storage_error)?;
+
+    let owner_pubkey = auth.pubkey.clone();
+    let owner_pubkey_bytes = hex::decode(&owner_pubkey)
+        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let membership = RelayMembershipRecord {
+        tenant_id: tenant_id.clone(),
+        pubkey: owner_pubkey_bytes,
+        role: "owner".to_string(),
+        status: "active".to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .repositories
+        .upsert_membership(membership)
+        .await
+        .map_err(map_storage_error)?;
+
+    let relay_url = format!("wss://{host}");
+    Ok(Json(ControlCreateTenantResponse {
+        tenant_id,
+        host,
+        relay_pubkey: relay_pubkey_hex,
+        relay_url,
+        owner_pubkey,
+        status: "created".to_string(),
+    }))
 }
 
 async fn create_pull_handler<T>(
@@ -1012,6 +1159,34 @@ fn build_request_url(headers: &HeaderMap, uri: &Uri) -> Result<String, ControlHt
     Ok(format!("{scheme}://{host}{path}"))
 }
 
+fn normalize_host(value: &str) -> Result<String, ControlHttpError> {
+    let value = value.trim().trim_end_matches('.');
+    let value = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value);
+    if value.contains('/') {
+        return Err(ControlHttpError::BadRequest("invalid host".to_string()));
+    }
+    let normalized = if let Some(value) = value.strip_prefix('[') {
+        if let Some(end) = value.find(']') {
+            value[..end].to_ascii_lowercase()
+        } else {
+            return Err(ControlHttpError::BadRequest("invalid host".to_string()));
+        }
+    } else {
+        value
+            .split(':')
+            .next()
+            .unwrap_or(value)
+            .to_ascii_lowercase()
+    };
+    if normalized.trim().is_empty() {
+        return Err(ControlHttpError::BadRequest("invalid host".to_string()));
+    }
+    Ok(normalized)
+}
+
 fn parse_nostr_auth(headers: &HeaderMap) -> Result<Nip98Event, ControlHttpError> {
     let value = headers
         .get(AUTH_HEADER)
@@ -1181,7 +1356,8 @@ impl IntoResponse for ControlHttpError {
 #[cfg(test)]
 mod tests {
     use super::{
-        npub_from_hex, AUTH_HEADER, ControlConfig, ControlHttpError, authorize, build_router,
+        ControlCreateTenantResponse, npub_from_hex, AUTH_HEADER, ControlConfig, ControlHttpError,
+        authorize, build_router,
     };
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
@@ -1197,7 +1373,10 @@ mod tests {
     use gittree_core::{RepoAnnouncement, format_grasp_server_url_as_clone_url};
     use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
     use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
-    use gittree_storage::{AccountRecord, AccountRepository, InMemoryRepositories, RelayPublishRepository};
+    use gittree_storage::{
+        AccountRecord, AccountRepository, InMemoryRepositories, RelayMembershipRepository,
+        RelayPublishRepository, RelayTenantRepository,
+    };
     use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde_json::json;
     use std::collections::VecDeque;
@@ -1621,6 +1800,70 @@ mod tests {
             .expect("job");
         assert_eq!(job.forgejo_owner, "alice");
         assert_eq!(job.forgejo_repo, "demo");
+    }
+
+    #[tokio::test]
+    async fn create_tenant_creates_membership() {
+        let (state, _transport, repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+
+        let body = serde_json::to_vec(&json!({
+            "host": "relay.local",
+            "name": "Relay Local",
+            "public_read": false,
+            "public_write": false,
+            "auth_required": true
+        }))
+        .expect("body");
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let response: ControlCreateTenantResponse =
+            serde_json::from_slice(&body).expect("tenant response");
+        assert_eq!(response.host, "relay.local");
+        assert_eq!(response.owner_pubkey, pubkey);
+
+        let tenant = repos
+            .tenant_by_host("relay.local")
+            .await
+            .expect("tenant lookup")
+            .expect("tenant");
+        let pubkey_bytes = hex::decode(&pubkey).expect("pubkey");
+        let membership = repos
+            .membership_by_pubkey(&tenant.id, &pubkey_bytes)
+            .await
+            .expect("membership lookup")
+            .expect("membership");
+        assert_eq!(membership.role, "owner");
     }
 
     #[tokio::test]
