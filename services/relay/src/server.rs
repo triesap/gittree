@@ -204,13 +204,25 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     let (out_tx, mut out_rx) = mpsc::channel(128);
     let broadcast_rx = state.broadcast.subscribe();
 
-    let (read_auth_required, write_auth_required) = match tenant.tenant.as_ref() {
-        Some(record) => (!record.public_read, record.auth_required),
-        None => (
-            state.config.policy.auth_required,
-            state.config.policy.auth_required,
-        ),
-    };
+    let (read_auth_required, write_auth_required, read_membership_required, write_membership_required) =
+        match tenant.tenant.as_ref() {
+            Some(record) => {
+                let read_membership_required = !record.public_read;
+                let write_membership_required = !record.public_write;
+                (
+                    read_membership_required,
+                    record.auth_required || write_membership_required,
+                    read_membership_required,
+                    write_membership_required,
+                )
+            }
+            None => (
+                state.config.policy.auth_required,
+                state.config.policy.auth_required,
+                false,
+                false,
+            ),
+        };
     let relay_url = tenant
         .tenant
         .as_ref()
@@ -228,6 +240,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
         write_auth_required,
     )
     .with_membership(Some(tenant.tenant_id.clone()), membership.clone())
+    .with_membership_requirements(read_membership_required, write_membership_required)
     .with_relay_url(relay_url);
 
     if let Some(record) = tenant.tenant.as_ref() {

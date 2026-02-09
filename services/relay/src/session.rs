@@ -157,6 +157,8 @@ pub struct Session<S: EventStore> {
     relay_url: Option<String>,
     read_auth_required: bool,
     write_auth_required: bool,
+    read_membership_required: bool,
+    write_membership_required: bool,
     rate_limiter: Option<RateLimiter>,
     metrics: Option<Arc<RelayMetrics>>,
 }
@@ -177,6 +179,8 @@ impl<S: EventStore> Session<S> {
             relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
+            read_membership_required: false,
+            write_membership_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -196,6 +200,8 @@ impl<S: EventStore> Session<S> {
             relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
+            read_membership_required: false,
+            write_membership_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -216,6 +222,8 @@ impl<S: EventStore> Session<S> {
             relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
+            read_membership_required: false,
+            write_membership_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -239,6 +247,8 @@ impl<S: EventStore> Session<S> {
             relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
+            read_membership_required: false,
+            write_membership_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -259,6 +269,8 @@ impl<S: EventStore> Session<S> {
             relay_url: None,
             read_auth_required: auth_required,
             write_auth_required: auth_required,
+            read_membership_required: false,
+            write_membership_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -286,6 +298,8 @@ impl<S: EventStore> Session<S> {
             relay_url: None,
             read_auth_required,
             write_auth_required,
+            read_membership_required: false,
+            write_membership_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -298,6 +312,16 @@ impl<S: EventStore> Session<S> {
     ) -> Self {
         self.tenant_id = tenant_id;
         self.membership = membership;
+        self
+    }
+
+    pub fn with_membership_requirements(
+        mut self,
+        read_required: bool,
+        write_required: bool,
+    ) -> Self {
+        self.read_membership_required = read_required;
+        self.write_membership_required = write_required;
         self
     }
 
@@ -343,6 +367,46 @@ impl<S: EventStore> Session<S> {
         self.auth
             .as_ref()
             .and_then(|state| state.authenticated_pubkey.as_deref())
+    }
+
+    async fn ensure_read_membership(&self) -> Result<(), String> {
+        if !self.read_membership_required {
+            return Ok(());
+        }
+        self.require_membership().await
+    }
+
+    async fn ensure_write_membership(&self) -> Result<(), String> {
+        if !self.write_membership_required {
+            return Ok(());
+        }
+        self.require_membership().await
+    }
+
+    async fn require_membership(&self) -> Result<(), String> {
+        let Some(membership) = self.membership.as_ref() else {
+            return Err(format!("{RESTRICTED_PREFIX} relay does not support membership"));
+        };
+        let Some(tenant_id) = self.tenant_id.as_deref() else {
+            return Err(format!("{RESTRICTED_PREFIX} relay does not support membership"));
+        };
+        let Some(pubkey) = self.authenticated_pubkey() else {
+            return Err(AUTH_REQUIRED_REASON.to_string());
+        };
+
+        let pubkey_bytes =
+            hex::decode(pubkey).map_err(|_| format!("{RESTRICTED_PREFIX} invalid pubkey"))?;
+        let member = membership
+            .membership_by_pubkey(tenant_id, &pubkey_bytes)
+            .await
+            .map_err(|err| err.to_string())?;
+        let Some(member) = member else {
+            return Err(format!("{RESTRICTED_PREFIX} membership required"));
+        };
+        if member.status != MEMBERSHIP_STATUS_ACTIVE {
+            return Err(format!("{RESTRICTED_PREFIX} membership required"));
+        }
+        Ok(())
     }
 
     pub fn initial_messages(&self) -> Vec<ServerMessage> {
@@ -429,6 +493,12 @@ impl<S: EventStore> Session<S> {
                         message: AUTH_REQUIRED_REASON.to_string(),
                     }];
                 }
+                if let Err(message) = self.ensure_read_membership().await {
+                    return vec![ServerMessage::Closed {
+                        subscription_id,
+                        message,
+                    }];
+                }
                 let parsed = match parse_filters(&filters) {
                     Ok(filters) => filters,
                     Err(err) => return vec![Notice::from(err).into()],
@@ -507,6 +577,12 @@ impl<S: EventStore> Session<S> {
                     return vec![ServerMessage::Closed {
                         subscription_id,
                         message: AUTH_REQUIRED_REASON.to_string(),
+                    }];
+                }
+                if let Err(message) = self.ensure_read_membership().await {
+                    return vec![ServerMessage::Closed {
+                        subscription_id,
+                        message,
                     }];
                 }
                 let parsed = match parse_filters(&filters) {
@@ -651,6 +727,15 @@ impl<S: EventStore> Session<S> {
                 }
                 Some(_) => {}
             }
+        }
+
+        if let Err(message) = self.ensure_write_membership().await {
+            self.record_event("rejected");
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message,
+            }];
         }
 
         if let Some(admission) = &self.admission {
@@ -1848,6 +1933,88 @@ mod tests {
             .await
             .expect("invite lookup");
         assert!(invite.is_some());
+    }
+
+    #[tokio::test]
+    async fn req_rejects_non_member_when_membership_required() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership))
+            .with_membership_requirements(true, false);
+        let challenge = session.auth_challenge().expect("challenge");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let auth_event = signed_event_with_tags_at(
+            "auth",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), challenge],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
+        );
+        let _ = session
+            .handle_message(ClientMessage::Auth(serde_json::to_value(auth_event).unwrap()))
+            .await;
+
+        let response = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.starts_with(super::RESTRICTED_PREFIX)
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_rejects_non_member_when_membership_required() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership))
+            .with_membership_requirements(false, true);
+        let challenge = session.auth_challenge().expect("challenge");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let auth_event = signed_event_with_tags_at(
+            "auth",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), challenge],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
+        );
+        let _ = session
+            .handle_message(ClientMessage::Auth(serde_json::to_value(auth_event).unwrap()))
+            .await;
+
+        let event = signed_event("seed");
+        let response = session
+            .handle_message(ClientMessage::Event(serde_json::to_value(event).unwrap()))
+            .await;
+
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message.starts_with(super::RESTRICTED_PREFIX)
+        ));
     }
 
     #[tokio::test]
