@@ -1,27 +1,40 @@
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{OriginalUri, State};
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use bech32::{Bech32, Hrp};
+use gittree_app_core::{
+    nip98_payload_hash, normalize_identifier, RepoCreateRequest, RepoCreateResponse,
+    SignedNostrEvent as ApiSignedNostrEvent,
+};
 use gittree_config::{
     ConfigError, ControlAuthConfig, ForgejoConfig, RelayTargetsConfig, ServicesConfig, UiConfig,
 };
-use gittree_core::kinds::KIND_GITTREE_CONTROL;
-use gittree_core::{ControlAction, RepoAnnouncement, format_grasp_server_url_as_clone_url};
+use gittree_core::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_GITTREE_CONTROL};
+use gittree_core::{format_grasp_server_url_as_clone_url, ControlAction, RepoAnnouncement};
 use gittree_forgejo::{
     ForgejoClient, ForgejoCreateOrg, ForgejoCreatePullRequest, ForgejoCreateRepo,
     ForgejoCreateUser, ForgejoError, ForgejoOrg, ForgejoPullRequest, ForgejoRepo, ForgejoTransport,
     ForgejoUser,
 };
+use gittree_nostr_auth::{validate_nip98, Nip98Event, Nip98Request};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
-use gittree_relay_adapter::SignedNostrEvent;
+use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
 use gittree_storage::{
-    PostgresRepositories, RelayPublishRepository, RelayPublishRequest, StorageConfig, StorageError,
+    AccountRepository, PostgresRepositories, RelayPublishRepository, RelayPublishRequest,
+    StorageConfig, StorageError,
 };
-use secp256k1::SecretKey;
+use secp256k1::{Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tower_http::cors::{Any, CorsLayer};
 
 #[allow(dead_code)]
 const AUTH_HEADER: &str = "authorization";
@@ -32,6 +45,7 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const DEFAULT_CONTROL_MAX_SKEW_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlConfig {
@@ -226,10 +240,15 @@ struct ControlAppState<T> {
     auth: ControlAuthConfig,
     forgejo: ForgejoClient<T>,
     forgejo_owner: String,
-    repositories: Arc<dyn RelayPublishRepository>,
+    repositories: Arc<dyn ControlRepositories>,
     relay_urls: Vec<String>,
     public_git_url: String,
+    repo_private_default: bool,
 }
+
+trait ControlRepositories: AccountRepository + RelayPublishRepository {}
+
+impl<T> ControlRepositories for T where T: AccountRepository + RelayPublishRepository {}
 
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
@@ -238,6 +257,7 @@ pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let forgejo_owner = config.forgejo.owner.clone();
     let relay_urls = config.relay_urls;
     let public_git_url = config.public_git_url;
+    let repo_private_default = config.forgejo.repo_private;
     let auth = config.auth;
     let forgejo = ForgejoClient::new(config.forgejo).map_err(ControlError::Forgejo)?;
     let state = ControlAppState {
@@ -247,6 +267,7 @@ pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
         repositories: Arc::new(repositories),
         relay_urls,
         public_git_url,
+        repo_private_default,
     };
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -262,13 +283,19 @@ fn build_router<T>(state: ControlAppState<T>) -> Router
 where
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::POST, Method::OPTIONS])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT]);
     Router::new()
         .route("/health", get(health_handler))
+        .route("/v1/repos", post(create_repo_nostr_handler))
         .route("/control/users", post(create_user_handler))
         .route("/control/orgs", post(create_org_handler))
         .route("/control/repos", post(create_repo_handler))
         .route("/control/pulls", post(create_pull_handler))
         .route("/control/events", post(control_event_handler))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -544,6 +571,42 @@ where
     Ok(Json(repo))
 }
 
+async fn create_repo_nostr_handler<T>(
+    State(state): State<ControlAppState<T>>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Result<Json<RepoCreateResponse>, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    let event = parse_nostr_auth(&headers)?;
+    let request_url = build_request_url(&headers, &uri)?;
+    let payload_hash = nip98_payload_hash(&body);
+    let now = unix_timestamp();
+    let request = Nip98Request {
+        method: method.as_str(),
+        url: &request_url,
+        payload_sha256: payload_hash.as_deref(),
+        now,
+        max_skew_seconds: DEFAULT_CONTROL_MAX_SKEW_SECONDS,
+    };
+    let auth = validate_nip98(&event, &request)
+        .map_err(|err| ControlHttpError::Unauthorized(err.to_string()))?;
+
+    if body.is_empty() {
+        return Err(ControlHttpError::BadRequest(
+            "missing repo create body".to_string(),
+        ));
+    }
+    let payload: RepoCreateRequest = serde_json::from_slice(&body).map_err(|err| {
+        ControlHttpError::BadRequest(format!("invalid repo create request: {err}"))
+    })?;
+    let repo = create_repo_from_signed_event(&state, &auth.pubkey, payload).await?;
+    Ok(Json(repo))
+}
+
 async fn create_pull_handler<T>(
     State(state): State<ControlAppState<T>>,
     headers: HeaderMap,
@@ -742,7 +805,7 @@ where
         maintainers: vec![input.pubkey.clone()],
     };
 
-    let signed = SignedNostrEvent::from_announcement(&announcement, &secret_key)
+    let signed = RelaySignedNostrEvent::from_announcement(&announcement, &secret_key)
         .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
     if signed.pubkey != input.pubkey {
         return Err(ControlHttpError::BadRequest(
@@ -788,6 +851,137 @@ where
     Ok(repo.into())
 }
 
+async fn create_repo_from_signed_event<T>(
+    state: &ControlAppState<T>,
+    auth_pubkey: &str,
+    request: RepoCreateRequest,
+) -> Result<RepoCreateResponse, ControlHttpError>
+where
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    let event = request.event;
+    let (announcement, identifier, _npub) = validate_repo_announcement_event(
+        &event,
+        auth_pubkey,
+        &state.relay_urls,
+        &state.public_git_url,
+    )?;
+
+    let pubkey_bytes = hex::decode(auth_pubkey)
+        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let account = state
+        .repositories
+        .account_by_pubkey(&pubkey_bytes)
+        .await
+        .map_err(map_storage_error)?
+        .ok_or_else(|| ControlHttpError::BadRequest("account not found".to_string()))?;
+    let owner = account.forgejo_username;
+    let private = request.private.unwrap_or(state.repo_private_default);
+
+    let repo = state
+        .forgejo
+        .create_repo_for_owner(
+            &owner,
+            ForgejoCreateRepo {
+                name: identifier.clone(),
+                description: announcement.description.clone(),
+                private: Some(private),
+                auto_init: None,
+            },
+        )
+        .await
+        .map_err(map_forgejo_error)?;
+
+    for relay_url in &state.relay_urls {
+        let request = RelayPublishRequest {
+            relay_url: relay_url.clone(),
+            event_id: event.id.clone(),
+            pubkey: event.pubkey.clone(),
+            created_at: event.created_at,
+            kind: event.kind,
+            tags: event.tags.clone(),
+            content: event.content.clone(),
+            sig: event.sig.clone(),
+            forgejo_owner: owner.clone(),
+            forgejo_repo: repo.name.clone(),
+            identifier: identifier.clone(),
+        };
+        state
+            .repositories
+            .enqueue_relay_publish(request)
+            .await
+            .map_err(map_storage_error)?;
+    }
+
+    Ok(RepoCreateResponse {
+        owner,
+        name: repo.name,
+        html_url: repo.html_url,
+    })
+}
+
+fn validate_repo_announcement_event(
+    event: &ApiSignedNostrEvent,
+    auth_pubkey: &str,
+    relay_urls: &[String],
+    public_git_url: &str,
+) -> Result<(RepoAnnouncement, String, String), ControlHttpError> {
+    if event.kind != KIND_GIT_REPO_ANNOUNCEMENT.0 {
+        return Err(ControlHttpError::BadRequest(
+            "invalid repo announcement kind".to_string(),
+        ));
+    }
+    if event.pubkey != auth_pubkey {
+        return Err(ControlHttpError::Unauthorized(
+            "repo event pubkey mismatch".to_string(),
+        ));
+    }
+    verify_signed_event(event)?;
+    let announcement = RepoAnnouncement::from_tags(&event.tags)
+        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    announcement
+        .validate()
+        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    if !announcement
+        .maintainers
+        .iter()
+        .any(|key| key == &event.pubkey)
+    {
+        return Err(ControlHttpError::BadRequest(
+            "missing maintainer pubkey".to_string(),
+        ));
+    }
+
+    let identifier = normalize_identifier(&announcement.identifier).to_string();
+    if identifier.trim().is_empty() {
+        return Err(ControlHttpError::BadRequest(
+            "invalid repo identifier".to_string(),
+        ));
+    }
+
+    let npub = npub_from_hex(&event.pubkey)?;
+    let expected_clone = format_grasp_server_url_as_clone_url(
+        public_git_url,
+        &npub,
+        &identifier,
+    )
+    .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    if !announcement.clone.iter().any(|url| url == &expected_clone) {
+        return Err(ControlHttpError::BadRequest(
+            "missing clone url".to_string(),
+        ));
+    }
+    for relay_url in relay_urls {
+        if !announcement.relays.iter().any(|url| url == relay_url) {
+            return Err(ControlHttpError::BadRequest(
+                "missing relay url".to_string(),
+            ));
+        }
+    }
+
+    Ok((announcement, identifier, npub))
+}
+
 fn ensure_action_pubkey_matches(
     request_pubkey: &str,
     action: &ControlAction,
@@ -802,10 +996,111 @@ fn ensure_action_pubkey_matches(
     Ok(())
 }
 
+fn build_request_url(headers: &HeaderMap, uri: &Uri) -> Result<String, ControlHttpError> {
+    let host = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ControlHttpError::BadRequest("missing host header".to_string()))?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let path = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or_else(|| uri.path());
+    Ok(format!("{scheme}://{host}{path}"))
+}
+
+fn parse_nostr_auth(headers: &HeaderMap) -> Result<Nip98Event, ControlHttpError> {
+    let value = headers
+        .get(AUTH_HEADER)
+        .and_then(|header| header.to_str().ok())
+        .ok_or_else(|| ControlHttpError::Unauthorized("missing authorization".to_string()))?;
+    let value = value.trim();
+    let Some(token) = value.strip_prefix("Nostr ") else {
+        return Err(ControlHttpError::Unauthorized(
+            "invalid authorization header".to_string(),
+        ));
+    };
+    let decoded = BASE64_STANDARD
+        .decode(token.as_bytes())
+        .map_err(|_| ControlHttpError::Unauthorized("invalid nostr authorization".to_string()))?;
+    serde_json::from_slice::<Nip98Event>(&decoded)
+        .map_err(|_| ControlHttpError::Unauthorized("invalid nostr event".to_string()))
+}
+
+fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpError> {
+    require_hex_len("event.id", &event.id, 64)?;
+    require_hex_len("event.pubkey", &event.pubkey, 64)?;
+    require_hex_len("event.sig", &event.sig, 128)?;
+
+    let expected_id = build_event_id(event)?;
+    if expected_id != event.id {
+        return Err(ControlHttpError::BadRequest(
+            "event id mismatch".to_string(),
+        ));
+    }
+
+    let event_id = hex::decode(&event.id)
+        .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
+    let msg = Message::from_digest_slice(&event_id)
+        .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
+    let sig_bytes = hex::decode(&event.sig)
+        .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
+    let sig = secp256k1::schnorr::Signature::from_slice(&sig_bytes)
+        .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
+    let pubkey_bytes = hex::decode(&event.pubkey)
+        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes)
+        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let secp = Secp256k1::new();
+    secp.verify_schnorr(&sig, &msg, &pubkey)
+        .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
+    Ok(())
+}
+
+fn build_event_id(event: &ApiSignedNostrEvent) -> Result<String, ControlHttpError> {
+    let payload = serde_json::json!([
+        0,
+        event.pubkey,
+        event.created_at,
+        event.kind,
+        event.tags,
+        event.content
+    ]);
+    let serialized = serde_json::to_string(&payload)
+        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(serialized.as_bytes());
+    let digest = hasher.finalize();
+    Ok(hex::encode(digest))
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 fn require_non_empty(field: &'static str, value: &str) -> Result<(), ControlHttpError> {
     if value.trim().is_empty() {
         return Err(ControlHttpError::BadRequest(format!(
             "missing {field}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_hex_len(
+    field: &'static str,
+    value: &str,
+    len: usize,
+) -> Result<(), ControlHttpError> {
+    if value.len() != len || !is_hex(value) {
+        return Err(ControlHttpError::BadRequest(format!(
+            "invalid {field}"
         )));
     }
     Ok(())
@@ -885,14 +1180,24 @@ impl IntoResponse for ControlHttpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AUTH_HEADER, ControlConfig, ControlHttpError, authorize, build_router};
+    use super::{
+        npub_from_hex, AUTH_HEADER, ControlConfig, ControlHttpError, authorize, build_router,
+    };
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{HeaderMap, Request};
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use gittree_app_core::{
+        nip98_payload_hash, nip98_sign_event, RepoCreateRequest, RepoCreateResponse,
+        SignedNostrEvent as ApiSignedNostrEvent,
+    };
     use gittree_config::{ControlAuthConfig, ForgejoConfig};
     use gittree_core::kinds::KIND_GITTREE_CONTROL;
+    use gittree_core::{RepoAnnouncement, format_grasp_server_url_as_clone_url};
     use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
-    use gittree_storage::{InMemoryRepositories, RelayPublishRepository};
+    use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
+    use gittree_storage::{AccountRecord, AccountRepository, InMemoryRepositories, RelayPublishRepository};
     use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde_json::json;
     use std::collections::VecDeque;
@@ -978,6 +1283,7 @@ mod tests {
                 repositories: repositories.clone(),
                 relay_urls,
                 public_git_url: "http://localhost:8085".to_string(),
+                repo_private_default: true,
             },
             transport,
             repositories,
@@ -993,6 +1299,24 @@ mod tests {
             hex::encode(pubkey.serialize()),
             hex::encode(secret.secret_bytes()),
         )
+    }
+
+    fn api_event_from_relay(event: RelaySignedNostrEvent) -> ApiSignedNostrEvent {
+        ApiSignedNostrEvent {
+            id: event.id,
+            pubkey: event.pubkey,
+            created_at: event.created_at,
+            kind: event.kind,
+            tags: event.tags,
+            content: event.content,
+            sig: event.sig,
+        }
+    }
+
+    fn nostr_auth_header(event: &gittree_app_core::Nip98Event) -> String {
+        let payload = serde_json::to_vec(event).expect("serialize");
+        let token = BASE64_STANDARD.encode(payload);
+        format!("Nostr {token}")
     }
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
@@ -1194,6 +1518,98 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let requests = transport.requests();
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/admin/users/alice/repos"));
+        let job = repos
+            .claim_relay_publish(OffsetDateTime::now_utc())
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(job.forgejo_owner, "alice");
+        assert_eq!(job.forgejo_repo, "demo");
+    }
+
+    #[tokio::test]
+    async fn create_repo_accepts_signed_announcement() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"full_name":"alice/demo","name":"demo","owner":{"username":"alice"},"html_url":"http://localhost/alice/demo"}"#.to_string(),
+        }];
+        let (state, transport, repos) = test_state(responses);
+        let (pubkey, privkey) = test_keys();
+        repos
+            .upsert_account(AccountRecord::new(&pubkey, "alice").expect("account"))
+            .await
+            .expect("upsert");
+
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url = format_grasp_server_url_as_clone_url(
+            &state.public_git_url,
+            &npub,
+            "demo",
+        )
+        .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("test repo".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
+            &announcement,
+            &secret,
+            now,
+        )
+        .expect("signed");
+        let request = RepoCreateRequest {
+            event: api_event_from_relay(signed),
+            private: Some(false),
+        };
+        let body = serde_json::to_vec(&request).expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let repo: RepoCreateResponse = serde_json::from_slice(&body).expect("repo");
+        assert_eq!(repo.owner, "alice");
+        assert_eq!(repo.name, "demo");
+
         let requests = transport.requests();
         assert!(requests[0]
             .url

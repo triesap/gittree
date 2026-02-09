@@ -5,18 +5,24 @@ edition = "2024"
 
 [dependencies]
 axum = "0.7"
+base64 = { workspace = true }
 bech32 = "0.11"
 dotenvy = "0.15"
+gittree-app-core = { path = "../../crates/app-core" }
 gittree-config = { path = "../../crates/config" }
 gittree-core = { path = "../../crates/core" }
 gittree-forgejo = { path = "../../crates/forgejo" }
+gittree-nostr-auth = { path = "../../crates/nostr-auth" }
 gittree-observability = { path = "../../crates/observability" }
 gittree-relay-adapter = { path = "../../crates/relay-adapter" }
 gittree-storage = { path = "../../crates/storage" }
 hex = "0.4"
 secp256k1 = "0.29"
 serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 
 [dev-dependencies]
