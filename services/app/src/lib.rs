@@ -13,7 +13,9 @@ use gittree_app_ui::server::{
 use gittree_app_ui::AppUiState;
 use gittree_config::{ConfigError, UiConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
-use gittree_storage::{PostgresRepositories, RepoMappingRepository, StorageConfig, StorageError};
+use gittree_storage::{
+    PostgresRepositories, ProfileRepository, RepoMappingRepository, StorageConfig, StorageError,
+};
 use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
 use leptos_axum::{handle_server_fns_with_context, LeptosRoutes};
@@ -275,9 +277,12 @@ pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
     let _observability = init_observability()?;
     let repositories = build_repositories(&config)?;
     let leptos_options = build_leptos_options(&config);
-    let repositories: Arc<dyn RepoMappingRepository> = Arc::new(repositories);
+    let repositories = Arc::new(repositories);
+    let repo_mappings: Arc<dyn RepoMappingRepository> = repositories.clone();
+    let profiles: Arc<dyn ProfileRepository> = repositories.clone();
     let state = AppUiState::new(
-        repositories,
+        repo_mappings,
+        profiles,
         config.ui.repo_root,
         config.ui.public_git_url,
         config.ui.auth_url,
@@ -399,14 +404,21 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use gittree_app_core::RepoListResponse;
-    use gittree_storage::{InMemoryRepositories, RepoMappingRecord, RepoMappingRepository};
+    use gittree_storage::{
+        InMemoryRepositories, ProfileRecord, ProfileRepository, ProfileVisibility, RepoMappingRecord,
+        RepoMappingRepository,
+    };
     use leptos::config::LeptosOptions;
     use std::sync::Arc;
     use tower::util::ServiceExt;
 
-    fn test_state(repositories: Arc<dyn RepoMappingRepository>) -> AppUiState {
+    fn test_state(
+        repositories: Arc<dyn RepoMappingRepository>,
+        profiles: Arc<dyn ProfileRepository>,
+    ) -> AppUiState {
         AppUiState::new(
             repositories,
+            profiles,
             "/tmp/gittree".into(),
             "http://localhost:8085".to_string(),
             "http://localhost:8089".to_string(),
@@ -422,10 +434,16 @@ mod tests {
         )
     }
 
+    fn pubkey_hex(byte: u8) -> String {
+        format!("{:02x}", byte).repeat(32)
+    }
+
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
-        let repositories: Arc<dyn RepoMappingRepository> = Arc::new(InMemoryRepositories::new());
-        let state = test_state(repositories);
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
         let app = build_router(state);
         let response = app
             .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
@@ -443,13 +461,31 @@ mod tests {
             pubkey: vec![0x11; 32],
             identifier: "repo".to_string(),
         };
+        let pubkey_hex = pubkey_hex(0x11);
         repositories
-            .upsert_mapping(record)
+            .upsert_mapping(record.clone())
             .await
             .expect("insert mapping");
+        let profile = ProfileRecord::new(
+            &pubkey_hex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(profile)
+            .await
+            .expect("profile");
 
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;
-        let state = test_state(repositories);
+        let state = test_state(repositories, profiles);
         let app = build_router(state);
         let response = app
             .oneshot(
@@ -484,17 +520,52 @@ mod tests {
             pubkey: vec![0x22; 32],
             identifier: "else".to_string(),
         };
+        let pubkey_hex_a = pubkey_hex(0x11);
+        let pubkey_hex_b = pubkey_hex(0x22);
         repositories
-            .upsert_mapping(record_a)
+            .upsert_mapping(record_a.clone())
             .await
             .expect("insert mapping");
         repositories
-            .upsert_mapping(record_b)
+            .upsert_mapping(record_b.clone())
             .await
             .expect("insert mapping");
+        let profile_a = ProfileRecord::new(
+            &pubkey_hex_a,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        let profile_b = ProfileRecord::new(
+            &pubkey_hex_b,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(profile_a)
+            .await
+            .expect("profile");
+        repositories
+            .upsert_profile(profile_b)
+            .await
+            .expect("profile");
 
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;
-        let state = test_state(repositories);
+        let state = test_state(repositories, profiles);
         let app = build_router(state);
         let npub = gittree_app_core::npub_from_bytes(&[0x11; 32]).expect("npub");
         let response = app
@@ -524,14 +595,32 @@ mod tests {
             pubkey: vec![0x11; 32],
             identifier: "repo".to_string(),
         };
+        let pubkey_hex = pubkey_hex(0x11);
         let npub = gittree_app_core::npub_from_bytes(&record.pubkey).expect("npub");
         repositories
-            .upsert_mapping(record)
+            .upsert_mapping(record.clone())
             .await
             .expect("insert mapping");
+        let profile = ProfileRecord::new(
+            &pubkey_hex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(profile)
+            .await
+            .expect("profile");
 
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;
-        let state = test_state(repositories);
+        let state = test_state(repositories, profiles);
         let app = build_router(state);
         let response = app
             .oneshot(
@@ -549,5 +638,133 @@ mod tests {
         let parsed: gittree_app_core::RepoDetail = serde_json::from_slice(&body).expect("json");
         assert_eq!(parsed.identifier, "repo");
         assert_eq!(parsed.forgejo, "owner/repo");
+    }
+
+    #[tokio::test]
+    async fn api_list_repos_hides_private_profiles() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let public_record = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            pubkey: vec![0x11; 32],
+            identifier: "repo".to_string(),
+        };
+        let private_record = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "secret".to_string(),
+            pubkey: vec![0x22; 32],
+            identifier: "secret".to_string(),
+        };
+        let public_pubkey_hex = pubkey_hex(0x11);
+        let private_pubkey_hex = pubkey_hex(0x22);
+        repositories
+            .upsert_mapping(public_record.clone())
+            .await
+            .expect("insert mapping");
+        repositories
+            .upsert_mapping(private_record.clone())
+            .await
+            .expect("insert mapping");
+        let profile_public = ProfileRecord::new(
+            &public_pubkey_hex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        let profile_private = ProfileRecord::new(
+            &private_pubkey_hex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            10,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(profile_public)
+            .await
+            .expect("profile");
+        repositories
+            .upsert_profile(profile_private)
+            .await
+            .expect("profile");
+
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/repos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let parsed: RepoListResponse = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].forgejo, "owner/repo");
+    }
+
+    #[tokio::test]
+    async fn api_repo_detail_hides_private_profile() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let record = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "secret".to_string(),
+            pubkey: vec![0x22; 32],
+            identifier: "secret".to_string(),
+        };
+        let pubkey_hex = pubkey_hex(0x22);
+        let npub = gittree_app_core::npub_from_bytes(&record.pubkey).expect("npub");
+        repositories
+            .upsert_mapping(record.clone())
+            .await
+            .expect("insert mapping");
+        let profile = ProfileRecord::new(
+            &pubkey_hex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            10,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(profile)
+            .await
+            .expect("profile");
+
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/repos/{npub}/secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
