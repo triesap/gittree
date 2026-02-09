@@ -854,6 +854,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn signup_rejects_method_mismatch() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "GET", now, None);
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[test]
     fn build_request_url_prefers_forwarded_proto() {
         let mut headers = HeaderMap::new();
@@ -1169,6 +1192,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_patch_rejects_invalid_json_payload() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let (state, repos, _transport) = test_state(Vec::new());
+        let account = AccountRecord::new(
+            "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+            "alice",
+        )
+        .expect("account");
+        repos.upsert_account(account).await.expect("upsert");
+
+        let body_bytes = Bytes::from_static(b"{invalid");
+        let hash = payload_hash(&body_bytes).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&hash));
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body_bytes))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn profile_patch_rejects_missing_account() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let update = ProfileUpdate {
+            display_name: Some("Ada".to_string()),
+            ..ProfileUpdate::default()
+        };
+        let body = Bytes::from(serde_json::to_vec(&update).expect("update json"));
+        let hash = payload_hash(&body).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&hash));
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn profile_public_returns_profile_for_public() {
         let now = unix_timestamp();
         let event = signed_event("http://localhost/v1/profile", "GET", now, None);
@@ -1264,5 +1350,26 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn profile_public_returns_not_found_without_account() {
+        let now = unix_timestamp();
+        let event = signed_event("http://localhost/v1/profile", "GET", now, None);
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let npub = npub_from_bytes(&pubkey_bytes).expect("npub");
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/profile/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
