@@ -98,6 +98,22 @@ app.profile.public.repos_empty = no repositories yet.
 
 app.profile.public.error = unable to load profile:
 
+app.profile.validation.title = fix the issues below before saving.
+
+app.profile.validation.display_name_length = display name must be 80 characters or fewer.
+
+app.profile.validation.bio_length = bio must be 500 characters or fewer.
+
+app.profile.validation.avatar_url_length = avatar url must be 300 characters or fewer.
+
+app.profile.validation.avatar_url_scheme = avatar url must start with http:// or https://.
+
+app.profile.validation.website_url_length = website url must be 300 characters or fewer.
+
+app.profile.validation.website_url_scheme = website url must start with http:// or https://.
+
+app.profile.validation.location_length = location must be 120 characters or fewer.
+
 app.account.cta = account
 
 app.account.title = account

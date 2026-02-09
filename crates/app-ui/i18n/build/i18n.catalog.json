@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "project": "gittree-app-ui",
-  "generated_at": "2026-02-08T22:56:56Z",
+  "generated_at": "2026-02-09T01:39:04Z",
   "default_locale": "en",
   "messages": [
     {
@@ -370,6 +370,94 @@
     {
       "key": "app.profile.updated",
       "id": 1673213942,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.avatar_url_length",
+      "id": 881653917,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.avatar_url_scheme",
+      "id": 3437879377,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.bio_length",
+      "id": 3469837410,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.display_name_length",
+      "id": 1951920875,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.location_length",
+      "id": 4078113659,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.title",
+      "id": 4127241410,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.website_url_length",
+      "id": 2130788521,
+      "args": [],
+      "features": {
+        "select": false,
+        "plural_cardinal": false,
+        "plural_ordinal": false,
+        "formatters": []
+      }
+    },
+    {
+      "key": "app.profile.validation.website_url_scheme",
+      "id": 2626704276,
       "args": [],
       "features": {
         "select": false,

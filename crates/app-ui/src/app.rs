@@ -29,6 +29,7 @@ use crate::profile_client::{
     fetch_profile, fetch_public_profile, profile_endpoint, public_profile_endpoint,
     update_profile,
 };
+use crate::profile_validation::validate_profile_update;
 use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
 use crate::server::{list_repositories, repo_detail};
 use crate::t;
@@ -372,6 +373,23 @@ fn ProfilePage() -> impl IntoView {
         }
     });
 
+    let validation_errors = Memo::new(move |_| {
+        let update = ProfileUpdate {
+            display_name: Some(display_name.get()),
+            bio: Some(bio.get()),
+            avatar_url: Some(avatar_url.get()),
+            website_url: Some(website_url.get()),
+            location: Some(location.get()),
+            visibility: Some(if visibility_public.get() {
+                ProfileVisibility::Public
+            } else {
+                ProfileVisibility::Private
+            }),
+        };
+        validate_profile_update(&update)
+    });
+    let has_validation_errors = move || !validation_errors.get().is_empty();
+
     let fetch_profile_action = Callback::new({
         let auth_endpoint = auth_endpoint.clone();
         let set_profile = set_profile.clone();
@@ -453,6 +471,12 @@ fn ProfilePage() -> impl IntoView {
                     ProfileVisibility::Private
                 }),
             };
+            let errors = validate_profile_update(&update);
+            if !errors.is_empty() {
+                set_status.set(None);
+                set_error.set(None);
+                return;
+            }
             leptos::task::spawn_local(async move {
                 set_busy.set(true);
                 set_error.set(None);
@@ -586,12 +610,34 @@ fn ProfilePage() -> impl IntoView {
                                 </label>
                             </div>
                         </form>
+                        {move || {
+                            let errors = validation_errors.get();
+                            if errors.is_empty() {
+                                ().into_any()
+                            } else {
+                                view! {
+                                    <div class="gt-error">
+                                        <p class="gt-meta">{t!("app.profile.validation.title")}</p>
+                                        <ul class="gt-validation-list">
+                                            {errors
+                                                .into_iter()
+                                                .map(|error| {
+                                                    let message = crate::translate(error.message_key());
+                                                    view! { <li class="gt-validation-item">{message}</li> }
+                                                })
+                                                .collect_view()}
+                                        </ul>
+                                    </div>
+                                }
+                                .into_any()
+                            }
+                        }}
                         <div class="gt-actions">
                             <button
                                 class="gt-button"
                                 type="button"
                                 on:click=move |_| save_profile_action.run(())
-                                disabled=move || busy.get()
+                                disabled=move || busy.get() || has_validation_errors()
                             >
                                 {t!("app.profile.save")}
                             </button>
@@ -765,14 +811,42 @@ fn PublicProfilePage() -> impl IntoView {
                         let display_name =
                             profile.display_name.clone().unwrap_or_else(|| profile.username.clone());
                         let npub_label = params.get().get("npub").unwrap_or_default();
+                        let avatar_alt = format!("{display_name} avatar");
                         view! {
                             <>
+                                {move || match profile.avatar_url.clone() {
+                                    None => ().into_any(),
+                                    Some(url) => view! {
+                                        <img class="gt-avatar" src=url alt=avatar_alt.clone() />
+                                    }
+                                    .into_any(),
+                                }}
                                 <h2 class="gt-title">{display_name}</h2>
                                 <p class="gt-meta">{format!("@{}", profile.username)}</p>
                                 <p class="gt-meta">{format!("{} {}", t!("app.profile.npub"), npub_label)}</p>
                                 {move || match profile.bio.clone() {
                                     None => ().into_any(),
                                     Some(bio) => view! { <p class="gt-meta">{bio}</p> }.into_any(),
+                                }}
+                                {move || match profile.location.clone() {
+                                    None => ().into_any(),
+                                    Some(location) => view! {
+                                        <p class="gt-meta">{format!("{} {}", t!("app.profile.location"), location)}</p>
+                                    }
+                                    .into_any(),
+                                }}
+                                {move || match profile.website_url.clone() {
+                                    None => ().into_any(),
+                                    Some(url) => {
+                                        let href = url.clone();
+                                        view! {
+                                            <p class="gt-meta">
+                                                {format!("{} ", t!("app.profile.website_url"))}
+                                                <a class="gt-link" href=href target="_blank" rel="noopener noreferrer">{url}</a>
+                                            </p>
+                                        }
+                                        .into_any()
+                                    }
                                 }}
                             </>
                         }

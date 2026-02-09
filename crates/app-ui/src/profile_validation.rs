@@ -1,6 +1,5 @@
-#![allow(dead_code)]
-
 use gittree_app_core::ProfileUpdate;
+use crate::t;
 
 const MAX_DISPLAY_NAME: usize = 80;
 const MAX_BIO: usize = 500;
@@ -80,6 +79,17 @@ fn normalized(value: &Option<String>) -> Option<String> {
 fn is_http_url(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+#[allow(dead_code)]
+fn profile_validation_message_keys() {
+    let _ = t!("app.profile.validation.display_name_length");
+    let _ = t!("app.profile.validation.bio_length");
+    let _ = t!("app.profile.validation.avatar_url_length");
+    let _ = t!("app.profile.validation.avatar_url_scheme");
+    let _ = t!("app.profile.validation.website_url_length");
+    let _ = t!("app.profile.validation.website_url_scheme");
+    let _ = t!("app.profile.validation.location_length");
 }
 
 #[cfg(test)]
