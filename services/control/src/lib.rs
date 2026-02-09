@@ -1356,8 +1356,9 @@ impl IntoResponse for ControlHttpError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlCreateTenantResponse, npub_from_hex, AUTH_HEADER, ControlConfig, ControlHttpError,
-        authorize, build_router,
+        ControlCreateTenantResponse, AUTH_HEADER, ControlConfig, ControlHttpError, authorize,
+        authorize_admin_pubkey, build_request_url, build_router, normalize_host, npub_from_hex,
+        parse_nostr_auth, parse_secret_key,
     };
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
@@ -1562,6 +1563,64 @@ mod tests {
         let headers = HeaderMap::new();
         let err = authorize(&headers, "token").unwrap_err();
         assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn authorize_rejects_invalid_header_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTH_HEADER, "Nostr token".parse().expect("header"));
+        let err = authorize(&headers, "token").unwrap_err();
+        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn authorize_rejects_wrong_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTH_HEADER, "Bearer wrong".parse().expect("header"));
+        let err = authorize(&headers, "token").unwrap_err();
+        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn authorize_admin_pubkey_handles_allowlist() {
+        let auth = ControlAuthConfig {
+            token: "token".to_string(),
+            admin_keys: vec!["aa".repeat(32)],
+        };
+        let denied = authorize_admin_pubkey(&"bb".repeat(32), &auth).unwrap_err();
+        assert!(matches!(denied, ControlHttpError::Unauthorized(_)));
+
+        let open = ControlAuthConfig {
+            token: "token".to_string(),
+            admin_keys: Vec::new(),
+        };
+        authorize_admin_pubkey(&"bb".repeat(32), &open).expect("open allowlist");
+    }
+
+    #[test]
+    fn build_request_url_and_host_normalization_cover_edge_cases() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "gittr.ee".parse().expect("host"));
+        headers.insert("x-forwarded-proto", "https".parse().expect("proto"));
+        let uri = "/v1/repos?x=1".parse().expect("uri");
+        let url = build_request_url(&headers, &uri).expect("url");
+        assert_eq!(url, "https://gittr.ee/v1/repos?x=1");
+
+        let normalized = normalize_host("https://Relay.Local:443").expect("host");
+        assert_eq!(normalized, "relay.local");
+        let invalid = normalize_host("relay.local/path").unwrap_err();
+        assert!(matches!(invalid, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parse_nostr_auth_and_secret_key_validate_inputs() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTH_HEADER, "Nostr !!!".parse().expect("header"));
+        let auth_err = parse_nostr_auth(&headers).unwrap_err();
+        assert!(matches!(auth_err, ControlHttpError::Unauthorized(_)));
+
+        let secret_err = parse_secret_key("bad").unwrap_err();
+        assert!(matches!(secret_err, ControlHttpError::BadRequest(_)));
     }
 
     #[tokio::test]
@@ -1864,6 +1923,94 @@ mod tests {
             .expect("membership lookup")
             .expect("membership");
         assert_eq!(membership.role, "owner");
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_duplicate_host() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+
+        let build_request = || {
+            let body = serde_json::to_vec(&json!({
+                "host": "relay.local",
+                "name": "Relay Local"
+            }))
+            .expect("body");
+            let auth_event = nip98_sign_event(
+                &secret.secret_bytes(),
+                "POST",
+                "http://localhost/v1/relay/tenants",
+                nip98_payload_hash(&body).as_deref(),
+                now,
+            )
+            .expect("auth");
+            (body, nostr_auth_header(&auth_event))
+        };
+
+        let app = build_router(state);
+        let (body1, header1) = build_request();
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header1)
+                    .body(Body::from(body1))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(first.status(), axum::http::StatusCode::OK);
+
+        let (body2, header2) = build_request();
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header2)
+                    .body(Body::from(body2))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(second.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_missing_body() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+        let auth_event =
+            nip98_sign_event(&secret.secret_bytes(), "POST", "http://localhost/v1/repos", None, now)
+                .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
