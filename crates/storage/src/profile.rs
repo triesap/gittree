@@ -69,8 +69,8 @@ impl ProfileRecord {
             pubkey: decode_hex_32("pubkey", pubkey)?,
             display_name: normalize_optional("display_name", display_name, MAX_DISPLAY_NAME)?,
             bio: normalize_optional("bio", bio, MAX_BIO)?,
-            avatar_url: normalize_optional("avatar_url", avatar_url, MAX_AVATAR_URL)?,
-            website_url: normalize_optional("website_url", website_url, MAX_WEBSITE_URL)?,
+            avatar_url: normalize_optional_url("avatar_url", avatar_url, MAX_AVATAR_URL)?,
+            website_url: normalize_optional_url("website_url", website_url, MAX_WEBSITE_URL)?,
             location: normalize_optional("location", location, MAX_LOCATION)?,
             visibility,
             created_at,
@@ -113,9 +113,28 @@ fn normalize_optional(
     }
 }
 
+fn normalize_optional_url(
+    field: &'static str,
+    value: Option<String>,
+    max_len: usize,
+) -> Result<Option<String>, StorageError> {
+    let value = normalize_optional(field, value, max_len)?;
+    if let Some(url) = value.as_ref() {
+        let lower = url.to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return Err(StorageError::InvalidField {
+                field,
+                value: url.clone(),
+            });
+        }
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ProfileRecord, ProfileVisibility, MAX_DISPLAY_NAME};
+    use crate::StorageError;
 
     #[test]
     fn profile_record_maps_fields() {
@@ -199,5 +218,39 @@ mod tests {
             super::ProfileVisibility::parse("PUBLIC").expect("public"),
             ProfileVisibility::Public
         );
+    }
+
+    #[test]
+    fn profile_record_rejects_invalid_avatar_url_scheme() {
+        let err = ProfileRecord::new(
+            &"11".repeat(32),
+            None,
+            None,
+            Some("ftp://example.com/avatar.png".to_string()),
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            20,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "avatar_url"));
+    }
+
+    #[test]
+    fn profile_record_rejects_invalid_website_url_scheme() {
+        let err = ProfileRecord::new(
+            &"11".repeat(32),
+            None,
+            None,
+            None,
+            Some("gopher://example.com".to_string()),
+            None,
+            ProfileVisibility::Private,
+            10,
+            20,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "website_url"));
     }
 }
