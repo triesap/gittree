@@ -180,6 +180,15 @@ fn normalize_host(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn relay_url_from_host(host: &str) -> String {
+    let host = host.trim();
+    if host.starts_with("ws://") || host.starts_with("wss://") {
+        host.to_string()
+    } else {
+        format!("wss://{host}")
+    }
+}
+
 async fn health_handler() -> &'static str {
     "ok"
 }
@@ -202,6 +211,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
             state.config.policy.auth_required,
         ),
     };
+    let relay_url = tenant
+        .tenant
+        .as_ref()
+        .map(|record| relay_url_from_host(&record.host));
     let membership = state
         .repos
         .as_ref()
@@ -214,7 +227,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
         read_auth_required,
         write_auth_required,
     )
-    .with_membership(Some(tenant.tenant_id.clone()), membership.clone());
+    .with_membership(Some(tenant.tenant_id.clone()), membership.clone())
+    .with_relay_url(relay_url);
 
     if let Some(record) = tenant.tenant.as_ref() {
         session =

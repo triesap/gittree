@@ -153,6 +153,7 @@ pub struct Session<S: EventStore> {
     tenant_id: Option<String>,
     membership: Option<Arc<dyn RelayMembershipRepository>>,
     tenant_signer: Option<TenantSigner>,
+    relay_url: Option<String>,
     read_auth_required: bool,
     write_auth_required: bool,
     rate_limiter: Option<RateLimiter>,
@@ -172,6 +173,7 @@ impl<S: EventStore> Session<S> {
             tenant_id: None,
             membership: None,
             tenant_signer: None,
+            relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -190,6 +192,7 @@ impl<S: EventStore> Session<S> {
             tenant_id: None,
             membership: None,
             tenant_signer: None,
+            relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -209,6 +212,7 @@ impl<S: EventStore> Session<S> {
             tenant_id: None,
             membership: None,
             tenant_signer: None,
+            relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -231,6 +235,7 @@ impl<S: EventStore> Session<S> {
             tenant_id: None,
             membership: None,
             tenant_signer: None,
+            relay_url: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -250,6 +255,7 @@ impl<S: EventStore> Session<S> {
             tenant_id: None,
             membership: None,
             tenant_signer: None,
+            relay_url: None,
             read_auth_required: auth_required,
             write_auth_required: auth_required,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -276,6 +282,7 @@ impl<S: EventStore> Session<S> {
             tenant_id: None,
             membership: None,
             tenant_signer: None,
+            relay_url: None,
             read_auth_required,
             write_auth_required,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -299,6 +306,11 @@ impl<S: EventStore> Session<S> {
         relay_secret: Vec<u8>,
     ) -> Self {
         self.tenant_signer = TenantSigner::new(relay_pubkey, relay_secret);
+        self
+    }
+
+    pub fn with_relay_url(mut self, relay_url: Option<String>) -> Self {
+        self.relay_url = relay_url;
         self
     }
 
@@ -637,7 +649,7 @@ impl<S: EventStore> Session<S> {
                 pubkey: event.pubkey.clone(),
                 event_id: event.id.clone(),
                 tags: event.tags.clone(),
-                relay_url: None,
+                relay_url: self.relay_url.clone(),
                 source_ip: None,
             };
             let decision = admission.decide(&relay_event).await;
