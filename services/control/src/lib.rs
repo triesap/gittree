@@ -1372,7 +1372,9 @@ mod tests {
     use gittree_config::{ControlAuthConfig, ForgejoConfig};
     use gittree_core::kinds::KIND_GITTREE_CONTROL;
     use gittree_core::{RepoAnnouncement, format_grasp_server_url_as_clone_url};
-    use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
+    use gittree_forgejo::{
+        ForgejoClient, ForgejoError, ForgejoRequest, ForgejoResponse, ForgejoTransport,
+    };
     use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
     use gittree_storage::{
         AccountRecord, AccountRepository, InMemoryRepositories, RelayMembershipRepository,
@@ -1613,6 +1615,14 @@ mod tests {
     }
 
     #[test]
+    fn build_request_url_rejects_missing_host_header() {
+        let headers = HeaderMap::new();
+        let uri = "/v1/repos".parse().expect("uri");
+        let err = build_request_url(&headers, &uri).expect_err("missing host");
+        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
     fn parse_nostr_auth_and_secret_key_validate_inputs() {
         let mut headers = HeaderMap::new();
         headers.insert(AUTH_HEADER, "Nostr !!!".parse().expect("header"));
@@ -1621,6 +1631,21 @@ mod tests {
 
         let secret_err = parse_secret_key("bad").unwrap_err();
         assert!(matches!(secret_err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn map_forgejo_error_maps_client_and_server_failures() {
+        let client = super::map_forgejo_error(ForgejoError::Response {
+            status: 404,
+            body: "missing".to_string(),
+        });
+        assert!(matches!(client, ControlHttpError::BadRequest(_)));
+
+        let server = super::map_forgejo_error(ForgejoError::Response {
+            status: 503,
+            body: "down".to_string(),
+        });
+        assert!(matches!(server, ControlHttpError::Internal(_)));
     }
 
     #[tokio::test]
@@ -2011,6 +2036,177 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_repo_rejects_pubkey_privkey_mismatch() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let (pubkey, _) = test_keys();
+        let wrong_secret = SecretKey::from_slice(&[2u8; 32]).expect("secret");
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": pubkey,
+                            "privkey": hex::encode(wrong_secret.secret_bytes())
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_when_account_missing() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url = format_grasp_server_url_as_clone_url(
+            &state.public_git_url,
+            &npub,
+            "demo",
+        )
+        .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("missing account".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let now = super::unix_timestamp();
+        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
+            &announcement,
+            &secret,
+            now,
+        )
+        .expect("signed");
+        let request = RepoCreateRequest {
+            event: api_event_from_relay(signed),
+            private: Some(false),
+        };
+        let body = serde_json::to_vec(&request).expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(message.contains("account not found"));
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_missing_required_relay_url() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url = format_grasp_server_url_as_clone_url(
+            &state.public_git_url,
+            &npub,
+            "demo",
+        )
+        .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("bad relay".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: vec!["wss://other-relay.local".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let now = super::unix_timestamp();
+        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
+            &announcement,
+            &secret,
+            now,
+        )
+        .expect("signed");
+        let request = RepoCreateRequest {
+            event: api_event_from_relay(signed),
+            private: Some(false),
+        };
+        let body = serde_json::to_vec(&request).expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(message.contains("missing relay url"));
     }
 
     #[tokio::test]
