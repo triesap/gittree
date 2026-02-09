@@ -1,7 +1,8 @@
 use crate::{
     AccountRecord, EventQuery, EventRecord, ProfileRecord, RelayCompatibilityRecord,
-    RelayPublishJob, RelayPublishRequest, RelayPublishStatus, RelayTenantRecord,
-    RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError,
+    RelayInviteRecord, RelayMembershipRecord, RelayPublishJob, RelayPublishRequest,
+    RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord,
+    RepoStateRecord, StorageError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -91,6 +92,39 @@ pub trait RelayTenantRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait RelayMembershipRepository: Send + Sync {
+    async fn upsert_membership(
+        &self,
+        record: RelayMembershipRecord,
+    ) -> Result<(), StorageError>;
+    async fn membership_by_pubkey(
+        &self,
+        tenant_id: &str,
+        pubkey: &[u8],
+    ) -> Result<Option<RelayMembershipRecord>, StorageError>;
+    async fn list_memberships(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<RelayMembershipRecord>, StorageError>;
+    async fn remove_membership(
+        &self,
+        tenant_id: &str,
+        pubkey: &[u8],
+    ) -> Result<bool, StorageError>;
+    async fn insert_invite(&self, record: RelayInviteRecord) -> Result<(), StorageError>;
+    async fn invite_by_code(
+        &self,
+        tenant_id: &str,
+        invite_code: &str,
+    ) -> Result<Option<RelayInviteRecord>, StorageError>;
+    async fn delete_invite(
+        &self,
+        tenant_id: &str,
+        invite_code: &str,
+    ) -> Result<(), StorageError>;
+}
+
+#[async_trait]
 pub trait EventRepository: Send + Sync {
     async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError>;
     async fn get_event(
@@ -144,6 +178,8 @@ pub struct InMemoryRepositories {
     relay_compatibility: RwLock<HashMap<String, RelayCompatibilityRecord>>,
     tenants_by_id: RwLock<HashMap<String, RelayTenantRecord>>,
     tenants_by_host: RwLock<HashMap<String, String>>,
+    memberships: RwLock<HashMap<String, RelayMembershipRecord>>,
+    invites: RwLock<HashMap<String, RelayInviteRecord>>,
     events: RwLock<HashMap<String, EventRecord>>,
     outbox: RwLock<HashMap<i64, OutboxEntry>>,
     outbox_seq: AtomicI64,
@@ -176,6 +212,14 @@ impl InMemoryRepositories {
 
     fn tenant_key(tenant_id: &str) -> String {
         tenant_id.to_string()
+    }
+
+    fn membership_key(tenant_id: &str, pubkey: &[u8]) -> String {
+        format!("{tenant_id}:{}", hex::encode(pubkey))
+    }
+
+    fn invite_key(invite_code: &str) -> String {
+        invite_code.to_string()
     }
 
     fn next_outbox_id(&self) -> i64 {
@@ -481,6 +525,111 @@ impl RelayTenantRepository for InMemoryRepositories {
             message: "tenant store poisoned".to_string(),
         })?;
         Ok(by_id.values().cloned().collect())
+    }
+}
+
+#[async_trait]
+impl RelayMembershipRepository for InMemoryRepositories {
+    async fn upsert_membership(
+        &self,
+        record: RelayMembershipRecord,
+    ) -> Result<(), StorageError> {
+        let key = Self::membership_key(&record.tenant_id, &record.pubkey);
+        let mut map = self
+            .memberships
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "membership store poisoned".to_string(),
+            })?;
+        map.insert(key, record);
+        Ok(())
+    }
+
+    async fn membership_by_pubkey(
+        &self,
+        tenant_id: &str,
+        pubkey: &[u8],
+    ) -> Result<Option<RelayMembershipRecord>, StorageError> {
+        let key = Self::membership_key(tenant_id, pubkey);
+        let map = self
+            .memberships
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "membership store poisoned".to_string(),
+            })?;
+        Ok(map.get(&key).cloned())
+    }
+
+    async fn list_memberships(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<RelayMembershipRecord>, StorageError> {
+        let map = self
+            .memberships
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "membership store poisoned".to_string(),
+            })?;
+        Ok(map
+            .values()
+            .filter(|record| record.tenant_id == tenant_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn remove_membership(
+        &self,
+        tenant_id: &str,
+        pubkey: &[u8],
+    ) -> Result<bool, StorageError> {
+        let key = Self::membership_key(tenant_id, pubkey);
+        let mut map = self
+            .memberships
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "membership store poisoned".to_string(),
+            })?;
+        Ok(map.remove(&key).is_some())
+    }
+
+    async fn insert_invite(&self, record: RelayInviteRecord) -> Result<(), StorageError> {
+        let key = Self::invite_key(&record.invite_code);
+        let mut map = self.invites.write().map_err(|_| StorageError::Internal {
+            message: "invite store poisoned".to_string(),
+        })?;
+        map.insert(key, record);
+        Ok(())
+    }
+
+    async fn invite_by_code(
+        &self,
+        tenant_id: &str,
+        invite_code: &str,
+    ) -> Result<Option<RelayInviteRecord>, StorageError> {
+        let map = self.invites.read().map_err(|_| StorageError::Internal {
+            message: "invite store poisoned".to_string(),
+        })?;
+        Ok(map
+            .get(invite_code)
+            .filter(|record| record.tenant_id == tenant_id)
+            .cloned())
+    }
+
+    async fn delete_invite(
+        &self,
+        tenant_id: &str,
+        invite_code: &str,
+    ) -> Result<(), StorageError> {
+        let mut map = self.invites.write().map_err(|_| StorageError::Internal {
+            message: "invite store poisoned".to_string(),
+        })?;
+        if map
+            .get(invite_code)
+            .is_some_and(|record| record.tenant_id == tenant_id)
+        {
+            map.remove(invite_code);
+        }
+        Ok(())
     }
 }
 

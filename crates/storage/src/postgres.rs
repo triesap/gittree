@@ -1,13 +1,13 @@
 use crate::repositories::{
     AccountRepository, AnnouncementRepository, EventRepository, ProfileRepository,
-    RelayCompatibilityRepository, RelayPublishRepository, RelayTenantRepository,
-    RepoMappingRepository, StateRepository,
+    RelayCompatibilityRepository, RelayMembershipRepository, RelayPublishRepository,
+    RelayTenantRepository, RepoMappingRepository, StateRepository,
 };
 use crate::{
     AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
-    RelayCompatibilityRecord, RelayPublishJob, RelayPublishRequest, RelayPublishStatus,
-    RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
-    StorageError,
+    RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishJob,
+    RelayPublishRequest, RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord,
+    RepoMappingRecord, RepoStateRecord, TagRecord, StorageError,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
@@ -830,6 +830,187 @@ fn relay_tenant_from_row(row: sqlx::postgres::PgRow) -> Result<RelayTenantRecord
 }
 
 #[async_trait]
+impl RelayMembershipRepository for PostgresRepositories {
+    async fn upsert_membership(
+        &self,
+        record: RelayMembershipRecord,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+INSERT INTO relay_membership (tenant_id, pubkey, role, status, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (tenant_id, pubkey) DO UPDATE SET
+    role = EXCLUDED.role,
+    status = EXCLUDED.status,
+    created_at = EXCLUDED.created_at,
+    updated_at = EXCLUDED.updated_at
+"#,
+        )
+        .bind(&record.tenant_id)
+        .bind(&record.pubkey)
+        .bind(&record.role)
+        .bind(&record.status)
+        .bind(record.created_at)
+        .bind(record.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn membership_by_pubkey(
+        &self,
+        tenant_id: &str,
+        pubkey: &[u8],
+    ) -> Result<Option<RelayMembershipRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT tenant_id, pubkey, role, status, created_at, updated_at
+FROM relay_membership
+WHERE tenant_id = $1 AND pubkey = $2
+LIMIT 1
+"#,
+        )
+        .bind(tenant_id)
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(relay_membership_from_row).transpose()?)
+    }
+
+    async fn list_memberships(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<RelayMembershipRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+SELECT tenant_id, pubkey, role, status, created_at, updated_at
+FROM relay_membership
+WHERE tenant_id = $1
+ORDER BY pubkey
+"#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(relay_membership_from_row).collect()
+    }
+
+    async fn remove_membership(
+        &self,
+        tenant_id: &str,
+        pubkey: &[u8],
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+DELETE FROM relay_membership
+WHERE tenant_id = $1 AND pubkey = $2
+"#,
+        )
+        .bind(tenant_id)
+        .bind(pubkey)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn insert_invite(&self, record: RelayInviteRecord) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+INSERT INTO relay_invite (
+    tenant_id,
+    invite_code,
+    role,
+    inviter_pubkey,
+    invitee_pubkey,
+    expires_at,
+    created_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+"#,
+        )
+        .bind(&record.tenant_id)
+        .bind(&record.invite_code)
+        .bind(&record.role)
+        .bind(&record.inviter_pubkey)
+        .bind(&record.invitee_pubkey)
+        .bind(record.expires_at)
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn invite_by_code(
+        &self,
+        tenant_id: &str,
+        invite_code: &str,
+    ) -> Result<Option<RelayInviteRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT tenant_id,
+       invite_code,
+       role,
+       inviter_pubkey,
+       invitee_pubkey,
+       expires_at,
+       created_at
+FROM relay_invite
+WHERE tenant_id = $1 AND invite_code = $2
+LIMIT 1
+"#,
+        )
+        .bind(tenant_id)
+        .bind(invite_code)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(relay_invite_from_row).transpose()?)
+    }
+
+    async fn delete_invite(
+        &self,
+        tenant_id: &str,
+        invite_code: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+DELETE FROM relay_invite
+WHERE tenant_id = $1 AND invite_code = $2
+"#,
+        )
+        .bind(tenant_id)
+        .bind(invite_code)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+fn relay_membership_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<RelayMembershipRecord, StorageError> {
+    Ok(RelayMembershipRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        pubkey: row.try_get("pubkey")?,
+        role: row.try_get("role")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn relay_invite_from_row(row: sqlx::postgres::PgRow) -> Result<RelayInviteRecord, StorageError> {
+    Ok(RelayInviteRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        invite_code: row.try_get("invite_code")?,
+        role: row.try_get("role")?,
+        inviter_pubkey: row.try_get("inviter_pubkey")?,
+        invitee_pubkey: row.try_get("invitee_pubkey")?,
+        expires_at: row.try_get("expires_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+#[async_trait]
 impl EventRepository for PostgresRepositories {
     async fn insert_event(&self, record: EventRecord) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
@@ -1222,7 +1403,8 @@ mod tests {
     use super::PostgresRepositories;
     use crate::repositories::{
         AccountRepository, EventRepository, ProfileRepository, RelayCompatibilityRepository,
-        RelayPublishRepository, RelayTenantRepository, RepoMappingRepository,
+        RelayMembershipRepository, RelayPublishRepository, RelayTenantRepository,
+        RepoMappingRepository,
     };
     use crate::StorageError;
 
@@ -1277,6 +1459,12 @@ mod tests {
     #[test]
     fn postgres_repos_implements_relay_tenant_repo() {
         fn assert_impl<T: RelayTenantRepository>() {}
+        assert_impl::<PostgresRepositories>();
+    }
+
+    #[test]
+    fn postgres_repos_implements_relay_membership_repo() {
+        fn assert_impl<T: RelayMembershipRepository>() {}
         assert_impl::<PostgresRepositories>();
     }
 }
