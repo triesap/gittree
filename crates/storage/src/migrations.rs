@@ -27,6 +27,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_gittree_profiles(),
         migration_relay_tenants(),
         migration_nostr_event_tenant(),
+        migration_relay_membership(),
     ]
 }
 
@@ -209,6 +210,16 @@ fn migration_nostr_event_tenant() -> Migration {
     }
 }
 
+fn migration_relay_membership() -> Migration {
+    const RELAY_MEMBERSHIP_SQL: &str =
+        include_str!("../../../migrations/0012_relay_membership.sql");
+    Migration {
+        version: 12,
+        description: "relay memberships",
+        sql: RELAY_MEMBERSHIP_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -283,12 +294,14 @@ mod tests {
         assert!(sql.contains("CREATE TABLE relay_tenant"));
         assert!(sql.contains("ALTER TABLE nostr_event"));
         assert!(sql.contains("ADD COLUMN tenant_id"));
+        assert!(sql.contains("CREATE TABLE relay_membership"));
+        assert!(sql.contains("CREATE TABLE relay_invite"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     }
 }
