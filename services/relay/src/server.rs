@@ -9,7 +9,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use gittree_storage::{PostgresRepositories, RelayTenantRecord, RelayTenantRepository};
+use gittree_storage::{
+    PostgresRepositories, RelayMembershipRepository, RelayTenantRecord, RelayTenantRepository,
+};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -199,6 +201,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
             state.config.policy.auth_required,
         ),
     };
+    let membership = state
+        .repos
+        .as_ref()
+        .map(|repos| repos.clone() as Arc<dyn RelayMembershipRepository>);
     let session = Session::with_broadcast(
         tenant.store.clone(),
         state.policy,
@@ -207,6 +213,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
         read_auth_required,
         write_auth_required,
     )
+    .with_membership(Some(tenant.tenant_id.clone()), membership)
     .with_metrics(state.metrics.clone());
     let driver = SessionDriver::new(session);
     tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
