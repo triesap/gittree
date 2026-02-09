@@ -10,7 +10,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use gittree_storage::{
-    PostgresRepositories, RelayMembershipRepository, RelayTenantRecord, RelayTenantRepository,
+    PostgresRepositories, RelayMembershipRecord, RelayMembershipRepository, RelayTenantRecord,
+    RelayTenantRepository, StorageError,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -205,7 +206,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
         .repos
         .as_ref()
         .map(|repos| repos.clone() as Arc<dyn RelayMembershipRepository>);
-    let session = Session::with_broadcast(
+    let mut session = Session::with_broadcast(
         tenant.store.clone(),
         state.policy,
         state.admission.clone(),
@@ -213,8 +214,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
         read_auth_required,
         write_auth_required,
     )
-    .with_membership(Some(tenant.tenant_id.clone()), membership)
-    .with_metrics(state.metrics.clone());
+    .with_membership(Some(tenant.tenant_id.clone()), membership.clone());
+
+    if let Some(record) = tenant.tenant.as_ref() {
+        session =
+            session.with_relay_signer(record.relay_pubkey.clone(), record.relay_secret.clone());
+        if let Some(membership) = membership.as_ref() {
+            let _ = seed_owner_membership(
+                membership,
+                &tenant.tenant_id,
+                &record.relay_pubkey,
+            )
+            .await;
+        }
+    }
+
+    let session = session.with_metrics(state.metrics.clone());
     let driver = SessionDriver::new(session);
     tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
 
@@ -245,6 +260,34 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
             }
         }
     }
+}
+
+async fn seed_owner_membership(
+    membership: &Arc<dyn RelayMembershipRepository>,
+    tenant_id: &str,
+    relay_pubkey: &[u8],
+) -> Result<(), StorageError> {
+    let existing = membership
+        .membership_by_pubkey(tenant_id, relay_pubkey)
+        .await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let created_at = existing
+        .as_ref()
+        .map(|record| record.created_at)
+        .unwrap_or(now);
+    let record = RelayMembershipRecord {
+        tenant_id: tenant_id.to_string(),
+        pubkey: relay_pubkey.to_vec(),
+        role: "owner".to_string(),
+        status: "active".to_string(),
+        created_at,
+        updated_at: now,
+    };
+    membership.upsert_membership(record).await?;
+    Ok(())
 }
 
 #[cfg(test)]

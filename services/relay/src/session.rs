@@ -4,8 +4,9 @@ use crate::{
     decode_client_message,
 };
 use gittree_core::AdmissionDecision;
-use gittree_storage::{RelayMembershipRecord, RelayMembershipRepository};
+use gittree_storage::{RelayInviteRecord, RelayMembershipRecord, RelayMembershipRepository};
 use serde_json::Value;
+use secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use secp256k1::rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -15,10 +16,14 @@ use tokio::sync::broadcast;
 const AUTH_KIND: u32 = 22242;
 const AUTH_REQUIRED_REASON: &str = "auth-required";
 const AUTH_PUBKEY_MISMATCH_REASON: &str = "auth-pubkey-mismatch";
+const NIP43_MEMBERSHIP_KIND: u32 = 13534;
 const NIP43_JOIN_KIND: u32 = 28934;
+const NIP43_INVITE_KIND: u32 = 28935;
 const NIP43_LEAVE_KIND: u32 = 28936;
 const MEMBERSHIP_STATUS_ACTIVE: &str = "active";
 const MEMBERSHIP_STATUS_LEFT: &str = "left";
+const DEFAULT_INVITE_ROLE: &str = "member";
+const INVITE_TTL_SECS: i64 = 86_400;
 const RESTRICTED_PREFIX: &str = "restricted:";
 const DUPLICATE_PREFIX: &str = "duplicate:";
 const INFO_PREFIX: &str = "info:";
@@ -34,6 +39,24 @@ impl AuthState {
             challenge: generate_challenge(),
             authenticated_pubkey: None,
         }
+    }
+}
+
+struct TenantSigner {
+    pubkey: String,
+    secret_key: SecretKey,
+}
+
+impl TenantSigner {
+    fn new(relay_pubkey: Vec<u8>, relay_secret: Vec<u8>) -> Option<Self> {
+        if relay_pubkey.len() != 32 {
+            return None;
+        }
+        let secret_key = SecretKey::from_slice(&relay_secret).ok()?;
+        Some(Self {
+            pubkey: hex::encode(relay_pubkey),
+            secret_key,
+        })
     }
 }
 
@@ -129,6 +152,7 @@ pub struct Session<S: EventStore> {
     auth: Option<AuthState>,
     tenant_id: Option<String>,
     membership: Option<Arc<dyn RelayMembershipRepository>>,
+    tenant_signer: Option<TenantSigner>,
     read_auth_required: bool,
     write_auth_required: bool,
     rate_limiter: Option<RateLimiter>,
@@ -147,6 +171,7 @@ impl<S: EventStore> Session<S> {
             auth: None,
             tenant_id: None,
             membership: None,
+            tenant_signer: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -164,6 +189,7 @@ impl<S: EventStore> Session<S> {
             auth: None,
             tenant_id: None,
             membership: None,
+            tenant_signer: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -182,6 +208,7 @@ impl<S: EventStore> Session<S> {
             auth: None,
             tenant_id: None,
             membership: None,
+            tenant_signer: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -203,6 +230,7 @@ impl<S: EventStore> Session<S> {
             auth: None,
             tenant_id: None,
             membership: None,
+            tenant_signer: None,
             read_auth_required: false,
             write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -221,6 +249,7 @@ impl<S: EventStore> Session<S> {
             auth: auth_state(auth_enabled),
             tenant_id: None,
             membership: None,
+            tenant_signer: None,
             read_auth_required: auth_required,
             write_auth_required: auth_required,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -246,6 +275,7 @@ impl<S: EventStore> Session<S> {
             auth: auth_state(auth_enabled),
             tenant_id: None,
             membership: None,
+            tenant_signer: None,
             read_auth_required,
             write_auth_required,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
@@ -260,6 +290,15 @@ impl<S: EventStore> Session<S> {
     ) -> Self {
         self.tenant_id = tenant_id;
         self.membership = membership;
+        self
+    }
+
+    pub fn with_relay_signer(
+        mut self,
+        relay_pubkey: Vec<u8>,
+        relay_secret: Vec<u8>,
+    ) -> Self {
+        self.tenant_signer = TenantSigner::new(relay_pubkey, relay_secret);
         self
     }
 
@@ -285,6 +324,12 @@ impl<S: EventStore> Session<S> {
             .as_ref()
             .and_then(|state| state.authenticated_pubkey.as_ref())
             .is_some()
+    }
+
+    fn authenticated_pubkey(&self) -> Option<&str> {
+        self.auth
+            .as_ref()
+            .and_then(|state| state.authenticated_pubkey.as_deref())
     }
 
     pub fn initial_messages(&self) -> Vec<ServerMessage> {
@@ -321,6 +366,31 @@ impl<S: EventStore> Session<S> {
             }
         }
         responses
+    }
+
+    async fn virtual_events(
+        &self,
+        filters: &[Filter],
+        now: i64,
+    ) -> Result<Vec<crate::NostrEvent>, String> {
+        let mut events = Vec::new();
+
+        if filters_request_kind(filters, NIP43_MEMBERSHIP_KIND) {
+            if let Some(event) = self.build_membership_list_event(now).await? {
+                if event_matches_filters(&event, filters) {
+                    events.push(event);
+                }
+            }
+        }
+
+        if filters_request_kind(filters, NIP43_INVITE_KIND) {
+            let event = self.build_invite_event(now).await?;
+            if event_matches_filters(&event, filters) {
+                events.push(event);
+            }
+        }
+
+        Ok(events)
     }
 
     pub async fn handle_raw(&mut self, input: &str) -> Vec<ServerMessage> {
@@ -361,10 +431,24 @@ impl<S: EventStore> Session<S> {
                     }
                 }
 
-                let events = match self.store.query(&parsed).await {
+                let mut events = match self.store.query(&parsed).await {
                     Ok(events) => events,
                     Err(err) => return vec![Notice::from(err).into()],
                 };
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let virtual_events = match self.virtual_events(&parsed, now).await {
+                    Ok(events) => events,
+                    Err(message) => {
+                        return vec![ServerMessage::Closed {
+                            subscription_id,
+                            message,
+                        }];
+                    }
+                };
+                events.extend(virtual_events);
 
                 self.registry.insert(sub_id.clone(), parsed.clone());
 
@@ -818,6 +902,103 @@ impl<S: EventStore> Session<S> {
         }
     }
 
+    async fn build_membership_list_event(
+        &self,
+        now: i64,
+    ) -> Result<Option<crate::NostrEvent>, String> {
+        let Some(membership) = self.membership.as_ref() else {
+            return Ok(None);
+        };
+        let Some(tenant_id) = self.tenant_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(signer) = self.tenant_signer.as_ref() else {
+            return Ok(None);
+        };
+
+        let records = membership
+            .list_memberships(tenant_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut tags = Vec::with_capacity(records.len() + 1);
+        tags.push(vec!["-".to_string()]);
+        for record in records {
+            if record.status == MEMBERSHIP_STATUS_ACTIVE {
+                tags.push(vec!["member".to_string(), hex::encode(record.pubkey)]);
+            }
+        }
+
+        let mut event = crate::NostrEvent {
+            id: String::new(),
+            pubkey: signer.pubkey.clone(),
+            created_at: now,
+            kind: NIP43_MEMBERSHIP_KIND,
+            tags,
+            content: String::new(),
+            sig: String::new(),
+        };
+        sign_event(&mut event, signer)?;
+        Ok(Some(event))
+    }
+
+    async fn build_invite_event(&self, now: i64) -> Result<crate::NostrEvent, String> {
+        let Some(membership) = self.membership.as_ref() else {
+            return Err(format!("{RESTRICTED_PREFIX} relay does not support invites"));
+        };
+        let Some(tenant_id) = self.tenant_id.as_deref() else {
+            return Err(format!("{RESTRICTED_PREFIX} relay does not support invites"));
+        };
+        let Some(signer) = self.tenant_signer.as_ref() else {
+            return Err(format!("{RESTRICTED_PREFIX} relay does not support invites"));
+        };
+        let Some(pubkey) = self.authenticated_pubkey() else {
+            return Err(AUTH_REQUIRED_REASON.to_string());
+        };
+
+        let pubkey_bytes =
+            hex::decode(pubkey).map_err(|_| format!("{RESTRICTED_PREFIX} invalid pubkey"))?;
+        let member = membership
+            .membership_by_pubkey(tenant_id, &pubkey_bytes)
+            .await
+            .map_err(|err| err.to_string())?;
+        let Some(member) = member else {
+            return Err(format!("{RESTRICTED_PREFIX} membership required"));
+        };
+        if member.status != MEMBERSHIP_STATUS_ACTIVE {
+            return Err(format!("{RESTRICTED_PREFIX} membership required"));
+        }
+
+        let invite_code = generate_invite_code();
+        let invite = RelayInviteRecord {
+            tenant_id: tenant_id.to_string(),
+            invite_code: invite_code.clone(),
+            role: DEFAULT_INVITE_ROLE.to_string(),
+            inviter_pubkey: pubkey_bytes,
+            invitee_pubkey: None,
+            expires_at: Some(now.saturating_add(INVITE_TTL_SECS)),
+            created_at: now,
+        };
+        membership
+            .insert_invite(invite)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut event = crate::NostrEvent {
+            id: String::new(),
+            pubkey: signer.pubkey.clone(),
+            created_at: now,
+            kind: NIP43_INVITE_KIND,
+            tags: vec![
+                vec!["-".to_string()],
+                vec!["claim".to_string(), invite_code],
+            ],
+            content: String::new(),
+            sig: String::new(),
+        };
+        sign_event(&mut event, signer)?;
+        Ok(event)
+    }
+
     async fn apply_retention(&self, now: i64) -> Result<(), StoreError> {
         let Some(max_age) = self.policy.retention_max_age_seconds else {
             return Ok(());
@@ -930,6 +1111,38 @@ fn find_tag_value(tags: &[Vec<String>], name: &str) -> Option<String> {
 fn has_tag(tags: &[Vec<String>], name: &str) -> bool {
     tags.iter()
         .any(|tag| tag.first().map(|entry| entry == name).unwrap_or(false))
+}
+
+fn filters_request_kind(filters: &[Filter], kind: u32) -> bool {
+    filters.iter().any(|filter| filter.kinds.contains(&kind))
+}
+
+fn event_matches_filters(event: &crate::NostrEvent, filters: &[Filter]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    let tags = match crate::TagIndex::from_tags(&event.tags) {
+        Ok(tags) => tags,
+        Err(_) => return false,
+    };
+    filters.iter().any(|filter| filter.matches(event, &tags))
+}
+
+fn sign_event(event: &mut crate::NostrEvent, signer: &TenantSigner) -> Result<(), String> {
+    event.id = event.compute_id().map_err(|err| err.to_string())?;
+    let id_bytes = hex::decode(&event.id).map_err(|_| "invalid event id".to_string())?;
+    let msg = Message::from_digest_slice(&id_bytes).map_err(|err| err.to_string())?;
+    let secp = Secp256k1::new();
+    let keypair = Keypair::from_secret_key(&secp, &signer.secret_key);
+    let sig = secp.sign_schnorr(&msg, &keypair);
+    event.sig = hex::encode(sig.as_ref());
+    Ok(())
+}
+
+fn generate_invite_code() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 fn parse_filters(filters: &[Value]) -> Result<Vec<Filter>, crate::FilterError> {
@@ -1383,6 +1596,147 @@ mod tests {
             .expect("membership lookup")
             .expect("member");
         assert_eq!(record.status, super::MEMBERSHIP_STATUS_LEFT);
+    }
+
+    #[tokio::test]
+    async fn req_includes_membership_list_event() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+        let active = RelayMembershipRecord {
+            tenant_id: tenant_id.to_string(),
+            pubkey: hex::decode(&"22".repeat(32)).expect("pubkey"),
+            role: "member".to_string(),
+            status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let inactive = RelayMembershipRecord {
+            tenant_id: tenant_id.to_string(),
+            pubkey: hex::decode(&"33".repeat(32)).expect("pubkey"),
+            role: "member".to_string(),
+            status: super::MEMBERSHIP_STATUS_LEFT.to_string(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        membership
+            .upsert_membership(active)
+            .await
+            .expect("membership insert");
+        membership
+            .upsert_membership(inactive)
+            .await
+            .expect("membership insert");
+
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0x22; 32]).expect("secret");
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
+
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(membership))
+            .with_relay_signer(pubkey.serialize().to_vec(), secret_key.secret_bytes().to_vec());
+
+        let responses = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"kinds": [super::NIP43_MEMBERSHIP_KIND]})],
+            })
+            .await;
+
+        let event = responses.iter().find_map(|response| match response {
+            ServerMessage::Event { event, .. } => Some(event),
+            _ => None,
+        });
+        let event = event.expect("membership event");
+        assert_eq!(
+            event.get("kind").and_then(|kind| kind.as_u64()),
+            Some(super::NIP43_MEMBERSHIP_KIND as u64)
+        );
+        let tags = event
+            .get("tags")
+            .and_then(|tags| tags.as_array())
+            .expect("tags");
+        let member_tags = tags
+            .iter()
+            .filter_map(|tag| tag.as_array())
+            .filter(|tag| tag.first().and_then(|value| value.as_str()) == Some("member"))
+            .count();
+        assert_eq!(member_tags, 1);
+    }
+
+    #[tokio::test]
+    async fn req_generates_invite_claim_when_member() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x44; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+
+        let auth_event = signed_event_with_tags(
+            "auth",
+            super::AUTH_KIND,
+            vec![vec!["challenge".to_string(), "placeholder".to_string()]],
+        );
+        let member_pubkey = hex::decode(&auth_event.pubkey).expect("pubkey");
+        let record = RelayMembershipRecord {
+            tenant_id: tenant_id.to_string(),
+            pubkey: member_pubkey,
+            role: "member".to_string(),
+            status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        membership
+            .upsert_membership(record)
+            .await
+            .expect("membership insert");
+
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+            .with_relay_signer(relay_pubkey.serialize().to_vec(), relay_secret.secret_bytes().to_vec());
+        let challenge = session.auth_challenge().expect("challenge");
+        let auth_event = signed_event_with_tags(
+            "auth",
+            super::AUTH_KIND,
+            vec![vec!["challenge".to_string(), challenge]],
+        );
+        let _ = session
+            .handle_message(ClientMessage::Auth(serde_json::to_value(auth_event).unwrap()))
+            .await;
+
+        let responses = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"kinds": [super::NIP43_INVITE_KIND]})],
+            })
+            .await;
+
+        let event = responses.iter().find_map(|response| match response {
+            ServerMessage::Event { event, .. } => Some(event),
+            _ => None,
+        });
+        let event = event.expect("invite event");
+        let tags = event
+            .get("tags")
+            .and_then(|tags| tags.as_array())
+            .expect("tags");
+        let claim = tags.iter().find_map(|tag| {
+            let tag = tag.as_array()?;
+            if tag.first().and_then(|value| value.as_str()) == Some("claim") {
+                tag.get(1).and_then(|value| value.as_str())
+            } else {
+                None
+            }
+        });
+        let claim = claim.expect("claim");
+
+        let invite = membership
+            .invite_by_code(tenant_id, claim)
+            .await
+            .expect("invite lookup");
+        assert!(invite.is_some());
     }
 
     #[tokio::test]
