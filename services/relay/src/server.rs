@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use gittree_storage::{PostgresRepositories, RelayTenantRecord, RelayTenantRepository};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -17,9 +18,17 @@ struct RelayState {
     config: RelayConfig,
     policy: Policy,
     store: Arc<dyn EventStore>,
+    repos: Option<Arc<PostgresRepositories>>,
     admission: Option<Arc<dyn AdmissionDecider>>,
     broadcast: broadcast::Sender<crate::NostrEvent>,
     metrics: Arc<RelayMetrics>,
+}
+
+#[derive(Clone)]
+struct TenantContext {
+    tenant_id: String,
+    store: Arc<dyn EventStore>,
+    tenant: Option<RelayTenantRecord>,
 }
 
 pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
@@ -30,8 +39,8 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
         .write_connect_options()
         .map_err(RelayError::Storage)?;
     let pool = pool_options.connect_lazy_with(connect_options);
-    let repos = gittree_storage::PostgresRepositories::new(pool);
-    let store: Arc<dyn EventStore> = Arc::new(RepositoryStore::new(repos));
+    let repos = PostgresRepositories::new(pool);
+    let store: Arc<dyn EventStore> = Arc::new(RepositoryStore::new(repos.clone()));
     let (broadcast, _) = broadcast::channel(1024);
     let policy = Policy::from_config(&config.policy);
     let metrics = Arc::new(RelayMetrics::new());
@@ -45,6 +54,7 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
         config: config.clone(),
         policy,
         store,
+        repos: Some(Arc::new(repos)),
         admission,
         broadcast,
         metrics,
@@ -74,11 +84,21 @@ async fn root_handler(
     headers: HeaderMap,
 ) -> Response {
     if let Some(ws) = ws {
-        return ws.on_upgrade(move |socket| handle_socket(socket, state)).into_response();
+        let tenant = match resolve_tenant(&state, &headers).await {
+            Ok(tenant) => tenant,
+            Err(response) => return response,
+        };
+        return ws
+            .on_upgrade(move |socket| handle_socket(socket, state, tenant))
+            .into_response();
     }
 
     if accepts_nostr_json(&headers) {
-        return nip11_response(&state).into_response();
+        let tenant = match resolve_tenant(&state, &headers).await {
+            Ok(tenant) => tenant,
+            Err(response) => return response,
+        };
+        return nip11_response(&state, &tenant).into_response();
     }
 
     StatusCode::NOT_FOUND.into_response()
@@ -92,7 +112,8 @@ fn accepts_nostr_json(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-fn nip11_response(state: &RelayState) -> Response {
+fn nip11_response(state: &RelayState, tenant: &TenantContext) -> Response {
+    let _ = (&tenant.tenant_id, &tenant.tenant);
     let doc = build_nip11_document(&state.config, &state.policy);
     let mut response = Json(doc).into_response();
     let headers = response.headers_mut();
@@ -107,6 +128,56 @@ fn nip11_response(state: &RelayState) -> Response {
     response
 }
 
+async fn resolve_tenant(
+    state: &RelayState,
+    headers: &HeaderMap,
+) -> Result<TenantContext, Response> {
+    let Some(repos) = &state.repos else {
+        return Ok(TenantContext {
+            tenant_id: "default".to_string(),
+            store: state.store.clone(),
+            tenant: None,
+        });
+    };
+
+    let host = extract_host(headers).ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
+    let tenant = repos
+        .tenant_by_host(&host)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let Some(tenant) = tenant else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
+    let store: Arc<dyn EventStore> =
+        Arc::new(RepositoryStore::with_tenant(repos.as_ref().clone(), tenant.id.clone()));
+    Ok(TenantContext {
+        tenant_id: tenant.id.clone(),
+        store,
+        tenant: Some(tenant),
+    })
+}
+
+fn extract_host(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(normalize_host)
+}
+
+fn normalize_host(value: &str) -> String {
+    let value = value.trim().trim_end_matches('.');
+    if let Some(value) = value.strip_prefix('[') {
+        if let Some(end) = value.find(']') {
+            return value[..end].to_ascii_lowercase();
+        }
+    }
+    value
+        .split(':')
+        .next()
+        .unwrap_or(value)
+        .to_ascii_lowercase()
+}
+
 async fn health_handler() -> &'static str {
     "ok"
 }
@@ -115,14 +186,15 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: TenantContext) {
+    let _ = (&tenant.tenant_id, &tenant.tenant);
     let (mut sender, mut receiver) = socket.split();
     let (in_tx, in_rx) = mpsc::channel(128);
     let (out_tx, mut out_rx) = mpsc::channel(128);
     let broadcast_rx = state.broadcast.subscribe();
 
     let session = Session::with_broadcast(
-        state.store.clone(),
+        tenant.store.clone(),
         state.policy,
         state.admission.clone(),
         state.broadcast.clone(),
@@ -201,6 +273,7 @@ mod tests {
             config: sample_config(),
             policy: Policy::default(),
             store: Arc::new(MemoryStore::new()),
+            repos: None,
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
             metrics: Arc::new(RelayMetrics::new()),
@@ -243,6 +316,7 @@ mod tests {
             config: sample_config(),
             policy: Policy::default(),
             store: Arc::new(MemoryStore::new()),
+            repos: None,
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
             metrics: Arc::new(RelayMetrics::new()),
@@ -262,6 +336,7 @@ mod tests {
             config: sample_config(),
             policy: Policy::default(),
             store: Arc::new(MemoryStore::new()),
+            repos: None,
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
             metrics: Arc::new(RelayMetrics::new()),
@@ -293,6 +368,7 @@ mod tests {
             config: sample_config(),
             policy: Policy::default(),
             store: Arc::new(MemoryStore::new()),
+            repos: None,
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
             metrics: Arc::new(RelayMetrics::new()),
@@ -357,16 +433,32 @@ mod tests {
             config: sample_config(),
             policy: Policy::default(),
             store: Arc::new(MemoryStore::new()),
+            repos: None,
             admission: None,
             broadcast: tokio::sync::broadcast::channel(8).0,
             metrics: Arc::new(RelayMetrics::new()),
         };
-        let response = nip11_response(&state);
+        let tenant = super::TenantContext {
+            tenant_id: "default".to_string(),
+            store: state.store.clone(),
+            tenant: None,
+        };
+        let response = nip11_response(&state, &tenant);
         let cors = response
             .headers()
             .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         assert_eq!(cors, "*");
+    }
+
+    #[test]
+    fn normalize_host_strips_port() {
+        assert_eq!(super::normalize_host("Example.COM:8080"), "example.com");
+    }
+
+    #[test]
+    fn normalize_host_handles_ipv6() {
+        assert_eq!(super::normalize_host("[::1]:8080"), "::1");
     }
 }
