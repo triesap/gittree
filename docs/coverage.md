@@ -30,3 +30,23 @@ Override the package list with `COV_PACKAGES`:
 ```
 COV_PACKAGES="gittree-relay gittree-control" ./scripts/llvm-cov.sh
 ```
+
+## Coverage Gate
+
+Use the gate script to enforce minimum coverage thresholds on the relevant
+security-critical packages.
+
+```
+./scripts/coverage-gate.sh
+```
+
+Defaults:
+- line coverage: `90`
+- function coverage: `85`
+- region coverage: `85`
+
+Override thresholds:
+
+```
+COV_FAIL_UNDER_LINES=92 COV_FAIL_UNDER_FUNCTIONS=88 ./scripts/coverage-gate.sh
+```
