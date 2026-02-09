@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 const AUTH_KIND: u32 = 22242;
 const AUTH_REQUIRED_REASON: &str = "auth-required";
 const AUTH_PUBKEY_MISMATCH_REASON: &str = "auth-pubkey-mismatch";
+const AUTH_MAX_SKEW_SECS: i64 = 600;
 const NIP43_MEMBERSHIP_KIND: u32 = 13534;
 const NIP43_JOIN_KIND: u32 = 28934;
 const NIP43_INVITE_KIND: u32 = 28935;
@@ -609,6 +610,15 @@ impl<S: EventStore> Session<S> {
             }];
         }
 
+        if event.kind == AUTH_KIND {
+            self.record_event("rejected");
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: "auth event must use AUTH".to_string(),
+            }];
+        }
+
         if let Some(responses) = self.handle_membership_event(&event, now).await {
             return responses;
         }
@@ -1090,6 +1100,44 @@ impl<S: EventStore> Session<S> {
             }];
         }
 
+        let Some(relay_tag) = find_tag_value(&event.tags, "relay") else {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: "missing relay tag".to_string(),
+            }];
+        };
+
+        if let Some(expected) = self.relay_url.as_deref().and_then(relay_host_from_url) {
+            let Some(actual) = relay_host_from_url(&relay_tag) else {
+                return vec![ServerMessage::Ok {
+                    event_id: event.id.clone(),
+                    accepted: false,
+                    message: "invalid relay tag".to_string(),
+                }];
+            };
+            if actual != expected {
+                return vec![ServerMessage::Ok {
+                    event_id: event.id.clone(),
+                    accepted: false,
+                    message: "relay tag mismatch".to_string(),
+                }];
+            }
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let skew = (now - event.created_at).abs();
+        if skew > AUTH_MAX_SKEW_SECS {
+            return vec![ServerMessage::Ok {
+                event_id: event.id.clone(),
+                accepted: false,
+                message: "auth event timestamp out of range".to_string(),
+            }];
+        }
+
         auth.authenticated_pubkey = Some(event.pubkey.clone());
 
         vec![ServerMessage::Ok {
@@ -1123,6 +1171,31 @@ fn find_tag_value(tags: &[Vec<String>], name: &str) -> Option<String> {
 fn has_tag(tags: &[Vec<String>], name: &str) -> bool {
     tags.iter()
         .any(|tag| tag.first().map(|entry| entry == name).unwrap_or(false))
+}
+
+fn relay_host_from_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let without_scheme = value
+        .strip_prefix("ws://")
+        .or_else(|| value.strip_prefix("wss://"))
+        .or_else(|| value.strip_prefix("http://"))
+        .or_else(|| value.strip_prefix("https://"))
+        .unwrap_or(value);
+    let host = without_scheme.split('/').next().unwrap_or("");
+    if host.is_empty() {
+        return None;
+    }
+    let host = host.trim_end_matches('.');
+    if let Some(inner) = host.strip_prefix('[') {
+        if let Some(end) = inner.find(']') {
+            return Some(inner[..end].to_ascii_lowercase());
+        }
+    }
+    let host = host.split(':').next().unwrap_or(host);
+    Some(host.to_ascii_lowercase())
 }
 
 fn filters_request_kind(filters: &[Filter], kind: u32) -> bool {
@@ -1191,6 +1264,7 @@ mod tests {
     use secp256k1::{Keypair, Secp256k1, SecretKey};
     use serde_json::json;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[tokio::test]
     async fn handle_raw_reports_invalid_messages() {
@@ -1465,6 +1539,15 @@ mod tests {
     }
 
     fn signed_event_with_tags(seed: &str, kind: u32, tags: Vec<Vec<String>>) -> NostrEvent {
+        signed_event_with_tags_at(seed, kind, tags, 1)
+    }
+
+    fn signed_event_with_tags_at(
+        seed: &str,
+        kind: u32,
+        tags: Vec<Vec<String>>,
+        created_at: i64,
+    ) -> NostrEvent {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[0x11; 32]).expect("secret");
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
@@ -1473,7 +1556,7 @@ mod tests {
         let mut event = NostrEvent {
             id: seed.to_string(),
             pubkey: hex::encode(pubkey.serialize()),
-            created_at: 1,
+            created_at,
             kind,
             tags,
             content: String::new(),
@@ -1491,10 +1574,18 @@ mod tests {
     async fn auth_accepts_valid_event() {
         let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
         let challenge = session.auth_challenge().expect("challenge");
-        let event = signed_event_with_tags(
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let event = signed_event_with_tags_at(
             "auth",
             super::AUTH_KIND,
-            vec![vec!["challenge".to_string(), challenge]],
+            vec![
+                vec!["challenge".to_string(), challenge],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
         );
 
         let response = session
@@ -1709,10 +1800,18 @@ mod tests {
             .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
             .with_relay_signer(relay_pubkey.serialize().to_vec(), relay_secret.secret_bytes().to_vec());
         let challenge = session.auth_challenge().expect("challenge");
-        let auth_event = signed_event_with_tags(
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let auth_event = signed_event_with_tags_at(
             "auth",
             super::AUTH_KIND,
-            vec![vec!["challenge".to_string(), challenge]],
+            vec![
+                vec!["challenge".to_string(), challenge],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
         );
         let _ = session
             .handle_message(ClientMessage::Auth(serde_json::to_value(auth_event).unwrap()))
