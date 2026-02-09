@@ -119,6 +119,8 @@ pub struct Session<S: EventStore> {
     admission: Option<Arc<dyn AdmissionDecider>>,
     broadcast: Option<broadcast::Sender<crate::NostrEvent>>,
     auth: Option<AuthState>,
+    read_auth_required: bool,
+    write_auth_required: bool,
     rate_limiter: Option<RateLimiter>,
     metrics: Option<Arc<RelayMetrics>>,
 }
@@ -133,6 +135,8 @@ impl<S: EventStore> Session<S> {
             admission: None,
             broadcast: None,
             auth: None,
+            read_auth_required: false,
+            write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -146,6 +150,8 @@ impl<S: EventStore> Session<S> {
             admission: None,
             broadcast: None,
             auth: None,
+            read_auth_required: false,
+            write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -160,6 +166,8 @@ impl<S: EventStore> Session<S> {
             admission: Some(admission),
             broadcast: None,
             auth: None,
+            read_auth_required: false,
+            write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -177,19 +185,24 @@ impl<S: EventStore> Session<S> {
             admission: Some(admission),
             broadcast: None,
             auth: None,
+            read_auth_required: false,
+            write_auth_required: false,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
     }
 
     pub fn with_policy_and_auth(store: S, policy: Policy, auth_required: bool) -> Self {
+        let auth_enabled = auth_required;
         Self {
             registry: SubscriptionRegistry::default(),
             store,
             policy,
             admission: None,
             broadcast: None,
-            auth: auth_state(auth_required),
+            auth: auth_state(auth_enabled),
+            read_auth_required: auth_required,
+            write_auth_required: auth_required,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -200,15 +213,19 @@ impl<S: EventStore> Session<S> {
         policy: Policy,
         admission: Option<Arc<dyn AdmissionDecider>>,
         broadcast: broadcast::Sender<crate::NostrEvent>,
-        auth_required: bool,
+        read_auth_required: bool,
+        write_auth_required: bool,
     ) -> Self {
+        let auth_enabled = read_auth_required || write_auth_required;
         Self {
             registry: SubscriptionRegistry::default(),
             store,
             policy,
             admission,
             broadcast: Some(broadcast),
-            auth: auth_state(auth_required),
+            auth: auth_state(auth_enabled),
+            read_auth_required,
+            write_auth_required,
             rate_limiter: RateLimitConfig::from_policy(&policy).map(RateLimiter::new),
             metrics: None,
         }
@@ -229,6 +246,13 @@ impl<S: EventStore> Session<S> {
 
     pub fn auth_challenge(&self) -> Option<String> {
         self.auth.as_ref().map(|state| state.challenge.clone())
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.auth
+            .as_ref()
+            .and_then(|state| state.authenticated_pubkey.as_ref())
+            .is_some()
     }
 
     pub fn initial_messages(&self) -> Vec<ServerMessage> {
@@ -283,6 +307,12 @@ impl<S: EventStore> Session<S> {
                 self.record_message("REQ");
                 if let Some(notice) = self.rate_limit_request() {
                     return vec![notice.into()];
+                }
+                if self.read_auth_required && !self.is_authenticated() {
+                    return vec![ServerMessage::Closed {
+                        subscription_id,
+                        message: AUTH_REQUIRED_REASON.to_string(),
+                    }];
                 }
                 let parsed = match parse_filters(&filters) {
                     Ok(filters) => filters,
@@ -343,6 +373,12 @@ impl<S: EventStore> Session<S> {
                 self.record_message("COUNT");
                 if let Some(notice) = self.rate_limit_request() {
                     return vec![notice.into()];
+                }
+                if self.read_auth_required && !self.is_authenticated() {
+                    return vec![ServerMessage::Closed {
+                        subscription_id,
+                        message: AUTH_REQUIRED_REASON.to_string(),
+                    }];
                 }
                 let parsed = match parse_filters(&filters) {
                     Ok(filters) => filters,
@@ -445,7 +481,15 @@ impl<S: EventStore> Session<S> {
             }];
         }
 
-        if let Some(auth) = &self.auth {
+        if self.write_auth_required {
+            let Some(auth) = &self.auth else {
+                self.record_event("rejected");
+                return vec![ServerMessage::Ok {
+                    event_id: event.id.clone(),
+                    accepted: false,
+                    message: AUTH_REQUIRED_REASON.to_string(),
+                }];
+            };
             match auth.authenticated_pubkey.as_ref() {
                 None => {
                     self.record_event("rejected");
@@ -1019,6 +1063,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_required_rejects_req_without_auth() {
+        let store = MemoryStore::new();
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+        let mut session =
+            Session::with_broadcast(store, Policy::default(), None, tx, true, false);
+        let response = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![serde_json::json!({})],
+            })
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message,
+                ..
+            } if message == super::AUTH_REQUIRED_REASON
+        ));
+    }
+
+    #[tokio::test]
     async fn admission_rejects_event() {
         let admission = StubAdmission {
             decision: AdmissionDecision::Reject {
@@ -1086,7 +1151,7 @@ mod tests {
         let store = MemoryStore::new();
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
         let mut session =
-            Session::with_broadcast(store, Policy::default(), None, tx, false);
+            Session::with_broadcast(store, Policy::default(), None, tx, false, false);
         let event = signed_event("seed");
 
         let response = session

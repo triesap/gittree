@@ -192,12 +192,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     let (out_tx, mut out_rx) = mpsc::channel(128);
     let broadcast_rx = state.broadcast.subscribe();
 
+    let (read_auth_required, write_auth_required) = match tenant.tenant.as_ref() {
+        Some(record) => (!record.public_read, record.auth_required),
+        None => (
+            state.config.policy.auth_required,
+            state.config.policy.auth_required,
+        ),
+    };
     let session = Session::with_broadcast(
         tenant.store.clone(),
         state.policy,
         state.admission.clone(),
         state.broadcast.clone(),
-        state.config.policy.auth_required,
+        read_auth_required,
+        write_auth_required,
     )
     .with_metrics(state.metrics.clone());
     let driver = SessionDriver::new(session);
