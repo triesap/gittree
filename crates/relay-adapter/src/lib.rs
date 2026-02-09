@@ -510,34 +510,16 @@ fn parse_eose_message(message: &WsMessage) -> Result<Option<String>, RelayAdapte
 mod tests {
     use super::{
         RelayAdapter, RelayAdapterConfig, RelayAdapterError, SignedNostrEvent,
-        WebsocketRelayAdapter, normalize_ws_url,
+        WebsocketRelayAdapter, build_event_id, build_probe_event, normalize_ws_url,
+        parse_eose_message, parse_event_message, parse_ok_message, sign_event_id,
     };
+    use gittree_core::RepoAnnouncement;
+    use serde_json::json;
     use secp256k1::{Message, Secp256k1, SecretKey, XOnlyPublicKey};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-    #[test]
-    fn normalize_ws_url_converts_https() {
-        let url = normalize_ws_url("https://relay.example").expect("url");
-        assert_eq!(url.as_str(), "wss://relay.example/");
-    }
-
-    #[test]
-    fn normalize_ws_url_accepts_wss() {
-        let url = normalize_ws_url("wss://relay.example/").expect("url");
-        assert_eq!(url.as_str(), "wss://relay.example/");
-    }
-
-    #[tokio::test]
-    async fn websocket_adapter_rejects_invalid_url() {
-        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("ftp://relay.example"));
-        let err = adapter.probe_write_read().await.unwrap_err();
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
-    }
-
-    #[test]
-    fn signed_event_has_valid_signature() {
-        let secret_key =
-            SecretKey::from_slice(&[7u8; 32]).expect("secret");
-        let announcement = gittree_core::RepoAnnouncement {
+    fn sample_announcement() -> RepoAnnouncement {
+        RepoAnnouncement {
             identifier: "repo".to_string(),
             name: Some("repo".to_string()),
             description: None,
@@ -551,7 +533,50 @@ mod tests {
             blossoms: Vec::new(),
             hashtags: Vec::new(),
             maintainers: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn normalize_ws_url_converts_https() {
+        let url = normalize_ws_url("https://relay.example").expect("url");
+        assert_eq!(url.as_str(), "wss://relay.example/");
+    }
+
+    #[test]
+    fn normalize_ws_url_accepts_wss() {
+        let url = normalize_ws_url("wss://relay.example/").expect("url");
+        assert_eq!(url.as_str(), "wss://relay.example/");
+    }
+
+    #[test]
+    fn normalize_ws_url_converts_http() {
+        let url = normalize_ws_url("http://relay.example").expect("url");
+        assert_eq!(url.as_str(), "ws://relay.example/");
+    }
+
+    #[test]
+    fn normalize_ws_url_rejects_unsupported_scheme() {
+        let err = normalize_ws_url("ftp://relay.example").unwrap_err();
+        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn normalize_ws_url_rejects_invalid_input() {
+        let err = normalize_ws_url("not a url").unwrap_err();
+        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[tokio::test]
+    async fn websocket_adapter_rejects_invalid_url() {
+        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("ftp://relay.example"));
+        let err = adapter.probe_write_read().await.unwrap_err();
+        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn signed_event_has_valid_signature() {
+        let secret_key = SecretKey::from_slice(&[7u8; 32]).expect("secret");
+        let announcement = sample_announcement();
         let event =
             SignedNostrEvent::from_announcement_with_created_at(&announcement, &secret_key, 123)
                 .expect("event");
@@ -565,5 +590,129 @@ mod tests {
         let sig = secp256k1::schnorr::Signature::from_slice(&sig_bytes).expect("sig");
         secp.verify_schnorr(&sig, &msg, &pubkey)
             .expect("signature valid");
+    }
+
+    #[test]
+    fn signed_event_rejects_invalid_announcement() {
+        let secret_key = SecretKey::from_slice(&[7u8; 32]).expect("secret");
+        let mut announcement = sample_announcement();
+        announcement.clone.clear();
+        let err = SignedNostrEvent::from_announcement_with_created_at(&announcement, &secret_key, 1)
+            .unwrap_err();
+        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn build_event_id_is_deterministic() {
+        let tags = vec![vec!["d".to_string(), "repo".to_string()]];
+        let first =
+            build_event_id("abcd", 100, 30617, &tags, "").expect("event id");
+        let second =
+            build_event_id("abcd", 100, 30617, &tags, "").expect("event id");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn sign_event_id_rejects_invalid_hex() {
+        let secret_key = SecretKey::from_slice(&[9u8; 32]).expect("secret");
+        let secp = Secp256k1::new();
+        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+        let err = sign_event_id(&secp, &keypair, "zz").unwrap_err();
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[test]
+    fn build_probe_event_embeds_relay_target() {
+        let secret_key = SecretKey::from_slice(&[8u8; 32]).expect("secret");
+        let event = build_probe_event("wss://relay.example", &secret_key).expect("probe");
+        assert!(!event.tags.is_empty());
+        let relay_tag_present = event
+            .tags
+            .iter()
+            .any(|tag| tag.iter().any(|value| value == "wss://relay.example"));
+        assert!(relay_tag_present);
+    }
+
+    #[test]
+    fn parse_ok_message_parses_result() {
+        let message = WsMessage::Text("[\"OK\",\"abc\",true,\"ok\"]".to_string());
+        let parsed = parse_ok_message(&message).expect("parsed");
+        assert_eq!(
+            parsed,
+            Some(("abc".to_string(), true, Some("ok".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_ok_message_ignores_non_ok_messages() {
+        let message = WsMessage::Text("[\"EVENT\",\"sub\",{}]".to_string());
+        let parsed = parse_ok_message(&message).expect("parsed");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_ok_message_rejects_invalid_json() {
+        let message = WsMessage::Text("{".to_string());
+        let err = parse_ok_message(&message).unwrap_err();
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[test]
+    fn parse_event_message_parses_event() {
+        let message = WsMessage::Text(
+            json!(["EVENT", "sub-1", {"id":"evt-1","kind":1}]).to_string(),
+        );
+        let parsed = parse_event_message(&message).expect("parsed").expect("event");
+        assert_eq!(parsed.0, "sub-1");
+        assert_eq!(parsed.1.get("id").and_then(|value| value.as_str()), Some("evt-1"));
+    }
+
+    #[test]
+    fn parse_eose_message_parses_sub_id() {
+        let message = WsMessage::Text("[\"EOSE\",\"sub-1\"]".to_string());
+        let parsed = parse_eose_message(&message).expect("parsed");
+        assert_eq!(parsed.as_deref(), Some("sub-1"));
+    }
+
+    #[test]
+    fn load_secret_key_rejects_non_hex_config() {
+        let adapter = WebsocketRelayAdapter::new(
+            RelayAdapterConfig::new("wss://relay.example").with_secret_key("not-hex"),
+        );
+        let err = adapter.load_secret_key().unwrap_err();
+        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn load_secret_key_accepts_explicit_secret() {
+        let secret_hex = "0101010101010101010101010101010101010101010101010101010101010101";
+        let adapter = WebsocketRelayAdapter::new(
+            RelayAdapterConfig::new("wss://relay.example").with_secret_key(secret_hex),
+        );
+        let key = adapter.load_secret_key().expect("secret");
+        assert_eq!(hex::encode(key.secret_bytes()), secret_hex);
+    }
+
+    #[tokio::test]
+    async fn websocket_adapter_publish_rejects_invalid_url() {
+        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("not-valid"));
+        let event = SignedNostrEvent {
+            id: "abc".to_string(),
+            pubkey: "def".to_string(),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "123".to_string(),
+        };
+        let err = adapter.publish_event(&event).await.unwrap_err();
+        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[tokio::test]
+    async fn websocket_adapter_relay_info_returns_none() {
+        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
+        let info = adapter.relay_info().await.expect("info");
+        assert!(info.is_none());
     }
 }
