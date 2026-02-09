@@ -17,6 +17,12 @@ cargo install cargo-llvm-cov
 By default the script targets the core crates and services and skips wasm/tauri
 packages. HTML output is written to `target/llvm-cov/html`.
 
+To pass through `--nocapture` to Rust tests:
+
+```
+COV_NOCAPTURE=1 ./scripts/llvm-cov.sh
+```
+
 ## Run (custom packages)
 
 Override the package list with `COV_PACKAGES`:

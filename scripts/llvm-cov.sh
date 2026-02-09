@@ -27,4 +27,13 @@ for pkg in "${packages[@]}"; do
   args+=("-p" "$pkg")
 done
 
-cargo llvm-cov --html --no-capture "${args[@]}"
+test_args=()
+if [[ "${COV_NOCAPTURE:-0}" == "1" ]]; then
+  test_args+=("--" "--nocapture")
+fi
+
+if [[ "${#test_args[@]}" -gt 0 ]]; then
+  cargo llvm-cov --html "${args[@]}" "${test_args[@]}"
+else
+  cargo llvm-cov --html "${args[@]}"
+fi
