@@ -59,6 +59,17 @@ impl TenantRepository for PostgresRepositories {
 
 pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
     let _observability = crate::init_observability()?;
+    let state = build_state(config.clone())?;
+    let router = build_router(Arc::new(state));
+    let listener = bind_listener(&config.bind).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|err| RelayError::Serve(err.to_string()))?;
+    Ok(())
+}
+
+fn build_state(config: RelayConfig) -> Result<RelayState, RelayError> {
     let pool_options = config.storage.pool_options().map_err(RelayError::Storage)?;
     let connect_options = config
         .storage
@@ -76,7 +87,7 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
         ) as Arc<dyn AdmissionDecider>),
         None => None,
     };
-    let state = RelayState {
+    Ok(RelayState {
         config: config.clone(),
         policy,
         store,
@@ -84,17 +95,13 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
         admission,
         broadcast,
         metrics,
-    };
+    })
+}
 
-    let router = build_router(Arc::new(state));
-    let listener = tokio::net::TcpListener::bind(&config.bind)
+async fn bind_listener(bind: &str) -> Result<tokio::net::TcpListener, RelayError> {
+    tokio::net::TcpListener::bind(bind)
         .await
-        .map_err(|err| RelayError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|err| RelayError::Serve(err.to_string()))?;
-    Ok(())
+        .map_err(|err| RelayError::Serve(err.to_string()))
 }
 
 fn build_router(state: Arc<RelayState>) -> Router {
@@ -343,10 +350,12 @@ async fn seed_owner_membership(
 #[cfg(test)]
 mod tests {
     use super::{
-        accepts_nostr_json, build_router, extract_host, handle_socket, nip11_response, relay_url_from_host,
-        resolve_tenant, seed_owner_membership, shutdown_signal,
+        accepts_nostr_json, bind_listener, build_router, build_state, extract_host, handle_socket,
+        nip11_response, relay_url_from_host, resolve_tenant, seed_owner_membership, shutdown_signal,
     };
-    use crate::{MemoryStore, NostrEvent, Policy, RelayConfig, RelayMetrics};
+    use crate::{
+        MemoryStore, NostrEvent, Policy, RelayConfig, RelayError, RelayMetrics,
+    };
     use async_trait::async_trait;
     use axum::Router;
     use axum::extract::ws::WebSocketUpgrade;
@@ -1190,5 +1199,23 @@ mod tests {
         let task = tokio::spawn(shutdown_signal());
         tokio::time::sleep(Duration::from_millis(10)).await;
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn bind_listener_returns_serve_error_for_invalid_bind_address() {
+        let mut config = sample_config();
+        config.bind = "127.0.0.1:99999".to_string();
+        let err = bind_listener(&config.bind).await.expect_err("invalid bind");
+        assert!(matches!(err, RelayError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn build_state_returns_storage_error_for_invalid_pool_settings() {
+        let mut config = sample_config();
+        config.storage.max_connections = 0;
+        match build_state(config) {
+            Ok(_) => panic!("expected storage error"),
+            Err(err) => assert!(matches!(err, RelayError::Storage(_))),
+        }
     }
 }
