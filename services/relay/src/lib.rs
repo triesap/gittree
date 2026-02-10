@@ -404,6 +404,7 @@ mod tests {
     use super::RelayConfig;
     use super::RelayConfigError;
     use super::RelayError;
+    use super::ConfigError;
     use super::StorageConfig;
     use super::StorageConfigError;
     use super::Policy;
@@ -734,6 +735,107 @@ bind = "127.0.0.1:9010"
                 });
             },
         );
+    }
+
+    #[test]
+    fn config_error_and_admission_error_display_variants_are_stable() {
+        let config_err = RelayConfigError::Config(ConfigError::MissingEnv("MISSING_CONFIG"));
+        assert_eq!(
+            config_err.to_string(),
+            "relay config error: missing env MISSING_CONFIG"
+        );
+
+        let storage_err = RelayConfigError::Storage(StorageConfigError::InvalidEnv {
+            key: "GITTREE_STORAGE_MAX_CONNECTIONS",
+            value: "bad".to_string(),
+        });
+        assert_eq!(
+            storage_err.to_string(),
+            "relay storage config error: invalid env GITTREE_STORAGE_MAX_CONNECTIONS: bad"
+        );
+
+        let admission_err = RelayConfigError::Admission(AdmissionConfigError::InvalidFallback {
+            value: "unknown".to_string(),
+        });
+        assert_eq!(
+            admission_err.to_string(),
+            "relay admission config error: invalid admission fallback: unknown"
+        );
+        assert!(admission_err.source().is_some());
+    }
+
+    #[test]
+    fn storage_and_admission_config_error_display_variants_are_stable() {
+        let storage_missing = StorageConfigError::MissingEnv("GITTREE_STORAGE_READ_URL");
+        assert_eq!(
+            storage_missing.to_string(),
+            "missing env GITTREE_STORAGE_READ_URL"
+        );
+        let storage_invalid =
+            StorageConfigError::InvalidConfig("invalid pool config max_connections: 0".to_string());
+        assert_eq!(
+            storage_invalid.to_string(),
+            "invalid pool config max_connections: 0"
+        );
+
+        let endpoint_err = AdmissionConfigError::InvalidEndpoint("bad://endpoint".to_string());
+        assert_eq!(
+            endpoint_err.to_string(),
+            "invalid admission endpoint: bad://endpoint"
+        );
+        let timeout_err = AdmissionConfigError::InvalidTimeout {
+            value: "abc".to_string(),
+        };
+        assert_eq!(
+            timeout_err.to_string(),
+            "invalid admission timeout: abc"
+        );
+    }
+
+    #[test]
+    fn admission_env_defaults_and_empty_fallback_resolve_to_reject() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
+            without_env_var(ENV_ADMISSION_FALLBACK, || {
+                let config = super::admission_from_env()
+                    .expect("admission")
+                    .expect("configured");
+                assert_eq!(config.fallback, AdmissionFallback::Reject);
+            });
+            with_env_var(ENV_ADMISSION_FALLBACK, "", || {
+                let config = super::admission_from_env()
+                    .expect("admission")
+                    .expect("configured");
+                assert_eq!(config.fallback, AdmissionFallback::Reject);
+            });
+        });
+    }
+
+    #[test]
+    fn env_helpers_restore_existing_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let restore_key = "GITTREE_RELAY_ENV_RESTORE_TEST";
+        // SAFETY: this test owns environment mutation and is serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var(restore_key, "before");
+        }
+        with_env_var(restore_key, "during", || {
+            let current = std::env::var(restore_key).expect("var during");
+            assert_eq!(current, "during");
+        });
+        let after = std::env::var(restore_key).expect("var after with_env_var");
+        assert_eq!(after, "before");
+
+        without_env_var(restore_key, || {
+            assert!(std::env::var(restore_key).is_err());
+        });
+        let restored = std::env::var(restore_key).expect("var after without_env_var");
+        assert_eq!(restored, "before");
+
+        // SAFETY: this test owns environment mutation and is serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var(restore_key);
+        }
     }
 
     #[test]
