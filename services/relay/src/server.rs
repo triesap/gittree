@@ -2,6 +2,7 @@ use crate::{
     AdmissionDecider, AdmissionHookClient, EventStore, Policy, RelayConfig, RelayError,
     RelayMetrics, RepositoryStore, Session, SessionDriver, build_nip11_document,
 };
+use async_trait::async_trait;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -21,7 +22,7 @@ struct RelayState {
     config: RelayConfig,
     policy: Policy,
     store: Arc<dyn EventStore>,
-    repos: Option<Arc<PostgresRepositories>>,
+    repos: Option<Arc<dyn TenantRepository>>,
     admission: Option<Arc<dyn AdmissionDecider>>,
     broadcast: broadcast::Sender<crate::NostrEvent>,
     metrics: Arc<RelayMetrics>,
@@ -32,6 +33,28 @@ struct TenantContext {
     tenant_id: String,
     store: Arc<dyn EventStore>,
     tenant: Option<RelayTenantRecord>,
+}
+
+#[async_trait]
+trait TenantRepository: Send + Sync {
+    async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError>;
+    fn tenant_store(&self, tenant_id: &str) -> Arc<dyn EventStore>;
+    fn membership_repository(&self) -> Arc<dyn RelayMembershipRepository>;
+}
+
+#[async_trait]
+impl TenantRepository for PostgresRepositories {
+    async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
+        RelayTenantRepository::tenant_by_host(self, host).await
+    }
+
+    fn tenant_store(&self, tenant_id: &str) -> Arc<dyn EventStore> {
+        Arc::new(RepositoryStore::with_tenant(self.clone(), tenant_id.to_string()))
+    }
+
+    fn membership_repository(&self) -> Arc<dyn RelayMembershipRepository> {
+        Arc::new(self.clone())
+    }
 }
 
 pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
@@ -150,8 +173,7 @@ async fn resolve_tenant(
     let Some(tenant) = tenant else {
         return Err(StatusCode::NOT_FOUND.into_response());
     };
-    let store: Arc<dyn EventStore> =
-        Arc::new(RepositoryStore::with_tenant(repos.as_ref().clone(), tenant.id.clone()));
+    let store = repos.tenant_store(&tenant.id);
     Ok(TenantContext {
         tenant_id: tenant.id.clone(),
         store,
@@ -231,7 +253,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     let membership = state
         .repos
         .as_ref()
-        .map(|repos| repos.clone() as Arc<dyn RelayMembershipRepository>);
+        .map(|repos| repos.membership_repository());
     let mut session = Session::with_broadcast(
         tenant.store.clone(),
         state.policy,
@@ -321,10 +343,11 @@ async fn seed_owner_membership(
 #[cfg(test)]
 mod tests {
     use super::{
-        accepts_nostr_json, build_router, extract_host, handle_socket, nip11_response,
-        relay_url_from_host, resolve_tenant, seed_owner_membership, shutdown_signal,
+        accepts_nostr_json, build_router, extract_host, handle_socket, nip11_response, relay_url_from_host,
+        resolve_tenant, seed_owner_membership, shutdown_signal,
     };
     use crate::{MemoryStore, NostrEvent, Policy, RelayConfig, RelayMetrics};
+    use async_trait::async_trait;
     use axum::Router;
     use axum::extract::ws::WebSocketUpgrade;
     use axum::body::Body;
@@ -336,6 +359,7 @@ mod tests {
     use gittree_storage::{InMemoryRepositories, RelayMembershipRepository};
     use secp256k1::{Keypair, Secp256k1, SecretKey};
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -376,6 +400,37 @@ mod tests {
         Arc::new(gittree_storage::PostgresRepositories::new(
             pool_options.connect_lazy_with(connect_options),
         ))
+    }
+
+    struct FakeTenantRepository {
+        tenants_by_host: HashMap<String, gittree_storage::RelayTenantRecord>,
+    }
+
+    impl FakeTenantRepository {
+        fn with_tenant(host: &str, tenant: gittree_storage::RelayTenantRecord) -> Self {
+            let mut tenants_by_host = HashMap::new();
+            tenants_by_host.insert(host.to_string(), tenant);
+            Self { tenants_by_host }
+        }
+    }
+
+    #[async_trait]
+    impl super::TenantRepository for FakeTenantRepository {
+        async fn tenant_by_host(
+            &self,
+            host: &str,
+        ) -> Result<Option<gittree_storage::RelayTenantRecord>, gittree_storage::StorageError>
+        {
+            Ok(self.tenants_by_host.get(host).cloned())
+        }
+
+        fn tenant_store(&self, _tenant_id: &str) -> Arc<dyn crate::EventStore> {
+            Arc::new(MemoryStore::new())
+        }
+
+        fn membership_repository(&self) -> Arc<dyn RelayMembershipRepository> {
+            Arc::new(gittree_storage::InMemoryRepositories::new())
+        }
     }
 
     async fn spawn_ws_server() -> std::net::SocketAddr {
@@ -802,6 +857,51 @@ mod tests {
             .err()
             .unwrap_or_else(|| StatusCode::IM_A_TEAPOT.into_response());
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn resolve_tenant_returns_not_found_when_host_has_no_match() {
+        let repos = Arc::new(FakeTenantRepository {
+            tenants_by_host: HashMap::new(),
+        });
+        let state = super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(repos),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        };
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "tenant.local".parse().expect("host"));
+        let response = resolve_tenant(&state, &headers)
+            .await
+            .err()
+            .unwrap_or_else(|| StatusCode::IM_A_TEAPOT.into_response());
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_tenant_returns_tenant_context_when_found() {
+        let tenant = sample_tenant_record();
+        let repos = Arc::new(FakeTenantRepository::with_tenant("tenant.local", tenant.clone()));
+        let state = super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(repos),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        };
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "TENANT.LOCAL:443".parse().expect("host"));
+        let context = resolve_tenant(&state, &headers).await.expect("tenant context");
+        assert_eq!(context.tenant_id, tenant.id);
+        assert!(context.tenant.is_some());
     }
 
     #[tokio::test]
