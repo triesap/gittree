@@ -1517,6 +1517,19 @@ mod tests {
         }
     }
 
+    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
+        f();
+        if let Some(old) = previous {
+            unsafe {
+                std::env::set_var(key, old);
+            }
+        }
+    }
+
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -1543,6 +1556,95 @@ mod tests {
                                                 );
                                             });
                                         });
+                                    },
+                                );
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_missing_storage_read_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_CONTROL_TOKEN", "token", || {
+            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+                        with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087/", || {
+                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                                with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
+                                    with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
+                                        with_env_var(
+                                            "GITTREE_UI_PUBLIC_GIT_URL",
+                                            "http://localhost:8085",
+                                            || {
+                                                without_env_var("GITTREE_STORAGE_READ_URL", || {
+                                                    let err =
+                                                        ControlConfig::from_env().expect_err("config");
+                                                    assert!(matches!(
+                                                        err,
+                                                        super::ControlConfigError::Storage(
+                                                            super::StorageConfigError::MissingEnv(
+                                                                "GITTREE_STORAGE_READ_URL"
+                                                            )
+                                                        )
+                                                    ));
+                                                });
+                                            },
+                                        );
+                                    });
+                                });
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_invalid_storage_numeric_override() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_CONTROL_TOKEN", "token", || {
+            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+                        with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087/", || {
+                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                                with_env_var(
+                                    "GITTREE_STORAGE_READ_URL",
+                                    "postgres://user:pass@localhost:5432/gittree",
+                                    || {
+                                        with_env_var(
+                                            "GITTREE_STORAGE_MAX_CONNECTIONS",
+                                            "bad",
+                                            || {
+                                                with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
+                                                    with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
+                                                        with_env_var(
+                                                            "GITTREE_UI_PUBLIC_GIT_URL",
+                                                            "http://localhost:8085",
+                                                            || {
+                                                                let err =
+                                                                    ControlConfig::from_env().expect_err("config");
+                                                                assert!(matches!(
+                                                                    err,
+                                                                    super::ControlConfigError::Storage(
+                                                                        super::StorageConfigError::InvalidEnv {
+                                                                            key: "GITTREE_STORAGE_MAX_CONNECTIONS",
+                                                                            ..
+                                                                        }
+                                                                    )
+                                                                ));
+                                                            },
+                                                        );
+                                                    });
+                                                });
+                                            },
+                                        );
                                     },
                                 );
                             });

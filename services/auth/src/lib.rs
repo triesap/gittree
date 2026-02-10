@@ -837,6 +837,7 @@ mod tests {
         hex::encode(sig.as_ref())
     }
 
+
     #[tokio::test]
     async fn signup_rejects_missing_auth() {
         let (state, _repos, _transport) = test_state(Vec::new());
@@ -916,6 +917,68 @@ mod tests {
         assert!(payload_hash(&Bytes::new()).is_none());
         let digest = payload_hash(&Bytes::from_static(b"hello")).expect("digest");
         assert_eq!(digest.len(), 64);
+    }
+
+    #[test]
+    fn profile_visibility_mapping_round_trip() {
+        assert_eq!(
+            api_visibility_from_storage(StorageProfileVisibility::Private),
+            ApiProfileVisibility::Private
+        );
+        assert_eq!(
+            api_visibility_from_storage(StorageProfileVisibility::Public),
+            ApiProfileVisibility::Public
+        );
+        assert_eq!(
+            storage_visibility_from_api(ApiProfileVisibility::Private),
+            StorageProfileVisibility::Private
+        );
+        assert_eq!(
+            storage_visibility_from_api(ApiProfileVisibility::Public),
+            StorageProfileVisibility::Public
+        );
+    }
+
+    #[test]
+    fn profile_input_error_maps_invalid_and_internal() {
+        let invalid = profile_input_error(StorageError::InvalidField {
+            field: "display_name",
+            value: "bad".to_string(),
+        });
+        assert!(matches!(invalid, AuthHttpError::BadRequest(_)));
+
+        let internal = profile_input_error(StorageError::Internal {
+            message: "boom".to_string(),
+        });
+        assert!(matches!(internal, AuthHttpError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn ensure_profile_returns_existing_without_rewrite() {
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let pubkey = "aa".repeat(32);
+        let existing = ProfileRecord::new(
+            &pubkey,
+            Some("alice".to_string()),
+            Some("bio".to_string()),
+            None,
+            None,
+            None,
+            StorageProfileVisibility::Public,
+            100,
+            110,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(existing.clone())
+            .await
+            .expect("upsert");
+
+        let result = ensure_profile(&profiles, &pubkey, "ignored", 200)
+            .await
+            .expect("ensure");
+        assert_eq!(result, existing);
     }
 
     #[test]
