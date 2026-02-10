@@ -910,12 +910,11 @@ mod tests {
             (ENV_STORAGE_MIN_CONNECTIONS, "2"),
         ])
         .unwrap_err();
-        match err {
-            AuthConfigError::Storage(StorageConfigError::InvalidConfig(message)) => {
-                assert!(message.contains("min_connections"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidConfig(_))
+        ));
+        assert!(err.to_string().contains("min_connections"));
     }
 
     #[test]
@@ -926,6 +925,41 @@ mod tests {
         let empty_u64 = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some(String::new()))
             .expect("empty u64");
         assert!(empty_u64.is_none());
+    }
+
+    #[test]
+    fn env_u64_with_rejects_invalid_values() {
+        let err = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some("bad".to_string()))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                key: ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn storage_config_error_display_variants_are_stable() {
+        let invalid_env = StorageConfigError::InvalidEnv {
+            key: ENV_STORAGE_MAX_CONNECTIONS,
+            value: "bad".to_string(),
+        };
+        assert_eq!(
+            invalid_env.to_string(),
+            format!("invalid env {ENV_STORAGE_MAX_CONNECTIONS}: bad")
+        );
+
+        let invalid_config = StorageConfigError::InvalidConfig("broken".to_string());
+        assert_eq!(invalid_config.to_string(), "broken");
+    }
+
+    #[test]
+    fn auth_config_error_config_variant_exposes_source() {
+        let err = AuthConfigError::Config(ConfigError::MissingEnv("GITTREE_AUTH_BIND"));
+        assert_eq!(err.to_string(), "auth config error: missing env GITTREE_AUTH_BIND");
+        assert!(err.source().is_some());
     }
 
     #[test]
@@ -951,6 +985,25 @@ mod tests {
             "auth storage error: internal error: storage down"
         );
         assert!(storage.source().is_some());
+
+        let observability_config = AuthError::ObservabilityConfig(
+            ObservabilityConfigError::InvalidEnv {
+                key: "GITTREE_LOG_JSON",
+                value: "maybe".to_string(),
+            },
+        );
+        assert_eq!(
+            format!("{observability_config}"),
+            "auth observability config error: invalid env GITTREE_LOG_JSON: maybe"
+        );
+        assert!(observability_config.source().is_some());
+
+        let observability = AuthError::Observability(ObservabilityError::LogInit("boom".to_string()));
+        assert_eq!(
+            format!("{observability}"),
+            "auth observability error: observability log init failed: boom"
+        );
+        assert!(observability.source().is_some());
 
         let serve = AuthError::Serve("bind failed".to_string());
         assert_eq!(format!("{serve}"), "auth serve error: bind failed");
@@ -994,6 +1047,39 @@ mod tests {
             .expect("runtime");
         let result = runtime.block_on(async { transport.send(request).await });
         assert!(matches!(result, Err(ForgejoError::Request(_))));
+    }
+
+    #[test]
+    fn serve_reports_bind_errors() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let listener = runtime
+            .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
+            .expect("listener");
+        let bind = listener.local_addr().expect("local addr").to_string();
+        let config = AuthServiceConfig {
+            bind,
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = runtime
+            .block_on(async { serve(config).await })
+            .expect_err("serve should fail");
+        assert!(matches!(err, AuthError::Serve(_)));
     }
 
 
