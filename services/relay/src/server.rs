@@ -469,6 +469,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nip11_tenant_mode_requires_host_header() {
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(unreachable_repos()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(ACCEPT, "application/nostr+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn nip11_tenant_mode_maps_repository_errors_to_500() {
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(unreachable_repos()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(ACCEPT, "application/nostr+json")
+                    .header("host", "tenant.local")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn health_endpoint_returns_ok() {
         let state = Arc::new(super::RelayState {
             config: sample_config(),
