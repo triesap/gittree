@@ -933,6 +933,47 @@ bind = "127.0.0.1:9010"
         assert!(relay_err.source().is_none());
     }
 
+    #[test]
+    fn relay_error_display_and_source_cover_all_variants() {
+        let cli = RelayError::Cli(super::RelayCliError::UnknownFlag("--bad".to_string()));
+        assert_eq!(cli.to_string(), "relay cli error: unknown flag --bad");
+        assert!(cli.source().is_some());
+
+        let config = RelayError::Config(RelayConfigError::Config(ConfigError::MissingEnv("MISSING")));
+        assert!(config
+            .to_string()
+            .contains("relay config error: missing env MISSING"));
+        assert!(config.source().is_some());
+
+        let observability_config = RelayError::ObservabilityConfig(
+            super::ObservabilityConfigError::InvalidEnv {
+                key: "GITTREE_LOG_JSON",
+                value: "maybe".to_string(),
+            },
+        );
+        assert!(observability_config
+            .to_string()
+            .contains("relay observability config error"));
+        assert!(observability_config.source().is_some());
+
+        let observability =
+            RelayError::Observability(super::ObservabilityError::SubscriberInit("dup".to_string()));
+        assert!(observability
+            .to_string()
+            .contains("relay observability error"));
+        assert!(observability.source().is_some());
+
+        let storage = RelayError::Storage(gittree_storage::StorageError::Internal {
+            message: "backend".to_string(),
+        });
+        assert!(storage.to_string().contains("relay storage error"));
+        assert!(storage.source().is_some());
+
+        let serve = RelayError::Serve("boom".to_string());
+        assert_eq!(serve.to_string(), "relay serve error: boom");
+        assert!(serve.source().is_none());
+    }
+
     #[tokio::test]
     async fn repository_builder_accepts_valid_storage_config() {
         let config = RelayConfig {
