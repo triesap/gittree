@@ -399,9 +399,12 @@ mod tests {
     use super::ENV_ADMISSION_URL;
     use super::AdmissionConfigError;
     use super::AdmissionFallback;
+    use super::AdmissionHookError;
     use super::ObservabilityHandle;
     use super::RelayConfig;
+    use super::RelayConfigError;
     use super::RelayError;
+    use super::StorageConfig;
     use super::StorageConfigError;
     use super::Policy;
     use super::build_nip11_document;
@@ -409,9 +412,12 @@ mod tests {
     use super::init_observability;
     use gittree_storage::RelayTenantRecord;
     use gittree_config::RelayPolicyConfig;
+    use std::error::Error;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::OnceLock;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
@@ -446,6 +452,17 @@ mod tests {
             },
             None => {}
         }
+    }
+
+    fn write_temp_services_config(contents: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        path.push(format!("gittree-relay-services-{now}.toml"));
+        fs::write(&path, contents).expect("write temp services config");
+        path
     }
 
     #[test]
@@ -640,5 +657,130 @@ mod tests {
     fn observability_init_returns_registry() {
         let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
         assert!(handle.prometheus_registry().is_some());
+    }
+
+    #[test]
+    fn config_loads_from_toml_file() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                let path = write_temp_services_config(
+                    r#"
+[services.relay]
+bind = "127.0.0.1:9010"
+"#,
+                );
+                let config = RelayConfig::from_toml_file(&path).expect("relay config");
+                assert_eq!(config.bind, "127.0.0.1:9010");
+                let _ = fs::remove_file(path);
+            },
+        );
+    }
+
+    #[test]
+    fn config_reports_invalid_admission_settings() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_ADMISSION_URL, " ", || {
+                    let err = RelayConfig::from_env().expect_err("invalid endpoint");
+                    assert!(matches!(
+                        err,
+                        RelayConfigError::Admission(AdmissionConfigError::InvalidEndpoint(_))
+                    ));
+                });
+                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
+                    with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "bad", || {
+                        let err = RelayConfig::from_env().expect_err("invalid timeout");
+                        assert!(matches!(
+                            err,
+                            RelayConfigError::Admission(AdmissionConfigError::InvalidTimeout { .. })
+                        ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_reports_invalid_storage_settings() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+                    let err = RelayConfig::from_env().expect_err("invalid timeout");
+                    assert!(matches!(
+                        err,
+                        RelayConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                            ..
+                        })
+                    ));
+                });
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                        let err = RelayConfig::from_env().expect_err("invalid config");
+                        assert!(matches!(
+                            err,
+                            RelayConfigError::Storage(StorageConfigError::InvalidConfig(_))
+                        ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn relay_and_config_errors_expose_sources() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        let storage_err = RelayConfigError::Storage(StorageConfigError::MissingEnv("MISSING"));
+        assert!(storage_err.to_string().contains("relay storage config error"));
+        assert!(storage_err.source().is_some());
+
+        with_env_var("GITTREE_RELAY_BIND", "bad-bind", || {
+            with_env_var(
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+                || {
+                    let err = RelayConfig::from_env().expect_err("invalid relay bind");
+                    assert!(matches!(err, RelayConfigError::Config(_)));
+                    assert!(err.source().is_some());
+                },
+            );
+        });
+
+        let relay_err = RelayError::Admission(AdmissionHookError::Transport("offline".to_string()));
+        assert!(relay_err.to_string().contains("relay admission error"));
+        assert!(relay_err.source().is_some());
+        let relay_err = RelayError::Serve("boom".to_string());
+        assert!(relay_err.to_string().contains("relay serve error"));
+        assert!(relay_err.source().is_none());
+    }
+
+    #[tokio::test]
+    async fn repository_builder_accepts_valid_storage_config() {
+        let config = RelayConfig {
+            bind: "0.0.0.0:8080".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: Some("gittree-relay".to_string()),
+            },
+            policy: RelayPolicyConfig::default(),
+            admission: None,
+        };
+        let repositories = build_repositories(&config).expect("repositories");
+        let _ = repositories;
     }
 }
