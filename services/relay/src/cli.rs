@@ -129,4 +129,30 @@ mod tests {
         let err = RelayCli::parse(["gittree-relay", "--bind"]).unwrap_err();
         assert!(matches!(err, RelayCliError::MissingValue(_)));
     }
+
+    #[test]
+    fn parse_rejects_empty_equals_values() {
+        let config_err = RelayCli::parse(["gittree-relay", "--config="]).unwrap_err();
+        assert!(matches!(config_err, RelayCliError::MissingValue("--config")));
+
+        let bind_err = RelayCli::parse(["gittree-relay", "--bind="]).unwrap_err();
+        assert!(matches!(bind_err, RelayCliError::MissingValue("--bind")));
+    }
+
+    #[test]
+    fn cli_error_display_messages_are_stable() {
+        let unknown = RelayCliError::UnknownFlag("--nope".to_string());
+        assert_eq!(unknown.to_string(), "unknown flag --nope");
+
+        let missing = RelayCliError::MissingValue("--bind");
+        assert_eq!(missing.to_string(), "missing value for --bind");
+    }
+
+    #[test]
+    fn help_text_mentions_supported_flags() {
+        let help = RelayCli::help_text();
+        assert!(help.contains("--config <path>"));
+        assert!(help.contains("--bind <addr>"));
+        assert!(help.contains("--help"));
+    }
 }
