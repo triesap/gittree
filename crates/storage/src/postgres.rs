@@ -1407,7 +1407,11 @@ mod tests {
         RelayMembershipRepository, RelayPublishRepository, RelayTenantRepository,
         RepoMappingRepository,
     };
-    use crate::{AccountRecord, ProfileRecord, ProfileVisibility, RelayPublishRequest, RepoMappingRecord, StorageError};
+    use crate::{
+        AccountRecord, EventQuery, EventRecord, RelayInviteRecord, RelayMembershipRecord,
+        RelayTenantRecord, ProfileRecord, ProfileVisibility, RelayPublishRequest, RepoMappingRecord,
+        StorageError, TagRecord,
+    };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::PgPool;
     use std::str::FromStr;
@@ -1719,6 +1723,317 @@ WHERE datname = $1
             .await
             .expect("pending");
         assert_eq!(pending_after, 0);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_tenant_membership_invite_round_trip_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_tenant_membership_invite_round_trip_db: postgres unavailable");
+            return;
+        };
+
+        let repositories = test_db.repositories();
+        let tenant = RelayTenantRecord::new(
+            "tenant-1",
+            "relay.tenant.local",
+            &"66".repeat(32),
+            vec![1, 2, 3, 4],
+            vec![5, 6, 7, 8],
+            "local",
+            Some("Tenant 1".to_string()),
+            Some("tenant description".to_string()),
+            Some("https://example.com/icon.png".to_string()),
+            Some("https://example.com/banner.png".to_string()),
+            Some("ops@example.com".to_string()),
+            true,
+            false,
+            false,
+            100,
+            100,
+        )
+        .expect("tenant");
+        repositories
+            .upsert_tenant(tenant.clone())
+            .await
+            .expect("upsert tenant");
+
+        let by_id = repositories
+            .tenant_by_id("tenant-1")
+            .await
+            .expect("tenant by id")
+            .expect("tenant");
+        assert_eq!(by_id.host, "relay.tenant.local");
+
+        let by_host = repositories
+            .tenant_by_host("relay.tenant.local")
+            .await
+            .expect("tenant by host")
+            .expect("tenant");
+        assert_eq!(by_host.id, "tenant-1");
+
+        let tenants = repositories.list_tenants().await.expect("list tenants");
+        assert_eq!(tenants.len(), 1);
+
+        let membership = RelayMembershipRecord::new(
+            "tenant-1",
+            &"77".repeat(32),
+            "member",
+            "active",
+            110,
+            110,
+        )
+        .expect("membership");
+        repositories
+            .upsert_membership(membership.clone())
+            .await
+            .expect("upsert membership");
+
+        let by_pubkey = repositories
+            .membership_by_pubkey("tenant-1", &membership.pubkey)
+            .await
+            .expect("membership by pubkey")
+            .expect("membership");
+        assert_eq!(by_pubkey.role, "member");
+
+        let memberships = repositories
+            .list_memberships("tenant-1")
+            .await
+            .expect("list memberships");
+        assert_eq!(memberships.len(), 1);
+
+        let removed = repositories
+            .remove_membership("tenant-1", &membership.pubkey)
+            .await
+            .expect("remove membership");
+        assert!(removed);
+        let removed_again = repositories
+            .remove_membership("tenant-1", &membership.pubkey)
+            .await
+            .expect("remove membership second");
+        assert!(!removed_again);
+
+        let invite = RelayInviteRecord::new(
+            "tenant-1",
+            "invite-1",
+            "member",
+            &"88".repeat(32),
+            Some(&"99".repeat(32)),
+            Some(500),
+            120,
+        )
+        .expect("invite");
+        repositories
+            .insert_invite(invite.clone())
+            .await
+            .expect("insert invite");
+
+        let invite_lookup = repositories
+            .invite_by_code("tenant-1", "invite-1")
+            .await
+            .expect("invite by code")
+            .expect("invite");
+        assert_eq!(invite_lookup.role, "member");
+
+        repositories
+            .delete_invite("tenant-1", "invite-1")
+            .await
+            .expect("delete invite");
+        let invite_missing = repositories
+            .invite_by_code("tenant-1", "invite-1")
+            .await
+            .expect("invite by code");
+        assert!(invite_missing.is_none());
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_event_repository_round_trip_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_event_repository_round_trip_db: postgres unavailable");
+            return;
+        };
+
+        let repositories = test_db.repositories();
+        let event_a = EventRecord::new(
+            "tenant-1",
+            &"aa".repeat(32),
+            &"bb".repeat(32),
+            200,
+            1,
+            "event-a",
+            &"cc".repeat(64),
+            vec![
+                vec!["e".to_string(), "1".to_string()],
+                vec!["p".to_string(), "2".to_string()],
+            ],
+        )
+        .expect("event a");
+        let event_b = EventRecord::new(
+            "tenant-1",
+            &"dd".repeat(32),
+            &"bb".repeat(32),
+            300,
+            2,
+            "event-b",
+            &"ee".repeat(64),
+            vec![vec!["e".to_string(), "1".to_string()]],
+        )
+        .expect("event b");
+
+        repositories
+            .insert_event(event_a.clone())
+            .await
+            .expect("insert a");
+        repositories
+            .insert_event(event_b.clone())
+            .await
+            .expect("insert b");
+
+        let fetched = repositories
+            .get_event("tenant-1", &event_a.id)
+            .await
+            .expect("get event")
+            .expect("event");
+        assert_eq!(fetched.content, "event-a");
+        assert_eq!(fetched.tags.len(), 2);
+
+        let by_tenant = repositories
+            .query_events(&EventQuery::for_tenant("tenant-1"))
+            .await
+            .expect("query tenant");
+        assert_eq!(by_tenant.len(), 2);
+        assert_eq!(by_tenant[0].created_at, 300);
+
+        let by_id = repositories
+            .query_events(&EventQuery::for_ids(vec!["aa".repeat(32)]))
+            .await
+            .expect("query ids");
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].content, "event-a");
+
+        let by_author = repositories
+            .query_events(&EventQuery::for_authors(vec!["bb".repeat(32)]))
+            .await
+            .expect("query authors");
+        assert_eq!(by_author.len(), 2);
+
+        let by_kind = repositories
+            .query_events(&EventQuery::for_kinds(vec![2]))
+            .await
+            .expect("query kinds");
+        assert_eq!(by_kind.len(), 1);
+        assert_eq!(by_kind[0].content, "event-b");
+
+        let by_tag = repositories
+            .query_events(&EventQuery::for_tag("e", vec!["1".to_string()]))
+            .await
+            .expect("query tags");
+        assert_eq!(by_tag.len(), 2);
+
+        let mut limited_query = EventQuery::for_tenant("tenant-1");
+        limited_query.limit = Some(1);
+        limited_query.tags.push(TagRecord::new("p", "2"));
+        let limited = repositories
+            .query_events(&limited_query)
+            .await
+            .expect("query limited");
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].content, "event-a");
+
+        let deleted = repositories
+            .delete_event("tenant-1", &event_a.id)
+            .await
+            .expect("delete event");
+        assert!(deleted);
+        let deleted_again = repositories
+            .delete_event("tenant-1", &event_a.id)
+            .await
+            .expect("delete event again");
+        assert!(!deleted_again);
+
+        let missing = repositories
+            .get_event("tenant-1", &event_a.id)
+            .await
+            .expect("get event");
+        assert!(missing.is_none());
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_relay_publish_retry_and_missing_id_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_relay_publish_retry_and_missing_id_db: postgres unavailable");
+            return;
+        };
+
+        let repositories = test_db.repositories();
+        let request = RelayPublishRequest {
+            relay_url: "wss://relay.local".to_string(),
+            event_id: "33".repeat(32),
+            pubkey: "44".repeat(32),
+            created_at: 123,
+            kind: 30617,
+            tags: vec![vec!["d".to_string(), "demo".to_string()]],
+            content: String::new(),
+            sig: "55".repeat(64),
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            identifier: "demo".to_string(),
+        };
+        repositories
+            .enqueue_relay_publish(request)
+            .await
+            .expect("enqueue");
+
+        let now = time::OffsetDateTime::now_utc();
+        let claimed = repositories
+            .claim_relay_publish(now)
+            .await
+            .expect("claim")
+            .expect("job");
+        let retry_at = now + time::Duration::minutes(5);
+        repositories
+            .mark_relay_publish_failed(claimed.id, "network timeout", retry_at)
+            .await
+            .expect("mark failed");
+
+        let none_before_retry = repositories
+            .claim_relay_publish(now + time::Duration::minutes(1))
+            .await
+            .expect("claim before retry");
+        assert!(none_before_retry.is_none());
+
+        let claimed_retry = repositories
+            .claim_relay_publish(now + time::Duration::minutes(6))
+            .await
+            .expect("claim after retry")
+            .expect("retry job");
+        assert!(claimed_retry.attempt_count >= 2);
+
+        repositories
+            .mark_relay_publish_succeeded(claimed_retry.id)
+            .await
+            .expect("mark succeeded");
+
+        let missing_mark_success = repositories
+            .mark_relay_publish_succeeded(999_999)
+            .await
+            .expect_err("missing success id");
+        assert!(matches!(missing_mark_success, StorageError::Internal { .. }));
+
+        let missing_mark_failed = repositories
+            .mark_relay_publish_failed(
+                999_998,
+                "missing",
+                now + time::Duration::minutes(10),
+            )
+            .await
+            .expect_err("missing failed id");
+        assert!(matches!(missing_mark_failed, StorageError::Internal { .. }));
+
         test_db.cleanup().await;
     }
 }
