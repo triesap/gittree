@@ -328,6 +328,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
+    use axum::response::IntoResponse;
     use futures_util::{SinkExt, StreamExt};
     use gittree_storage::{InMemoryRepositories, RelayMembershipRepository};
     use secp256k1::{Keypair, Secp256k1, SecretKey};
@@ -388,7 +389,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve");
+            let _ = axum::serve(listener, app).await;
         });
         addr
     }
@@ -620,6 +621,11 @@ mod tests {
     }
 
     #[test]
+    fn normalize_host_handles_malformed_ipv6_prefix() {
+        assert_eq!(super::normalize_host("[::1"), "[");
+    }
+
+    #[test]
     fn accepts_nostr_json_matches_mixed_accept_header() {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
@@ -677,10 +683,10 @@ mod tests {
             metrics: Arc::new(RelayMetrics::new()),
         };
         let headers = axum::http::HeaderMap::new();
-        let response = match resolve_tenant(&state, &headers).await {
-            Ok(_) => panic!("expected tenant resolution to fail"),
-            Err(response) => response,
-        };
+        let response = resolve_tenant(&state, &headers)
+            .await
+            .err()
+            .unwrap_or_else(|| StatusCode::IM_A_TEAPOT.into_response());
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -698,10 +704,10 @@ mod tests {
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("host", "tenant.local".parse().expect("host"));
-        let response = match resolve_tenant(&state, &headers).await {
-            Ok(_) => panic!("expected tenant resolution to fail"),
-            Err(response) => response,
-        };
+        let response = resolve_tenant(&state, &headers)
+            .await
+            .err()
+            .unwrap_or_else(|| StatusCode::IM_A_TEAPOT.into_response());
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
