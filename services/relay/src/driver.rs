@@ -104,12 +104,26 @@ mod tests {
     use super::SessionDriver;
     use crate::{EventStore, MemoryStore, NostrEvent, Policy, Session};
     use serde_json::Value;
+    use tokio::sync::{broadcast, mpsc};
+    use tokio::time::{Duration, timeout};
 
     fn decode_frames(frames: &[String]) -> Vec<Value> {
         frames
             .iter()
             .map(|frame| serde_json::from_str(frame).expect("valid json"))
             .collect()
+    }
+
+    fn sample_event(id: &str) -> NostrEvent {
+        NostrEvent {
+            id: id.to_string(),
+            pubkey: "aa".repeat(32),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "00".repeat(64),
+        }
     }
 
     #[tokio::test]
@@ -166,5 +180,128 @@ mod tests {
         let decoded = decode_frames(&frames);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0][0], Value::String("NOTICE".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_emits_initial_auth_challenge() {
+        let session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, mut out_rx) = mpsc::channel(2);
+        let task = tokio::spawn(driver.run(in_rx, out_tx));
+        drop(in_tx);
+
+        let first = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("frame");
+        let decoded: Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(decoded[0], Value::String("AUTH".to_string()));
+        task.await.expect("task");
+    }
+
+    #[tokio::test]
+    async fn run_returns_when_outbound_is_closed_during_initial_send() {
+        let session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let driver = SessionDriver::new(session);
+        let (_in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, out_rx) = mpsc::channel(1);
+        drop(out_rx);
+        timeout(Duration::from_secs(1), driver.run(in_rx, out_tx))
+            .await
+            .expect("timeout");
+    }
+
+    #[tokio::test]
+    async fn run_stops_after_outbound_closes_for_inbound_responses() {
+        let session = Session::new(MemoryStore::new());
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, out_rx) = mpsc::channel(1);
+        drop(out_rx);
+        let task = tokio::spawn(driver.run(in_rx, out_tx));
+        in_tx
+            .send(r#"["REQ","sub",{}]"#.to_string())
+            .await
+            .expect("send inbound");
+        drop(in_tx);
+        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+    }
+
+    #[tokio::test]
+    async fn run_with_broadcast_returns_when_initial_send_fails() {
+        let session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let driver = SessionDriver::new(session);
+        let (_in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, out_rx) = mpsc::channel(1);
+        drop(out_rx);
+        let (_broadcast_tx, broadcast_rx) = broadcast::channel(1);
+        timeout(
+            Duration::from_secs(1),
+            driver.run_with_broadcast(in_rx, out_tx, broadcast_rx),
+        )
+        .await
+        .expect("timeout");
+    }
+
+    #[tokio::test]
+    async fn run_with_broadcast_handles_lagged_then_closed_channel() {
+        let session = Session::new(MemoryStore::new());
+        let driver = SessionDriver::new(session);
+        let (_in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, _out_rx) = mpsc::channel(4);
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(1);
+        broadcast_tx.send(sample_event("e1")).expect("send 1");
+        broadcast_tx.send(sample_event("e2")).expect("send 2");
+        drop(broadcast_tx);
+        timeout(
+            Duration::from_secs(1),
+            driver.run_with_broadcast(in_rx, out_tx, broadcast_rx),
+        )
+        .await
+        .expect("timeout");
+    }
+
+    #[tokio::test]
+    async fn run_with_broadcast_returns_when_outbound_closes_after_inbound() {
+        let session = Session::new(MemoryStore::new());
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, out_rx) = mpsc::channel(1);
+        drop(out_rx);
+        let (_broadcast_tx, broadcast_rx) = broadcast::channel(1);
+        let task = tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
+        in_tx
+            .send(r#"["REQ","sub",{}]"#.to_string())
+            .await
+            .expect("send inbound");
+        drop(in_tx);
+        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+    }
+
+    #[tokio::test]
+    async fn run_with_broadcast_stops_when_outbound_closes_for_broadcast_frames() {
+        let session = Session::new(MemoryStore::new());
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(2);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(2);
+        let task = tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
+
+        in_tx
+            .send(r#"["REQ","sub",{}]"#.to_string())
+            .await
+            .expect("send req");
+        let _ = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("response");
+
+        drop(out_rx);
+        broadcast_tx.send(sample_event("broadcast")).expect("send broadcast");
+        drop(in_tx);
+        drop(broadcast_tx);
+
+        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
     }
 }

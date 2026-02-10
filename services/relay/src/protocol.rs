@@ -208,8 +208,42 @@ mod tests {
     }
 
     #[test]
+    fn decode_auth_message() {
+        let input = r#"["AUTH",{"id":"auth-evt"}]"#;
+        let message = decode_client_message(input).expect("message");
+        assert_eq!(message, ClientMessage::Auth(json!({"id": "auth-evt"})));
+    }
+
+    #[test]
+    fn decode_count_message() {
+        let input = r#"["COUNT","sub",{"kinds":[1]}]"#;
+        let message = decode_client_message(input).expect("message");
+        assert_eq!(
+            message,
+            ClientMessage::Count {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"kinds":[1]})],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_unknown_message_type() {
+        let input = r#"["PING"]"#;
+        let err = decode_client_message(input).unwrap_err();
+        assert_eq!(err, ProtocolError::UnknownMessageType("PING".to_string()));
+    }
+
+    #[test]
     fn decode_missing_filters() {
         let input = r#"["REQ","sub"]"#;
+        let err = decode_client_message(input).unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("filters"));
+    }
+
+    #[test]
+    fn decode_count_missing_filters() {
+        let input = r#"["COUNT","sub"]"#;
         let err = decode_client_message(input).unwrap_err();
         assert_eq!(err, ProtocolError::MissingField("filters"));
     }
@@ -252,5 +286,43 @@ mod tests {
         let encoded = encode_server_message(&message).expect("encode");
         let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
         assert_eq!(value, json!(["CLOSED", "sub", "auth-required"]));
+    }
+
+    #[test]
+    fn encode_auth_message() {
+        let message = ServerMessage::Auth {
+            challenge: "challenge".to_string(),
+        };
+        let encoded = encode_server_message(&message).expect("encode");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
+        assert_eq!(value, json!(["AUTH", "challenge"]));
+    }
+
+    #[test]
+    fn encode_count_message() {
+        let message = ServerMessage::Count {
+            subscription_id: "sub".to_string(),
+            count: 42,
+        };
+        let encoded = encode_server_message(&message).expect("encode");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
+        assert_eq!(value, json!(["COUNT", "sub", {"count": 42}]));
+    }
+
+    #[test]
+    fn protocol_error_display_messages_are_stable() {
+        assert_eq!(ProtocolError::InvalidJson.to_string(), "invalid json");
+        assert_eq!(
+            ProtocolError::MissingField("subscription_id").to_string(),
+            "missing field subscription_id"
+        );
+        assert_eq!(
+            ProtocolError::InvalidField("subscription_id").to_string(),
+            "invalid field subscription_id"
+        );
+        assert_eq!(
+            ProtocolError::UnknownMessageType("PING".to_string()).to_string(),
+            "unknown message type PING"
+        );
     }
 }
