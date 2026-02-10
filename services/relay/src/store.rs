@@ -559,7 +559,10 @@ fn map_repo_err(err: gittree_storage::StorageError) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventStore, MemoryStore, RepositoryStore, StoreOutcome};
+    use super::{
+        EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome, collect_tag_values,
+        exact_hex_filters, parse_address,
+    };
     use crate::NostrEvent;
     use gittree_storage::InMemoryRepositories;
     use serde_json::json;
@@ -791,5 +794,110 @@ mod tests {
         let filter = crate::Filter::from_json(&json!({"ids": ["zz"]})).expect("filter");
         let results = store.query(&[filter]).await.expect("query");
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_store_query_empty_filters_returns_empty() {
+        let store = MemoryStore::new();
+        let results = store.query(&[]).await.expect("query");
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_store_query_empty_filters_returns_empty() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+        let results = store.query(&[]).await.expect("query");
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_store_get_and_delete_reject_invalid_hex_ids() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let get_err = store.get("not-hex").await.expect_err("invalid get id");
+        assert!(matches!(get_err, StoreError::Backend(_)));
+
+        let delete_err = store
+            .delete("still-not-hex")
+            .await
+            .expect_err("invalid delete id");
+        assert!(matches!(delete_err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn repository_store_replaces_parameterized_replaceable_events() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let pubkey = "aa".repeat(32);
+        let mut older = sample_event(&"31".repeat(32));
+        older.kind = 30023;
+        older.created_at = 10;
+        older.pubkey = pubkey.clone();
+        older.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        store.insert(older.clone()).await.expect("insert older");
+
+        let mut newer = sample_event(&"32".repeat(32));
+        newer.kind = 30023;
+        newer.created_at = 20;
+        newer.pubkey = pubkey;
+        newer.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        let outcome = store.insert(newer.clone()).await.expect("insert newer");
+        assert_eq!(outcome, StoreOutcome::Inserted);
+
+        assert!(store.get(&older.id).await.expect("get older").is_none());
+        assert!(store.get(&newer.id).await.expect("get newer").is_some());
+    }
+
+    #[tokio::test]
+    async fn repository_store_delete_event_removes_parameterized_by_address() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let pubkey = "aa".repeat(32);
+        let mut target = sample_event(&"41".repeat(32));
+        target.kind = 30023;
+        target.created_at = 5;
+        target.pubkey = pubkey.clone();
+        target.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        store.insert(target.clone()).await.expect("insert target");
+
+        let mut delete = sample_event(&"42".repeat(32));
+        delete.kind = 5;
+        delete.created_at = 15;
+        delete.pubkey = pubkey.clone();
+        delete.tags = vec![vec!["a".to_string(), format!("30023:{pubkey}:demo")]];
+        store.insert(delete.clone()).await.expect("insert delete");
+
+        assert!(store.get(&target.id).await.expect("get target").is_none());
+        assert!(store.get(&delete.id).await.expect("get delete").is_some());
+    }
+
+    #[test]
+    fn exact_hex_filters_and_helpers_cover_edge_cases() {
+        let exact = vec!["11".repeat(32), "22".repeat(32)];
+        let (values, needs_post) = exact_hex_filters(&exact);
+        assert_eq!(values, exact);
+        assert!(!needs_post);
+
+        let mixed = vec!["11".repeat(31), "prefix".to_string()];
+        let (values, needs_post) = exact_hex_filters(&mixed);
+        assert!(values.is_empty());
+        assert!(needs_post);
+
+        let tags = vec![
+            vec!["e".to_string(), "a".to_string(), "b".to_string()],
+            vec!["p".to_string(), "x".to_string()],
+        ];
+        assert_eq!(collect_tag_values(&tags, "e"), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(collect_tag_values(&tags, "z"), Vec::<String>::new());
+
+        assert!(parse_address("bad").is_none());
+        let parsed = parse_address("30023:pubkey:demo").expect("address");
+        assert_eq!(parsed.kind, 30023);
+        assert_eq!(parsed.pubkey, "pubkey");
+        assert_eq!(parsed.identifier.as_deref(), Some("demo"));
     }
 }

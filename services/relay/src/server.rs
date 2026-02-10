@@ -322,13 +322,14 @@ async fn seed_owner_membership(
 mod tests {
     use super::{
         accepts_nostr_json, build_router, extract_host, nip11_response, relay_url_from_host,
-        resolve_tenant,
+        resolve_tenant, seed_owner_membership,
     };
     use crate::{MemoryStore, NostrEvent, Policy, RelayConfig, RelayMetrics};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
     use futures_util::{SinkExt, StreamExt};
+    use gittree_storage::{InMemoryRepositories, RelayMembershipRepository};
     use secp256k1::{Keypair, Secp256k1, SecretKey};
     use serde_json::json;
     use std::sync::Arc;
@@ -354,6 +355,23 @@ mod tests {
             policy: gittree_config::RelayPolicyConfig::default(),
             admission: None,
         }
+    }
+
+    fn unreachable_repos() -> Arc<gittree_storage::PostgresRepositories> {
+        let storage = gittree_storage::StorageConfig {
+            read_connection: "postgres://user:pass@127.0.0.1:1/gittree".to_string(),
+            write_connection: None,
+            max_connections: 1,
+            min_connections: 0,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: Some("gittree-test".to_string()),
+        };
+        let pool_options = storage.pool_options().expect("pool options");
+        let connect_options = storage.read_connect_options().expect("connect options");
+        Arc::new(gittree_storage::PostgresRepositories::new(
+            pool_options.connect_lazy_with(connect_options),
+        ))
     }
 
     async fn spawn_ws_server() -> std::net::SocketAddr {
@@ -594,5 +612,77 @@ mod tests {
         let tenant = resolve_tenant(&state, &headers).await.expect("tenant");
         assert_eq!(tenant.tenant_id, "default");
         assert!(tenant.tenant.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_tenant_requires_host_when_repositories_enabled() {
+        let state = super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(unreachable_repos()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        };
+        let headers = axum::http::HeaderMap::new();
+        let response = match resolve_tenant(&state, &headers).await {
+            Ok(_) => panic!("expected tenant resolution to fail"),
+            Err(response) => response,
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn resolve_tenant_maps_repository_failures_to_500() {
+        let state = super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(unreachable_repos()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        };
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "tenant.local".parse().expect("host"));
+        let response = match resolve_tenant(&state, &headers).await {
+            Ok(_) => panic!("expected tenant resolution to fail"),
+            Err(response) => response,
+        };
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn seed_owner_membership_sets_owner_role_and_preserves_created_at() {
+        let repo = Arc::new(InMemoryRepositories::new());
+        let membership: Arc<dyn RelayMembershipRepository> = repo.clone();
+        let tenant_id = "tenant-test";
+        let relay_pubkey = vec![0x11; 32];
+
+        seed_owner_membership(&membership, tenant_id, &relay_pubkey)
+            .await
+            .expect("seed first");
+        let first = repo
+            .membership_by_pubkey(tenant_id, &relay_pubkey)
+            .await
+            .expect("lookup first")
+            .expect("membership");
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        seed_owner_membership(&membership, tenant_id, &relay_pubkey)
+            .await
+            .expect("seed second");
+        let second = repo
+            .membership_by_pubkey(tenant_id, &relay_pubkey)
+            .await
+            .expect("lookup second")
+            .expect("membership");
+
+        assert_eq!(first.created_at, second.created_at);
+        assert!(second.updated_at >= first.updated_at);
+        assert_eq!(second.role, "owner");
+        assert_eq!(second.status, "active");
     }
 }
