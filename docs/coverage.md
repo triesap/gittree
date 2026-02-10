@@ -44,9 +44,23 @@ Defaults:
 - line coverage: `90`
 - function coverage: `85`
 - region coverage: `85`
+- binary `main.rs` files are excluded from gate calculations by default
+  (`.*/src/main\\.rs$`)
 
 Override thresholds:
 
 ```
 COV_FAIL_UNDER_LINES=92 COV_FAIL_UNDER_FUNCTIONS=88 ./scripts/coverage-gate.sh
+```
+
+Include binary `main.rs` files in gate calculations:
+
+```
+COV_INCLUDE_BIN_MAINS=1 ./scripts/coverage-gate.sh
+```
+
+Override the ignore regex directly:
+
+```
+COV_IGNORE_FILENAME_REGEX='.*/src/bin/experimental_.*\\.rs$' ./scripts/coverage-gate.sh
 ```

@@ -35,22 +35,30 @@ fi
 lines="${COV_FAIL_UNDER_LINES:-90}"
 functions="${COV_FAIL_UNDER_FUNCTIONS:-85}"
 regions="${COV_FAIL_UNDER_REGIONS:-85}"
+include_bin_mains="${COV_INCLUDE_BIN_MAINS:-0}"
+
+cov_args=(
+  --json
+  --summary-only
+  --fail-under-lines "${lines}"
+  --fail-under-functions "${functions}"
+  --fail-under-regions "${regions}"
+)
+
+if [[ "${include_bin_mains}" != "1" ]]; then
+  ignore_regex="${COV_IGNORE_FILENAME_REGEX:-.*/src/main\\.rs$}"
+  cov_args+=(--ignore-filename-regex "${ignore_regex}")
+elif [[ -n "${COV_IGNORE_FILENAME_REGEX:-}" ]]; then
+  cov_args+=(--ignore-filename-regex "${COV_IGNORE_FILENAME_REGEX}")
+fi
 
 if [[ "${#test_args[@]}" -gt 0 ]]; then
   cargo llvm-cov \
-    --json \
-    --summary-only \
-    --fail-under-lines "${lines}" \
-    --fail-under-functions "${functions}" \
-    --fail-under-regions "${regions}" \
+    "${cov_args[@]}" \
     "${args[@]}" \
     "${test_args[@]}"
 else
   cargo llvm-cov \
-    --json \
-    --summary-only \
-    --fail-under-lines "${lines}" \
-    --fail-under-functions "${functions}" \
-    --fail-under-regions "${regions}" \
+    "${cov_args[@]}" \
     "${args[@]}"
 fi
