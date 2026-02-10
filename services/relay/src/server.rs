@@ -356,7 +356,10 @@ mod tests {
     use axum::routing::get;
     use axum::response::IntoResponse;
     use futures_util::{SinkExt, StreamExt};
-    use gittree_storage::{InMemoryRepositories, RelayMembershipRepository};
+    use gittree_storage::{
+        InMemoryRepositories, RelayInviteRecord, RelayMembershipRecord, RelayMembershipRepository,
+        StorageError,
+    };
     use secp256k1::{Keypair, Secp256k1, SecretKey};
     use serde_json::json;
     use std::collections::HashMap;
@@ -430,6 +433,83 @@ mod tests {
 
         fn membership_repository(&self) -> Arc<dyn RelayMembershipRepository> {
             Arc::new(gittree_storage::InMemoryRepositories::new())
+        }
+    }
+
+    struct FailingMembershipRepository {
+        fail_lookup: bool,
+        fail_upsert: bool,
+    }
+
+    impl FailingMembershipRepository {
+        fn lookup() -> Self {
+            Self {
+                fail_lookup: true,
+                fail_upsert: false,
+            }
+        }
+
+        fn upsert() -> Self {
+            Self {
+                fail_lookup: false,
+                fail_upsert: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RelayMembershipRepository for FailingMembershipRepository {
+        async fn upsert_membership(&self, _record: RelayMembershipRecord) -> Result<(), StorageError> {
+            if self.fail_upsert {
+                return Err(StorageError::Internal {
+                    message: "upsert failed".to_string(),
+                });
+            }
+            Ok(())
+        }
+
+        async fn membership_by_pubkey(
+            &self,
+            _tenant_id: &str,
+            _pubkey: &[u8],
+        ) -> Result<Option<RelayMembershipRecord>, StorageError> {
+            if self.fail_lookup {
+                return Err(StorageError::Internal {
+                    message: "lookup failed".to_string(),
+                });
+            }
+            Ok(None)
+        }
+
+        async fn list_memberships(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<Vec<RelayMembershipRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn remove_membership(
+            &self,
+            _tenant_id: &str,
+            _pubkey: &[u8],
+        ) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
+        async fn insert_invite(&self, _record: RelayInviteRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn invite_by_code(
+            &self,
+            _tenant_id: &str,
+            _invite_code: &str,
+        ) -> Result<Option<RelayInviteRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn delete_invite(&self, _tenant_id: &str, _invite_code: &str) -> Result<(), StorageError> {
+            Ok(())
         }
     }
 
@@ -1057,6 +1137,52 @@ mod tests {
         assert!(second.updated_at >= first.updated_at);
         assert_eq!(second.role, "owner");
         assert_eq!(second.status, "active");
+    }
+
+    #[tokio::test]
+    async fn seed_owner_membership_promotes_existing_member_to_owner_active() {
+        let repo = Arc::new(InMemoryRepositories::new());
+        let membership: Arc<dyn RelayMembershipRepository> = repo.clone();
+        let tenant_id = "tenant-test";
+        let relay_pubkey = vec![0x22; 32];
+        repo.upsert_membership(RelayMembershipRecord {
+            tenant_id: tenant_id.to_string(),
+            pubkey: relay_pubkey.clone(),
+            role: "member".to_string(),
+            status: "left".to_string(),
+            created_at: 5,
+            updated_at: 6,
+        })
+        .await
+        .expect("seed existing");
+
+        seed_owner_membership(&membership, tenant_id, &relay_pubkey)
+            .await
+            .expect("promote to owner");
+        let record = repo
+            .membership_by_pubkey(tenant_id, &relay_pubkey)
+            .await
+            .expect("lookup")
+            .expect("membership");
+        assert_eq!(record.role, "owner");
+        assert_eq!(record.status, "active");
+        assert_eq!(record.created_at, 5);
+        assert!(record.updated_at >= 6);
+    }
+
+    #[tokio::test]
+    async fn seed_owner_membership_surfaces_repository_errors() {
+        let lookup_repo: Arc<dyn RelayMembershipRepository> = Arc::new(FailingMembershipRepository::lookup());
+        let lookup_err = seed_owner_membership(&lookup_repo, "tenant", &[0x33; 32])
+            .await
+            .expect_err("lookup error");
+        assert!(lookup_err.to_string().contains("lookup failed"));
+
+        let upsert_repo: Arc<dyn RelayMembershipRepository> = Arc::new(FailingMembershipRepository::upsert());
+        let upsert_err = seed_owner_membership(&upsert_repo, "tenant", &[0x33; 32])
+            .await
+            .expect_err("upsert error");
+        assert!(upsert_err.to_string().contains("upsert failed"));
     }
 
     #[tokio::test]
