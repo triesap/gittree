@@ -1401,12 +1401,117 @@ WHERE pubkey = $1
 #[cfg(test)]
 mod tests {
     use super::PostgresRepositories;
+    use crate::migrations::{MigrationRunner, core_migrations};
     use crate::repositories::{
         AccountRepository, EventRepository, ProfileRepository, RelayCompatibilityRepository,
         RelayMembershipRepository, RelayPublishRepository, RelayTenantRepository,
         RepoMappingRepository,
     };
-    use crate::StorageError;
+    use crate::{AccountRecord, ProfileRecord, ProfileVisibility, RelayPublishRequest, RepoMappingRecord, StorageError};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::PgPool;
+    use std::str::FromStr;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
+
+    struct TestDatabase {
+        base_url: String,
+        database_name: String,
+        pool: PgPool,
+    }
+
+    impl TestDatabase {
+        async fn provision() -> Option<Self> {
+            let base_url = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
+                .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
+            let mut admin_options = match PgConnectOptions::from_str(&base_url) {
+                Ok(options) => options,
+                Err(_) => return None,
+            };
+            admin_options = admin_options.database("postgres");
+            let admin_pool = match PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(admin_options)
+                .await
+            {
+                Ok(pool) => pool,
+                Err(_) => return None,
+            };
+
+            let database_name = unique_database_name();
+            let create_database = format!("CREATE DATABASE \"{database_name}\"");
+            if let Err(err) = sqlx::query(&create_database).execute(&admin_pool).await {
+                panic!("failed creating test database {database_name}: {err}");
+            }
+            admin_pool.close().await;
+
+            let mut test_options = PgConnectOptions::from_str(&base_url).expect("test options");
+            test_options = test_options.database(&database_name);
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect_with(test_options)
+                .await
+                .expect("connect test database");
+
+            let runner = MigrationRunner::new(core_migrations()).expect("runner");
+            let mut connection = pool.acquire().await.expect("connection");
+            runner.run(&mut *connection).await.expect("migrations");
+            drop(connection);
+
+            Some(Self {
+                base_url,
+                database_name,
+                pool,
+            })
+        }
+
+        fn repositories(&self) -> PostgresRepositories {
+            PostgresRepositories::new(self.pool.clone())
+        }
+
+        async fn cleanup(self) {
+            self.pool.close().await;
+
+            let mut admin_options = match PgConnectOptions::from_str(&self.base_url) {
+                Ok(options) => options,
+                Err(_) => return,
+            };
+            admin_options = admin_options.database("postgres");
+
+            let Ok(admin_pool) = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(admin_options)
+                .await
+            else {
+                return;
+            };
+
+            let _ = sqlx::query(
+                r#"
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = $1
+  AND pid <> pg_backend_pid()
+"#,
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await;
+
+            let drop_database = format!("DROP DATABASE IF EXISTS \"{}\"", self.database_name);
+            let _ = sqlx::query(&drop_database).execute(&admin_pool).await;
+            admin_pool.close().await;
+        }
+    }
+
+    fn unique_database_name() -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("gittree_storage_test_{}_{}", std::process::id(), now)
+    }
 
     #[test]
     fn to_offset_datetime_rejects_invalid_timestamp() {
@@ -1466,5 +1571,154 @@ mod tests {
     fn postgres_repos_implements_relay_membership_repo() {
         fn assert_impl<T: RelayMembershipRepository>() {}
         assert_impl::<PostgresRepositories>();
+    }
+
+    #[tokio::test]
+    async fn postgres_repo_mapping_round_trip_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_repo_mapping_round_trip_db: postgres unavailable");
+            return;
+        };
+
+        let repositories = test_db.repositories();
+        let record = RepoMappingRecord {
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            pubkey: vec![0x11; 32],
+            identifier: "demo".to_string(),
+        };
+
+        repositories
+            .upsert_mapping(record.clone())
+            .await
+            .expect("upsert");
+
+        let by_forgejo = repositories
+            .mapping_by_forgejo("alice", "demo")
+            .await
+            .expect("mapping by forgejo")
+            .expect("record");
+        assert_eq!(by_forgejo, record);
+
+        let by_repo = repositories
+            .mapping_by_repo(&record.pubkey, "demo")
+            .await
+            .expect("mapping by repo")
+            .expect("record");
+        assert_eq!(by_repo, record);
+
+        let mappings = repositories.list_mappings().await.expect("list mappings");
+        assert_eq!(mappings.len(), 1);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_account_and_profile_round_trip_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_account_and_profile_round_trip_db: postgres unavailable");
+            return;
+        };
+
+        let repositories = test_db.repositories();
+        let pubkey_hex = "22".repeat(32);
+        let account = AccountRecord::new(&pubkey_hex, "alice").expect("account");
+        repositories
+            .upsert_account(account.clone())
+            .await
+            .expect("upsert account");
+
+        let by_pubkey = repositories
+            .account_by_pubkey(&account.pubkey)
+            .await
+            .expect("account by pubkey")
+            .expect("account");
+        assert_eq!(by_pubkey.forgejo_username, "alice");
+
+        let by_username = repositories
+            .account_by_username("alice")
+            .await
+            .expect("account by username")
+            .expect("account");
+        assert_eq!(by_username.pubkey, account.pubkey);
+
+        let profile = ProfileRecord::new(
+            &pubkey_hex,
+            Some("Alice".to_string()),
+            Some("bio".to_string()),
+            None,
+            None,
+            None,
+            ProfileVisibility::Private,
+            100,
+            100,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(profile)
+            .await
+            .expect("upsert profile");
+
+        let stored_profile = repositories
+            .profile_by_pubkey(&account.pubkey)
+            .await
+            .expect("profile by pubkey")
+            .expect("profile");
+        assert_eq!(stored_profile.display_name.as_deref(), Some("Alice"));
+        assert_eq!(stored_profile.visibility, ProfileVisibility::Private);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_relay_publish_round_trip_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_relay_publish_round_trip_db: postgres unavailable");
+            return;
+        };
+
+        let repositories = test_db.repositories();
+        let request = RelayPublishRequest {
+            relay_url: "wss://relay.local".to_string(),
+            event_id: "33".repeat(32),
+            pubkey: "44".repeat(32),
+            created_at: 123,
+            kind: 30617,
+            tags: vec![vec!["d".to_string(), "demo".to_string()]],
+            content: String::new(),
+            sig: "55".repeat(64),
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            identifier: "demo".to_string(),
+        };
+
+        repositories
+            .enqueue_relay_publish(request)
+            .await
+            .expect("enqueue");
+
+        let pending_before = repositories
+            .pending_relay_publishes(&[0x44; 32], "demo", 30617)
+            .await
+            .expect("pending");
+        assert_eq!(pending_before, 1);
+
+        let now = time::OffsetDateTime::now_utc();
+        let job = repositories
+            .claim_relay_publish(now)
+            .await
+            .expect("claim")
+            .expect("job");
+        assert_eq!(job.forgejo_owner, "alice");
+        assert_eq!(job.forgejo_repo, "demo");
+        repositories
+            .mark_relay_publish_succeeded(job.id)
+            .await
+            .expect("mark succeeded");
+
+        let pending_after = repositories
+            .pending_relay_publishes(&[0x44; 32], "demo", 30617)
+            .await
+            .expect("pending");
+        assert_eq!(pending_after, 0);
+        test_db.cleanup().await;
     }
 }
