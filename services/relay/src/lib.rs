@@ -393,6 +393,7 @@ pub fn build_nip11_document(
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_APP_NAME;
+    use super::ENV_STORAGE_MAX_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
     use super::DEFAULT_ADMISSION_TIMEOUT_SECS;
     use super::ENV_ADMISSION_FALLBACK;
@@ -541,6 +542,42 @@ mod tests {
                         assert_eq!(config.storage.idle_timeout_secs, None);
                         assert_eq!(config.storage.max_lifetime_secs, None);
                     });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_ignores_empty_max_connections_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "", || {
+                    let config = RelayConfig::from_env().expect("config");
+                    assert_eq!(config.storage.max_connections, 10);
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_reports_invalid_max_connections_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "bad", || {
+                    let err = RelayConfig::from_env().expect_err("invalid max connections");
+                    assert!(matches!(
+                        err,
+                        RelayConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: ENV_STORAGE_MAX_CONNECTIONS,
+                            value
+                        }) if value == "bad"
+                    ));
                 });
             },
         );
