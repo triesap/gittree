@@ -1416,7 +1416,7 @@ mod tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::PgPool;
     use std::str::FromStr;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
 
@@ -1518,6 +1518,22 @@ WHERE datname = $1
         format!("gittree_storage_test_{}_{}", std::process::id(), now)
     }
 
+    fn unreachable_repositories() -> PostgresRepositories {
+        let options =
+            PgConnectOptions::from_str("postgres://gittree:gittree@127.0.0.1:1/gittree")
+                .expect("connect options");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy_with(options);
+        PostgresRepositories::new(pool)
+    }
+
+    fn assert_db_error(err: StorageError) {
+        assert!(matches!(err, StorageError::Database { .. }));
+    }
+
     #[test]
     fn to_offset_datetime_rejects_invalid_timestamp() {
         let err = PostgresRepositories::to_offset_datetime(i64::MIN).unwrap_err();
@@ -1576,6 +1592,363 @@ WHERE datname = $1
     fn postgres_repos_implements_relay_membership_repo() {
         fn assert_impl<T: RelayMembershipRepository>() {}
         assert_impl::<PostgresRepositories>();
+    }
+
+    #[tokio::test]
+    async fn postgres_repositories_exercise_unreachable_database_paths() {
+        let repositories = unreachable_repositories();
+        let repo_pubkey = "11".repeat(32);
+
+        let announcement = RepoAnnouncementRecord {
+            event_id: vec![0x01; 32],
+            pubkey: vec![0x11; 32],
+            identifier: "repo".to_string(),
+            name: Some("repo".to_string()),
+            description: Some("description".to_string()),
+            root_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            clone_urls: vec!["https://git.example/repo.git".to_string()],
+            web_urls: vec!["https://git.example/repo".to_string()],
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: vec!["https://blossom.example".to_string()],
+            hashtags: vec!["nostr".to_string()],
+            maintainers: vec!["aa".repeat(32)],
+            created_at: 10,
+        };
+        assert_db_error(
+            repositories
+                .insert_announcement(announcement.clone())
+                .await
+                .expect_err("insert announcement"),
+        );
+        assert_db_error(
+            repositories
+                .list_announcements(&announcement.pubkey, "repo")
+                .await
+                .expect_err("list announcements"),
+        );
+        assert_db_error(
+            repositories
+                .latest_announcement(&announcement.pubkey, "repo")
+                .await
+                .expect_err("latest announcement"),
+        );
+
+        let state = RepoStateRecord {
+            event_id: vec![0x02; 32],
+            pubkey: vec![0x11; 32],
+            identifier: "repo".to_string(),
+            created_at: 11,
+            state_json: "{\"HEAD\":\"ref: refs/heads/main\"}".to_string(),
+        };
+        assert_db_error(
+            repositories
+                .insert_state(state)
+                .await
+                .expect_err("insert state"),
+        );
+        assert_db_error(
+            repositories
+                .latest_state(&[0x11; 32], "repo")
+                .await
+                .expect_err("latest state"),
+        );
+
+        let mapping = RepoMappingRecord {
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "repo".to_string(),
+            pubkey: hex::decode(&repo_pubkey).expect("pubkey"),
+            identifier: "repo".to_string(),
+        };
+        assert_db_error(
+            repositories
+                .upsert_mapping(mapping)
+                .await
+                .expect_err("upsert mapping"),
+        );
+        assert_db_error(
+            repositories
+                .mapping_by_forgejo("alice", "repo")
+                .await
+                .expect_err("mapping by forgejo"),
+        );
+        assert_db_error(
+            repositories
+                .mapping_by_repo(&[0x11; 32], "repo")
+                .await
+                .expect_err("mapping by repo"),
+        );
+        assert_db_error(
+            repositories
+                .list_mappings()
+                .await
+                .expect_err("list mappings"),
+        );
+
+        let account = AccountRecord::new(&"22".repeat(32), "alice").expect("account");
+        assert_db_error(
+            repositories
+                .upsert_account(account.clone())
+                .await
+                .expect_err("upsert account"),
+        );
+        assert_db_error(
+            repositories
+                .account_by_pubkey(&account.pubkey)
+                .await
+                .expect_err("account by pubkey"),
+        );
+        assert_db_error(
+            repositories
+                .account_by_username("alice")
+                .await
+                .expect_err("account by username"),
+        );
+
+        let profile = ProfileRecord::new(
+            &"22".repeat(32),
+            Some("Alice".to_string()),
+            Some("bio".to_string()),
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            100,
+            100,
+        )
+        .expect("profile");
+        assert_db_error(
+            repositories
+                .upsert_profile(profile)
+                .await
+                .expect_err("upsert profile"),
+        );
+        assert_db_error(
+            repositories
+                .profile_by_pubkey(&account.pubkey)
+                .await
+                .expect_err("profile by pubkey"),
+        );
+
+        let compatibility = RelayCompatibilityRecord {
+            relay_url: "wss://relay.example".to_string(),
+            compatible: false,
+            supported_capabilities: vec!["nip-01".to_string()],
+            missing_required: vec!["nip-34".to_string()],
+            missing_optional: vec!["nip-11".to_string()],
+            report_json: "{\"relay_url\":\"wss://relay.example\"}".to_string(),
+            nip11_url: Some("https://relay.example".to_string()),
+            nip11_available: true,
+            active_probe_ok: Some(false),
+            active_probe_error: Some("timeout".to_string()),
+            checked_at: 100,
+        };
+        assert_db_error(
+            repositories
+                .upsert_relay_compatibility(compatibility)
+                .await
+                .expect_err("upsert relay compatibility"),
+        );
+        assert_db_error(
+            repositories
+                .relay_compatibility("wss://relay.example")
+                .await
+                .expect_err("relay compatibility"),
+        );
+
+        let tenant = RelayTenantRecord::new(
+            "tenant-1",
+            "relay.tenant.local",
+            &"66".repeat(32),
+            vec![1, 2, 3, 4],
+            vec![5, 6, 7, 8],
+            "local",
+            Some("Tenant 1".to_string()),
+            Some("tenant description".to_string()),
+            Some("https://example.com/icon.png".to_string()),
+            Some("https://example.com/banner.png".to_string()),
+            Some("ops@example.com".to_string()),
+            true,
+            false,
+            false,
+            100,
+            100,
+        )
+        .expect("tenant");
+        assert_db_error(
+            repositories
+                .upsert_tenant(tenant)
+                .await
+                .expect_err("upsert tenant"),
+        );
+        assert_db_error(
+            repositories
+                .tenant_by_id("tenant-1")
+                .await
+                .expect_err("tenant by id"),
+        );
+        assert_db_error(
+            repositories
+                .tenant_by_host("relay.tenant.local")
+                .await
+                .expect_err("tenant by host"),
+        );
+        assert_db_error(
+            repositories
+                .list_tenants()
+                .await
+                .expect_err("list tenants"),
+        );
+
+        let membership = RelayMembershipRecord::new(
+            "tenant-1",
+            &"77".repeat(32),
+            "member",
+            "active",
+            110,
+            110,
+        )
+        .expect("membership");
+        assert_db_error(
+            repositories
+                .upsert_membership(membership.clone())
+                .await
+                .expect_err("upsert membership"),
+        );
+        assert_db_error(
+            repositories
+                .membership_by_pubkey("tenant-1", &membership.pubkey)
+                .await
+                .expect_err("membership by pubkey"),
+        );
+        assert_db_error(
+            repositories
+                .list_memberships("tenant-1")
+                .await
+                .expect_err("list memberships"),
+        );
+        assert_db_error(
+            repositories
+                .remove_membership("tenant-1", &membership.pubkey)
+                .await
+                .expect_err("remove membership"),
+        );
+
+        let invite = RelayInviteRecord::new(
+            "tenant-1",
+            "invite-1",
+            "member",
+            &"88".repeat(32),
+            Some(&"99".repeat(32)),
+            Some(500),
+            120,
+        )
+        .expect("invite");
+        assert_db_error(
+            repositories
+                .insert_invite(invite)
+                .await
+                .expect_err("insert invite"),
+        );
+        assert_db_error(
+            repositories
+                .invite_by_code("tenant-1", "invite-1")
+                .await
+                .expect_err("invite by code"),
+        );
+        assert_db_error(
+            repositories
+                .delete_invite("tenant-1", "invite-1")
+                .await
+                .expect_err("delete invite"),
+        );
+
+        let event = EventRecord::new(
+            "tenant-1",
+            &"aa".repeat(32),
+            &"bb".repeat(32),
+            200,
+            1,
+            "event-a",
+            &"cc".repeat(64),
+            vec![vec!["e".to_string(), "1".to_string()]],
+        )
+        .expect("event");
+        assert_db_error(
+            repositories
+                .insert_event(event.clone())
+                .await
+                .expect_err("insert event"),
+        );
+        assert_db_error(
+            repositories
+                .get_event("tenant-1", &event.id)
+                .await
+                .expect_err("get event"),
+        );
+        assert_db_error(
+            repositories
+                .delete_event("tenant-1", &event.id)
+                .await
+                .expect_err("delete event"),
+        );
+        let mut query = EventQuery::for_tenant("tenant-1");
+        query.ids.push("aa".repeat(32));
+        query.authors.push("bb".repeat(32));
+        query.kinds.push(1);
+        query.tags.push(TagRecord::new("e", "1"));
+        query.since = Some(100);
+        query.until = Some(300);
+        query.limit = Some(5);
+        assert_db_error(
+            repositories
+                .query_events(&query)
+                .await
+                .expect_err("query events"),
+        );
+
+        let request = RelayPublishRequest {
+            relay_url: "wss://relay.local".to_string(),
+            event_id: "33".repeat(32),
+            pubkey: "44".repeat(32),
+            created_at: 123,
+            kind: 30617,
+            tags: vec![vec!["d".to_string(), "demo".to_string()]],
+            content: String::new(),
+            sig: "55".repeat(64),
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            identifier: "demo".to_string(),
+        };
+        assert_db_error(
+            repositories
+                .enqueue_relay_publish(request)
+                .await
+                .expect_err("enqueue relay publish"),
+        );
+        assert_db_error(
+            repositories
+                .claim_relay_publish(time::OffsetDateTime::now_utc())
+                .await
+                .expect_err("claim relay publish"),
+        );
+        assert_db_error(
+            repositories
+                .mark_relay_publish_succeeded(1)
+                .await
+                .expect_err("mark relay publish succeeded"),
+        );
+        assert_db_error(
+            repositories
+                .mark_relay_publish_failed(1, "error", time::OffsetDateTime::now_utc())
+                .await
+                .expect_err("mark relay publish failed"),
+        );
+        assert_db_error(
+            repositories
+                .pending_relay_publishes(&[0x44; 32], "demo", 30617)
+                .await
+                .expect_err("pending relay publishes"),
+        );
     }
 
     #[tokio::test]
