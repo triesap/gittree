@@ -108,14 +108,21 @@ impl std::fmt::Display for StorageConfigError {
 impl std::error::Error for StorageConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, AuthConfigError> {
-    let read_connection = std::env::var(ENV_STORAGE_READ_URL)
-        .map_err(|_| AuthConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL)))?;
-    let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
-    let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
-    let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
-    let idle_timeout_secs = env_u64(ENV_STORAGE_IDLE_TIMEOUT_SECS)?;
-    let max_lifetime_secs = env_u64(ENV_STORAGE_MAX_LIFETIME_SECS)?;
-    let application_name = std::env::var(ENV_STORAGE_APP_NAME).ok();
+    storage_from_env_with(|key| std::env::var(key).ok())
+}
+
+fn storage_from_env_with<F>(mut get_var: F) -> Result<StorageConfig, AuthConfigError>
+where
+    F: FnMut(&'static str) -> Option<String>,
+{
+    let read_connection = get_var(ENV_STORAGE_READ_URL)
+        .ok_or(AuthConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL)))?;
+    let write_connection = get_var(ENV_STORAGE_WRITE_URL);
+    let max_connections = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, &mut get_var)?.unwrap_or(10);
+    let min_connections = env_u32_with(ENV_STORAGE_MIN_CONNECTIONS, &mut get_var)?.unwrap_or(2);
+    let idle_timeout_secs = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, &mut get_var)?;
+    let max_lifetime_secs = env_u64_with(ENV_STORAGE_MAX_LIFETIME_SECS, &mut get_var)?;
+    let application_name = get_var(ENV_STORAGE_APP_NAME);
 
     let config = StorageConfig {
         read_connection,
@@ -134,9 +141,12 @@ fn storage_from_env() -> Result<StorageConfig, AuthConfigError> {
     Ok(config)
 }
 
-fn env_u32(key: &'static str) -> Result<Option<u32>, AuthConfigError> {
-    match std::env::var(key) {
-        Ok(value) => {
+fn env_u32_with<F>(key: &'static str, mut get_var: F) -> Result<Option<u32>, AuthConfigError>
+where
+    F: FnMut(&'static str) -> Option<String>,
+{
+    match get_var(key) {
+        Some(value) => {
             if value.trim().is_empty() {
                 return Ok(None);
             }
@@ -144,13 +154,16 @@ fn env_u32(key: &'static str) -> Result<Option<u32>, AuthConfigError> {
                 AuthConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
             })
         }
-        Err(_) => Ok(None),
+        None => Ok(None),
     }
 }
 
-fn env_u64(key: &'static str) -> Result<Option<u64>, AuthConfigError> {
-    match std::env::var(key) {
-        Ok(value) => {
+fn env_u64_with<F>(key: &'static str, mut get_var: F) -> Result<Option<u64>, AuthConfigError>
+where
+    F: FnMut(&'static str) -> Option<String>,
+{
+    match get_var(key) {
+        Some(value) => {
             if value.trim().is_empty() {
                 return Ok(None);
             }
@@ -158,7 +171,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AuthConfigError> {
                 AuthConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
             })
         }
-        Err(_) => Ok(None),
+        None => Ok(None),
     }
 }
 
@@ -710,9 +723,18 @@ mod tests {
     use gittree_nostr_auth::NIP98_KIND;
     use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde_json::json;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
+    use std::error::Error as _;
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
+
+    fn storage_from_map(entries: &[(&'static str, &'static str)]) -> Result<StorageConfig, AuthConfigError> {
+        let values: HashMap<&'static str, String> = entries
+            .iter()
+            .map(|(key, value)| (*key, (*value).to_string()))
+            .collect();
+        storage_from_env_with(|key| values.get(key).cloned())
+    }
 
     #[derive(Clone, Default)]
     struct MockTransport {
@@ -835,6 +857,143 @@ mod tests {
         let msg = Message::from_digest_slice(&bytes).expect("msg");
         let sig = secp.sign_schnorr_no_aux_rand(&msg, keypair);
         hex::encode(sig.as_ref())
+    }
+
+    #[test]
+    fn storage_from_env_with_uses_defaults_for_pool_limits() {
+        let config = storage_from_map(&[(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree")])
+            .expect("config");
+        assert_eq!(config.max_connections, 10);
+        assert_eq!(config.min_connections, 2);
+        assert_eq!(config.read_connection, "postgres://user:pass@localhost:5432/gittree");
+        assert!(config.idle_timeout_secs.is_none());
+        assert!(config.max_lifetime_secs.is_none());
+    }
+
+    #[test]
+    fn storage_from_env_requires_read_connection() {
+        let err = storage_from_env_with(|_| None).unwrap_err();
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
+        ));
+        assert_eq!(
+            format!("{err}"),
+            format!(
+                "auth storage config error: missing env {ENV_STORAGE_READ_URL}"
+            )
+        );
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn storage_from_env_rejects_invalid_numeric_values() {
+        let err = storage_from_map(&[
+            (ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree"),
+            (ENV_STORAGE_MAX_CONNECTIONS, "not-a-number"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                key: ENV_STORAGE_MAX_CONNECTIONS,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn storage_from_env_rejects_invalid_pool_configuration() {
+        let err = storage_from_map(&[
+            (ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree"),
+            (ENV_STORAGE_MAX_CONNECTIONS, "1"),
+            (ENV_STORAGE_MIN_CONNECTIONS, "2"),
+        ])
+        .unwrap_err();
+        match err {
+            AuthConfigError::Storage(StorageConfigError::InvalidConfig(message)) => {
+                assert!(message.contains("min_connections"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn env_parsers_treat_empty_values_as_absent() {
+        let empty_u32 = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, |_| Some("   ".to_string()))
+            .expect("empty u32");
+        assert!(empty_u32.is_none());
+        let empty_u64 = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some(String::new()))
+            .expect("empty u64");
+        assert!(empty_u64.is_none());
+    }
+
+    #[test]
+    fn auth_error_display_and_source_cover_all_variants() {
+        let config = AuthError::Config(AuthConfigError::Config(ConfigError::MissingEnv(
+            "GITTREE_FORGEJO_BASE_URL",
+        )));
+        assert_eq!(
+            format!("{config}"),
+            "auth error: auth config error: missing env GITTREE_FORGEJO_BASE_URL"
+        );
+        assert!(config.source().is_some());
+
+        let forgejo = AuthError::Forgejo(ForgejoError::Request("boom".to_string()));
+        assert_eq!(format!("{forgejo}"), "auth forgejo error: forgejo request error: boom");
+        assert!(forgejo.source().is_some());
+
+        let storage = AuthError::Storage(StorageError::Internal {
+            message: "storage down".to_string(),
+        });
+        assert_eq!(
+            format!("{storage}"),
+            "auth storage error: internal error: storage down"
+        );
+        assert!(storage.source().is_some());
+
+        let serve = AuthError::Serve("bind failed".to_string());
+        assert_eq!(format!("{serve}"), "auth serve error: bind failed");
+        assert!(serve.source().is_none());
+    }
+
+    #[tokio::test]
+    async fn build_repositories_constructs_lazy_pool_from_storage_config() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let repos = build_repositories(&config).expect("repositories");
+        let _ = repos;
+    }
+
+    #[test]
+    fn mock_transport_returns_error_when_response_queue_is_empty() {
+        let transport = MockTransport::new(Vec::new());
+        let request = ForgejoRequest {
+            method: gittree_forgejo::ForgejoMethod::Get,
+            url: "http://localhost/api/v1/users/alice".to_string(),
+            body: None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = runtime.block_on(async { transport.send(request).await });
+        assert!(matches!(result, Err(ForgejoError::Request(_))));
     }
 
 
