@@ -10,7 +10,15 @@ async fn main() {
 }
 
 async fn run() -> Result<(), RelayError> {
-    let cli = RelayCli::parse(std::env::args_os()).map_err(RelayError::Cli)?;
+    run_with_args(std::env::args_os()).await
+}
+
+async fn run_with_args<I, T>(args: I) -> Result<(), RelayError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = RelayCli::parse(args).map_err(RelayError::Cli)?;
     if cli.help {
         println!("{}", RelayCli::help_text());
         return Ok(());
@@ -26,4 +34,33 @@ async fn run() -> Result<(), RelayError> {
     }
 
     serve(config).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_with_args;
+    use gittree_relay::RelayError;
+
+    #[tokio::test]
+    async fn run_with_help_flag_returns_ok() {
+        let result = run_with_args(["gittree-relay", "--help"]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_missing_config_file_returns_config_error() {
+        let result = run_with_args([
+            "gittree-relay",
+            "--config",
+            "/definitely/missing/gittree-relay.toml",
+        ])
+        .await;
+        assert!(matches!(result, Err(RelayError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_unknown_flag_returns_cli_error() {
+        let result = run_with_args(["gittree-relay", "--unknown"]).await;
+        assert!(matches!(result, Err(RelayError::Cli(_))));
+    }
 }
