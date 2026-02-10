@@ -2430,4 +2430,286 @@ mod tests {
             .expect("job");
         assert_eq!(job.identifier, "demo");
     }
+
+    #[test]
+    fn helper_validators_cover_reject_paths() {
+        let missing = super::require_non_empty("owner", "   ").unwrap_err();
+        assert!(matches!(missing, ControlHttpError::BadRequest(_)));
+
+        let bad_hex_len = super::require_hex_len("event.id", "11", 64).unwrap_err();
+        assert!(matches!(bad_hex_len, ControlHttpError::BadRequest(_)));
+
+        let bad_hex64 = super::require_hex64("pubkey", "xyz").unwrap_err();
+        assert!(matches!(bad_hex64, ControlHttpError::BadRequest(_)));
+
+        let bad_npub = npub_from_hex("11").unwrap_err();
+        assert!(matches!(bad_npub, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn verify_signed_event_rejects_mismatched_event_id() {
+        let (pubkey, privkey) = test_keys();
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url =
+            format_grasp_server_url_as_clone_url("http://localhost:8085", &npub, "demo")
+                .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("event id mismatch".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: vec!["ws://relay.local".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let mut event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(
+                &announcement,
+                &secret,
+                super::unix_timestamp(),
+            )
+            .expect("signed"),
+        );
+        event.id = "00".repeat(32);
+        let err = super::verify_signed_event(&event).unwrap_err();
+        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn control_event_routes_create_user_and_org_actions() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 201,
+                body: r#"{"login":"alice","email":"alice@example.com"}"#.to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: r#"{"name":"acme","full_name":"Acme Org"}"#.to_string(),
+            },
+        ];
+        let (state, transport, _repos) = test_state_with_auth(responses, Vec::new(), "gittree");
+        let app = build_router(state);
+        let (pubkey, _privkey) = test_keys();
+
+        let create_user = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": pubkey,
+            "content": serde_json::to_string(&json!({
+                "action": "create_user",
+                "username": "alice",
+                "email": "alice@example.com",
+                "password": "secret"
+            })).expect("content")
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&create_user).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let create_org = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": test_keys().0,
+            "content": serde_json::to_string(&json!({
+                "action": "create_org",
+                "name": "acme",
+                "full_name": "Acme Org"
+            })).expect("content")
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&create_org).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let requests = transport.requests();
+        assert!(requests[0].url.ends_with("/api/v1/admin/users"));
+        assert!(requests[1].url.ends_with("/api/v1/admin/users/gittree/orgs"));
+    }
+
+    #[tokio::test]
+    async fn control_event_routes_create_pull_request_action() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"number":5,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/5"}"#.to_string(),
+        }];
+        let (state, transport, _repos) = test_state_with_auth(responses, Vec::new(), "gittree");
+        let app = build_router(state);
+        let (pubkey, _privkey) = test_keys();
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": pubkey,
+            "content": serde_json::to_string(&json!({
+                "action": "create_pull_request",
+                "owner": "gittree",
+                "repo": "demo",
+                "head": "feature",
+                "base": "main",
+                "title": "Add thing"
+            })).expect("content")
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let requests = transport.requests();
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/repos/gittree/demo/pulls"));
+    }
+
+    #[tokio::test]
+    async fn control_event_rejects_repo_action_pubkey_mismatch() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let (pubkey, privkey) = test_keys();
+        let mismatched = "22".repeat(32);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": pubkey,
+            "content": serde_json::to_string(&json!({
+                "action": "create_repo",
+                "name": "demo",
+                "pubkey": mismatched,
+                "privkey": privkey
+            })).expect("content")
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_invalid_kind_and_auth_pubkey_mismatch() {
+        let (state, _transport, repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+        repos
+            .upsert_account(AccountRecord::new(&pubkey, "alice").expect("account"))
+            .await
+            .expect("upsert");
+
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, "demo")
+            .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("invalid kind".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let now = super::unix_timestamp();
+        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
+            &announcement,
+            &secret,
+            now,
+        )
+        .expect("signed");
+
+        let mut invalid_kind = api_event_from_relay(signed.clone());
+        invalid_kind.kind = 1;
+        let body = serde_json::to_vec(&RepoCreateRequest {
+            event: invalid_kind,
+            private: Some(false),
+        })
+        .expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let other_secret = SecretKey::from_slice(&[2u8; 32]).expect("secret");
+        let mismatch_body = serde_json::to_vec(&RepoCreateRequest {
+            event: api_event_from_relay(signed),
+            private: Some(false),
+        })
+        .expect("body");
+        let mismatch_auth = nip98_sign_event(
+            &other_secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&mismatch_body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&mismatch_auth))
+                    .body(Body::from(mismatch_body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
 }
