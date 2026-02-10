@@ -1336,7 +1336,8 @@ fn filter_from_event_filter(filter: &gittree_core::EventFilter) -> Filter {
 mod tests {
     use super::Session;
     use crate::{
-        AdmissionDecider, ClientMessage, EventStore, MemoryStore, NostrEvent, Policy, ServerMessage,
+        AdmissionDecider, ClientMessage, EventStore, MemoryStore, NostrEvent, Policy,
+        ServerMessage, StoreError, StoreOutcome,
     };
     use async_trait::async_trait;
     use gittree_core::{AdmissionDecision, EventFilter};
@@ -1417,6 +1418,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn req_rejects_invalid_filters_and_query_errors() {
+        let mut parse_session = Session::new(MemoryStore::new());
+        let parse_response = parse_session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"ids": "not-an-array"})],
+            })
+            .await;
+        assert!(matches!(parse_response[0], ServerMessage::Notice { .. }));
+
+        let mut query_session = Session::new(ScriptedStore::query_error());
+        let query_response = query_session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(matches!(query_response[0], ServerMessage::Notice { .. }));
+    }
+
+    #[tokio::test]
     async fn count_returns_match_count() {
         let store = MemoryStore::new();
         let event = NostrEvent {
@@ -1443,6 +1465,84 @@ mod tests {
             responses[0],
             ServerMessage::Count { count: 1, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn count_rejects_rate_limit_auth_membership_and_query_errors() {
+        let mut rate_limited = Session::with_policy(
+            MemoryStore::new(),
+            Policy {
+                max_requests_per_min: Some(1),
+                ..Policy::default()
+            },
+        );
+        let _ = rate_limited
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub-1".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        let rate_response = rate_limited
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub-2".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(matches!(rate_response[0], ServerMessage::Notice { .. }));
+
+        let mut auth_required = Session::with_broadcast(
+            MemoryStore::new(),
+            Policy::default(),
+            None,
+            tokio::sync::broadcast::channel(4).0,
+            true,
+            false,
+        );
+        let auth_response = auth_required
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(matches!(
+            auth_response[0],
+            ServerMessage::Closed { ref message, .. } if message == super::AUTH_REQUIRED_REASON
+        ));
+
+        let membership = Arc::new(InMemoryRepositories::new());
+        let mut membership_required =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+                .with_membership(Some("tenant-1".to_string()), Some(membership))
+                .with_membership_requirements(true, false);
+        authenticate_session(&mut membership_required).await;
+        let membership_response = membership_required
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(matches!(
+            membership_response[0],
+            ServerMessage::Closed { ref message, .. } if message.starts_with(super::RESTRICTED_PREFIX)
+        ));
+
+        let mut parse_session = Session::new(MemoryStore::new());
+        let parse_response = parse_session
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"ids": "not-an-array"})],
+            })
+            .await;
+        assert!(matches!(parse_response[0], ServerMessage::Notice { .. }));
+
+        let mut query_session = Session::new(ScriptedStore::query_error());
+        let query_response = query_session
+            .handle_message(ClientMessage::Count {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(matches!(query_response[0], ServerMessage::Notice { .. }));
     }
 
     #[tokio::test]
@@ -1772,6 +1872,58 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ScriptedStoreMode {
+        QueryError,
+        InsertError,
+    }
+
+    struct ScriptedStore {
+        mode: ScriptedStoreMode,
+        inner: MemoryStore,
+    }
+
+    impl ScriptedStore {
+        fn query_error() -> Self {
+            Self {
+                mode: ScriptedStoreMode::QueryError,
+                inner: MemoryStore::new(),
+            }
+        }
+
+        fn insert_error() -> Self {
+            Self {
+                mode: ScriptedStoreMode::InsertError,
+                inner: MemoryStore::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EventStore for ScriptedStore {
+        async fn insert(&self, event: NostrEvent) -> Result<StoreOutcome, StoreError> {
+            if matches!(self.mode, ScriptedStoreMode::InsertError) {
+                return Err(StoreError::Backend("insert failure".to_string()));
+            }
+            self.inner.insert(event).await
+        }
+
+        async fn get(&self, id: &str) -> Result<Option<NostrEvent>, StoreError> {
+            self.inner.get(id).await
+        }
+
+        async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn query(&self, filters: &[crate::Filter]) -> Result<Vec<NostrEvent>, StoreError> {
+            if matches!(self.mode, ScriptedStoreMode::QueryError) {
+                return Err(StoreError::Backend("query failure".to_string()));
+            }
+            self.inner.query(filters).await
+        }
+    }
+
     fn signed_event(seed: &str) -> NostrEvent {
         signed_event_with_tags(seed, 1, Vec::new())
     }
@@ -1875,6 +2027,40 @@ mod tests {
                 ref message,
                 ..
             } if message == "invalid auth kind"
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_invalid_signature() {
+        let mut session =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let challenge = session.auth_challenge().expect("challenge");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut event = signed_event_with_tags_at(
+            "auth-bad-signature",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), challenge],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
+        );
+        event.sig = "00".repeat(64);
+        let response = session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(event).expect("auth event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if !message.is_empty()
         ));
     }
 
@@ -2090,6 +2276,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn event_rejects_invalid_payload_and_policy_violation() {
+        let mut invalid_payload_session = Session::new(MemoryStore::new());
+        let invalid_payload = invalid_payload_session
+            .handle_message(ClientMessage::Event(json!({"not": "an event"})))
+            .await;
+        assert!(matches!(invalid_payload[0], ServerMessage::Notice { .. }));
+
+        let mut policy_session = Session::with_policy(
+            MemoryStore::new(),
+            Policy {
+                max_future_seconds: 0,
+                ..Policy::default()
+            },
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let future_event = signed_event_with_tags_at("future", 1, Vec::new(), now + 120);
+        let response = policy_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(future_event).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message == "event timestamp too far in future"
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_rejects_auth_pubkey_mismatch_and_insert_failure() {
+        let mut mismatch_session =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        authenticate_session(&mut mismatch_session).await;
+        let mismatched_event = signed_event_with_tags("mismatch", 1, Vec::new());
+        mismatch_session
+            .auth
+            .as_mut()
+            .expect("auth")
+            .authenticated_pubkey = Some("aa".repeat(32));
+        let mismatch_response = mismatch_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(mismatched_event).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            mismatch_response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message == super::AUTH_PUBKEY_MISMATCH_REASON
+        ));
+
+        let mut insert_failure = Session::new(ScriptedStore::insert_error());
+        let response = insert_failure
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("insert-fail")).expect("event"),
+            ))
+            .await;
+        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+    }
+
+    #[tokio::test]
     async fn event_rejects_auth_kind_as_regular_event() {
         let mut session = Session::new(MemoryStore::new());
         let event = signed_event_with_tags("auth-event", super::AUTH_KIND, Vec::new());
@@ -2182,6 +2437,194 @@ mod tests {
                 ref message,
                 ..
             } if message.contains("missing invite code")
+        ));
+    }
+
+    #[tokio::test]
+    async fn join_request_rejects_without_membership_backend_tenant_or_nip70_tag() {
+        let join_event = signed_event_with_tags(
+            "join-guard",
+            super::NIP43_JOIN_KIND,
+            vec![
+                vec!["-".to_string()],
+                vec!["claim".to_string(), "invite-code".to_string()],
+            ],
+        );
+        let mut no_backend = Session::new(MemoryStore::new());
+        let response = no_backend
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(join_event.clone()).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message.contains("relay does not support membership")
+        ));
+
+        let membership = Arc::new(InMemoryRepositories::new());
+        let mut no_tenant =
+            Session::new(MemoryStore::new()).with_membership(None, Some(membership.clone()));
+        let response = no_tenant
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(join_event.clone()).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message.contains("relay does not support membership")
+        ));
+
+        let no_nip70 = signed_event_with_tags(
+            "join-no-nip70",
+            super::NIP43_JOIN_KIND,
+            vec![vec!["claim".to_string(), "invite-code".to_string()]],
+        );
+        let mut no_nip70_session = Session::new(MemoryStore::new())
+            .with_membership(Some("tenant-1".to_string()), Some(membership));
+        let response = no_nip70_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(no_nip70).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message.contains("missing nip-70 tag")
+        ));
+    }
+
+    #[tokio::test]
+    async fn join_and_leave_reject_invalid_or_duplicate_membership_states() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+        let join_unknown_invite = signed_event_with_tags(
+            "join-unknown-invite",
+            super::NIP43_JOIN_KIND,
+            vec![
+                vec!["-".to_string()],
+                vec!["claim".to_string(), "unknown".to_string()],
+            ],
+        );
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        let response = session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(join_unknown_invite.clone()).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message.contains("invalid invite code")
+        ));
+
+        let pubkey_bytes = hex::decode(&join_unknown_invite.pubkey).expect("pubkey");
+        let invite = RelayInviteRecord::new(
+            tenant_id,
+            "active-member",
+            "member",
+            &"11".repeat(32),
+            None,
+            None,
+            1,
+        )
+        .expect("invite");
+        membership
+            .insert_invite(invite)
+            .await
+            .expect("insert invite");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: pubkey_bytes.clone(),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("insert membership");
+        let duplicate_join = signed_event_with_tags(
+            "join-duplicate",
+            super::NIP43_JOIN_KIND,
+            vec![
+                vec!["-".to_string()],
+                vec!["claim".to_string(), "active-member".to_string()],
+            ],
+        );
+        let response = session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(duplicate_join).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: true,
+                ref message,
+                ..
+            } if message.contains("already a member")
+        ));
+
+        let mut leave_session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        let leave_event = signed_event_with_tags(
+            "leave-not-member",
+            super::NIP43_LEAVE_KIND,
+            vec![vec!["-".to_string()]],
+        );
+        let response = leave_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(leave_event.clone()).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: true,
+                ref message,
+                ..
+            } if message.contains("access revoked")
+        ));
+
+        let leave_pubkey = hex::decode(&leave_event.pubkey).expect("pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: leave_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_LEFT.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("insert left membership");
+        let response = leave_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(leave_event).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message.contains("not a member")
         ));
     }
 
@@ -2615,6 +3058,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn req_membership_list_event_surfaces_list_memberships_failure() {
+        let membership = Arc::new(ScriptedMembership::new("list_memberships"));
+        let relay_secret = SecretKey::from_slice(&[0x42; 32]).expect("secret");
+        let secp = Secp256k1::new();
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some("tenant-1".to_string()), Some(membership))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        let response = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"kinds":[super::NIP43_MEMBERSHIP_KIND]})],
+            })
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.contains("list_memberships failure")
+        ));
+    }
+
+    #[tokio::test]
+    async fn scripted_membership_remove_membership_passthrough_returns_false() {
+        let membership = ScriptedMembership::new("none");
+        let removed = membership
+            .remove_membership("tenant-1", &[1, 2, 3])
+            .await
+            .expect("remove");
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn req_invite_virtual_event_guards_require_full_context_and_active_member() {
+        let req = ClientMessage::Req {
+            subscription_id: "sub".to_string(),
+            filters: vec![json!({"kinds":[super::NIP43_INVITE_KIND]})],
+        };
+
+        let mut no_membership = Session::new(MemoryStore::new());
+        let response = no_membership.handle_message(req.clone()).await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.contains("relay does not support invites")
+        ));
+
+        let membership = Arc::new(InMemoryRepositories::new());
+        let mut no_tenant =
+            Session::new(MemoryStore::new()).with_membership(None, Some(membership.clone()));
+        let response = no_tenant.handle_message(req.clone()).await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.contains("relay does not support invites")
+        ));
+
+        let mut no_signer = Session::new(MemoryStore::new())
+            .with_membership(Some("tenant-1".to_string()), Some(membership.clone()));
+        let response = no_signer.handle_message(req.clone()).await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.contains("relay does not support invites")
+        ));
+
+        let relay_secret = SecretKey::from_slice(&[0x33; 32]).expect("secret");
+        let secp = Secp256k1::new();
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+        let mut no_auth = Session::new(MemoryStore::new())
+            .with_membership(Some("tenant-1".to_string()), Some(membership.clone()))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        let response = no_auth.handle_message(req.clone()).await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message == super::AUTH_REQUIRED_REASON
+        ));
+
+        let mut no_member =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+                .with_membership(Some("tenant-1".to_string()), Some(membership.clone()))
+                .with_relay_signer(
+                    relay_pubkey.serialize().to_vec(),
+                    relay_secret.secret_bytes().to_vec(),
+                );
+        authenticate_session(&mut no_member).await;
+        let response = no_member.handle_message(req.clone()).await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.contains("membership required")
+        ));
+
+        let auth_pubkey = no_member
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.authenticated_pubkey.as_ref())
+            .cloned()
+            .expect("auth pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: "tenant-1".to_string(),
+                pubkey: hex::decode(auth_pubkey).expect("pubkey bytes"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_LEFT.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("insert membership");
+        let response = no_member.handle_message(req).await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.contains("membership required")
+        ));
+    }
+
+    #[tokio::test]
     async fn admission_requires_related_events_rejects_when_missing() {
         let mut filter = EventFilter::new();
         filter.ids = vec!["missing".to_string()];
@@ -2642,6 +3219,26 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn admission_requires_related_events_surfaces_store_query_error() {
+        let mut filter = EventFilter::new();
+        filter.ids = vec!["missing".to_string()];
+        filter.limit = Some(1);
+        let admission = StubAdmission {
+            decision: AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![filter],
+            },
+        };
+        let mut session =
+            Session::with_admission(ScriptedStore::query_error(), Arc::new(admission));
+        let response = session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("needs-related-error")).expect("event"),
+            ))
+            .await;
+        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+    }
+
     #[test]
     fn relay_host_and_filter_matching_helpers_cover_edges() {
         assert_eq!(
@@ -2653,6 +3250,10 @@ mod tests {
         assert_eq!(
             super::relay_host_from_url("https://[::1]:443"),
             Some("::1".to_string())
+        );
+        assert_eq!(
+            super::relay_host_from_url("https://[::1"),
+            Some("[".to_string())
         );
 
         let event = signed_event_with_tags("bad-tags", 1, vec![Vec::new()]);
@@ -2893,6 +3494,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_accepts_event() {
+        let admission = StubAdmission {
+            decision: AdmissionDecision::Accept,
+        };
+        let mut session = Session::with_admission(MemoryStore::new(), Arc::new(admission));
+        let response = session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("admission-accept")).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: true,
+                ref message,
+                ..
+            } if message == "saved"
+        ));
+    }
+
+    #[tokio::test]
     async fn admission_requires_related_events() {
         let related = signed_event("rel");
         let store = MemoryStore::new();
@@ -2935,6 +3557,20 @@ mod tests {
         let responses = session.dispatch_event(&event);
         assert_eq!(responses.len(), 1);
         assert!(matches!(responses[0], ServerMessage::Event { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_skips_subscriptions_with_empty_filter_sets() {
+        let store = MemoryStore::new();
+        let mut session = Session::new(store);
+        session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: Vec::new(),
+            })
+            .await;
+        let responses = session.dispatch_event(&signed_event("seed-empty"));
+        assert!(responses.is_empty());
     }
 
     #[tokio::test]
