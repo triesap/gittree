@@ -49,10 +49,19 @@ pub struct AuthServiceConfig {
 
 impl AuthServiceConfig {
     pub fn from_env() -> Result<Self, AuthConfigError> {
-        let services = ServicesConfig::from_env_validated().map_err(AuthConfigError::Config)?;
-        let auth = AuthSettings::from_env().map_err(AuthConfigError::Config)?;
-        let forgejo = ForgejoConfig::from_env().map_err(AuthConfigError::Config)?;
-        let storage = storage_from_env()?;
+        Self::from_env_with(|key| std::env::var(key).ok())
+    }
+
+    fn from_env_with<F>(mut get_var: F) -> Result<Self, AuthConfigError>
+    where
+        F: FnMut(&'static str) -> Option<String>,
+    {
+        let services =
+            ServicesConfig::from_env_validated_with(&mut get_var).map_err(AuthConfigError::Config)?;
+        let auth = AuthSettings::from_env_with(&mut get_var).map_err(AuthConfigError::Config)?;
+        let forgejo =
+            ForgejoConfig::from_env_with(&mut get_var).map_err(AuthConfigError::Config)?;
+        let storage = storage_from_env_with(&mut get_var)?;
         Ok(Self {
             bind: services.auth.bind,
             auth,
@@ -106,10 +115,6 @@ impl std::fmt::Display for StorageConfigError {
 }
 
 impl std::error::Error for StorageConfigError {}
-
-fn storage_from_env() -> Result<StorageConfig, AuthConfigError> {
-    storage_from_env_with(|key| std::env::var(key).ok())
-}
 
 fn storage_from_env_with<F>(mut get_var: F) -> Result<StorageConfig, AuthConfigError>
 where
@@ -736,6 +741,16 @@ mod tests {
         storage_from_env_with(|key| values.get(key).cloned())
     }
 
+    fn auth_service_config_from_map(
+        entries: &[(&'static str, &'static str)],
+    ) -> Result<AuthServiceConfig, AuthConfigError> {
+        let values: HashMap<&'static str, String> = entries
+            .iter()
+            .map(|(key, value)| (*key, (*value).to_string()))
+            .collect();
+        AuthServiceConfig::from_env_with(|key| values.get(key).cloned())
+    }
+
     #[derive(Clone, Default)]
     struct MockTransport {
         requests: Arc<Mutex<Vec<ForgejoRequest>>>,
@@ -953,6 +968,37 @@ mod tests {
 
         let invalid_config = StorageConfigError::InvalidConfig("broken".to_string());
         assert_eq!(invalid_config.to_string(), "broken");
+    }
+
+    #[test]
+    fn auth_service_config_from_env_with_loads_required_sections() {
+        let config = auth_service_config_from_map(&[
+            ("GITTREE_AUTH_BIND", "127.0.0.1:18089"),
+            ("GITTREE_AUTH_EMAIL_DOMAIN", "local.test"),
+            ("GITTREE_AUTH_MAX_SKEW_SECONDS", "42"),
+            ("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000"),
+            ("GITTREE_FORGEJO_API_TOKEN", "token"),
+            ("GITTREE_FORGEJO_OWNER", "gittree"),
+            ("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087"),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret"),
+            (ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree"),
+        ])
+        .expect("auth config");
+        assert_eq!(config.bind, "127.0.0.1:18089");
+        assert_eq!(config.auth.email_domain, "local.test");
+        assert_eq!(config.auth.max_skew_seconds, 42);
+        assert_eq!(config.forgejo.owner, "gittree");
+        assert_eq!(
+            config.storage.read_connection,
+            "postgres://user:pass@localhost:5432/gittree"
+        );
+    }
+
+    #[test]
+    fn auth_service_config_from_env_with_maps_config_error() {
+        let err = auth_service_config_from_map(&[(ENV_STORAGE_READ_URL, "postgres://localhost/gittree")])
+            .expect_err("missing forgejo config");
+        assert!(matches!(err, AuthConfigError::Config(ConfigError::MissingEnv(_))));
     }
 
     #[test]
