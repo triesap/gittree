@@ -1037,6 +1037,60 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(body, Bytes::from_static(b"ok"));
+    }
+
+    #[tokio::test]
+    async fn signup_returns_internal_when_forgejo_responses_are_incomplete() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "POST", now, None);
+        let responses = vec![ForgejoResponse {
+            status: 404,
+            body: String::new(),
+        }];
+        let (state, _repos, _transport) = test_state(responses);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn auth_http_error_internal_maps_to_500() {
+        let response = AuthHttpError::Internal("boom".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[test]
     fn build_request_url_prefers_forwarded_proto() {
         let mut headers = HeaderMap::new();
