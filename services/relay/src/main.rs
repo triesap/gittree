@@ -50,9 +50,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::{run_with_args, run_with_args_and_serve};
-    use gittree_relay::RelayError;
-    use std::sync::Arc;
+    use gittree_relay::{RelayConfig, RelayError};
+    use std::ffi::OsString;
+    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env_var_for_test(key: &str, value: &str) -> Option<OsString> {
+        let previous = std::env::var_os(key);
+        // SAFETY: these tests serialize env mutations using ENV_LOCK and restore previous values.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        previous
+    }
+
+    fn clear_env_var_for_test(key: &str) -> Option<OsString> {
+        let previous = std::env::var_os(key);
+        // SAFETY: these tests serialize env mutations using ENV_LOCK and restore previous values.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        previous
+    }
+
+    fn restore_env_var(key: &str, previous: Option<OsString>) {
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var(key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+    }
 
     #[tokio::test]
     async fn run_with_help_flag_returns_ok() {
@@ -88,5 +120,69 @@ mod tests {
     async fn run_with_unknown_flag_returns_cli_error() {
         let result = run_with_args(["gittree-relay", "--unknown"]).await;
         assert!(matches!(result, Err(RelayError::Cli(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_env_path_returns_config_error_when_storage_url_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = clear_env_var_for_test("GITTREE_STORAGE_READ_URL");
+
+        let called = Arc::new(AtomicBool::new(false));
+        let called_flag = called.clone();
+        let result = run_with_args_and_serve(["gittree-relay"], move |_config| {
+            called_flag.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await;
+
+        restore_env_var("GITTREE_STORAGE_READ_URL", previous);
+        assert!(matches!(result, Err(RelayError::Config(_))));
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn run_with_bind_override_passes_bind_to_injected_serve() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = set_env_var_for_test(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+        );
+        let captured = Arc::new(Mutex::new(None::<RelayConfig>));
+        let captured_ref = captured.clone();
+
+        let result = run_with_args_and_serve(
+            ["gittree-relay", "--bind", "127.0.0.1:9191"],
+            move |config| {
+                *captured_ref.lock().expect("capture lock") = Some(config);
+                async { Ok(()) }
+            },
+        )
+        .await;
+
+        restore_env_var("GITTREE_STORAGE_READ_URL", previous);
+        assert!(result.is_ok());
+        let config = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("captured config");
+        assert_eq!(config.bind, "127.0.0.1:9191");
+    }
+
+    #[tokio::test]
+    async fn run_with_injected_serve_propagates_serve_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = set_env_var_for_test(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+        );
+
+        let result = run_with_args_and_serve(["gittree-relay"], |_config| async {
+            Err(RelayError::Serve("boom".to_string()))
+        })
+        .await;
+
+        restore_env_var("GITTREE_STORAGE_READ_URL", previous);
+        assert!(matches!(result, Err(RelayError::Serve(message)) if message == "boom"));
     }
 }
