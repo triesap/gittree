@@ -437,13 +437,13 @@ where
             .await?;
         let key = record.relay_url.clone();
         let now = Instant::now();
-        let mut entries = self
-            .cache
-            .relay_compatibility
-            .write()
-            .map_err(|_| StorageError::Internal {
-                message: "relay compatibility cache poisoned".to_string(),
-            })?;
+        let mut entries =
+            self.cache
+                .relay_compatibility
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "relay compatibility cache poisoned".to_string(),
+                })?;
         entries.insert(
             key,
             CacheEntry {
@@ -464,13 +464,13 @@ where
         }
 
         let (cached, stale) = {
-            let entries = self
-                .cache
-                .relay_compatibility
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "relay compatibility cache poisoned".to_string(),
-                })?;
+            let entries =
+                self.cache
+                    .relay_compatibility
+                    .read()
+                    .map_err(|_| StorageError::Internal {
+                        message: "relay compatibility cache poisoned".to_string(),
+                    })?;
             match entries.get(relay_url) {
                 Some(entry) if self.is_fresh(entry) => (Some(entry.value.clone()), false),
                 Some(_) => (None, true),
@@ -520,7 +520,10 @@ impl<R> RelayPublishRepository for CachedRepositories<R>
 where
     R: RelayPublishRepository,
 {
-    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError> {
+    async fn enqueue_relay_publish(
+        &self,
+        request: RelayPublishRequest,
+    ) -> Result<(), StorageError> {
         self.inner.enqueue_relay_publish(request).await
     }
 
@@ -560,7 +563,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheConfig, CachedRepositories};
+    use super::{CacheConfig, CacheEntry, CachedRepositories};
     use crate::{
         AnnouncementRepository, RelayCompatibilityRecord, RelayCompatibilityRepository,
         RelayProbeMetadata, RelayPublishJob, RelayPublishRepository, RelayPublishRequest,
@@ -569,9 +572,10 @@ mod tests {
     use async_trait::async_trait;
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use std::collections::HashMap;
+    use std::panic::AssertUnwindSafe;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use time::OffsetDateTime;
 
     #[derive(Debug, Default)]
@@ -688,12 +692,12 @@ mod tests {
             record: RelayCompatibilityRecord,
         ) -> Result<(), StorageError> {
             let key = CountingRepo::relay_key(&record.relay_url);
-            let mut map =
-                self.relay_compatibility
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "relay compatibility store poisoned".to_string(),
-                    })?;
+            let mut map = self
+                .relay_compatibility
+                .write()
+                .map_err(|_| StorageError::Internal {
+                    message: "relay compatibility store poisoned".to_string(),
+                })?;
             map.insert(key, record);
             Ok(())
         }
@@ -704,12 +708,12 @@ mod tests {
         ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
             self.relay_compatibility_calls
                 .fetch_add(1, Ordering::SeqCst);
-            let map =
-                self.relay_compatibility
-                    .read()
-                    .map_err(|_| StorageError::Internal {
-                        message: "relay compatibility store poisoned".to_string(),
-                    })?;
+            let map = self
+                .relay_compatibility
+                .read()
+                .map_err(|_| StorageError::Internal {
+                    message: "relay compatibility store poisoned".to_string(),
+                })?;
             Ok(map.get(relay_url).cloned())
         }
     }
@@ -812,8 +816,21 @@ mod tests {
             missing_required: Vec::new(),
             missing_optional: Vec::new(),
         };
-        RelayCompatibilityRecord::new(&report, 10, &RelayProbeMetadata::default())
-            .expect("record")
+        RelayCompatibilityRecord::new(&report, 10, &RelayProbeMetadata::default()).expect("record")
+    }
+
+    fn poison_lock<T>(lock: &RwLock<T>) {
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _guard = lock.write().expect("lock");
+            panic!("poison lock");
+        }));
+    }
+
+    fn assert_internal_message(err: StorageError, expected: &str) {
+        match err {
+            StorageError::Internal { message } => assert_eq!(message, expected),
+            other => panic!("expected internal error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1133,5 +1150,98 @@ mod tests {
         assert_eq!(inner.mark_success_calls.load(Ordering::SeqCst), 1);
         assert_eq!(inner.mark_failed_calls.load(Ordering::SeqCst), 1);
         assert_eq!(inner.pending_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cache_helpers_cover_none_ttl_and_zero_max_entries() {
+        let cached = CachedRepositories::with_config(
+            Arc::new(CountingRepo::new()),
+            CacheConfig::new(None, 0),
+        );
+        let mut map: HashMap<String, CacheEntry<i32>> = HashMap::new();
+        map.insert(
+            "k".to_string(),
+            CacheEntry {
+                value: 1,
+                stored_at: Instant::now(),
+            },
+        );
+        cached.evict_if_needed(&mut map);
+        assert!(map.is_empty());
+
+        let fresh = CacheEntry {
+            value: 2,
+            stored_at: Instant::now(),
+        };
+        assert!(cached.is_fresh(&fresh));
+    }
+
+    #[tokio::test]
+    async fn cache_reports_poisoned_announcement_cache() {
+        let inner = Arc::new(CountingRepo::new());
+        let cached = CachedRepositories::new(inner.clone());
+        let record = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("record");
+
+        poison_lock(&cached.cache.announcements);
+        let insert_err = cached
+            .insert_announcement(record.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(insert_err, "announcement cache poisoned");
+        let list_err = cached
+            .list_announcements(&record.pubkey, "repo")
+            .await
+            .unwrap_err();
+        assert_internal_message(list_err, "announcement cache poisoned");
+
+        let latest_poisoned = CachedRepositories::new(inner.clone());
+        poison_lock(&latest_poisoned.cache.latest_announcements);
+        let latest_insert_err = latest_poisoned
+            .insert_announcement(record)
+            .await
+            .unwrap_err();
+        assert_internal_message(latest_insert_err, "announcement cache poisoned");
+    }
+
+    #[tokio::test]
+    async fn cache_reports_poisoned_state_cache() {
+        let inner = Arc::new(CountingRepo::new());
+        let cached = CachedRepositories::new(inner);
+        let record = RepoStateRecord::new(&hex_32(0x33), &hex_32(0x44), 10, &sample_state("repo"))
+            .expect("record");
+
+        poison_lock(&cached.cache.latest_states);
+        let insert_err = cached.insert_state(record.clone()).await.unwrap_err();
+        assert_internal_message(insert_err, "state cache poisoned");
+        let latest_err = cached
+            .latest_state(&record.pubkey, "repo")
+            .await
+            .unwrap_err();
+        assert_internal_message(latest_err, "state cache poisoned");
+    }
+
+    #[tokio::test]
+    async fn cache_reports_poisoned_relay_compatibility_cache() {
+        let inner = Arc::new(CountingRepo::new());
+        let cached = CachedRepositories::new(inner);
+        let record = sample_relay_compatibility("wss://relay.example");
+
+        poison_lock(&cached.cache.relay_compatibility);
+        let upsert_err = cached
+            .upsert_relay_compatibility(record.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(upsert_err, "relay compatibility cache poisoned");
+        let read_err = cached
+            .relay_compatibility(&record.relay_url)
+            .await
+            .unwrap_err();
+        assert_internal_message(read_err, "relay compatibility cache poisoned");
     }
 }

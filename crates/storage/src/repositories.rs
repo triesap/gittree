@@ -6,8 +6,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicI64, Ordering};
 use time::OffsetDateTime;
 
 #[async_trait]
@@ -55,7 +55,8 @@ pub trait RepoMappingRepository: Send + Sync {
 #[async_trait]
 pub trait AccountRepository: Send + Sync {
     async fn upsert_account(&self, record: AccountRecord) -> Result<(), StorageError>;
-    async fn account_by_pubkey(&self, pubkey: &[u8]) -> Result<Option<AccountRecord>, StorageError>;
+    async fn account_by_pubkey(&self, pubkey: &[u8])
+    -> Result<Option<AccountRecord>, StorageError>;
     async fn account_by_username(
         &self,
         username: &str,
@@ -65,10 +66,8 @@ pub trait AccountRepository: Send + Sync {
 #[async_trait]
 pub trait ProfileRepository: Send + Sync {
     async fn upsert_profile(&self, record: ProfileRecord) -> Result<(), StorageError>;
-    async fn profile_by_pubkey(
-        &self,
-        pubkey: &[u8],
-    ) -> Result<Option<ProfileRecord>, StorageError>;
+    async fn profile_by_pubkey(&self, pubkey: &[u8])
+    -> Result<Option<ProfileRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -86,17 +85,17 @@ pub trait RelayCompatibilityRepository: Send + Sync {
 #[async_trait]
 pub trait RelayTenantRepository: Send + Sync {
     async fn upsert_tenant(&self, record: RelayTenantRecord) -> Result<(), StorageError>;
-    async fn tenant_by_id(&self, tenant_id: &str) -> Result<Option<RelayTenantRecord>, StorageError>;
+    async fn tenant_by_id(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<RelayTenantRecord>, StorageError>;
     async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError>;
     async fn list_tenants(&self) -> Result<Vec<RelayTenantRecord>, StorageError>;
 }
 
 #[async_trait]
 pub trait RelayMembershipRepository: Send + Sync {
-    async fn upsert_membership(
-        &self,
-        record: RelayMembershipRecord,
-    ) -> Result<(), StorageError>;
+    async fn upsert_membership(&self, record: RelayMembershipRecord) -> Result<(), StorageError>;
     async fn membership_by_pubkey(
         &self,
         tenant_id: &str,
@@ -106,22 +105,15 @@ pub trait RelayMembershipRepository: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<RelayMembershipRecord>, StorageError>;
-    async fn remove_membership(
-        &self,
-        tenant_id: &str,
-        pubkey: &[u8],
-    ) -> Result<bool, StorageError>;
+    async fn remove_membership(&self, tenant_id: &str, pubkey: &[u8])
+    -> Result<bool, StorageError>;
     async fn insert_invite(&self, record: RelayInviteRecord) -> Result<(), StorageError>;
     async fn invite_by_code(
         &self,
         tenant_id: &str,
         invite_code: &str,
     ) -> Result<Option<RelayInviteRecord>, StorageError>;
-    async fn delete_invite(
-        &self,
-        tenant_id: &str,
-        invite_code: &str,
-    ) -> Result<(), StorageError>;
+    async fn delete_invite(&self, tenant_id: &str, invite_code: &str) -> Result<(), StorageError>;
 }
 
 #[async_trait]
@@ -132,14 +124,14 @@ pub trait EventRepository: Send + Sync {
         tenant_id: &str,
         event_id: &[u8],
     ) -> Result<Option<EventRecord>, StorageError>;
-    async fn delete_event(&self, tenant_id: &str, event_id: &[u8])
-        -> Result<bool, StorageError>;
+    async fn delete_event(&self, tenant_id: &str, event_id: &[u8]) -> Result<bool, StorageError>;
     async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError>;
 }
 
 #[async_trait]
 pub trait RelayPublishRepository: Send + Sync {
-    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError>;
+    async fn enqueue_relay_publish(&self, request: RelayPublishRequest)
+    -> Result<(), StorageError>;
     async fn claim_relay_publish(
         &self,
         now: OffsetDateTime,
@@ -307,12 +299,12 @@ impl RepoMappingRepository for InMemoryRepositories {
                 .map_err(|_| StorageError::Internal {
                     message: "forgejo mapping store poisoned".to_string(),
                 })?;
-        let mut repo_map =
-            self.mappings_by_repo
-                .write()
-                .map_err(|_| StorageError::Internal {
-                    message: "repo mapping store poisoned".to_string(),
-                })?;
+        let mut repo_map = self
+            .mappings_by_repo
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "repo mapping store poisoned".to_string(),
+            })?;
         forgejo_map.insert(forgejo_key, record.clone());
         repo_map.insert(repo_key, record);
         Ok(())
@@ -324,12 +316,12 @@ impl RepoMappingRepository for InMemoryRepositories {
         repo: &str,
     ) -> Result<Option<RepoMappingRecord>, StorageError> {
         let key = Self::forgejo_key(owner, repo);
-        let map =
-            self.mappings_by_forgejo
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "forgejo mapping store poisoned".to_string(),
-                })?;
+        let map = self
+            .mappings_by_forgejo
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "forgejo mapping store poisoned".to_string(),
+            })?;
         Ok(map.get(&key).cloned())
     }
 
@@ -339,22 +331,22 @@ impl RepoMappingRepository for InMemoryRepositories {
         identifier: &str,
     ) -> Result<Option<RepoMappingRecord>, StorageError> {
         let key = Self::key(pubkey, identifier);
-        let map =
-            self.mappings_by_repo
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "repo mapping store poisoned".to_string(),
-                })?;
+        let map = self
+            .mappings_by_repo
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "repo mapping store poisoned".to_string(),
+            })?;
         Ok(map.get(&key).cloned())
     }
 
     async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
-        let map =
-            self.mappings_by_repo
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "repo mapping store poisoned".to_string(),
-                })?;
+        let map = self
+            .mappings_by_repo
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "repo mapping store poisoned".to_string(),
+            })?;
         let mut records: Vec<RepoMappingRecord> = map.values().cloned().collect();
         records.sort_by(|a, b| a.forgejo_full_name().cmp(&b.forgejo_full_name()));
         Ok(records)
@@ -402,12 +394,12 @@ impl AccountRepository for InMemoryRepositories {
         pubkey: &[u8],
     ) -> Result<Option<AccountRecord>, StorageError> {
         let key = Self::account_key(pubkey);
-        let map =
-            self.accounts_by_pubkey
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "account pubkey store poisoned".to_string(),
-                })?;
+        let map = self
+            .accounts_by_pubkey
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "account pubkey store poisoned".to_string(),
+            })?;
         Ok(map.get(&key).cloned())
     }
 
@@ -415,12 +407,12 @@ impl AccountRepository for InMemoryRepositories {
         &self,
         username: &str,
     ) -> Result<Option<AccountRecord>, StorageError> {
-        let map =
-            self.accounts_by_username
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "account username store poisoned".to_string(),
-                })?;
+        let map = self
+            .accounts_by_username
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "account username store poisoned".to_string(),
+            })?;
         Ok(map.get(username).cloned())
     }
 }
@@ -429,12 +421,12 @@ impl AccountRepository for InMemoryRepositories {
 impl ProfileRepository for InMemoryRepositories {
     async fn upsert_profile(&self, record: ProfileRecord) -> Result<(), StorageError> {
         let key = Self::profile_key(&record.pubkey);
-        let mut profiles =
-            self.profiles_by_pubkey
-                .write()
-                .map_err(|_| StorageError::Internal {
-                    message: "profile store poisoned".to_string(),
-                })?;
+        let mut profiles = self
+            .profiles_by_pubkey
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "profile store poisoned".to_string(),
+            })?;
         profiles.insert(key, record);
         Ok(())
     }
@@ -444,12 +436,12 @@ impl ProfileRepository for InMemoryRepositories {
         pubkey: &[u8],
     ) -> Result<Option<ProfileRecord>, StorageError> {
         let key = Self::profile_key(pubkey);
-        let profiles =
-            self.profiles_by_pubkey
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "profile store poisoned".to_string(),
-                })?;
+        let profiles = self
+            .profiles_by_pubkey
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "profile store poisoned".to_string(),
+            })?;
         Ok(profiles.get(&key).cloned())
     }
 }
@@ -461,12 +453,12 @@ impl RelayCompatibilityRepository for InMemoryRepositories {
         record: RelayCompatibilityRecord,
     ) -> Result<(), StorageError> {
         let key = record.relay_url.clone();
-        let mut map =
-            self.relay_compatibility
-                .write()
-                .map_err(|_| StorageError::Internal {
-                    message: "relay compatibility store poisoned".to_string(),
-                })?;
+        let mut map = self
+            .relay_compatibility
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "relay compatibility store poisoned".to_string(),
+            })?;
         map.insert(key, record);
         Ok(())
     }
@@ -475,12 +467,12 @@ impl RelayCompatibilityRepository for InMemoryRepositories {
         &self,
         relay_url: &str,
     ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
-        let map =
-            self.relay_compatibility
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "relay compatibility store poisoned".to_string(),
-                })?;
+        let map = self
+            .relay_compatibility
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "relay compatibility store poisoned".to_string(),
+            })?;
         Ok(map.get(relay_url).cloned())
     }
 }
@@ -488,52 +480,70 @@ impl RelayCompatibilityRepository for InMemoryRepositories {
 #[async_trait]
 impl RelayTenantRepository for InMemoryRepositories {
     async fn upsert_tenant(&self, record: RelayTenantRecord) -> Result<(), StorageError> {
-        let mut by_id = self.tenants_by_id.write().map_err(|_| StorageError::Internal {
-            message: "tenant store poisoned".to_string(),
-        })?;
-        let mut by_host = self.tenants_by_host.write().map_err(|_| StorageError::Internal {
-            message: "tenant store poisoned".to_string(),
-        })?;
+        let mut by_id = self
+            .tenants_by_id
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "tenant store poisoned".to_string(),
+            })?;
+        let mut by_host = self
+            .tenants_by_host
+            .write()
+            .map_err(|_| StorageError::Internal {
+                message: "tenant store poisoned".to_string(),
+            })?;
         let key = Self::tenant_key(&record.id);
         by_host.insert(record.host.clone(), record.id.clone());
         by_id.insert(key, record);
         Ok(())
     }
 
-    async fn tenant_by_id(&self, tenant_id: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
-        let by_id = self.tenants_by_id.read().map_err(|_| StorageError::Internal {
-            message: "tenant store poisoned".to_string(),
-        })?;
+    async fn tenant_by_id(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<RelayTenantRecord>, StorageError> {
+        let by_id = self
+            .tenants_by_id
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "tenant store poisoned".to_string(),
+            })?;
         Ok(by_id.get(tenant_id).cloned())
     }
 
     async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
-        let by_host = self.tenants_by_host.read().map_err(|_| StorageError::Internal {
-            message: "tenant store poisoned".to_string(),
-        })?;
+        let by_host = self
+            .tenants_by_host
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "tenant store poisoned".to_string(),
+            })?;
         let Some(tenant_id) = by_host.get(host) else {
             return Ok(None);
         };
-        let by_id = self.tenants_by_id.read().map_err(|_| StorageError::Internal {
-            message: "tenant store poisoned".to_string(),
-        })?;
+        let by_id = self
+            .tenants_by_id
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "tenant store poisoned".to_string(),
+            })?;
         Ok(by_id.get(tenant_id).cloned())
     }
 
     async fn list_tenants(&self) -> Result<Vec<RelayTenantRecord>, StorageError> {
-        let by_id = self.tenants_by_id.read().map_err(|_| StorageError::Internal {
-            message: "tenant store poisoned".to_string(),
-        })?;
+        let by_id = self
+            .tenants_by_id
+            .read()
+            .map_err(|_| StorageError::Internal {
+                message: "tenant store poisoned".to_string(),
+            })?;
         Ok(by_id.values().cloned().collect())
     }
 }
 
 #[async_trait]
 impl RelayMembershipRepository for InMemoryRepositories {
-    async fn upsert_membership(
-        &self,
-        record: RelayMembershipRecord,
-    ) -> Result<(), StorageError> {
+    async fn upsert_membership(&self, record: RelayMembershipRecord) -> Result<(), StorageError> {
         let key = Self::membership_key(&record.tenant_id, &record.pubkey);
         let mut map = self
             .memberships
@@ -615,11 +625,7 @@ impl RelayMembershipRepository for InMemoryRepositories {
             .cloned())
     }
 
-    async fn delete_invite(
-        &self,
-        tenant_id: &str,
-        invite_code: &str,
-    ) -> Result<(), StorageError> {
+    async fn delete_invite(&self, tenant_id: &str, invite_code: &str) -> Result<(), StorageError> {
         let mut map = self.invites.write().map_err(|_| StorageError::Internal {
             message: "invite store poisoned".to_string(),
         })?;
@@ -702,10 +708,13 @@ impl EventRepository for InMemoryRepositories {
                 }
 
                 if !query.authors.is_empty()
-                    && !query.authors.iter().any(|author| match hex::decode(author) {
-                        Ok(bytes) => bytes == event.pubkey,
-                        Err(_) => false,
-                    })
+                    && !query
+                        .authors
+                        .iter()
+                        .any(|author| match hex::decode(author) {
+                            Ok(bytes) => bytes == event.pubkey,
+                            Err(_) => false,
+                        })
                 {
                     return false;
                 }
@@ -766,7 +775,10 @@ impl EventRepository for InMemoryRepositories {
 
 #[async_trait]
 impl RelayPublishRepository for InMemoryRepositories {
-    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError> {
+    async fn enqueue_relay_publish(
+        &self,
+        request: RelayPublishRequest,
+    ) -> Result<(), StorageError> {
         let entry = request.decode()?;
         let id = self.next_outbox_id();
         let job = RelayPublishJob {
@@ -890,13 +902,16 @@ mod tests {
         RepoMappingRepository, StateRepository,
     };
     use crate::{
-        AccountRecord, ProfileRecord, ProfileVisibility, RelayCompatibilityRecord, RelayInviteRecord,
-        RelayMembershipRecord, RelayProbeMetadata, RelayPublishRequest, RelayTenantRecord,
-        RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, TagRecord,
+        AccountRecord, ProfileRecord, ProfileVisibility, RelayCompatibilityRecord,
+        RelayInviteRecord, RelayMembershipRecord, RelayProbeMetadata, RelayPublishRequest,
+        RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord,
+        StorageError, TagRecord,
     };
-    use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use gittree_core::RepoMapping;
+    use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
     use std::collections::HashMap;
+    use std::panic::AssertUnwindSafe;
+    use std::sync::RwLock;
     use time::OffsetDateTime;
 
     fn hex_32(byte: u8) -> String {
@@ -932,8 +947,7 @@ mod tests {
     }
 
     fn sample_mapping(identifier: &str) -> RepoMappingRecord {
-        let mapping =
-            RepoMapping::new("owner", "repo", hex_32(0x11), identifier).expect("mapping");
+        let mapping = RepoMapping::new("owner", "repo", hex_32(0x11), identifier).expect("mapping");
         RepoMappingRecord::new(&mapping).expect("record")
     }
 
@@ -1009,6 +1023,36 @@ mod tests {
             vec![vec!["e".to_string(), "tag".to_string()]],
         )
         .expect("event record")
+    }
+
+    fn poison_lock<T>(lock: &RwLock<T>) {
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _guard = lock.write().expect("lock");
+            panic!("poison lock");
+        }));
+    }
+
+    fn assert_internal_message(err: StorageError, expected: &str) {
+        match err {
+            StorageError::Internal { message } => assert_eq!(message, expected),
+            other => panic!("expected internal error, got {other:?}"),
+        }
+    }
+
+    fn sample_publish_request() -> RelayPublishRequest {
+        RelayPublishRequest {
+            relay_url: "wss://relay.example".to_string(),
+            event_id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 1,
+            kind: 1,
+            tags: vec![vec!["d".to_string(), "repo".to_string()]],
+            content: String::new(),
+            sig: "33".repeat(64),
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            identifier: "repo".to_string(),
+        }
     }
 
     #[tokio::test]
@@ -1101,15 +1145,19 @@ mod tests {
     #[tokio::test]
     async fn in_memory_lists_mappings_sorted() {
         let store = InMemoryRepositories::new();
-        let mapping_a = RepoMapping::new("owner", "alpha", hex_32(0x11), "alpha")
-            .expect("mapping");
-        let mapping_b = RepoMapping::new("owner", "beta", hex_32(0x22), "beta")
-            .expect("mapping");
+        let mapping_a = RepoMapping::new("owner", "alpha", hex_32(0x11), "alpha").expect("mapping");
+        let mapping_b = RepoMapping::new("owner", "beta", hex_32(0x22), "beta").expect("mapping");
         let record_a = RepoMappingRecord::new(&mapping_a).expect("record");
         let record_b = RepoMappingRecord::new(&mapping_b).expect("record");
 
-        store.upsert_mapping(record_b.clone()).await.expect("upsert");
-        store.upsert_mapping(record_a.clone()).await.expect("upsert");
+        store
+            .upsert_mapping(record_b.clone())
+            .await
+            .expect("upsert");
+        store
+            .upsert_mapping(record_a.clone())
+            .await
+            .expect("upsert");
 
         let records = store.list_mappings().await.expect("list");
         assert_eq!(records, vec![record_a, record_b]);
@@ -1132,10 +1180,7 @@ mod tests {
         let store = InMemoryRepositories::new();
         let record = sample_account("alice", 0x11);
         store.upsert_account(record.clone()).await.expect("upsert");
-        let found = store
-            .account_by_username("alice")
-            .await
-            .expect("lookup");
+        let found = store.account_by_username("alice").await.expect("lookup");
         assert_eq!(found, Some(record));
     }
 
@@ -1169,9 +1214,8 @@ mod tests {
     async fn in_memory_upserts_relay_compatibility() {
         let store = InMemoryRepositories::new();
         let report = sample_compat_report();
-        let record =
-            RelayCompatibilityRecord::new(&report, 42, &RelayProbeMetadata::default())
-                .expect("record");
+        let record = RelayCompatibilityRecord::new(&report, 42, &RelayProbeMetadata::default())
+            .expect("record");
 
         store
             .upsert_relay_compatibility(record.clone())
@@ -1192,11 +1236,20 @@ mod tests {
 
         let looked_up = store.tenant_by_host("relay.local").await.expect("lookup");
         assert_eq!(looked_up, Some(tenant.clone()));
-        assert!(store.tenant_by_host("missing.local").await.expect("lookup").is_none());
+        assert!(
+            store
+                .tenant_by_host("missing.local")
+                .await
+                .expect("lookup")
+                .is_none()
+        );
         assert_eq!(store.list_tenants().await.expect("tenants").len(), 1);
 
         let member = sample_membership(&tenant.id, 0x33);
-        store.upsert_membership(member.clone()).await.expect("membership");
+        store
+            .upsert_membership(member.clone())
+            .await
+            .expect("membership");
         let listed = store.list_memberships(&tenant.id).await.expect("list");
         assert_eq!(listed, vec![member.clone()]);
         let removed = store
@@ -1233,23 +1286,8 @@ mod tests {
     #[tokio::test]
     async fn in_memory_outbox_claims_and_marks_success() {
         let store = InMemoryRepositories::new();
-        let request = RelayPublishRequest {
-            relay_url: "wss://relay.example".to_string(),
-            event_id: "11".repeat(32),
-            pubkey: "22".repeat(32),
-            created_at: 1,
-            kind: 1,
-            tags: vec![vec!["d".to_string(), "repo".to_string()]],
-            content: String::new(),
-            sig: "33".repeat(64),
-            forgejo_owner: "owner".to_string(),
-            forgejo_repo: "repo".to_string(),
-            identifier: "repo".to_string(),
-        };
-        store
-            .enqueue_relay_publish(request)
-            .await
-            .expect("enqueue");
+        let request = sample_publish_request();
+        store.enqueue_relay_publish(request).await.expect("enqueue");
         let job = store
             .claim_relay_publish(OffsetDateTime::now_utc())
             .await
@@ -1270,23 +1308,9 @@ mod tests {
     #[tokio::test]
     async fn in_memory_outbox_marks_failed_and_reclaims_after_retry() {
         let store = InMemoryRepositories::new();
-        let request = RelayPublishRequest {
-            relay_url: "wss://relay.example".to_string(),
-            event_id: "11".repeat(32),
-            pubkey: "22".repeat(32),
-            created_at: 1,
-            kind: 1,
-            tags: Vec::new(),
-            content: String::new(),
-            sig: "33".repeat(64),
-            forgejo_owner: "owner".to_string(),
-            forgejo_repo: "repo".to_string(),
-            identifier: "repo".to_string(),
-        };
-        store
-            .enqueue_relay_publish(request)
-            .await
-            .expect("enqueue");
+        let mut request = sample_publish_request();
+        request.tags = Vec::new();
+        store.enqueue_relay_publish(request).await.expect("enqueue");
         let now = OffsetDateTime::now_utc();
         let first = store
             .claim_relay_publish(now)
@@ -1399,5 +1423,326 @@ mod tests {
             .await
             .expect("query");
         assert_eq!(since_filtered, vec![second]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_outbox_missing_entries_return_internal_error() {
+        let store = InMemoryRepositories::new();
+        assert!(
+            store
+                .claim_relay_publish(OffsetDateTime::now_utc())
+                .await
+                .expect("claim")
+                .is_none()
+        );
+
+        let missing_succeeded = store.mark_relay_publish_succeeded(42).await.unwrap_err();
+        assert_internal_message(missing_succeeded, "outbox entry not found");
+
+        let missing_failed = store
+            .mark_relay_publish_failed(42, "missing", OffsetDateTime::now_utc())
+            .await
+            .unwrap_err();
+        assert_internal_message(missing_failed, "outbox entry not found");
+    }
+
+    #[tokio::test]
+    async fn in_memory_pending_relay_publishes_filters_kind_identifier_and_pubkey() {
+        let store = InMemoryRepositories::new();
+        store
+            .enqueue_relay_publish(sample_publish_request())
+            .await
+            .expect("enqueue");
+
+        assert_eq!(
+            store
+                .pending_relay_publishes(&hex::decode(hex_32(0x22)).expect("pubkey"), "repo", 2)
+                .await
+                .expect("count"),
+            0
+        );
+        assert_eq!(
+            store
+                .pending_relay_publishes(
+                    &hex::decode(hex_32(0x22)).expect("pubkey"),
+                    "other-repo",
+                    1
+                )
+                .await
+                .expect("count"),
+            0
+        );
+        assert_eq!(
+            store
+                .pending_relay_publishes(&hex::decode(hex_32(0x99)).expect("pubkey"), "repo", 1)
+                .await
+                .expect("count"),
+            0
+        );
+        assert_eq!(
+            store
+                .pending_relay_publishes(&hex::decode(hex_32(0x22)).expect("pubkey"), "repo", 1)
+                .await
+                .expect("count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_reports_poisoned_announcement_and_state_stores() {
+        let store = InMemoryRepositories::new();
+        let announcement = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("announcement");
+        poison_lock(&store.announcements);
+        let insert_err = store
+            .insert_announcement(announcement.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(insert_err, "announcement store poisoned");
+        let list_err = store
+            .list_announcements(&announcement.pubkey, "repo")
+            .await
+            .unwrap_err();
+        assert_internal_message(list_err, "announcement store poisoned");
+
+        let state_store = InMemoryRepositories::new();
+        let state = RepoStateRecord::new(&hex_32(0x11), &hex_32(0x22), 10, &sample_state("repo"))
+            .expect("state");
+        poison_lock(&state_store.states);
+        let insert_state_err = state_store.insert_state(state.clone()).await.unwrap_err();
+        assert_internal_message(insert_state_err, "state store poisoned");
+        let latest_state_err = state_store
+            .latest_state(&state.pubkey, "repo")
+            .await
+            .unwrap_err();
+        assert_internal_message(latest_state_err, "state store poisoned");
+    }
+
+    #[tokio::test]
+    async fn in_memory_reports_poisoned_mapping_and_account_stores() {
+        let mapping = sample_mapping("repo");
+
+        let forgejo_store = InMemoryRepositories::new();
+        poison_lock(&forgejo_store.mappings_by_forgejo);
+        let forgejo_upsert_err = forgejo_store
+            .upsert_mapping(mapping.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(forgejo_upsert_err, "forgejo mapping store poisoned");
+        let forgejo_read_err = forgejo_store
+            .mapping_by_forgejo("owner", "repo")
+            .await
+            .unwrap_err();
+        assert_internal_message(forgejo_read_err, "forgejo mapping store poisoned");
+
+        let repo_store = InMemoryRepositories::new();
+        poison_lock(&repo_store.mappings_by_repo);
+        let repo_upsert_err = repo_store
+            .upsert_mapping(mapping.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(repo_upsert_err, "repo mapping store poisoned");
+        let repo_read_err = repo_store
+            .mapping_by_repo(&mapping.pubkey, &mapping.identifier)
+            .await
+            .unwrap_err();
+        assert_internal_message(repo_read_err, "repo mapping store poisoned");
+        let list_err = repo_store.list_mappings().await.unwrap_err();
+        assert_internal_message(list_err, "repo mapping store poisoned");
+
+        let account = sample_account("alice", 0x11);
+        let pubkey_store = InMemoryRepositories::new();
+        poison_lock(&pubkey_store.accounts_by_pubkey);
+        let pubkey_write_err = pubkey_store
+            .upsert_account(account.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(pubkey_write_err, "account pubkey store poisoned");
+        let pubkey_read_err = pubkey_store
+            .account_by_pubkey(&account.pubkey)
+            .await
+            .unwrap_err();
+        assert_internal_message(pubkey_read_err, "account pubkey store poisoned");
+
+        let username_store = InMemoryRepositories::new();
+        poison_lock(&username_store.accounts_by_username);
+        let username_write_err = username_store
+            .upsert_account(account.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(username_write_err, "account username store poisoned");
+        let username_read_err = username_store
+            .account_by_username(&account.forgejo_username)
+            .await
+            .unwrap_err();
+        assert_internal_message(username_read_err, "account username store poisoned");
+    }
+
+    #[tokio::test]
+    async fn in_memory_reports_poisoned_profile_event_tenant_membership_and_outbox_stores() {
+        let profile_store = InMemoryRepositories::new();
+        let profile = sample_profile(0x44);
+        poison_lock(&profile_store.profiles_by_pubkey);
+        let profile_write_err = profile_store
+            .upsert_profile(profile.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(profile_write_err, "profile store poisoned");
+        let profile_read_err = profile_store
+            .profile_by_pubkey(&profile.pubkey)
+            .await
+            .unwrap_err();
+        assert_internal_message(profile_read_err, "profile store poisoned");
+
+        let compat_store = InMemoryRepositories::new();
+        let report = sample_compat_report();
+        let compat = RelayCompatibilityRecord::new(&report, 10, &RelayProbeMetadata::default())
+            .expect("compat");
+        poison_lock(&compat_store.relay_compatibility);
+        let compat_write_err = compat_store
+            .upsert_relay_compatibility(compat.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(compat_write_err, "relay compatibility store poisoned");
+        let compat_read_err = compat_store
+            .relay_compatibility(&report.relay_url)
+            .await
+            .unwrap_err();
+        assert_internal_message(compat_read_err, "relay compatibility store poisoned");
+
+        let tenant = sample_tenant("relay.local");
+        let tenant_id_store = InMemoryRepositories::new();
+        poison_lock(&tenant_id_store.tenants_by_id);
+        let tenant_id_write_err = tenant_id_store
+            .upsert_tenant(tenant.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(tenant_id_write_err, "tenant store poisoned");
+        let tenant_id_read_err = tenant_id_store.tenant_by_id(&tenant.id).await.unwrap_err();
+        assert_internal_message(tenant_id_read_err, "tenant store poisoned");
+        let tenant_list_err = tenant_id_store.list_tenants().await.unwrap_err();
+        assert_internal_message(tenant_list_err, "tenant store poisoned");
+
+        let tenant_host_store = InMemoryRepositories::new();
+        poison_lock(&tenant_host_store.tenants_by_host);
+        let tenant_host_write_err = tenant_host_store
+            .upsert_tenant(tenant.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(tenant_host_write_err, "tenant store poisoned");
+        let tenant_host_read_err = tenant_host_store
+            .tenant_by_host("relay.local")
+            .await
+            .unwrap_err();
+        assert_internal_message(tenant_host_read_err, "tenant store poisoned");
+
+        let tenant_lookup_store = InMemoryRepositories::new();
+        tenant_lookup_store
+            .upsert_tenant(tenant.clone())
+            .await
+            .expect("upsert");
+        poison_lock(&tenant_lookup_store.tenants_by_id);
+        let tenant_lookup_err = tenant_lookup_store
+            .tenant_by_host("relay.local")
+            .await
+            .unwrap_err();
+        assert_internal_message(tenant_lookup_err, "tenant store poisoned");
+
+        let membership = sample_membership(&tenant.id, 0x33);
+        let membership_store = InMemoryRepositories::new();
+        poison_lock(&membership_store.memberships);
+        let membership_write_err = membership_store
+            .upsert_membership(membership.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(membership_write_err, "membership store poisoned");
+        let membership_read_err = membership_store
+            .membership_by_pubkey(&tenant.id, &membership.pubkey)
+            .await
+            .unwrap_err();
+        assert_internal_message(membership_read_err, "membership store poisoned");
+        let membership_list_err = membership_store
+            .list_memberships(&tenant.id)
+            .await
+            .unwrap_err();
+        assert_internal_message(membership_list_err, "membership store poisoned");
+        let membership_remove_err = membership_store
+            .remove_membership(&tenant.id, &membership.pubkey)
+            .await
+            .unwrap_err();
+        assert_internal_message(membership_remove_err, "membership store poisoned");
+
+        let invite = sample_invite(&tenant.id, "code-1");
+        let invite_store = InMemoryRepositories::new();
+        poison_lock(&invite_store.invites);
+        let invite_write_err = invite_store
+            .insert_invite(invite.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(invite_write_err, "invite store poisoned");
+        let invite_read_err = invite_store
+            .invite_by_code(&tenant.id, &invite.invite_code)
+            .await
+            .unwrap_err();
+        assert_internal_message(invite_read_err, "invite store poisoned");
+        let invite_delete_err = invite_store
+            .delete_invite(&tenant.id, &invite.invite_code)
+            .await
+            .unwrap_err();
+        assert_internal_message(invite_delete_err, "invite store poisoned");
+
+        let event_store = InMemoryRepositories::new();
+        let event = event_record(&"aa".repeat(32), &"bb".repeat(32), 1);
+        poison_lock(&event_store.events);
+        let event_write_err = event_store.insert_event(event.clone()).await.unwrap_err();
+        assert_internal_message(event_write_err, "event store poisoned");
+        let event_read_err = event_store
+            .get_event(&event.tenant_id, &event.id)
+            .await
+            .unwrap_err();
+        assert_internal_message(event_read_err, "event store poisoned");
+        let event_query_err = event_store
+            .query_events(&EventQuery::default())
+            .await
+            .unwrap_err();
+        assert_internal_message(event_query_err, "event store poisoned");
+        let event_delete_err = event_store
+            .delete_event(&event.tenant_id, &event.id)
+            .await
+            .unwrap_err();
+        assert_internal_message(event_delete_err, "event store poisoned");
+
+        let outbox_store = InMemoryRepositories::new();
+        poison_lock(&outbox_store.outbox);
+        let outbox_enqueue_err = outbox_store
+            .enqueue_relay_publish(sample_publish_request())
+            .await
+            .unwrap_err();
+        assert_internal_message(outbox_enqueue_err, "outbox store poisoned");
+        let outbox_claim_err = outbox_store
+            .claim_relay_publish(OffsetDateTime::now_utc())
+            .await
+            .unwrap_err();
+        assert_internal_message(outbox_claim_err, "outbox store poisoned");
+        let outbox_mark_success_err = outbox_store
+            .mark_relay_publish_succeeded(1)
+            .await
+            .unwrap_err();
+        assert_internal_message(outbox_mark_success_err, "outbox store poisoned");
+        let outbox_mark_failed_err = outbox_store
+            .mark_relay_publish_failed(1, "boom", OffsetDateTime::now_utc())
+            .await
+            .unwrap_err();
+        assert_internal_message(outbox_mark_failed_err, "outbox store poisoned");
+        let outbox_pending_err = outbox_store
+            .pending_relay_publishes(&hex::decode(hex_32(0x22)).expect("pubkey"), "repo", 1)
+            .await
+            .unwrap_err();
+        assert_internal_message(outbox_pending_err, "outbox store poisoned");
     }
 }
