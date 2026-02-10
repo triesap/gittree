@@ -234,10 +234,7 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
             }
         }
 
-        self.repo
-            .insert_event(record)
-            .await
-            .map_err(map_repo_err)?;
+        self.repo.insert_event(record).await.map_err(map_repo_err)?;
         Ok(StoreOutcome::Inserted)
     }
 
@@ -270,11 +267,7 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
             let plan = build_query_plan(filter);
             let mut query = plan.query;
             query.tenant_id = Some(self.tenant_id.clone());
-            let records = self
-                .repo
-                .query_events(&query)
-                .await
-                .map_err(map_repo_err)?;
+            let records = self.repo.query_events(&query).await.map_err(map_repo_err)?;
             let mut remaining = filter.limit.unwrap_or(u64::MAX);
             for record in records {
                 if remaining == 0 {
@@ -403,9 +396,7 @@ fn replaceable_key(event: &NostrEvent) -> Option<ReplaceableKey> {
         });
     }
     if is_parameterized_replaceable_kind(event.kind) {
-        let identifier = collect_tag_values(&event.tags, "d")
-            .into_iter()
-            .next()?;
+        let identifier = collect_tag_values(&event.tags, "d").into_iter().next()?;
         return Some(ReplaceableKey {
             kind: event.kind,
             pubkey: event.pubkey.clone(),
@@ -525,7 +516,11 @@ fn build_query_plan(filter: &Filter) -> QueryPlan {
             since: filter.since,
             until: filter.until,
             tags,
-            limit: if needs_post_filter { None } else { filter.limit },
+            limit: if needs_post_filter {
+                None
+            } else {
+                filter.limit
+            },
         },
         needs_post_filter,
     }
@@ -566,6 +561,7 @@ mod tests {
     use crate::NostrEvent;
     use gittree_storage::InMemoryRepositories;
     use serde_json::json;
+    use std::sync::Arc;
 
     fn sample_event(id: &str) -> NostrEvent {
         NostrEvent {
@@ -604,6 +600,12 @@ mod tests {
         store.insert(sample_event("gone")).await.expect("insert");
         assert!(store.delete("gone").await.expect("delete"));
         assert!(store.get("gone").await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_missing_event_returns_false() {
+        let store = MemoryStore::new();
+        assert!(!store.delete("missing").await.expect("delete"));
     }
 
     #[tokio::test]
@@ -708,6 +710,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_store_delete_by_address_respects_timestamp() {
+        let store = MemoryStore::new();
+        let pubkey = "aa".repeat(32);
+
+        let mut target = sample_event("target-address");
+        target.kind = 30023;
+        target.pubkey = pubkey.clone();
+        target.created_at = 10;
+        target.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        store.insert(target.clone()).await.expect("insert target");
+
+        let mut older_delete = sample_event("older-delete");
+        older_delete.kind = 5;
+        older_delete.pubkey = pubkey.clone();
+        older_delete.created_at = 5;
+        older_delete.tags = vec![vec!["a".to_string(), format!("30023:{pubkey}:demo")]];
+        store
+            .insert(older_delete)
+            .await
+            .expect("insert older delete");
+        assert!(store.get(&target.id).await.expect("get target").is_some());
+
+        let mut newer_delete = sample_event("newer-delete");
+        newer_delete.kind = 5;
+        newer_delete.pubkey = pubkey.clone();
+        newer_delete.created_at = 20;
+        newer_delete.tags = vec![
+            vec!["a".to_string(), "bad-address".to_string()],
+            vec!["a".to_string(), format!("30023:{pubkey}:demo")],
+        ];
+        store
+            .insert(newer_delete)
+            .await
+            .expect("insert newer delete");
+        assert!(store.get(&target.id).await.expect("get target").is_none());
+    }
+
+    #[tokio::test]
     async fn repository_store_inserts_and_queries() {
         let repo = InMemoryRepositories::new();
         let store = RepositoryStore::new(repo);
@@ -716,8 +756,7 @@ mod tests {
         let outcome = store.insert(event.clone()).await.expect("insert");
         assert_eq!(outcome, StoreOutcome::Inserted);
 
-        let filter =
-            crate::Filter::from_json(&json!({"ids": [event.id.clone()]})).expect("filter");
+        let filter = crate::Filter::from_json(&json!({"ids": [event.id.clone()]})).expect("filter");
         let results = store.query(&[filter]).await.expect("query");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, event.id);
@@ -784,6 +823,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_store_with_tenant_and_arc_eventstore_paths_work() {
+        let repo = InMemoryRepositories::new();
+        let store = Arc::new(RepositoryStore::with_tenant(repo, "tenant-x"));
+        let event = sample_event(&"bb".repeat(32));
+        assert_eq!(
+            EventStore::insert(&store, event.clone())
+                .await
+                .expect("insert"),
+            StoreOutcome::Inserted
+        );
+        assert!(
+            EventStore::get(&store, &event.id)
+                .await
+                .expect("get")
+                .is_some()
+        );
+        assert!(EventStore::delete(&store, &event.id).await.expect("delete"));
+        assert!(
+            EventStore::get(&store, &event.id)
+                .await
+                .expect("get")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn repository_store_ignores_invalid_hex_filters() {
         let repo = InMemoryRepositories::new();
         let store = RepositoryStore::new(repo);
@@ -794,6 +859,37 @@ mod tests {
         let filter = crate::Filter::from_json(&json!({"ids": ["zz"]})).expect("filter");
         let results = store.query(&[filter]).await.expect("query");
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_store_sorts_results_and_handles_tag_filters() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let mut older = sample_event(&"51".repeat(32));
+        older.created_at = 10;
+        older.tags = vec![vec!["e".to_string(), "topic-1".to_string()]];
+        store.insert(older.clone()).await.expect("insert older");
+
+        let mut newer = sample_event(&"52".repeat(32));
+        newer.created_at = 20;
+        newer.tags = vec![vec!["e".to_string(), "topic-1".to_string()]];
+        store.insert(newer.clone()).await.expect("insert newer");
+
+        let filter_old =
+            crate::Filter::from_json(&json!({"ids": [older.id.clone()]})).expect("old filter");
+        let filter_new =
+            crate::Filter::from_json(&json!({"ids": [newer.id.clone()]})).expect("new filter");
+        let results = store
+            .query(&[filter_old, filter_new])
+            .await
+            .expect("query sorted");
+        let ids: Vec<String> = results.into_iter().map(|event| event.id).collect();
+        assert_eq!(ids, vec![newer.id.clone(), older.id.clone()]);
+
+        let tag_filter = crate::Filter::from_json(&json!({"#e": ["topic-1"]})).expect("tag filter");
+        let tagged = store.query(&[tag_filter]).await.expect("query tagged");
+        assert_eq!(tagged.len(), 2);
     }
 
     #[tokio::test]
@@ -875,6 +971,29 @@ mod tests {
         assert!(store.get(&delete.id).await.expect("get delete").is_some());
     }
 
+    #[tokio::test]
+    async fn repository_store_delete_by_address_requires_matching_pubkey() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let target_pubkey = "aa".repeat(32);
+        let mut target = sample_event(&"61".repeat(32));
+        target.kind = 30023;
+        target.created_at = 5;
+        target.pubkey = target_pubkey.clone();
+        target.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        store.insert(target.clone()).await.expect("insert target");
+
+        let mut delete = sample_event(&"62".repeat(32));
+        delete.kind = 5;
+        delete.created_at = 15;
+        delete.pubkey = "bb".repeat(32);
+        delete.tags = vec![vec!["a".to_string(), format!("30023:{target_pubkey}:demo")]];
+        store.insert(delete).await.expect("insert delete");
+
+        assert!(store.get(&target.id).await.expect("get target").is_some());
+    }
+
     #[test]
     fn exact_hex_filters_and_helpers_cover_edge_cases() {
         let exact = vec!["11".repeat(32), "22".repeat(32)];
@@ -891,7 +1010,10 @@ mod tests {
             vec!["e".to_string(), "a".to_string(), "b".to_string()],
             vec!["p".to_string(), "x".to_string()],
         ];
-        assert_eq!(collect_tag_values(&tags, "e"), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            collect_tag_values(&tags, "e"),
+            vec!["a".to_string(), "b".to_string()]
+        );
         assert_eq!(collect_tag_values(&tags, "z"), Vec::<String>::new());
 
         assert!(parse_address("bad").is_none());
