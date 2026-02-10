@@ -1400,7 +1400,10 @@ WHERE pubkey = $1
 
 #[cfg(test)]
 mod tests {
-    use super::PostgresRepositories;
+    use super::{
+        PostgresRepositories, relay_invite_from_row, relay_membership_from_row,
+        relay_tenant_from_row,
+    };
     use crate::migrations::{MigrationRunner, core_migrations};
     use crate::repositories::{
         AccountRepository, AnnouncementRepository, EventRepository, ProfileRepository,
@@ -1410,15 +1413,17 @@ mod tests {
     use crate::{
         AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
         RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishRequest,
-        RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord, RepoStateRecord, StorageError,
-        TagRecord,
+        RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord,
+        RepoStateRecord, StorageError, TagRecord,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::PgPool;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
+    static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     struct TestDatabase {
         base_url: String,
@@ -1515,7 +1520,13 @@ WHERE datname = $1
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        format!("gittree_storage_test_{}_{}", std::process::id(), now)
+        let counter = TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "gittree_storage_test_{}_{}_{}",
+            std::process::id(),
+            now,
+            counter
+        )
     }
 
     fn unreachable_repositories() -> PostgresRepositories {
@@ -2643,6 +2654,248 @@ WHERE datname = $1
             .await
             .expect("get event");
         assert!(missing.is_none());
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_upserts_replace_existing_rows_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_upserts_replace_existing_rows_db: postgres unavailable");
+            return;
+        };
+
+        let repositories = test_db.repositories();
+
+        let first_mapping = RepoMappingRecord {
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            pubkey: vec![0x11; 32],
+            identifier: "demo".to_string(),
+        };
+        repositories
+            .upsert_mapping(first_mapping.clone())
+            .await
+            .expect("insert mapping");
+
+        let updated_mapping = RepoMappingRecord {
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            pubkey: vec![0x22; 32],
+            identifier: "demo-v2".to_string(),
+        };
+        repositories
+            .upsert_mapping(updated_mapping.clone())
+            .await
+            .expect("update mapping");
+        let by_forgejo = repositories
+            .mapping_by_forgejo("alice", "demo")
+            .await
+            .expect("mapping by forgejo")
+            .expect("mapping");
+        assert_eq!(by_forgejo, updated_mapping);
+        let by_repo = repositories
+            .mapping_by_repo(&updated_mapping.pubkey, "demo-v2")
+            .await
+            .expect("mapping by repo")
+            .expect("mapping");
+        assert_eq!(by_repo, updated_mapping);
+        let mappings = repositories.list_mappings().await.expect("list mappings");
+        assert_eq!(mappings, vec![updated_mapping.clone()]);
+
+        let account = AccountRecord::new(&"33".repeat(32), "alice").expect("account");
+        repositories
+            .upsert_account(account.clone())
+            .await
+            .expect("insert account");
+        let updated_account = AccountRecord::new(&"33".repeat(32), "alice_2").expect("account");
+        repositories
+            .upsert_account(updated_account.clone())
+            .await
+            .expect("update account");
+        assert!(
+            repositories
+                .account_by_username("alice")
+                .await
+                .expect("account by username")
+                .is_none()
+        );
+        let by_username = repositories
+            .account_by_username("alice_2")
+            .await
+            .expect("account by username")
+            .expect("account");
+        assert_eq!(by_username, updated_account);
+        let by_pubkey = repositories
+            .account_by_pubkey(&updated_account.pubkey)
+            .await
+            .expect("account by pubkey")
+            .expect("account");
+        assert_eq!(by_pubkey, updated_account);
+
+        let profile = ProfileRecord::new(
+            &"33".repeat(32),
+            Some("Alice".to_string()),
+            Some("bio-1".to_string()),
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            1,
+            1,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(profile)
+            .await
+            .expect("insert profile");
+        let updated_profile = ProfileRecord::new(
+            &"33".repeat(32),
+            Some("Alice 2".to_string()),
+            Some("bio-2".to_string()),
+            Some("https://example.com/avatar.png".to_string()),
+            Some("https://example.com".to_string()),
+            Some("earth".to_string()),
+            ProfileVisibility::Private,
+            1,
+            2,
+        )
+        .expect("profile");
+        repositories
+            .upsert_profile(updated_profile.clone())
+            .await
+            .expect("update profile");
+        let stored_profile = repositories
+            .profile_by_pubkey(&updated_profile.pubkey)
+            .await
+            .expect("profile by pubkey")
+            .expect("profile");
+        assert_eq!(stored_profile, updated_profile);
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_decoder_helpers_report_row_errors_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_decoder_helpers_report_row_errors_db: postgres unavailable");
+            return;
+        };
+
+        let bad_tenant_row = sqlx::query(
+            r#"
+SELECT
+    1::integer AS id,
+    'relay.example'::text AS host,
+    E'\\x01'::bytea AS relay_pubkey,
+    E'\\x02'::bytea AS relay_secret,
+    E'\\x03'::bytea AS relay_secret_nonce,
+    'kid'::text AS relay_secret_kid,
+    NULL::text AS name,
+    NULL::text AS description,
+    NULL::text AS icon,
+    NULL::text AS banner,
+    NULL::text AS contact,
+    true AS auth_required,
+    true AS public_read,
+    false AS public_write,
+    10::bigint AS created_at,
+    11::bigint AS updated_at
+"#,
+        )
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("bad tenant row");
+        assert_db_error(relay_tenant_from_row(bad_tenant_row).expect_err("tenant row decode"));
+
+        let bad_membership_row = sqlx::query(
+            r#"
+SELECT
+    'tenant-1'::text AS tenant_id,
+    E'\\x04'::bytea AS pubkey,
+    9::integer AS role,
+    'active'::text AS status,
+    10::bigint AS created_at,
+    11::bigint AS updated_at
+"#,
+        )
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("bad membership row");
+        assert_db_error(
+            relay_membership_from_row(bad_membership_row).expect_err("membership row decode"),
+        );
+
+        let bad_invite_row = sqlx::query(
+            r#"
+SELECT
+    'tenant-1'::text AS tenant_id,
+    7::integer AS invite_code,
+    'member'::text AS role,
+    E'\\x05'::bytea AS inviter_pubkey,
+    NULL::bytea AS invitee_pubkey,
+    NULL::bigint AS expires_at,
+    12::bigint AS created_at
+"#,
+        )
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("bad invite row");
+        assert_db_error(relay_invite_from_row(bad_invite_row).expect_err("invite row decode"));
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_relay_publish_claim_reports_invalid_tags_db() {
+        let Some(test_db) = TestDatabase::provision().await else {
+            eprintln!("skipping postgres_relay_publish_claim_reports_invalid_tags_db: postgres unavailable");
+            return;
+        };
+
+        sqlx::query(
+            r#"
+INSERT INTO relay_publish_outbox (
+    relay_url,
+    event_id,
+    pubkey,
+    created_at,
+    kind,
+    tags,
+    content,
+    sig,
+    forgejo_owner,
+    forgejo_repo,
+    identifier,
+    status,
+    attempt_count,
+    publish_after
+)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
+"#,
+        )
+        .bind("wss://relay.example")
+        .bind(vec![0x88_u8; 32])
+        .bind(vec![0x99_u8; 32])
+        .bind(123_i64)
+        .bind(30617_i32)
+        .bind("{\"bad\":\"shape\"}")
+        .bind("content")
+        .bind(vec![0xaa_u8; 64])
+        .bind("alice")
+        .bind("demo")
+        .bind("demo")
+        .bind(RelayPublishStatus::Pending.as_str())
+        .execute(&test_db.pool)
+        .await
+        .expect("insert outbox row");
+
+        let repositories = test_db.repositories();
+        let err = repositories
+            .claim_relay_publish(time::OffsetDateTime::now_utc())
+            .await
+            .expect_err("claim should fail for invalid tags json");
+        assert!(matches!(err, StorageError::Serialization { field: "tags", .. }));
 
         test_db.cleanup().await;
     }
