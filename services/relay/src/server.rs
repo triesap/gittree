@@ -475,6 +475,18 @@ mod tests {
         event
     }
 
+    fn websocket_upgrade_request() -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .expect("upgrade request")
+    }
+
     fn sample_tenant_record() -> gittree_storage::RelayTenantRecord {
         gittree_storage::RelayTenantRecord::new(
             "tenant.local",
@@ -691,6 +703,72 @@ mod tests {
             }
             other => panic!("expected http handshake error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_without_explicit_host_returns_not_found() {
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(unreachable_repos()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let app = build_router(state);
+        let response = app
+            .oneshot(websocket_upgrade_request())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_returns_not_found_for_unknown_tenant() {
+        let repos = Arc::new(FakeTenantRepository {
+            tenants_by_host: HashMap::new(),
+        });
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(repos),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let app = build_router(state);
+        let mut request = websocket_upgrade_request();
+        request
+            .headers_mut()
+            .insert("host", "unknown.local".parse().expect("host"));
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn websocket_ignores_binary_messages() {
+        let addr = spawn_ws_server().await;
+        let url = format!("ws://{addr}/");
+        let (mut socket, _) = connect_async(url).await.expect("connect");
+        socket
+            .send(WsMessage::Binary(vec![0, 1, 2].into()))
+            .await
+            .expect("send binary");
+        socket
+            .send(WsMessage::Text(r#"["REQ","sub",{}]"#.to_string()))
+            .await
+            .expect("send req");
+
+        let message = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("timeout")
+            .expect("message")
+            .expect("ws");
+        let payload = message.into_text().expect("text");
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("json");
+        assert_eq!(value[0], "EOSE");
     }
 
     #[tokio::test]
