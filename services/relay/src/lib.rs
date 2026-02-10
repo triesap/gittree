@@ -394,6 +394,7 @@ pub fn build_nip11_document(
 mod tests {
     use super::ENV_STORAGE_APP_NAME;
     use super::ENV_STORAGE_READ_URL;
+    use super::DEFAULT_ADMISSION_TIMEOUT_SECS;
     use super::ENV_ADMISSION_FALLBACK;
     use super::ENV_ADMISSION_TIMEOUT_SECS;
     use super::ENV_ADMISSION_URL;
@@ -807,6 +808,35 @@ bind = "127.0.0.1:9010"
                     .expect("admission")
                     .expect("configured");
                 assert_eq!(config.fallback, AdmissionFallback::Reject);
+            });
+        });
+    }
+
+    #[test]
+    fn admission_env_empty_timeout_uses_default_timeout() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
+            with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "", || {
+                let config = super::admission_from_env()
+                    .expect("admission")
+                    .expect("configured");
+                assert_eq!(
+                    config.timeout,
+                    Duration::from_secs(DEFAULT_ADMISSION_TIMEOUT_SECS)
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn admission_env_fallback_parsing_trims_and_ignores_case() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
+            with_env_var(ENV_ADMISSION_FALLBACK, "  AcCePt  ", || {
+                let config = super::admission_from_env()
+                    .expect("admission")
+                    .expect("configured");
+                assert_eq!(config.fallback, AdmissionFallback::Accept);
             });
         });
     }
