@@ -226,6 +226,11 @@ mod tests {
     use super::MigrationRunner;
     use super::core_migrations;
     use crate::StorageError;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::str::FromStr;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
 
     #[test]
     fn runner_orders_migrations() {
@@ -303,5 +308,120 @@ mod tests {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
         assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn runner_rejects_non_positive_version() {
+        let migrations = vec![Migration {
+            version: 0,
+            description: "invalid",
+            sql: "SELECT 1",
+        }];
+        let err = MigrationRunner::new(migrations).unwrap_err();
+        assert!(matches!(err, StorageError::Migration { .. }));
+    }
+
+    #[test]
+    fn latest_version_for_empty_runner_is_zero() {
+        let runner = MigrationRunner::new(Vec::new()).expect("runner");
+        assert_eq!(runner.latest_version(), 0);
+        assert!(runner.migrations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn runner_run_is_idempotent_on_database() {
+        let Some((pool, database_name, base_url)) = provision_database().await else {
+            eprintln!("skipping runner_run_is_idempotent_on_database: postgres unavailable");
+            return;
+        };
+        let runner = MigrationRunner::new(core_migrations()).expect("runner");
+
+        let mut connection = pool.acquire().await.expect("connection");
+        let first = runner.run(&mut *connection).await.expect("first run");
+        let second = runner.run(&mut *connection).await.expect("second run");
+        assert_eq!(first, runner.latest_version());
+        assert_eq!(second, runner.latest_version());
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM migrations")
+            .fetch_one(&mut *connection)
+            .await
+            .expect("count");
+        assert_eq!(count as usize, runner.migrations().len());
+        drop(connection);
+        pool.close().await;
+
+        cleanup_database(&base_url, &database_name).await;
+    }
+
+    async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
+        let base_url = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
+        let mut admin_options = PgConnectOptions::from_str(&base_url).ok()?;
+        admin_options = admin_options.database("postgres");
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(admin_options)
+            .await
+            .ok()?;
+
+        let database_name = unique_database_name();
+        let create_database = format!("CREATE DATABASE \"{database_name}\"");
+        if sqlx::query(&create_database)
+            .execute(&admin_pool)
+            .await
+            .is_err()
+        {
+            admin_pool.close().await;
+            return None;
+        }
+        admin_pool.close().await;
+
+        let mut test_options = PgConnectOptions::from_str(&base_url).ok()?;
+        test_options = test_options.database(&database_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with(test_options)
+            .await
+            .ok()?;
+        Some((pool, database_name, base_url))
+    }
+
+    async fn cleanup_database(base_url: &str, database_name: &str) {
+        let mut admin_options = match PgConnectOptions::from_str(base_url) {
+            Ok(options) => options,
+            Err(_) => return,
+        };
+        admin_options = admin_options.database("postgres");
+        let Ok(admin_pool) = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(admin_options)
+            .await
+        else {
+            return;
+        };
+
+        let _ = sqlx::query(
+            r#"
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = $1
+  AND pid <> pg_backend_pid()
+"#,
+        )
+        .bind(database_name)
+        .execute(&admin_pool)
+        .await;
+
+        let drop_database = format!("DROP DATABASE IF EXISTS \"{database_name}\"");
+        let _ = sqlx::query(&drop_database).execute(&admin_pool).await;
+        admin_pool.close().await;
+    }
+
+    fn unique_database_name() -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("gittree_migrations_test_{}_{}", std::process::id(), now)
     }
 }

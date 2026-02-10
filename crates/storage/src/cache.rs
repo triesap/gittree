@@ -563,7 +563,8 @@ mod tests {
     use super::{CacheConfig, CachedRepositories};
     use crate::{
         AnnouncementRepository, RelayCompatibilityRecord, RelayCompatibilityRepository,
-        RelayProbeMetadata, RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
+        RelayProbeMetadata, RelayPublishJob, RelayPublishRepository, RelayPublishRequest,
+        RepoAnnouncementRecord, RepoStateRecord, StateRepository, StorageError,
     };
     use async_trait::async_trait;
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoAnnouncement, RepoState};
@@ -571,6 +572,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
+    use time::OffsetDateTime;
 
     #[derive(Debug, Default)]
     struct CountingRepo {
@@ -581,6 +583,15 @@ mod tests {
         latest_announcement_calls: AtomicUsize,
         latest_state_calls: AtomicUsize,
         relay_compatibility_calls: AtomicUsize,
+    }
+
+    #[derive(Debug, Default)]
+    struct RelayPublishProbeRepo {
+        enqueue_calls: AtomicUsize,
+        claim_calls: AtomicUsize,
+        mark_success_calls: AtomicUsize,
+        mark_failed_calls: AtomicUsize,
+        pending_calls: AtomicUsize,
     }
 
     impl CountingRepo {
@@ -700,6 +711,65 @@ mod tests {
                         message: "relay compatibility store poisoned".to_string(),
                     })?;
             Ok(map.get(relay_url).cloned())
+        }
+    }
+
+    #[async_trait]
+    impl RelayPublishRepository for Arc<RelayPublishProbeRepo> {
+        async fn enqueue_relay_publish(
+            &self,
+            _request: RelayPublishRequest,
+        ) -> Result<(), StorageError> {
+            self.enqueue_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn claim_relay_publish(
+            &self,
+            now: OffsetDateTime,
+        ) -> Result<Option<RelayPublishJob>, StorageError> {
+            self.claim_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(RelayPublishJob {
+                id: 1,
+                relay_url: "wss://relay.example".to_string(),
+                event_id: vec![0x11; 32],
+                pubkey: vec![0x22; 32],
+                created_at: 1,
+                kind: 1,
+                tags: vec![vec!["d".to_string(), "demo".to_string()]],
+                content: String::new(),
+                sig: vec![0x33; 64],
+                forgejo_owner: "alice".to_string(),
+                forgejo_repo: "demo".to_string(),
+                identifier: "demo".to_string(),
+                attempt_count: 1,
+                publish_after: now,
+            }))
+        }
+
+        async fn mark_relay_publish_succeeded(&self, _id: i64) -> Result<(), StorageError> {
+            self.mark_success_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn mark_relay_publish_failed(
+            &self,
+            _id: i64,
+            _error: &str,
+            _retry_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            self.mark_failed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn pending_relay_publishes(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+            _kind: u32,
+        ) -> Result<i64, StorageError> {
+            self.pending_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(7)
         }
     }
 
@@ -938,5 +1008,130 @@ mod tests {
             .expect("second");
 
         assert_eq!(inner.relay_compatibility_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_disabled_bypasses_announcement_and_compatibility_cache() {
+        let inner = Arc::new(CountingRepo::new());
+        let cached = CachedRepositories::with_config(inner.clone(), CacheConfig::disabled());
+        let record = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("record");
+        inner
+            .insert_announcement(record.clone())
+            .await
+            .expect("insert");
+        inner
+            .upsert_relay_compatibility(sample_relay_compatibility("wss://relay.example"))
+            .await
+            .expect("compat");
+
+        cached
+            .list_announcements(&record.pubkey, "repo")
+            .await
+            .expect("list 1");
+        cached
+            .list_announcements(&record.pubkey, "repo")
+            .await
+            .expect("list 2");
+        cached
+            .latest_announcement(&record.pubkey, "repo")
+            .await
+            .expect("latest 1");
+        cached
+            .latest_announcement(&record.pubkey, "repo")
+            .await
+            .expect("latest 2");
+        cached
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("compat 1");
+        cached
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("compat 2");
+
+        // `latest_announcement` in the probe uses `list_announcements` internally.
+        assert_eq!(inner.list_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(inner.latest_announcement_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(inner.relay_compatibility_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn latest_state_ttl_expires() {
+        let inner = Arc::new(CountingRepo::new());
+        let config = CacheConfig::new(Some(Duration::from_secs(0)), 16);
+        let cached = CachedRepositories::with_config(inner.clone(), config);
+        let record = RepoStateRecord::new(&hex_32(0x33), &hex_32(0x44), 10, &sample_state("repo"))
+            .expect("record");
+        inner.insert_state(record.clone()).await.expect("insert");
+
+        cached
+            .latest_state(&record.pubkey, "repo")
+            .await
+            .expect("first");
+        cached
+            .latest_state(&record.pubkey, "repo")
+            .await
+            .expect("second");
+
+        assert_eq!(inner.latest_state_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn relay_publish_methods_delegate_to_inner() {
+        let inner = Arc::new(RelayPublishProbeRepo::default());
+        let cached = CachedRepositories::new(inner.clone());
+
+        let request = RelayPublishRequest {
+            relay_url: "wss://relay.example".to_string(),
+            event_id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 1,
+            kind: 1,
+            tags: vec![vec!["d".to_string(), "demo".to_string()]],
+            content: String::new(),
+            sig: "33".repeat(64),
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            identifier: "demo".to_string(),
+        };
+
+        cached
+            .enqueue_relay_publish(request)
+            .await
+            .expect("enqueue");
+        let job = cached
+            .claim_relay_publish(OffsetDateTime::UNIX_EPOCH)
+            .await
+            .expect("claim")
+            .expect("job");
+        cached
+            .mark_relay_publish_succeeded(job.id)
+            .await
+            .expect("success");
+        cached
+            .mark_relay_publish_failed(
+                job.id,
+                "error",
+                OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(1),
+            )
+            .await
+            .expect("failed");
+        let pending = cached
+            .pending_relay_publishes(&[0x22; 32], "demo", 1)
+            .await
+            .expect("pending");
+
+        assert_eq!(pending, 7);
+        assert_eq!(inner.enqueue_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inner.claim_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inner.mark_success_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inner.mark_failed_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inner.pending_calls.load(Ordering::SeqCst), 1);
     }
 }
