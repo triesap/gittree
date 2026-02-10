@@ -311,6 +311,7 @@ fn admission_decision_from_payload(
 mod tests {
     use super::admission_decision_from_payload;
     use super::AdmissionDecisionPayload;
+    use super::AdmissionRequestError;
     use super::AdmissionFallback;
     use super::AdmissionFilter;
     use super::AdmissionHookClient;
@@ -318,11 +319,19 @@ mod tests {
     use super::AdmissionHookError;
     use super::AdmissionRequestPayload;
     use super::AdmissionTransport;
+    use super::HttpAdmissionTransport;
     use super::RelayEvent;
+    use axum::Json;
+    use axum::Router;
+    use axum::http::StatusCode;
+    use axum::routing::post;
     use async_trait::async_trait;
+    use gittree_core::AdmissionDecision;
+    use gittree_core::EventFilter;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::time::Duration;
+    use tokio::net::TcpListener;
 
     struct MockTransport {
         calls: Mutex<Vec<(String, AdmissionRequestPayload)>>,
@@ -361,6 +370,42 @@ mod tests {
             relay_url: Some("wss://relay.example".to_string()),
             source_ip: Some("127.0.0.1".to_string()),
         }
+    }
+
+    fn sample_request_payload() -> AdmissionRequestPayload {
+        AdmissionRequestPayload::try_from(&sample_event()).expect("request payload")
+    }
+
+    async fn spawn_error_server(status: StatusCode, body: &'static str) -> String {
+        let app = Router::new().route(
+            "/decide",
+            post(move || async move {
+                (
+                    status,
+                    [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                    body,
+                )
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}/decide")
+    }
+
+    async fn spawn_accept_server() -> String {
+        let app = Router::new().route(
+            "/decide",
+            post(|| async { Json(AdmissionDecisionPayload::Accept) }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}/decide")
     }
 
     #[tokio::test]
@@ -458,12 +503,10 @@ mod tests {
         event.pubkey = String::new();
 
         let decision = client.decide(&event).await;
-        match decision {
-            gittree_core::AdmissionDecision::Reject { reason } => {
-                assert!(reason.contains("admission unavailable"));
-                assert!(reason.contains("invalid request"));
-            }
-            _ => panic!("expected reject fallback"),
+        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+        if let AdmissionDecision::Reject { reason } = decision {
+            assert!(reason.contains("admission unavailable"));
+            assert!(reason.contains("invalid request"));
         }
 
         let calls = client.transport.calls.lock().expect("calls lock");
@@ -498,5 +541,157 @@ mod tests {
             AdmissionDecisionPayload::RequiresRelatedEvents { filters: Vec::new() },
         );
         assert!(matches!(related, Err(AdmissionHookError::InvalidDecision(_))));
+    }
+
+    #[test]
+    fn request_payload_validation_rejects_missing_event_id_and_invalid_tag() {
+        let mut event = sample_event();
+        event.event_id = String::new();
+        let missing_event_id = AdmissionRequestPayload::try_from(&event).unwrap_err();
+        assert!(matches!(
+            missing_event_id,
+            AdmissionRequestError::MissingField("event_id")
+        ));
+
+        let mut invalid_tag_event = sample_event();
+        invalid_tag_event.tags = vec![Vec::new()];
+        let invalid_tag = AdmissionRequestPayload::try_from(&invalid_tag_event).unwrap_err();
+        assert!(matches!(invalid_tag, AdmissionRequestError::InvalidTag));
+    }
+
+    #[test]
+    fn admission_filter_from_event_filter_clones_all_fields() {
+        let mut tags = BTreeMap::new();
+        tags.insert("e".to_string(), vec!["event-id".to_string()]);
+        let filter = EventFilter {
+            ids: vec!["1".to_string(), "2".to_string()],
+            kinds: vec![1, 30000],
+            authors: vec!["author".to_string()],
+            tags: tags.clone(),
+            limit: Some(5),
+        };
+        let payload = AdmissionFilter::from(&filter);
+        assert_eq!(payload.ids, filter.ids);
+        assert_eq!(payload.kinds, filter.kinds);
+        assert_eq!(payload.authors, filter.authors);
+        assert_eq!(payload.tags, tags);
+        assert_eq!(payload.limit, Some(5));
+
+        let round_trip: EventFilter = payload.into();
+        assert_eq!(round_trip.limit, Some(5));
+        assert_eq!(round_trip.tags["e"], vec!["event-id".to_string()]);
+    }
+
+    #[test]
+    fn admission_error_display_variants_are_stable() {
+        assert_eq!(
+            AdmissionRequestError::InvalidTag.to_string(),
+            "invalid admission tag"
+        );
+        assert_eq!(
+            AdmissionRequestError::InvalidKind(7).to_string(),
+            "invalid admission kind 7"
+        );
+        assert_eq!(
+            AdmissionHookError::Serialize("boom".to_string()).to_string(),
+            "serialize error: boom"
+        );
+        assert_eq!(
+            AdmissionHookError::Decode("bad json".to_string()).to_string(),
+            "decode error: bad json"
+        );
+        assert_eq!(
+            AdmissionHookError::Transport("timeout".to_string()).to_string(),
+            "transport error: timeout"
+        );
+        assert_eq!(
+            AdmissionHookError::InvalidDecision("missing".to_string()).to_string(),
+            "invalid decision: missing"
+        );
+    }
+
+    #[test]
+    fn decision_payload_reject_with_reason_maps_to_reject_decision() {
+        let decision = admission_decision_from_payload(AdmissionDecisionPayload::Reject {
+            reason: "denied".to_string(),
+        })
+        .expect("decision");
+        assert_eq!(
+            decision,
+            AdmissionDecision::Reject {
+                reason: "denied".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn http_transport_maps_connection_errors() {
+        let transport = HttpAdmissionTransport::new(Duration::from_millis(50)).expect("transport");
+        let err = transport
+            .send("http://127.0.0.1:1/decide", &sample_request_payload())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdmissionHookError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn http_transport_maps_non_success_statuses() {
+        let endpoint = spawn_error_server(StatusCode::FORBIDDEN, "denied").await;
+        let transport = HttpAdmissionTransport::new(Duration::from_secs(1)).expect("transport");
+        let err = transport
+            .send(&endpoint, &sample_request_payload())
+            .await
+            .unwrap_err();
+        match err {
+            AdmissionHookError::Transport(message) => {
+                assert!(message.contains("admission error 403 Forbidden"));
+                assert!(message.contains("denied"));
+            }
+            other => panic!("expected transport error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_transport_maps_decode_errors() {
+        let endpoint = spawn_error_server(StatusCode::OK, "not-json").await;
+        let transport = HttpAdmissionTransport::new(Duration::from_secs(1)).expect("transport");
+        let err = transport
+            .send(&endpoint, &sample_request_payload())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdmissionHookError::Decode(_)));
+    }
+
+    #[tokio::test]
+    async fn new_http_client_constructs_transport_and_accepts() {
+        let endpoint = spawn_accept_server().await;
+        let config = AdmissionHookConfig::new(
+            endpoint,
+            Duration::from_secs(1),
+            AdmissionFallback::Reject,
+        );
+        let client = AdmissionHookClient::new_http(config).expect("client");
+        let decision = client.decide(&sample_event()).await;
+        assert!(matches!(decision, AdmissionDecision::Accept));
+    }
+
+    async fn decide_via_trait(
+        decider: &(dyn super::AdmissionDecider + Send + Sync),
+        event: &RelayEvent,
+    ) -> AdmissionDecision {
+        decider.decide(event).await
+    }
+
+    #[tokio::test]
+    async fn admission_decider_trait_dispatches_to_client() {
+        let transport = MockTransport::with_result(Ok(AdmissionDecisionPayload::Accept));
+        let config = AdmissionHookConfig::new(
+            "http://admission.local/decide",
+            Duration::from_secs(1),
+            AdmissionFallback::Reject,
+        );
+        let client = AdmissionHookClient::new(config, transport);
+        let decision = decide_via_trait(&client, &sample_event()).await;
+        assert!(matches!(decision, AdmissionDecision::Accept));
     }
 }

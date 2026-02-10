@@ -321,13 +321,16 @@ async fn seed_owner_membership(
 #[cfg(test)]
 mod tests {
     use super::{
-        accepts_nostr_json, build_router, extract_host, nip11_response, relay_url_from_host,
-        resolve_tenant, seed_owner_membership,
+        accepts_nostr_json, build_router, extract_host, handle_socket, nip11_response,
+        relay_url_from_host, resolve_tenant, seed_owner_membership, shutdown_signal,
     };
     use crate::{MemoryStore, NostrEvent, Policy, RelayConfig, RelayMetrics};
+    use axum::Router;
+    use axum::extract::ws::WebSocketUpgrade;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
+    use axum::routing::get;
     use axum::response::IntoResponse;
     use futures_util::{SinkExt, StreamExt};
     use gittree_storage::{InMemoryRepositories, RelayMembershipRepository};
@@ -415,6 +418,28 @@ mod tests {
         let sig = secp.sign_schnorr(&msg, &keypair);
         event.sig = hex::encode(sig.as_ref());
         event
+    }
+
+    fn sample_tenant_record() -> gittree_storage::RelayTenantRecord {
+        gittree_storage::RelayTenantRecord::new(
+            "tenant.local",
+            "tenant.local",
+            &"44".repeat(32),
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            "v1",
+            Some("Tenant".to_string()),
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .expect("tenant")
     }
 
     #[tokio::test]
@@ -585,6 +610,74 @@ mod tests {
         assert_eq!(value[2], true);
     }
 
+    #[tokio::test]
+    async fn websocket_upgrade_maps_tenant_lookup_failure_to_http_error() {
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(unreachable_repos()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let app = build_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("ws://{addr}/");
+        let err = connect_async(url).await.expect_err("expected handshake failure");
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("expected http handshake error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_socket_tenant_mode_executes_signer_and_membership_paths() {
+        let tenant = sample_tenant_record();
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: Some(unreachable_repos()),
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let tenant_context = super::TenantContext {
+            tenant_id: tenant.id.clone(),
+            store: Arc::new(MemoryStore::new()),
+            tenant: Some(tenant),
+        };
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let state = state.clone();
+                let tenant = tenant_context.clone();
+                async move { ws.on_upgrade(move |socket| handle_socket(socket, state, tenant)) }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("ws://{addr}/");
+        let (mut socket, _) = connect_async(url).await.expect("connect");
+        socket
+            .send(WsMessage::Text(r#"["REQ","sub",{}]"#.to_string()))
+            .await
+            .expect("send req");
+        socket.send(WsMessage::Close(None)).await.expect("close");
+    }
+
     #[test]
     fn nip11_response_sets_cors() {
         let state = super::RelayState {
@@ -741,5 +834,12 @@ mod tests {
         assert!(second.updated_at >= first.updated_at);
         assert_eq!(second.role, "owner");
         assert_eq!(second.status, "active");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_future_can_start_and_be_aborted() {
+        let task = tokio::spawn(shutdown_signal());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        task.abort();
     }
 }
