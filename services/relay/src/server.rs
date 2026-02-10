@@ -350,7 +350,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::Router;
     use axum::extract::ws::WebSocketUpgrade;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
     use axum::routing::get;
@@ -836,6 +836,34 @@ mod tests {
         assert_eq!(cors, "*");
     }
 
+    #[tokio::test]
+    async fn nip11_response_body_matches_relay_info_document_contract() {
+        let state = super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: None,
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        };
+        let tenant = super::TenantContext {
+            tenant_id: "default".to_string(),
+            store: state.store.clone(),
+            tenant: None,
+        };
+        let response = nip11_response(&state, &tenant);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json = std::str::from_utf8(&bytes).expect("utf8 body");
+        let doc = gittree_core::nip11::RelayInfoDocument::from_json_str(json).expect("nip11");
+
+        assert!(doc.supports_nip(11));
+        assert!(doc.software.is_some());
+        assert!(doc.version.is_some());
+    }
+
     #[test]
     fn normalize_host_strips_port() {
         assert_eq!(super::normalize_host("Example.COM:8080"), "example.com");
@@ -859,6 +887,23 @@ mod tests {
             "text/html,application/nostr+json;q=0.9".parse().expect("accept"),
         );
         assert!(accepts_nostr_json(&headers));
+    }
+
+    #[test]
+    fn accepts_nostr_json_rejects_missing_invalid_and_unrelated_accept_headers() {
+        let missing = axum::http::HeaderMap::new();
+        assert!(!accepts_nostr_json(&missing));
+
+        let mut invalid = axum::http::HeaderMap::new();
+        invalid.insert(
+            ACCEPT,
+            axum::http::HeaderValue::from_bytes(&[0xFF]).expect("invalid header bytes"),
+        );
+        assert!(!accepts_nostr_json(&invalid));
+
+        let mut unrelated = axum::http::HeaderMap::new();
+        unrelated.insert(ACCEPT, "application/json".parse().expect("accept"));
+        assert!(!accepts_nostr_json(&unrelated));
     }
 
     #[test]
