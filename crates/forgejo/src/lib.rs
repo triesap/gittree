@@ -1113,4 +1113,140 @@ mod tests {
         assert!(body.contains("\"base\":\"main\""));
         assert!(body.contains("\"title\":\"Add thing\""));
     }
+
+    #[tokio::test]
+    async fn ensure_repo_falls_back_to_user_endpoint_on_org_forbidden() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("gittree", "fallback"),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client.ensure_repo("fallback", None).await.expect("repo");
+        assert_eq!(repo.full_name, "gittree/fallback");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].url.ends_with("/api/v1/orgs/gittree/repos"));
+        assert!(requests[2].url.ends_with("/api/v1/user/repos"));
+    }
+
+    #[tokio::test]
+    async fn create_repo_for_owner_conflict_reads_existing_repo() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("alice", "demo"),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: None,
+                    private: None,
+                    auto_init: None,
+                },
+            )
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "alice/demo");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]
+            .url
+            .ends_with("/api/v1/admin/users/alice/repos"));
+        assert!(requests[1].url.ends_with("/api/v1/repos/alice/demo"));
+    }
+
+    #[tokio::test]
+    async fn create_repo_for_owner_conflict_missing_repo_returns_not_found() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: None,
+                    private: None,
+                    auto_init: None,
+                },
+            )
+            .await
+            .expect_err("missing repo should fail");
+        assert!(matches!(err, ForgejoError::NotFound(name) if name == "demo"));
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_skips_create_when_already_present() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: r#"[{"config":{"url":"http://localhost:8090/"}}]"#.to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        client.ensure_webhook("repo").await.expect("hook");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, ForgejoMethod::Get);
+    }
+
+    #[tokio::test]
+    async fn create_pull_request_rejects_negative_number() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"number":-1,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/-1"}"#
+                .to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_pull_request(
+                "gittree",
+                "demo",
+                ForgejoCreatePullRequest {
+                    head: "feature".to_string(),
+                    base: "main".to_string(),
+                    title: "Add thing".to_string(),
+                    body: None,
+                },
+            )
+            .await
+            .expect_err("negative number should fail");
+        assert!(matches!(err, ForgejoError::Parse(message) if message.contains("invalid pull request number")));
+    }
 }
