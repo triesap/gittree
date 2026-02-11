@@ -1267,4 +1267,17 @@ mod tests {
             Err(err) => assert!(matches!(err, RelayError::Storage(_))),
         }
     }
+
+    #[tokio::test]
+    async fn build_state_with_admission_config_constructs_client() {
+        let mut config = sample_config();
+        config.admission = Some(crate::AdmissionHookConfig::new(
+            "http://127.0.0.1:8081/decide".to_string(),
+            Duration::from_secs(2),
+            crate::AdmissionFallback::Reject,
+        ));
+        let state = build_state(config).expect("state");
+        assert!(state.admission.is_some());
+    }
+
 }
