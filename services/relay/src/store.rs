@@ -748,6 +748,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_store_delete_ignores_mismatched_author() {
+        let store = MemoryStore::new();
+        let target_pubkey = "aa".repeat(32);
+
+        let mut target = sample_event("target-delete-author");
+        target.pubkey = target_pubkey.clone();
+        target.created_at = 5;
+        store.insert(target.clone()).await.expect("insert target");
+
+        let mut delete = sample_event("delete-mismatch");
+        delete.kind = 5;
+        delete.pubkey = "bb".repeat(32);
+        delete.created_at = 10;
+        delete.tags = vec![vec!["e".to_string(), target.id.clone()]];
+        store
+            .insert(delete)
+            .await
+            .expect("insert mismatched delete");
+        assert!(store.get(&target.id).await.expect("get target").is_some());
+
+        let mut target_address = sample_event("target-address-mismatch");
+        target_address.kind = 30023;
+        target_address.pubkey = target_pubkey.clone();
+        target_address.created_at = 5;
+        target_address.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        store
+            .insert(target_address.clone())
+            .await
+            .expect("insert address target");
+
+        let mut delete_address = sample_event("delete-address-mismatch");
+        delete_address.kind = 5;
+        delete_address.pubkey = "bb".repeat(32);
+        delete_address.created_at = 20;
+        delete_address.tags = vec![vec![
+            "a".to_string(),
+            format!("30023:{target_pubkey}:demo"),
+        ]];
+        store
+            .insert(delete_address)
+            .await
+            .expect("insert address delete");
+        assert!(
+            store
+                .get(&target_address.id)
+                .await
+                .expect("get address target")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn repository_store_inserts_and_queries() {
         let repo = InMemoryRepositories::new();
         let store = RepositoryStore::new(repo);

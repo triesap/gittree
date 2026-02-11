@@ -1130,6 +1130,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fake_tenant_repository_membership_repository_paths_are_exercised() {
+        let repos = FakeTenantRepository::with_tenant("tenant.local", sample_tenant_record());
+        let membership = super::TenantRepository::membership_repository(&repos);
+        let members = membership
+            .list_memberships("tenant-id")
+            .await
+            .expect("list memberships");
+        assert!(members.is_empty());
+    }
+
+    #[tokio::test]
     async fn seed_owner_membership_sets_owner_role_and_preserves_created_at() {
         let repo = Arc::new(InMemoryRepositories::new());
         let membership: Arc<dyn RelayMembershipRepository> = repo.clone();
