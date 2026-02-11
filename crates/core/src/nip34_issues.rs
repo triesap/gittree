@@ -125,4 +125,54 @@ mod tests {
 
         assert!(issue.validate().is_err());
     }
+
+    #[test]
+    fn issue_from_tags_requires_repo_address() {
+        let tags = vec![vec!["subject".to_string(), "missing repo".to_string()]];
+        let err = Issue::from_tags(&tags).unwrap_err();
+        assert!(matches!(err, crate::CoreError::MissingField("a")));
+    }
+
+    #[test]
+    fn issue_from_tags_dedupes_mentions_and_labels() {
+        let pubkey = hex_of(0x11, 64);
+        let mention = hex_of(0x22, 64);
+        let tags = vec![
+            vec!["a".to_string(), format!("30617:{pubkey}:repo")],
+            vec!["p".to_string(), mention.clone()],
+            vec!["p".to_string(), mention.clone()],
+            vec!["t".to_string(), "bug".to_string()],
+            vec!["t".to_string(), "bug".to_string()],
+        ];
+
+        let issue = Issue::from_tags(&tags).expect("issue");
+        assert_eq!(issue.mentions, vec![mention]);
+        assert_eq!(issue.labels, vec!["bug".to_string()]);
+    }
+
+    #[test]
+    fn issue_validate_rejects_invalid_mentions_and_labels() {
+        let pubkey = hex_of(0x11, 64);
+        let bad_mention = Issue {
+            repo_address: format!("30617:{pubkey}:repo"),
+            mentions: vec!["nothex".to_string()],
+            subject: None,
+            labels: Vec::new(),
+        };
+        assert!(matches!(
+            bad_mention.validate(),
+            Err(crate::CoreError::InvalidField { field: "p", .. })
+        ));
+
+        let bad_label = Issue {
+            repo_address: format!("30617:{pubkey}:repo"),
+            mentions: Vec::new(),
+            subject: None,
+            labels: vec![" ".to_string()],
+        };
+        assert!(matches!(
+            bad_label.validate(),
+            Err(crate::CoreError::InvalidField { field: "t", .. })
+        ));
+    }
 }

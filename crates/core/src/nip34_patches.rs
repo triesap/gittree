@@ -258,6 +258,7 @@ fn parse_e_tag(tag: &[String]) -> Option<(&str, Option<&str>)> {
 mod tests {
     use super::CommitterTag;
     use super::Patch;
+    use super::parse_e_tag;
 
     fn hex_of(byte: u8, len: usize) -> String {
         format!("{:02x}", byte).repeat(len / 2)
@@ -329,5 +330,99 @@ mod tests {
         };
 
         assert!(patch.validate().is_err());
+    }
+
+    #[test]
+    fn patch_from_tags_requires_repo_address() {
+        let tags = vec![vec!["t".to_string(), "root".to_string()]];
+        let err = Patch::from_tags(&tags).unwrap_err();
+        assert!(matches!(err, crate::CoreError::MissingField("a")));
+    }
+
+    #[test]
+    fn patch_from_tags_rejects_invalid_committer_tag() {
+        let pubkey = hex_of(0x11, 64);
+        let tags = vec![
+            vec!["a".to_string(), format!("30617:{pubkey}:repo")],
+            vec!["committer".to_string(), "Alice".to_string()],
+        ];
+        assert!(matches!(
+            Patch::from_tags(&tags),
+            Err(crate::CoreError::InvalidField {
+                field: "committer",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn patch_validation_rejects_invalid_optional_fields() {
+        let pubkey = hex_of(0x11, 64);
+        let base = Patch {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: Vec::new(),
+            mentions: Vec::new(),
+            root_event: None,
+            reply_event: None,
+            is_root: false,
+            is_root_revision: false,
+            commit: None,
+            parent_commit: None,
+            commit_pgp_sig: None,
+            committer: None,
+        };
+
+        let mut patch = base.clone();
+        patch.root_event = Some("bad".to_string());
+        assert!(matches!(
+            patch.validate(),
+            Err(crate::CoreError::InvalidField { field: "e", .. })
+        ));
+
+        let mut patch = base.clone();
+        patch.reply_event = Some("bad".to_string());
+        assert!(matches!(
+            patch.validate(),
+            Err(crate::CoreError::InvalidField { field: "e", .. })
+        ));
+
+        let mut patch = base.clone();
+        patch.repo_refs = vec!["bad".to_string()];
+        assert!(matches!(
+            patch.validate(),
+            Err(crate::CoreError::InvalidField { field: "r", .. })
+        ));
+
+        let mut patch = base.clone();
+        patch.mentions = vec!["bad".to_string()];
+        assert!(matches!(
+            patch.validate(),
+            Err(crate::CoreError::InvalidField { field: "p", .. })
+        ));
+
+        let mut patch = base;
+        patch.parent_commit = Some("bad".to_string());
+        assert!(matches!(
+            patch.validate(),
+            Err(crate::CoreError::InvalidField {
+                field: "parent-commit",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_e_tag_handles_short_and_non_e_tags() {
+        assert!(parse_e_tag(&[]).is_none());
+        assert!(parse_e_tag(&["p".to_string(), "abc".to_string()]).is_none());
+        assert_eq!(
+            parse_e_tag(&[
+                "e".to_string(),
+                "deadbeef".to_string(),
+                "".to_string(),
+                "root".to_string()
+            ]),
+            Some(("deadbeef", Some("root")))
+        );
     }
 }
