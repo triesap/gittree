@@ -2422,6 +2422,175 @@ mode = "unknown"
     }
 
     #[test]
+    fn relay_compatibility_mode_as_str_covers_all_variants() {
+        assert_eq!(RelayCompatibilityMode::Strict.as_str(), "strict");
+        assert_eq!(RelayCompatibilityMode::Warn.as_str(), "warn");
+        assert_eq!(RelayCompatibilityMode::Allow.as_str(), "allow");
+    }
+
+    #[test]
+    fn forgejo_config_validate_rejects_blank_required_fields() {
+        let base = ForgejoConfig {
+            base_url: "http://localhost:3000".to_string(),
+            api_token: "token".to_string(),
+            owner: "gittree".to_string(),
+            webhook_url: "http://localhost:8087/".to_string(),
+            webhook_secret: "secret".to_string(),
+            repo_private: true,
+        };
+
+        let mut blank_token = base.clone();
+        blank_token.api_token = " ".to_string();
+        assert!(matches!(
+            blank_token.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "forgejo.api_token",
+                ..
+            })
+        ));
+
+        let mut blank_owner = base.clone();
+        blank_owner.owner = " ".to_string();
+        assert!(matches!(
+            blank_owner.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "forgejo.owner",
+                ..
+            })
+        ));
+
+        let mut blank_secret = base;
+        blank_secret.webhook_secret = " ".to_string();
+        assert!(matches!(
+            blank_secret.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "forgejo.webhook_secret",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn forgejo_and_ui_toml_file_missing_paths_report_read_error() {
+        let mut forgejo_missing = std::env::temp_dir();
+        forgejo_missing.push(format!(
+            "gittree-forgejo-missing-{}.toml",
+            std::process::id()
+        ));
+        let forgejo_err = ForgejoConfig::from_toml_file(&forgejo_missing).unwrap_err();
+        assert!(matches!(forgejo_err, ConfigError::ReadConfig { .. }));
+
+        let mut ui_missing = std::env::temp_dir();
+        ui_missing.push(format!("gittree-ui-missing-{}.toml", std::process::id()));
+        let ui_err = UiConfig::from_toml_file(&ui_missing).unwrap_err();
+        assert!(matches!(ui_err, ConfigError::ReadConfig { .. }));
+    }
+
+    #[test]
+    fn auth_and_probe_env_parsers_reject_invalid_numbers_and_bools() {
+        let auth_values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "bad")]);
+        let auth_err =
+            AuthConfig::from_env_with(|key| auth_values.get(key).cloned()).expect_err("invalid skew");
+        assert!(matches!(
+            auth_err,
+            ConfigError::InvalidConfig {
+                field: "auth.max_skew_seconds",
+                ..
+            }
+        ));
+
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_PROBE_ACTIVE, "maybe", || {
+            let err = RelayProbeConfig::from_env().expect_err("invalid probe bool");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayProbeConfig {
+                    field: ENV_RELAY_PROBE_ACTIVE,
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_PROBE_TIMEOUT_SECS, "bad", || {
+            let err = RelayProbeConfig::from_env().expect_err("invalid probe timeout");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayProbeConfig {
+                    field: ENV_RELAY_PROBE_TIMEOUT_SECS,
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn relay_probe_default_and_validate_reject_zero_timeout() {
+        let default_probe = RelayProbeConfig::default();
+        assert!(!default_probe.active);
+        assert_eq!(default_probe.timeout_secs, crate::DEFAULT_RELAY_PROBE_TIMEOUT_SECS);
+        assert_eq!(default_probe.secret_key, None);
+
+        let invalid = RelayProbeConfig {
+            active: true,
+            timeout_secs: 0,
+            secret_key: None,
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(ConfigError::InvalidRelayProbeConfig {
+                field: "relay_probe.timeout_secs",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn relay_policy_env_rejects_invalid_numeric_and_bool() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max content len");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_content_len",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "notabool", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid auth required");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.auth_required",
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn from_toml_file_validated_accepts_valid_config() {
+        let path = write_temp_config("relay_bind = \"127.0.0.1:9123\"");
+        let config = GittreeConfig::from_toml_file_validated(&path).expect("validated file");
+        assert_eq!(config.relay_bind, "127.0.0.1:9123");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn require_toml_field_reports_missing_value() {
+        let err = super::require_toml_field::<String>(None, "x.field").expect_err("missing");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidConfig {
+                field: "x.field",
+                value,
+            } if value == "missing"
+        ));
+    }
+
+    #[test]
     fn config_error_display_source_and_with_path_cover_variants() {
         use std::error::Error as _;
 
@@ -2449,6 +2618,45 @@ mode = "unknown"
         };
         assert!(invalid.to_string().contains("relay_policy.max_tags"));
         assert!(invalid.source().is_none());
+
+        let invalid_bind = ConfigError::InvalidRelayBind("bad".to_string());
+        assert!(invalid_bind.to_string().contains("invalid relay bind address"));
+        assert!(invalid_bind.source().is_none());
+
+        let invalid_url = ConfigError::InvalidRelayUrl("ftp://relay".to_string());
+        assert!(invalid_url.to_string().contains("invalid relay url"));
+        assert!(invalid_url.source().is_none());
+
+        let invalid_mode = ConfigError::InvalidRelayCompatibilityMode("oops".to_string());
+        assert!(invalid_mode.to_string().contains("invalid relay compatibility mode"));
+        assert!(invalid_mode.source().is_none());
+
+        let invalid_probe = ConfigError::InvalidRelayProbeConfig {
+            field: "relay_probe.timeout_secs",
+            value: "0".to_string(),
+        };
+        assert!(invalid_probe.to_string().contains("invalid relay probe config"));
+        assert!(invalid_probe.source().is_none());
+
+        let invalid_service = ConfigError::InvalidServiceBind {
+            service: "relay",
+            value: "bad".to_string(),
+        };
+        assert!(invalid_service.to_string().contains("invalid relay bind address"));
+        assert!(invalid_service.source().is_none());
+
+        let missing_env = ConfigError::MissingEnv("KEY");
+        assert!(missing_env.to_string().contains("missing env KEY"));
+        assert!(missing_env.source().is_none());
+
+        let invalid_config = ConfigError::InvalidConfig {
+            field: "ui.repo_root",
+            value: "".to_string(),
+        };
+        assert!(invalid_config.to_string().contains("invalid config ui.repo_root"));
+        assert!(invalid_config.source().is_none());
+        let unchanged = invalid_config.with_path(std::path::Path::new("/tmp/unused"));
+        assert!(matches!(unchanged, ConfigError::InvalidConfig { .. }));
     }
 
     #[test]
