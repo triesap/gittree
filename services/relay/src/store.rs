@@ -558,10 +558,95 @@ mod tests {
         EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome, collect_tag_values,
         exact_hex_filters, parse_address,
     };
+    use async_trait::async_trait;
     use crate::NostrEvent;
-    use gittree_storage::InMemoryRepositories;
+    use gittree_storage::{EventQuery, EventRecord, EventRepository, InMemoryRepositories, StorageError};
     use serde_json::json;
     use std::sync::Arc;
+
+    #[derive(Debug, Clone, Copy)]
+    struct ScriptedEventRepo {
+        fail_insert: bool,
+        fail_get: bool,
+        fail_delete: bool,
+        fail_query: bool,
+    }
+
+    impl ScriptedEventRepo {
+        fn insert_error() -> Self {
+            Self {
+                fail_insert: true,
+                fail_get: false,
+                fail_delete: false,
+                fail_query: false,
+            }
+        }
+
+        fn get_error() -> Self {
+            Self {
+                fail_insert: false,
+                fail_get: true,
+                fail_delete: false,
+                fail_query: false,
+            }
+        }
+
+        fn query_error() -> Self {
+            Self {
+                fail_insert: false,
+                fail_get: false,
+                fail_delete: false,
+                fail_query: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EventRepository for ScriptedEventRepo {
+        async fn insert_event(&self, _record: EventRecord) -> Result<(), StorageError> {
+            if self.fail_insert {
+                return Err(StorageError::Internal {
+                    message: "insert failure".to_string(),
+                });
+            }
+            Ok(())
+        }
+
+        async fn get_event(
+            &self,
+            _tenant_id: &str,
+            _event_id: &[u8],
+        ) -> Result<Option<EventRecord>, StorageError> {
+            if self.fail_get {
+                return Err(StorageError::Internal {
+                    message: "get failure".to_string(),
+                });
+            }
+            Ok(None)
+        }
+
+        async fn delete_event(
+            &self,
+            _tenant_id: &str,
+            _event_id: &[u8],
+        ) -> Result<bool, StorageError> {
+            if self.fail_delete {
+                return Err(StorageError::Internal {
+                    message: "delete failure".to_string(),
+                });
+            }
+            Ok(false)
+        }
+
+        async fn query_events(&self, _query: &EventQuery) -> Result<Vec<EventRecord>, StorageError> {
+            if self.fail_query {
+                return Err(StorageError::Internal {
+                    message: "query failure".to_string(),
+                });
+            }
+            Ok(Vec::new())
+        }
+    }
 
     fn sample_event(id: &str) -> NostrEvent {
         NostrEvent {
@@ -1073,6 +1158,49 @@ mod tests {
             .await
             .expect_err("invalid delete pubkey should fail");
         assert!(matches!(err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn repository_store_propagates_insert_and_query_repository_errors() {
+        let insert_store = RepositoryStore::new(ScriptedEventRepo::insert_error());
+        let insert_err = insert_store
+            .insert(sample_event(&"72".repeat(32)))
+            .await
+            .expect_err("insert should fail");
+        assert!(matches!(insert_err, StoreError::Backend(_)));
+
+        let query_store = RepositoryStore::new(ScriptedEventRepo::query_error());
+        let filter = crate::Filter::from_json(&json!({})).expect("filter");
+        let query_err = query_store
+            .query(&[filter])
+            .await
+            .expect_err("query should fail");
+        assert!(matches!(query_err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn repository_store_delete_event_propagates_lookup_and_address_query_errors() {
+        let lookup_store = RepositoryStore::new(ScriptedEventRepo::get_error());
+        let mut delete_lookup = sample_event(&"73".repeat(32));
+        delete_lookup.kind = 5;
+        delete_lookup.tags = vec![vec!["e".to_string(), "11".repeat(32)]];
+        let lookup_err = lookup_store
+            .insert(delete_lookup)
+            .await
+            .expect_err("delete lookup should fail");
+        assert!(matches!(lookup_err, StoreError::Backend(_)));
+
+        let query_store = RepositoryStore::new(ScriptedEventRepo::query_error());
+        let author = "aa".repeat(32);
+        let mut delete_address = sample_event(&"74".repeat(32));
+        delete_address.kind = 5;
+        delete_address.pubkey = author.clone();
+        delete_address.tags = vec![vec!["a".to_string(), format!("30023:{author}:demo")]];
+        let query_err = query_store
+            .insert(delete_address)
+            .await
+            .expect_err("delete address query should fail");
+        assert!(matches!(query_err, StoreError::Backend(_)));
     }
 
     #[test]

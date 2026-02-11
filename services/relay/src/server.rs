@@ -59,6 +59,10 @@ impl TenantRepository for PostgresRepositories {
 
 pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
     let _observability = crate::init_observability()?;
+    serve_inner(config).await
+}
+
+async fn serve_inner(config: RelayConfig) -> Result<(), RelayError> {
     let state = build_state(config.clone())?;
     let router = build_router(Arc::new(state));
     let listener = bind_listener(&config.bind).await?;
@@ -1266,6 +1270,14 @@ mod tests {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
         let err = bind_listener(&config.bind).await.expect_err("invalid bind");
+        assert!(matches!(err, RelayError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_inner_returns_serve_error_for_invalid_bind_address() {
+        let mut config = sample_config();
+        config.bind = "127.0.0.1:99999".to_string();
+        let err = super::serve_inner(config).await.expect_err("invalid bind");
         assert!(matches!(err, RelayError::Serve(_)));
     }
 
