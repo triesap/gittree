@@ -243,6 +243,8 @@ fn parse_q_tag(tag: &[String]) -> Result<StatusAppliedRef> {
 
 #[cfg(test)]
 mod tests {
+    use crate::CoreError;
+
     use super::StatusAppliedRef;
     use super::StatusEvent;
 
@@ -294,5 +296,121 @@ mod tests {
     fn q_tag_requires_all_fields() {
         let tags = vec![vec!["q".to_string(), "abc".to_string()]];
         assert!(StatusEvent::from_tags(&tags).is_err());
+    }
+
+    #[test]
+    fn status_from_tags_rejects_conflicting_root_event_tags() {
+        let first_root = hex_of(0x11, 64);
+        let second_root = hex_of(0x22, 64);
+        let tags = vec![
+            vec![
+                "e".to_string(),
+                first_root,
+                "".to_string(),
+                "root".to_string(),
+            ],
+            vec![
+                "e".to_string(),
+                second_root.clone(),
+                "".to_string(),
+                "root".to_string(),
+            ],
+        ];
+
+        assert!(matches!(
+            StatusEvent::from_tags(&tags),
+            Err(CoreError::InvalidTag {
+                tag: "e",
+                value
+            }) if value == second_root
+        ));
+    }
+
+    #[test]
+    fn status_validate_rejects_invalid_reply_repo_ref_and_merge_commit() {
+        let mut status = StatusEvent {
+            root_event: hex_of(0x11, 64),
+            reply_events: vec!["abcd".to_string()],
+            mentions: vec![],
+            repo_address: None,
+            repo_refs: vec![hex_of(0x22, 40)],
+            applied_refs: vec![],
+            merge_commit: None,
+            applied_as_commits: Vec::new(),
+        };
+        assert!(matches!(
+            status.validate(),
+            Err(CoreError::InvalidField { field: "e", .. })
+        ));
+
+        status.reply_events = vec![];
+        status.repo_refs = vec!["abcd".to_string()];
+        assert!(matches!(
+            status.validate(),
+            Err(CoreError::InvalidField { field: "r", .. })
+        ));
+
+        status.repo_refs = vec![hex_of(0x22, 40)];
+        status.merge_commit = Some("abcd".to_string());
+        assert!(matches!(
+            status.validate(),
+            Err(CoreError::InvalidField {
+                field: "merge-commit",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validate_rejects_invalid_applied_refs_and_commits() {
+        let valid_pubkey = hex_of(0x11, 64);
+        let valid_event = hex_of(0x22, 64);
+        let valid_commit = hex_of(0x33, 40);
+        let status = StatusEvent {
+            root_event: hex_of(0x44, 64),
+            reply_events: vec![],
+            mentions: vec![],
+            repo_address: None,
+            repo_refs: vec![],
+            applied_refs: vec![StatusAppliedRef {
+                event_id: valid_event.clone(),
+                relay: "wss://relay.example".to_string(),
+                pubkey: valid_pubkey.clone(),
+            }],
+            merge_commit: None,
+            applied_as_commits: vec![valid_commit.clone()],
+        };
+        status.validate().expect("baseline should be valid");
+
+        let mut invalid_q_event = status.clone();
+        invalid_q_event.applied_refs[0].event_id = "abcd".to_string();
+        assert!(matches!(
+            invalid_q_event.validate(),
+            Err(CoreError::InvalidField { field: "q", .. })
+        ));
+
+        let mut invalid_q_pubkey = status.clone();
+        invalid_q_pubkey.applied_refs[0].pubkey = "abcd".to_string();
+        assert!(matches!(
+            invalid_q_pubkey.validate(),
+            Err(CoreError::InvalidField { field: "q", .. })
+        ));
+
+        let mut invalid_q_relay = status.clone();
+        invalid_q_relay.applied_refs[0].relay = "   ".to_string();
+        assert!(matches!(
+            invalid_q_relay.validate(),
+            Err(CoreError::InvalidField { field: "q", .. })
+        ));
+
+        let mut invalid_applied_commit = status;
+        invalid_applied_commit.applied_as_commits = vec!["abcd".to_string()];
+        assert!(matches!(
+            invalid_applied_commit.validate(),
+            Err(CoreError::InvalidField {
+                field: "applied-as-commits",
+                ..
+            })
+        ));
     }
 }

@@ -335,6 +335,8 @@ impl PullRequestUpdate {
 
 #[cfg(test)]
 mod tests {
+    use crate::CoreError;
+
     use super::PullRequest;
     use super::PullRequestUpdate;
 
@@ -404,5 +406,154 @@ mod tests {
         let parsed = PullRequestUpdate::from_tags(&tags).expect("parse");
         assert_eq!(parsed, update);
         parsed.validate().expect("valid");
+    }
+
+    #[test]
+    fn pull_request_from_tags_requires_repo_and_tip() {
+        let missing_repo = PullRequest::from_tags(&[vec!["c".to_string(), hex_of(0x11, 40)]])
+            .expect_err("missing repo address should fail");
+        assert!(matches!(missing_repo, CoreError::MissingField("a")));
+
+        let missing_tip = PullRequest::from_tags(&[vec![
+            "a".to_string(),
+            format!("30617:{}:repo", hex_of(0x11, 64)),
+        ]])
+        .expect_err("missing tip commit should fail");
+        assert!(matches!(missing_tip, CoreError::MissingField("c")));
+    }
+
+    #[test]
+    fn pull_request_validate_rejects_invalid_optional_fields() {
+        let pubkey = hex_of(0x11, 64);
+        let valid = PullRequest {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            subject: Some("subject".to_string()),
+            labels: vec!["bug".to_string()],
+            tip_commit: hex_of(0x44, 40),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            branch_name: Some("feature/x".to_string()),
+            revision_of: Some(hex_of(0x55, 64)),
+            merge_base: Some(hex_of(0x66, 40)),
+        };
+
+        let mut bad_subject = valid.clone();
+        bad_subject.subject = Some("   ".to_string());
+        assert!(matches!(
+            bad_subject.validate(),
+            Err(CoreError::InvalidField { field: "subject", .. })
+        ));
+
+        let mut bad_branch = valid.clone();
+        bad_branch.branch_name = Some("   ".to_string());
+        assert!(matches!(
+            bad_branch.validate(),
+            Err(CoreError::InvalidField {
+                field: "branch-name",
+                ..
+            })
+        ));
+
+        let mut bad_revision = valid.clone();
+        bad_revision.revision_of = Some("abcd".to_string());
+        assert!(matches!(
+            bad_revision.validate(),
+            Err(CoreError::InvalidField { field: "e", .. })
+        ));
+
+        let mut bad_merge_base = valid.clone();
+        bad_merge_base.merge_base = Some("abcd".to_string());
+        assert!(matches!(
+            bad_merge_base.validate(),
+            Err(CoreError::InvalidField {
+                field: "merge-base",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pull_request_update_from_tags_requires_root_author_and_clone() {
+        let pubkey = hex_of(0x11, 64);
+        let missing_root_author = PullRequestUpdate::from_tags(&[
+            vec!["a".to_string(), format!("30617:{pubkey}:repo")],
+            vec!["E".to_string(), hex_of(0x22, 64)],
+            vec!["c".to_string(), hex_of(0x33, 40)],
+            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+        ])
+        .expect_err("missing root author should fail");
+        assert!(matches!(missing_root_author, CoreError::MissingField("P")));
+
+        let missing_clone = PullRequestUpdate {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: Vec::new(),
+            mentions: Vec::new(),
+            root_event_id: hex_of(0x44, 64),
+            root_author: hex_of(0x55, 64),
+            tip_commit: hex_of(0x66, 40),
+            clone: Vec::new(),
+            merge_base: None,
+        };
+        assert!(matches!(
+            missing_clone.validate(),
+            Err(CoreError::MissingField("clone"))
+        ));
+    }
+
+    #[test]
+    fn pull_request_update_validate_rejects_invalid_fields() {
+        let pubkey = hex_of(0x11, 64);
+        let valid = PullRequestUpdate {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            root_event_id: hex_of(0x44, 64),
+            root_author: hex_of(0x55, 64),
+            tip_commit: hex_of(0x66, 40),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            merge_base: Some(hex_of(0x77, 40)),
+        };
+
+        let mut bad_root_event = valid.clone();
+        bad_root_event.root_event_id = "abcd".to_string();
+        assert!(matches!(
+            bad_root_event.validate(),
+            Err(CoreError::InvalidField { field: "E", .. })
+        ));
+
+        let mut bad_root_author = valid.clone();
+        bad_root_author.root_author = "abcd".to_string();
+        assert!(matches!(
+            bad_root_author.validate(),
+            Err(CoreError::InvalidField { field: "P", .. })
+        ));
+
+        let mut bad_tip_commit = valid.clone();
+        bad_tip_commit.tip_commit = "abcd".to_string();
+        assert!(matches!(
+            bad_tip_commit.validate(),
+            Err(CoreError::InvalidField { field: "c", .. })
+        ));
+
+        let mut bad_clone_entry = valid.clone();
+        bad_clone_entry.clone = vec![" ".to_string()];
+        assert!(matches!(
+            bad_clone_entry.validate(),
+            Err(CoreError::InvalidField {
+                field: "clone",
+                ..
+            })
+        ));
+
+        let mut bad_merge_base = valid.clone();
+        bad_merge_base.merge_base = Some("abcd".to_string());
+        assert!(matches!(
+            bad_merge_base.validate(),
+            Err(CoreError::InvalidField {
+                field: "merge-base",
+                ..
+            })
+        ));
     }
 }
