@@ -1787,6 +1787,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_user_rejects_empty_username() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/users")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "username":"  ",
+                            "email":"alice@example.com",
+                            "password":"secret"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn create_user_posts_to_admin_endpoint() {
         let responses = vec![ForgejoResponse {
             status: 201,
@@ -1850,6 +1876,32 @@ mod tests {
         assert!(requests[0]
             .url
             .ends_with("/api/v1/admin/users/admin/orgs"));
+    }
+
+    #[tokio::test]
+    async fn create_org_rejects_empty_owner() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/orgs")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":" ",
+                            "name":"acme",
+                            "full_name":"Acme Org"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -2241,6 +2293,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_tenant_rejects_empty_host_value() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let body = serde_json::to_vec(&json!({
+            "host": "   ",
+            "name": "Relay Local"
+        }))
+        .expect("body");
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn create_repo_rejects_pubkey_privkey_mismatch() {
         let (state, transport, _repos) = test_state(Vec::new());
         let (pubkey, _) = test_keys();
@@ -2267,6 +2358,65 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_rejects_invalid_pubkey_hex() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": "zz",
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_rejects_non_admin_pubkey() {
+        let (state, transport, _repos) =
+            test_state_with_auth(Vec::new(), vec!["aa".repeat(32)], "gittree");
+        let app = build_router(state);
+        let (pubkey, privkey) = test_keys();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
         assert!(transport.requests().is_empty());
     }
 
@@ -2450,6 +2600,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_pull_rejects_empty_title() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/pulls")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "repo":"demo",
+                            "head":"feature",
+                            "base":"main",
+                            "title":" "
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn control_event_rejects_non_admin_pubkey() {
         let (pubkey, privkey) = test_keys();
         let (state, _transport, _repos) = test_state_with_auth(
@@ -2517,6 +2696,56 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn control_event_rejects_invalid_kind_out_of_range() {
+        let (pubkey, _privkey) = test_keys();
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let payload = json!({
+            "kind": u64::MAX,
+            "pubkey": pubkey,
+            "content": "{}"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn control_event_rejects_empty_content() {
+        let (pubkey, _privkey) = test_keys();
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": pubkey,
+            "content": " "
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
