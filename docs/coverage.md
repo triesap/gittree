@@ -23,6 +23,16 @@ To pass through `--nocapture` to Rust tests:
 COV_NOCAPTURE=1 ./scripts/llvm-cov.sh
 ```
 
+When `gittree-storage` is included, coverage scripts automatically provision a
+temporary Postgres instance via Docker if
+`GITTREE_STORAGE_TEST_DATABASE_URL` is not set.
+
+Disable auto-provisioning:
+
+```
+GITTREE_STORAGE_AUTOSTART_DB=0 ./scripts/llvm-cov.sh
+```
+
 ## Run (custom packages)
 
 Override the package list with `COV_PACKAGES`:

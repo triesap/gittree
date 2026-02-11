@@ -26,6 +26,13 @@ args=()
 for pkg in "${packages[@]}"; do
   args+=("-p" "$pkg")
 done
+needs_storage_db=0
+for pkg in "${packages[@]}"; do
+  if [[ "${pkg}" == "gittree-storage" ]]; then
+    needs_storage_db=1
+    break
+  fi
+done
 
 test_args=()
 if [[ "${COV_NOCAPTURE:-0}" == "1" ]]; then
@@ -33,7 +40,13 @@ if [[ "${COV_NOCAPTURE:-0}" == "1" ]]; then
 fi
 
 if [[ "${#test_args[@]}" -gt 0 ]]; then
-  cargo llvm-cov --html "${args[@]}" "${test_args[@]}"
+  cov_cmd=(cargo llvm-cov --html "${args[@]}" "${test_args[@]}")
 else
-  cargo llvm-cov --html "${args[@]}"
+  cov_cmd=(cargo llvm-cov --html "${args[@]}")
+fi
+
+if [[ "${needs_storage_db}" == "1" ]]; then
+  ./scripts/with-test-postgres.sh "${cov_cmd[@]}"
+else
+  "${cov_cmd[@]}"
 fi
