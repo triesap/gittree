@@ -3000,6 +3000,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn membership_requirements_allow_active_members_for_req_and_event() {
+        let tenant_id = "tenant-1";
+        let membership = Arc::new(InMemoryRepositories::new());
+
+        let mut req_session =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+                .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+                .with_membership_requirements(true, false);
+        authenticate_session(&mut req_session).await;
+        let req_pubkey = req_session
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.authenticated_pubkey.as_ref())
+            .cloned()
+            .expect("auth pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(req_pubkey).expect("pubkey bytes"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+        let req_response = req_session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(req_response
+            .iter()
+            .any(|message| matches!(message, ServerMessage::Eose { .. })));
+
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+        let mut event_session = Session::with_broadcast(
+            MemoryStore::new(),
+            Policy::default(),
+            None,
+            tx,
+            true,
+            true,
+        )
+        .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+        .with_membership_requirements(false, true);
+        authenticate_session(&mut event_session).await;
+        let event_pubkey = event_session
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.authenticated_pubkey.as_ref())
+            .cloned()
+            .expect("auth pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(event_pubkey).expect("pubkey bytes"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 2,
+                updated_at: 2,
+            })
+            .await
+            .expect("membership insert");
+        let event_response = event_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("seed-active-member")).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            event_response[0],
+            ServerMessage::Ok {
+                accepted: true,
+                ref message,
+                ..
+            } if message == "saved"
+        ));
+    }
+
+    #[tokio::test]
     async fn req_membership_requirements_reject_invalid_authenticated_pubkey_hex() {
         let membership = Arc::new(InMemoryRepositories::new());
         let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)

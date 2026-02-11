@@ -800,6 +800,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_store_query_reports_invalid_tag_index() {
+        let store = MemoryStore::new();
+        let mut event = sample_event("bad-tags");
+        event.tags = vec![Vec::new()];
+        store.insert(event).await.expect("insert");
+
+        let filter = crate::Filter::from_json(&json!({})).expect("filter");
+        let err = store.query(&[filter]).await.expect_err("invalid tag index");
+        assert!(matches!(err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
     async fn repository_store_inserts_and_queries() {
         let repo = InMemoryRepositories::new();
         let store = RepositoryStore::new(repo);
@@ -1046,6 +1058,23 @@ mod tests {
         assert!(store.get(&target.id).await.expect("get target").is_some());
     }
 
+    #[tokio::test]
+    async fn repository_store_delete_event_rejects_invalid_pubkey_hex() {
+        let repo = InMemoryRepositories::new();
+        let store = RepositoryStore::new(repo);
+
+        let mut delete = sample_event(&"71".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "not-hex".to_string();
+        delete.tags = vec![vec!["e".to_string(), "11".repeat(32)]];
+
+        let err = store
+            .insert(delete)
+            .await
+            .expect_err("invalid delete pubkey should fail");
+        assert!(matches!(err, StoreError::Backend(_)));
+    }
+
     #[test]
     fn exact_hex_filters_and_helpers_cover_edge_cases() {
         let exact = vec!["11".repeat(32), "22".repeat(32)];
@@ -1069,6 +1098,7 @@ mod tests {
         assert_eq!(collect_tag_values(&tags, "z"), Vec::<String>::new());
 
         assert!(parse_address("bad").is_none());
+        assert!(parse_address("not-a-kind:pubkey:demo").is_none());
         let parsed = parse_address("30023:pubkey:demo").expect("address");
         assert_eq!(parsed.kind, 30023);
         assert_eq!(parsed.pubkey, "pubkey");
