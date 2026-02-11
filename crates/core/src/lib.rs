@@ -113,4 +113,11 @@ mod tests {
         };
         assert_eq!(error.to_string(), "invalid tag e: missing-id");
     }
+
+    #[test]
+    fn core_error_exposes_no_source() {
+        let error = CoreError::MissingField("identifier");
+        let dyn_error: &dyn std::error::Error = &error;
+        assert!(dyn_error.source().is_none());
+    }
 }

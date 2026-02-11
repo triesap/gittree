@@ -879,6 +879,28 @@ bind = "127.0.0.1:9010"
     }
 
     #[test]
+    fn admission_env_fallback_parses_explicit_reject() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
+            with_env_var(ENV_ADMISSION_FALLBACK, " reject ", || {
+                let config = super::admission_from_env()
+                    .expect("admission")
+                    .expect("configured");
+                assert_eq!(config.fallback, AdmissionFallback::Reject);
+            });
+        });
+    }
+
+    #[test]
+    fn admission_env_without_url_disables_hook() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        without_env_var(ENV_ADMISSION_URL, || {
+            let config = super::admission_from_env().expect("admission");
+            assert!(config.is_none());
+        });
+    }
+
+    #[test]
     fn env_helpers_restore_existing_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let restore_key = "GITTREE_RELAY_ENV_RESTORE_TEST";
@@ -972,6 +994,27 @@ bind = "127.0.0.1:9010"
         let serve = RelayError::Serve("boom".to_string());
         assert_eq!(serve.to_string(), "relay serve error: boom");
         assert!(serve.source().is_none());
+    }
+
+    #[test]
+    fn nip11_builder_uses_default_name_without_app_or_tenant_name() {
+        let config = RelayConfig {
+            bind: "0.0.0.0:8080".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            policy: RelayPolicyConfig::default(),
+            admission: None,
+        };
+        let policy = Policy::default();
+        let doc = build_nip11_document(&config, &policy, None);
+        assert_eq!(doc.name, Some("gittree".to_string()));
     }
 
     #[tokio::test]
