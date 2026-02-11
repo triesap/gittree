@@ -837,6 +837,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_for_ok_ignores_other_event_ids_until_match() {
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"OK\",\"other\",true,\"accepted\"]".to_string(),
+            )),
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"OK\",\"evt\",true,\"accepted\"]".to_string(),
+            )),
+        ]);
+        wait_for_ok(&mut stream, "evt", Duration::from_secs(1))
+            .await
+            .expect("matching id should succeed");
+    }
+
+    #[tokio::test]
     async fn wait_for_ok_reports_closed_stream() {
         let mut empty = stream::iter(Vec::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>::new());
         let err = wait_for_ok(&mut empty, "evt", Duration::from_secs(1))
@@ -873,6 +888,27 @@ mod tests {
             .await
             .expect_err("missing event");
         assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_ignores_unrelated_messages_until_match() {
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                json!(["EVENT", "sub-other", {"id":"evt-1"}]).to_string(),
+            )),
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                json!(["EVENT", "sub-1", {"id":"evt-other"}]).to_string(),
+            )),
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"EOSE\",\"sub-other\"]".to_string(),
+            )),
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string(),
+            )),
+        ]);
+        wait_for_event(&mut stream, "sub-1", "evt-1", Duration::from_secs(1))
+            .await
+            .expect("matching event should be found");
     }
 
     #[tokio::test]
