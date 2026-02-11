@@ -196,6 +196,7 @@ impl StorageConfig {
 mod tests {
     use super::StorageConfig;
     use super::StorageError;
+    use std::error::Error as _;
     use sqlx::postgres::PgSslMode;
 
     fn sample_config() -> StorageConfig {
@@ -230,6 +231,17 @@ mod tests {
         assert_eq!(read.get_host(), write.get_host());
         assert_eq!(read.get_port(), write.get_port());
         assert_eq!(read.get_database(), write.get_database());
+    }
+
+    #[test]
+    fn write_connect_options_uses_write_connection_when_set() {
+        let mut config = sample_config();
+        config.write_connection =
+            Some("postgres://writer:pass@writer-host:5432/gittree_write".to_string());
+        let write = config.write_connect_options().expect("write options");
+        assert_eq!(write.get_host(), "writer-host");
+        assert_eq!(write.get_username(), "writer");
+        assert_eq!(write.get_database(), Some("gittree_write"));
     }
 
     #[test]
@@ -276,6 +288,73 @@ mod tests {
         config.read_connection = "not-a-url".to_string();
         let err = config.read_connect_options().unwrap_err();
         assert!(matches!(err, StorageError::InvalidConnectionString { .. }));
+    }
+
+    #[test]
+    fn invalid_write_connection_string_is_rejected() {
+        let mut config = sample_config();
+        config.write_connection = Some("not-a-url".to_string());
+        let err = config.write_connect_options().unwrap_err();
+        assert!(matches!(err, StorageError::InvalidConnectionString { .. }));
+    }
+
+    #[test]
+    fn validate_accepts_equal_pool_bounds() {
+        let mut config = sample_config();
+        config.max_connections = 4;
+        config.min_connections = 4;
+        config.validate().expect("equal bounds should validate");
+    }
+
+    #[test]
+    fn storage_error_display_and_source_cover_variants() {
+        let invalid_conn = StorageError::InvalidConnectionString {
+            value: "bad".to_string(),
+            source: sqlx::Error::PoolTimedOut,
+        };
+        assert!(invalid_conn.to_string().contains("invalid connection string bad"));
+        assert!(invalid_conn.source().is_some());
+
+        let invalid_pool = StorageError::InvalidPoolConfig {
+            field: "max_connections",
+            value: 0,
+        };
+        assert_eq!(invalid_pool.to_string(), "invalid pool config max_connections: 0");
+        assert!(invalid_pool.source().is_none());
+
+        let invalid_field = StorageError::InvalidField {
+            field: "tenant_id",
+            value: "empty".to_string(),
+        };
+        assert_eq!(invalid_field.to_string(), "invalid tenant_id: empty");
+        assert!(invalid_field.source().is_none());
+
+        let invalid_hex = StorageError::InvalidHex {
+            field: "pubkey",
+            value: "zz".to_string(),
+        };
+        assert_eq!(invalid_hex.to_string(), "invalid hex pubkey: zz");
+        assert!(invalid_hex.source().is_none());
+
+        let serde_err = serde_json::from_str::<serde_json::Value>("{").expect_err("serde error");
+        let serialization = StorageError::Serialization {
+            field: "report",
+            source: serde_err,
+        };
+        assert!(serialization.to_string().contains("invalid report:"));
+        assert!(serialization.source().is_some());
+
+        let migration = StorageError::Migration {
+            message: "stopped".to_string(),
+        };
+        assert_eq!(migration.to_string(), "migration error: stopped");
+        assert!(migration.source().is_none());
+
+        let database = StorageError::Database {
+            source: sqlx::Error::RowNotFound,
+        };
+        assert!(database.to_string().contains("database error:"));
+        assert!(database.source().is_some());
     }
 
     #[test]
