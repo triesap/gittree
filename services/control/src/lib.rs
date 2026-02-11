@@ -1815,6 +1815,76 @@ mod tests {
     }
 
     #[test]
+    fn normalize_host_accepts_ipv6_and_strips_brackets() {
+        let host = normalize_host("http://[2001:db8::1]:443").expect("host");
+        assert_eq!(host, "2001:db8::1");
+    }
+
+    #[test]
+    fn storage_env_helpers_handle_empty_and_invalid_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, " ", || {
+            let value = super::env_u32(super::ENV_STORAGE_MAX_CONNECTIONS).expect("env_u32");
+            assert!(value.is_none());
+        });
+        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, " ", || {
+            let value = super::env_u64(super::ENV_STORAGE_IDLE_TIMEOUT_SECS).expect("env_u64");
+            assert!(value.is_none());
+        });
+        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+            let err = super::env_u64(super::ENV_STORAGE_IDLE_TIMEOUT_SECS).unwrap_err();
+            assert!(matches!(
+                err,
+                super::ControlConfigError::Storage(super::StorageConfigError::InvalidEnv {
+                    key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn storage_from_env_reports_invalid_pool_bounds() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(super::ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                    let err = super::storage_from_env().expect_err("invalid pool bounds");
+                    assert!(matches!(
+                        err,
+                        super::ControlConfigError::Storage(super::StorageConfigError::InvalidConfig(_))
+                    ));
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn build_repositories_maps_invalid_pool_config_to_control_error() {
+        let config = super::ControlConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: ControlAuthConfig {
+                token: "token".to_string(),
+                admin_keys: Vec::new(),
+            },
+            forgejo: test_config(),
+            storage: gittree_storage::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 1,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["ws://relay.local".to_string()],
+            public_git_url: "http://localhost:8085".to_string(),
+        };
+        let err = super::build_repositories(&config).expect_err("invalid storage config");
+        assert!(matches!(err, super::ControlError::Storage(_)));
+    }
+
+    #[test]
     fn map_storage_error_maps_to_internal_http_error() {
         let err = super::map_storage_error(StorageError::Internal {
             message: "storage exploded".to_string(),
@@ -1838,6 +1908,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn with_env_var_restores_existing_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_CONTROL_TEST_SET_RESTORE";
+        unsafe {
+            std::env::set_var(key, "before");
+        }
+        with_env_var(key, "during", || {
+            assert_eq!(std::env::var(key).expect("set"), "during");
+        });
+        assert_eq!(std::env::var(key).expect("restored"), "before");
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
     #[tokio::test]
     async fn create_repo_nostr_rejects_invalid_json_body() {
         let (state, _transport, _repos) = test_state(Vec::new());
@@ -1845,6 +1931,198 @@ mod tests {
         let now = super::unix_timestamp();
         let secret = parse_secret_key(&privkey).expect("secret");
         let body = b"{not-json".to_vec();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_repo_rejects_missing_relay_urls() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"full_name":"alice/demo","name":"demo","owner":{"username":"alice"},"html_url":"http://localhost/alice/demo"}"#.to_string(),
+        }];
+        let (mut state, _transport, _repos) = test_state(responses);
+        state.relay_urls.clear();
+        let (pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_missing_maintainer_pubkey() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+        let now = super::unix_timestamp();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, "demo")
+            .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("missing maintainer".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec!["11".repeat(32)],
+        };
+        let event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed"),
+        );
+        let body = serde_json::to_vec(&RepoCreateRequest {
+            event,
+            private: Some(false),
+        })
+        .expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_identifier_that_normalizes_empty() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+        let now = super::unix_timestamp();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, ".git")
+            .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: ".git".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("invalid identifier".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+        let event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed"),
+        );
+        let body = serde_json::to_vec(&RepoCreateRequest {
+            event,
+            private: Some(false),
+        })
+        .expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_missing_expected_clone_url() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+        let now = super::unix_timestamp();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("missing clone url".to_string()),
+            root_commit: None,
+            clone: vec!["https://example.com/repo.git".to_string()],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+        let event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed"),
+        );
+        let body = serde_json::to_vec(&RepoCreateRequest {
+            event,
+            private: Some(false),
+        })
+        .expect("body");
         let auth_event = nip98_sign_event(
             &secret.secret_bytes(),
             "POST",
