@@ -163,19 +163,18 @@ fn normalize_optional_url(
 mod tests {
     use super::RelayTenantRecord;
 
-    #[test]
-    fn tenant_record_maps_fields() {
-        let record = RelayTenantRecord::new(
+    fn valid_record() -> RelayTenantRecord {
+        RelayTenantRecord::new(
             "tenant-1",
-            "org.relay.gittr.ee",
+            "Org.Relay.Gittr.ee",
             &"11".repeat(32),
             vec![1, 2, 3],
             vec![4, 5, 6],
             "v1",
             Some("Org Relay".to_string()),
-            None,
+            Some("desc".to_string()),
             Some("https://example.com/icon.png".to_string()),
-            None,
+            Some("https://example.com/banner.png".to_string()),
             Some("support".to_string()),
             true,
             false,
@@ -183,7 +182,12 @@ mod tests {
             10,
             10,
         )
-        .expect("record");
+        .expect("record")
+    }
+
+    #[test]
+    fn tenant_record_maps_fields() {
+        let record = valid_record();
         assert_eq!(record.host, "org.relay.gittr.ee");
         assert_eq!(record.name.as_deref(), Some("Org Relay"));
         assert_eq!(record.contact.as_deref(), Some("support"));
@@ -234,5 +238,169 @@ mod tests {
             1,
         )
         .is_err());
+    }
+
+    #[test]
+    fn tenant_record_rejects_empty_tenant_id() {
+        assert!(RelayTenantRecord::new(
+            " ",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tenant_record_rejects_empty_relay_secret() {
+        assert!(RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            Vec::new(),
+            vec![2],
+            "v1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tenant_record_rejects_empty_relay_secret_nonce() {
+        assert!(RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            Vec::new(),
+            "v1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tenant_record_rejects_empty_relay_secret_kid() {
+        assert!(RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            " ",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tenant_record_rejects_updated_before_created() {
+        assert!(RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            10,
+            9,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tenant_record_rejects_invalid_icon_scheme() {
+        assert!(RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            None,
+            None,
+            Some("ftp://example.com/icon.png".to_string()),
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tenant_record_normalizes_optional_fields() {
+        let record = RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            Some("  ".to_string()),
+            Some("  desc  ".to_string()),
+            None,
+            None,
+            Some("  ".to_string()),
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .expect("record");
+        assert!(record.name.is_none());
+        assert_eq!(record.description.as_deref(), Some("desc"));
+        assert!(record.contact.is_none());
     }
 }

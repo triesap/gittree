@@ -154,4 +154,41 @@ mod tests {
         assert!(record.nip11_available);
         assert_eq!(record.active_probe_ok, Some(true));
     }
+
+    #[test]
+    fn record_report_rejects_invalid_json() {
+        let record = RelayCompatibilityRecord {
+            relay_url: "wss://relay.example".to_string(),
+            compatible: true,
+            supported_capabilities: vec!["nip-01".to_string()],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+            report_json: "{".to_string(),
+            nip11_url: None,
+            nip11_available: false,
+            active_probe_ok: None,
+            active_probe_error: None,
+            checked_at: 0,
+        };
+        assert!(record.report().is_err());
+    }
+
+    #[test]
+    fn record_maps_active_probe_error_message() {
+        let report = RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01],
+            missing_required: vec![RelayCapability::Nip34],
+            missing_optional: Vec::new(),
+        };
+        let metadata = RelayProbeMetadata {
+            nip11_url: None,
+            nip11_available: false,
+            active_probe_ok: Some(false),
+            active_probe_error: Some("timeout".to_string()),
+        };
+        let record = RelayCompatibilityRecord::new(&report, 5, &metadata).expect("record");
+        assert_eq!(record.active_probe_ok, Some(false));
+        assert_eq!(record.active_probe_error.as_deref(), Some("timeout"));
+    }
 }
