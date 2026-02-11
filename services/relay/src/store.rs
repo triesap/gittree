@@ -599,6 +599,29 @@ mod tests {
                 fail_query: true,
             }
         }
+
+        fn delete_error() -> Self {
+            Self {
+                fail_insert: false,
+                fail_get: false,
+                fail_delete: true,
+                fail_query: false,
+            }
+        }
+    }
+
+    fn delete_target_record() -> EventRecord {
+        EventRecord::new(
+            "default",
+            &"11".repeat(32),
+            &"aa".repeat(32),
+            0,
+            1,
+            "",
+            &"00".repeat(64),
+            Vec::new(),
+        )
+        .expect("event record")
     }
 
     #[async_trait]
@@ -615,12 +638,19 @@ mod tests {
         async fn get_event(
             &self,
             _tenant_id: &str,
-            _event_id: &[u8],
+            event_id: &[u8],
         ) -> Result<Option<EventRecord>, StorageError> {
             if self.fail_get {
                 return Err(StorageError::Internal {
                     message: "get failure".to_string(),
                 });
+            }
+            if self.fail_delete {
+                let target_id = hex::decode("11".repeat(32)).expect("target id");
+                if event_id == target_id.as_slice() {
+                    return Ok(Some(delete_target_record()));
+                }
+                return Ok(None);
             }
             Ok(None)
         }
@@ -643,6 +673,9 @@ mod tests {
                 return Err(StorageError::Internal {
                     message: "query failure".to_string(),
                 });
+            }
+            if self.fail_delete {
+                return Ok(vec![delete_target_record()]);
             }
             Ok(Vec::new())
         }
@@ -1200,6 +1233,32 @@ mod tests {
             .insert(delete_address)
             .await
             .expect_err("delete address query should fail");
+        assert!(matches!(query_err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn repository_store_delete_event_propagates_delete_repository_errors() {
+        let delete_lookup_store = RepositoryStore::new(ScriptedEventRepo::delete_error());
+        let mut delete_lookup = sample_event(&"75".repeat(32));
+        delete_lookup.kind = 5;
+        delete_lookup.tags = vec![vec!["e".to_string(), "11".repeat(32)]];
+        let lookup_err = delete_lookup_store
+            .insert(delete_lookup)
+            .await
+            .expect_err("delete lookup should fail");
+        assert!(matches!(lookup_err, StoreError::Backend(_)));
+
+        let delete_address_store = RepositoryStore::new(ScriptedEventRepo::delete_error());
+        let mut delete_address = sample_event(&"76".repeat(32));
+        delete_address.kind = 5;
+        delete_address.tags = vec![vec![
+            "a".to_string(),
+            format!("30023:{}:demo", delete_address.pubkey),
+        ]];
+        let query_err = delete_address_store
+            .insert(delete_address)
+            .await
+            .expect_err("delete address should fail");
         assert!(matches!(query_err, StoreError::Backend(_)));
     }
 
