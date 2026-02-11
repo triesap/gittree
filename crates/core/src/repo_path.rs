@@ -66,6 +66,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::parse_repo_path;
+    use bech32::{Bech32, Hrp};
     use std::path::Path;
 
     const SAMPLE_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
@@ -106,6 +107,22 @@ mod tests {
     #[test]
     fn parse_repo_path_rejects_empty_identifier() {
         let path = Path::new("/var/lib/gittree").join(SAMPLE_NPUB).join(".git");
+        assert!(parse_repo_path(&path).is_err());
+    }
+
+    #[test]
+    fn parse_repo_path_rejects_non_npub_hrp() {
+        let hrp = Hrp::parse("nsec").expect("hrp");
+        let encoded = bech32::encode::<Bech32>(hrp, &[0u8; 32]).expect("encode");
+        let path = Path::new("/var/lib/gittree").join(encoded).join("repo.git");
+        assert!(parse_repo_path(&path).is_err());
+    }
+
+    #[test]
+    fn parse_repo_path_rejects_npub_with_wrong_payload_length() {
+        let hrp = Hrp::parse("npub").expect("hrp");
+        let encoded = bech32::encode::<Bech32>(hrp, &[0u8; 16]).expect("encode");
+        let path = Path::new("/var/lib/gittree").join(encoded).join("repo.git");
         assert!(parse_repo_path(&path).is_err());
     }
 }
