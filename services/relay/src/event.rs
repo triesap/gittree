@@ -75,6 +75,7 @@ impl NostrEvent {
 mod tests {
     use super::{EventError, NostrEvent};
     use secp256k1::{Keypair, Secp256k1, SecretKey};
+    use std::error::Error as _;
 
     fn sample_event() -> NostrEvent {
         NostrEvent {
@@ -134,5 +135,55 @@ mod tests {
         event.sig = "00".repeat(64);
         let err = event.verify().unwrap_err();
         assert_eq!(err, EventError::InvalidId);
+    }
+
+    #[test]
+    fn verify_rejects_invalid_signature() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0x22; 32]).expect("secret");
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
+
+        let mut event = sample_event();
+        event.pubkey = hex::encode(pubkey.serialize());
+        event.id = event.compute_id().expect("id");
+        event.sig = "not-a-schnorr-signature".to_string();
+
+        let err = event.verify().expect_err("invalid signature");
+        assert_eq!(err, EventError::InvalidSignature);
+    }
+
+    #[test]
+    fn verify_rejects_invalid_pubkey() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0x33; 32]).expect("secret");
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+
+        let mut event = sample_event();
+        event.pubkey = "g".repeat(64);
+        event.id = event.compute_id().expect("id");
+
+        let id_bytes = hex::decode(&event.id).expect("id bytes");
+        let msg = secp256k1::Message::from_digest_slice(&id_bytes).expect("msg");
+        let sig = secp.sign_schnorr(&msg, &keypair);
+        event.sig = hex::encode(sig.as_ref());
+
+        let err = event.verify().expect_err("invalid pubkey");
+        assert_eq!(err, EventError::InvalidPubkey);
+    }
+
+    #[test]
+    fn event_error_display_and_source_are_stable() {
+        assert_eq!(
+            EventError::Canonicalization.to_string(),
+            "failed to canonicalize event"
+        );
+        assert_eq!(EventError::InvalidId.to_string(), "event id mismatch");
+        assert_eq!(
+            EventError::InvalidSignature.to_string(),
+            "invalid event signature"
+        );
+        assert_eq!(EventError::InvalidPubkey.to_string(), "invalid event pubkey");
+        assert!(EventError::InvalidId.source().is_none());
     }
 }
