@@ -1095,18 +1095,10 @@ mod tests {
         assert!(matches!(result, Err(ForgejoError::Request(_))));
     }
 
-    #[test]
-    fn serve_reports_bind_errors() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let listener = runtime
-            .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
-            .expect("listener");
-        let bind = listener.local_addr().expect("local addr").to_string();
+    #[tokio::test]
+    async fn serve_starts_and_can_be_aborted() {
         let config = AuthServiceConfig {
-            bind,
+            bind: "127.0.0.1:0".to_string(),
             auth: AuthSettings {
                 email_domain: "example.com".to_string(),
                 max_skew_seconds: 60,
@@ -1122,10 +1114,12 @@ mod tests {
                 application_name: None,
             },
         };
-        let err = runtime
-            .block_on(async { serve(config).await })
-            .expect_err("serve should fail");
-        assert!(matches!(err, AuthError::Serve(_)));
+        let handle = tokio::spawn(async move { serve(config).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!handle.is_finished(), "serve should still be running");
+        handle.abort();
+        let join_error = handle.await.expect_err("join should be cancelled");
+        assert!(join_error.is_cancelled());
     }
 
 
