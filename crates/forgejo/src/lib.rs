@@ -1383,4 +1383,174 @@ mod tests {
             .expect_err("invalid payload should fail");
         assert!(matches!(err, ForgejoError::Parse(_)));
     }
+
+    #[test]
+    fn forgejo_error_display_covers_parse_variant() {
+        let err = ForgejoError::Parse("bad payload".to_string());
+        assert_eq!(err.to_string(), "forgejo parse error: bad payload");
+    }
+
+    #[tokio::test]
+    async fn ensure_user_propagates_unexpected_get_user_status() {
+        let responses = vec![ForgejoResponse {
+            status: 500,
+            body: "down".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect_err("unexpected status should fail");
+        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_for_owner_propagates_unexpected_lookup_status() {
+        let responses = vec![ForgejoResponse {
+            status: 500,
+            body: "down".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo_for_owner("alice", "demo", None)
+            .await
+            .expect_err("unexpected status should fail");
+        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_repo_for_owner_propagates_non_conflict_failure() {
+        let responses = vec![ForgejoResponse {
+            status: 503,
+            body: "down".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: None,
+                    private: None,
+                    auto_init: None,
+                },
+            )
+            .await
+            .expect_err("unexpected status should fail");
+        assert!(matches!(err, ForgejoError::Response { status: 503, .. }));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_conflict_without_existing_repo_returns_not_found() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("conflict fallback should fail when repo is still missing");
+        assert!(matches!(err, ForgejoError::NotFound(name) if name == "demo"));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_user_fallback_conflict_and_error_paths_are_mapped() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("user fallback conflict should fail without existing repo");
+        assert!(matches!(err, ForgejoError::NotFound(name) if name == "demo"));
+
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+            ForgejoResponse {
+                status: 500,
+                body: "down".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("user fallback error should propagate");
+        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_maps_request_errors() {
+        let transport = ReqwestTransport::new("token").expect("transport");
+        let err = transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Get,
+                url: "http://[::1".to_string(),
+                body: None,
+            })
+            .await
+            .expect_err("invalid url should fail");
+        assert!(matches!(err, ForgejoError::Request(_)));
+    }
+
+    #[tokio::test]
+    async fn mock_transport_returns_request_error_when_queue_is_empty() {
+        let transport = MockTransport::new(Vec::new());
+        let err = transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Get,
+                url: "http://localhost/api/v1/user".to_string(),
+                body: None,
+            })
+            .await
+            .expect_err("missing response should fail");
+        assert!(matches!(err, ForgejoError::Request(_)));
+    }
 }
