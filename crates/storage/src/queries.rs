@@ -50,4 +50,12 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn repo_filter_as_parts_returns_slices() {
+        let filter = RepoFilter::new(vec![1, 2, 3], "repo");
+        let (pubkey, identifier) = filter.as_parts();
+        assert_eq!(pubkey, &[1, 2, 3]);
+        assert_eq!(identifier, "repo");
+    }
 }
