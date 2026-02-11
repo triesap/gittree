@@ -1012,6 +1012,19 @@ mod tests {
     fn relay_url_from_host_adds_scheme_when_missing() {
         assert_eq!(relay_url_from_host("relay.local"), "wss://relay.local");
         assert_eq!(relay_url_from_host("ws://relay.local"), "ws://relay.local");
+        assert_eq!(relay_url_from_host("wss://relay.local"), "wss://relay.local");
+    }
+
+    #[tokio::test]
+    async fn postgres_tenant_repository_impl_paths_are_exercised() {
+        let repos = unreachable_repos();
+        let _store = super::TenantRepository::tenant_store(&*repos, "tenant-a");
+        let membership = super::TenantRepository::membership_repository(&*repos);
+        let err = super::TenantRepository::tenant_by_host(&*repos, "tenant.local")
+            .await
+            .expect_err("expected db lookup error");
+        assert!(!err.to_string().is_empty());
+        drop(membership);
     }
 
     #[tokio::test]
@@ -1192,6 +1205,42 @@ mod tests {
             .await
             .expect_err("upsert error");
         assert!(upsert_err.to_string().contains("upsert failed"));
+    }
+
+    #[tokio::test]
+    async fn failing_membership_repository_passthrough_methods_return_defaults() {
+        let repo = FailingMembershipRepository {
+            fail_lookup: false,
+            fail_upsert: false,
+        };
+
+        let listed = repo.list_memberships("tenant").await.expect("list");
+        assert!(listed.is_empty());
+
+        let removed = repo.remove_membership("tenant", &[0x11; 32]).await.expect("remove");
+        assert!(!removed);
+
+        repo.insert_invite(RelayInviteRecord {
+            tenant_id: "tenant".to_string(),
+            invite_code: "invite-code".to_string(),
+            role: "member".to_string(),
+            inviter_pubkey: vec![0x22; 32],
+            invitee_pubkey: None,
+            expires_at: None,
+            created_at: 1,
+        })
+        .await
+        .expect("insert invite");
+
+        let invite = repo
+            .invite_by_code("tenant", "invite-code")
+            .await
+            .expect("invite lookup");
+        assert!(invite.is_none());
+
+        repo.delete_invite("tenant", "invite-code")
+            .await
+            .expect("delete invite");
     }
 
     #[tokio::test]
