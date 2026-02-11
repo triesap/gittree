@@ -59,4 +59,10 @@ mod tests {
     fn account_record_rejects_invalid_pubkey() {
         assert!(AccountRecord::new("bad", "alice").is_err());
     }
+
+    #[test]
+    fn account_record_rejects_non_hex_pubkey_with_expected_length() {
+        let invalid = format!("{}z", "a".repeat(63));
+        assert!(AccountRecord::new(&invalid, "alice").is_err());
+    }
 }
