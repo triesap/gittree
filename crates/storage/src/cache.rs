@@ -1244,4 +1244,50 @@ mod tests {
             .unwrap_err();
         assert_internal_message(read_err, "relay compatibility cache poisoned");
     }
+
+    #[tokio::test]
+    async fn counting_repo_reports_poisoned_internal_stores() {
+        let announcements = Arc::new(CountingRepo::new());
+        let announcement = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("announcement");
+        poison_lock(&announcements.announcements);
+        let insert_announcement_err = announcements
+            .insert_announcement(announcement.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(insert_announcement_err, "announcement store poisoned");
+        let list_announcement_err = announcements
+            .list_announcements(&announcement.pubkey, "repo")
+            .await
+            .unwrap_err();
+        assert_internal_message(list_announcement_err, "announcement store poisoned");
+
+        let states = Arc::new(CountingRepo::new());
+        let state = RepoStateRecord::new(&hex_32(0x33), &hex_32(0x44), 10, &sample_state("repo"))
+            .expect("state");
+        poison_lock(&states.states);
+        let insert_state_err = states.insert_state(state.clone()).await.unwrap_err();
+        assert_internal_message(insert_state_err, "state store poisoned");
+        let latest_state_err = states.latest_state(&state.pubkey, "repo").await.unwrap_err();
+        assert_internal_message(latest_state_err, "state store poisoned");
+
+        let relay = Arc::new(CountingRepo::new());
+        let compatibility = sample_relay_compatibility("wss://relay.example");
+        poison_lock(&relay.relay_compatibility);
+        let upsert_compat_err = relay
+            .upsert_relay_compatibility(compatibility.clone())
+            .await
+            .unwrap_err();
+        assert_internal_message(upsert_compat_err, "relay compatibility store poisoned");
+        let read_compat_err = relay
+            .relay_compatibility(&compatibility.relay_url)
+            .await
+            .unwrap_err();
+        assert_internal_message(read_compat_err, "relay compatibility store poisoned");
+    }
 }
