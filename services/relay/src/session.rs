@@ -3324,6 +3324,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn req_membership_virtual_event_guards_require_full_context() {
+        let req = ClientMessage::Req {
+            subscription_id: "sub".to_string(),
+            filters: vec![json!({"kinds":[super::NIP43_MEMBERSHIP_KIND]})],
+        };
+
+        let mut no_membership = Session::new(MemoryStore::new());
+        let response = no_membership.handle_message(req.clone()).await;
+        assert_eq!(response.len(), 1);
+        assert!(matches!(response[0], ServerMessage::Eose { .. }));
+
+        let membership = Arc::new(InMemoryRepositories::new());
+        let mut no_tenant =
+            Session::new(MemoryStore::new()).with_membership(None, Some(membership.clone()));
+        let response = no_tenant.handle_message(req.clone()).await;
+        assert_eq!(response.len(), 1);
+        assert!(matches!(response[0], ServerMessage::Eose { .. }));
+
+        let mut no_signer = Session::new(MemoryStore::new())
+            .with_membership(Some("tenant-1".to_string()), Some(membership));
+        let response = no_signer.handle_message(req).await;
+        assert_eq!(response.len(), 1);
+        assert!(matches!(response[0], ServerMessage::Eose { .. }));
+    }
+
+    #[tokio::test]
     async fn admission_requires_related_events_rejects_when_missing() {
         let mut filter = EventFilter::new();
         filter.ids = vec!["missing".to_string()];
@@ -3403,6 +3429,39 @@ mod tests {
             &signed_event("empty-filters"),
             &[]
         ));
+    }
+
+    #[test]
+    fn tag_and_filter_limit_helpers_cover_edges() {
+        let tags = vec![
+            vec!["claim".to_string(), "invite-code".to_string()],
+            vec!["relay".to_string()],
+            Vec::new(),
+        ];
+        assert_eq!(
+            super::find_tag_value(&tags, "claim"),
+            Some("invite-code".to_string())
+        );
+        assert_eq!(super::find_tag_value(&tags, "relay"), None);
+        assert_eq!(super::find_tag_value(&tags, "missing"), None);
+        assert!(super::has_tag(&tags, "claim"));
+        assert!(super::has_tag(&tags, "relay"));
+        assert!(!super::has_tag(&tags, "missing"));
+
+        let mut policy = Policy::default();
+        policy.max_limit = Some(5);
+        let session = Session::with_policy(MemoryStore::new(), policy);
+        let filter = crate::Filter {
+            ids: Vec::new(),
+            authors: Vec::new(),
+            kinds: Vec::new(),
+            since: None,
+            until: None,
+            limit: Some(5),
+            tags: std::collections::BTreeMap::new(),
+        };
+        assert!(session.validate_filter_limits(&[filter]).is_none());
+        assert!(session.validate_filter_limits(&[]).is_none());
     }
 
     #[tokio::test]
