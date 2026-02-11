@@ -107,12 +107,18 @@ fn is_status_kind(kind: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::Nip34Event;
     use crate::kinds::{
-        KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_STATUS_OPEN,
-        KIND_USER_GRASP_LIST,
+        KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST, KIND_GIT_PULL_REQUEST_UPDATE,
+        KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_APPLIED,
+        KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_USER_GRASP_LIST,
     };
-    use crate::{PullRequest, RepoAnnouncement, StatusEvent, UserGraspList};
+    use crate::{
+        CommitterTag, Issue, Patch, PullRequest, PullRequestUpdate, RepoAnnouncement, RepoState,
+        StatusEvent, UserGraspList,
+    };
 
     fn hex_of(byte: u8, len: usize) -> String {
         format!("{:02x}", byte).repeat(len / 2)
@@ -224,5 +230,112 @@ mod tests {
         let tags = list.to_tags();
         let event = Nip34Event::parse_validated(KIND_USER_GRASP_LIST.0, &tags).expect("parse");
         assert!(matches!(event, Nip34Event::UserGraspList(_)));
+    }
+
+    #[test]
+    fn parses_repo_state_patch_update_and_issue_by_kind() {
+        let pubkey = hex_of(0x11, 64);
+        let mut state = HashMap::new();
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+        let parsed_state =
+            Nip34Event::parse(KIND_GIT_REPO_STATE.0, &repo_state.to_tags()).expect("state parse");
+        assert!(matches!(parsed_state, Nip34Event::RepoState(_)));
+
+        let patch = Patch {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            root_event: Some(hex_of(0x44, 64)),
+            reply_event: Some(hex_of(0x55, 64)),
+            is_root: true,
+            is_root_revision: true,
+            commit: Some(hex_of(0x66, 40)),
+            parent_commit: Some(hex_of(0x77, 40)),
+            commit_pgp_sig: Some("".to_string()),
+            committer: Some(CommitterTag {
+                name: "Alice".to_string(),
+                email: "alice@example.com".to_string(),
+                timestamp: 1_700_000_000,
+                timezone_minutes: -60,
+            }),
+        };
+        let parsed_patch =
+            Nip34Event::parse(KIND_GIT_PATCH.0, &patch.to_tags()).expect("patch parse");
+        assert!(matches!(parsed_patch, Nip34Event::Patch(_)));
+
+        let update = PullRequestUpdate {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            root_event_id: hex_of(0x44, 64),
+            root_author: hex_of(0x55, 64),
+            tip_commit: hex_of(0x66, 40),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            merge_base: Some(hex_of(0x77, 40)),
+        };
+        let parsed_update = Nip34Event::parse(KIND_GIT_PULL_REQUEST_UPDATE.0, &update.to_tags())
+            .expect("update parse");
+        assert!(matches!(parsed_update, Nip34Event::PullRequestUpdate(_)));
+
+        let issue = Issue {
+            repo_address: format!("30617:{pubkey}:repo"),
+            mentions: vec![hex_of(0x22, 64)],
+            subject: Some("Bug report".to_string()),
+            labels: vec!["bug".to_string()],
+        };
+        let parsed_issue =
+            Nip34Event::parse(KIND_GIT_ISSUE.0, &issue.to_tags()).expect("issue parse");
+        assert!(matches!(parsed_issue, Nip34Event::Issue(_)));
+    }
+
+    #[test]
+    fn parses_all_status_kinds() {
+        let status = StatusEvent {
+            root_event: hex_of(0x33, 64),
+            reply_events: Vec::new(),
+            mentions: Vec::new(),
+            repo_address: None,
+            repo_refs: Vec::new(),
+            applied_refs: Vec::new(),
+            merge_commit: None,
+            applied_as_commits: Vec::new(),
+        };
+        let tags = status.to_tags();
+        for kind in [
+            KIND_GIT_STATUS_OPEN,
+            KIND_GIT_STATUS_APPLIED,
+            KIND_GIT_STATUS_CLOSED,
+            KIND_GIT_STATUS_DRAFT,
+        ] {
+            let event = Nip34Event::parse(kind.0, &tags).expect("status parse");
+            assert_eq!(event.kind(), kind);
+            assert!(matches!(event, Nip34Event::Status { .. }));
+        }
+    }
+
+    #[test]
+    fn parse_validated_rejects_invalid_status_payload() {
+        let invalid_status = StatusEvent {
+            root_event: "bad".to_string(),
+            reply_events: Vec::new(),
+            mentions: Vec::new(),
+            repo_address: None,
+            repo_refs: Vec::new(),
+            applied_refs: Vec::new(),
+            merge_commit: None,
+            applied_as_commits: Vec::new(),
+        };
+        let err =
+            Nip34Event::parse_validated(KIND_GIT_STATUS_OPEN.0, &invalid_status.to_tags())
+                .expect_err("invalid status");
+        assert!(matches!(err, crate::CoreError::InvalidField { field: "e", .. }));
     }
 }
