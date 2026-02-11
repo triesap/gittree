@@ -552,6 +552,12 @@ mod tests {
     }
 
     #[test]
+    fn normalize_ws_url_accepts_ws() {
+        let url = normalize_ws_url("ws://relay.example/").expect("url");
+        assert_eq!(url.as_str(), "ws://relay.example/");
+    }
+
+    #[test]
     fn normalize_ws_url_converts_http() {
         let url = normalize_ws_url("http://relay.example").expect("url");
         assert_eq!(url.as_str(), "ws://relay.example/");
@@ -735,6 +741,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_message_rejects_invalid_json() {
+        let message = WsMessage::Text("{".to_string());
+        let err = parse_event_message(&message).unwrap_err();
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[test]
     fn parse_event_and_eose_ignore_non_text_messages() {
         let binary = WsMessage::Binary(vec![1, 2, 3]);
         assert!(parse_event_message(&binary).expect("event").is_none());
@@ -746,6 +759,13 @@ mod tests {
         let message = WsMessage::Text("[\"EOSE\",\"sub-1\"]".to_string());
         let parsed = parse_eose_message(&message).expect("parsed");
         assert_eq!(parsed.as_deref(), Some("sub-1"));
+    }
+
+    #[test]
+    fn parse_eose_message_rejects_invalid_json() {
+        let message = WsMessage::Text("{".to_string());
+        let err = parse_eose_message(&message).unwrap_err();
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
     }
 
     #[test]
@@ -765,6 +785,13 @@ mod tests {
         );
         let key = adapter.load_secret_key().expect("secret");
         assert_eq!(hex::encode(key.secret_bytes()), secret_hex);
+    }
+
+    #[test]
+    fn load_secret_key_generates_secret_when_missing() {
+        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
+        let key = adapter.load_secret_key().expect("secret");
+        assert_eq!(key.secret_bytes().len(), 32);
     }
 
     #[tokio::test]
@@ -819,6 +846,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_for_ok_times_out_when_stream_never_yields() {
+        let mut pending = stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
+        let err = wait_for_ok(&mut pending, "evt", Duration::from_millis(20))
+            .await
+            .expect_err("timeout");
+        assert!(matches!(
+            err,
+            RelayAdapterError::Transport(message) if message == "probe ok timeout"
+        ));
+    }
+
+    #[tokio::test]
     async fn wait_for_event_handles_match_and_eose() {
         let mut found = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
             WsMessage::Text(json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string()),
@@ -834,5 +873,26 @@ mod tests {
             .await
             .expect_err("missing event");
         assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_reports_closed_and_timeout_paths() {
+        let mut empty = stream::iter(Vec::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>::new());
+        let closed = wait_for_event(&mut empty, "sub-1", "evt-1", Duration::from_secs(1))
+            .await
+            .expect_err("closed");
+        assert!(matches!(
+            closed,
+            RelayAdapterError::Transport(message) if message == "relay closed"
+        ));
+
+        let mut pending = stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
+        let timeout_err = wait_for_event(&mut pending, "sub-1", "evt-1", Duration::from_millis(20))
+            .await
+            .expect_err("timeout");
+        assert!(matches!(
+            timeout_err,
+            RelayAdapterError::Transport(message) if message == "probe event timeout"
+        ));
     }
 }
