@@ -90,4 +90,21 @@ mod tests {
         assert_eq!(index.values("p"), Some(&["alice".to_string()][..]));
         assert_eq!(index.values("missing"), None);
     }
+
+    #[test]
+    fn collects_unique_values_and_trims_names() {
+        let tags = vec![
+            vec![" e ".to_string(), "1".to_string(), "1".to_string()],
+            vec!["e".to_string(), "2".to_string()],
+        ];
+        let index = TagIndex::from_tags(&tags).expect("index");
+        assert_eq!(index.values("e"), Some(&["1".to_string(), "2".to_string()][..]));
+    }
+
+    #[test]
+    fn accepts_tags_with_only_names() {
+        let tags = vec![vec!["e".to_string()]];
+        let index = TagIndex::from_tags(&tags).expect("index");
+        assert_eq!(index.values("e"), Some(&[][..]));
+    }
 }
