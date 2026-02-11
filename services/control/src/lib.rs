@@ -1362,7 +1362,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
-    use axum::http::{HeaderMap, Request};
+    use axum::http::{HeaderMap, Request, StatusCode};
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
     use gittree_app_core::{
@@ -1373,12 +1373,13 @@ mod tests {
     use gittree_core::kinds::KIND_GITTREE_CONTROL;
     use gittree_core::{RepoAnnouncement, format_grasp_server_url_as_clone_url};
     use gittree_forgejo::{
-        ForgejoClient, ForgejoError, ForgejoRequest, ForgejoResponse, ForgejoTransport,
+        ForgejoClient, ForgejoError, ForgejoMethod, ForgejoRequest, ForgejoResponse,
+        ForgejoTransport,
     };
     use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
     use gittree_storage::{
         AccountRecord, AccountRepository, InMemoryRepositories, RelayMembershipRepository,
-        RelayPublishRepository, RelayTenantRepository,
+        RelayPublishRepository, RelayTenantRepository, StorageError,
     };
     use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde_json::json;
@@ -1733,6 +1734,182 @@ mod tests {
 
         let secret_err = parse_secret_key("bad").unwrap_err();
         assert!(matches!(secret_err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn error_display_and_source_cover_variants() {
+        use std::error::Error as _;
+
+        let config_variant = super::ControlConfigError::Config(gittree_config::ConfigError::InvalidConfig {
+            field: "x",
+            value: "y".to_string(),
+        });
+        assert!(config_variant.to_string().contains("control config error"));
+        assert!(config_variant.source().is_some());
+
+        let storage_variant =
+            super::ControlConfigError::Storage(super::StorageConfigError::InvalidConfig(
+                "bad storage".to_string(),
+            ));
+        assert!(storage_variant
+            .to_string()
+            .contains("control storage config error"));
+        assert!(storage_variant.source().is_some());
+
+        let storage_missing = super::StorageConfigError::MissingEnv("KEY");
+        assert!(storage_missing.to_string().contains("missing env KEY"));
+        let storage_invalid = super::StorageConfigError::InvalidEnv {
+            key: "K",
+            value: "V".to_string(),
+        };
+        assert!(storage_invalid.to_string().contains("invalid env K"));
+
+        let control_config = super::ControlError::Config(config_variant);
+        assert!(control_config.to_string().contains("control error"));
+        assert!(control_config.source().is_some());
+
+        let control_forgejo = super::ControlError::Forgejo(ForgejoError::Request("x".to_string()));
+        assert!(control_forgejo.to_string().contains("control forgejo error"));
+        assert!(control_forgejo.source().is_some());
+
+        let control_obs_cfg = super::ControlError::ObservabilityConfig(
+            gittree_observability::ObservabilityConfigError::InvalidEnv {
+                key: "OBS",
+                value: "bad".to_string(),
+            },
+        );
+        assert!(control_obs_cfg
+            .to_string()
+            .contains("control observability config error"));
+        assert!(control_obs_cfg.source().is_some());
+
+        let control_obs = super::ControlError::Observability(
+            gittree_observability::ObservabilityError::LogInit("x".to_string()),
+        );
+        assert!(control_obs.to_string().contains("control observability error"));
+        assert!(control_obs.source().is_some());
+
+        let control_storage = super::ControlError::Storage(StorageError::Internal {
+            message: "boom".to_string(),
+        });
+        assert!(control_storage.to_string().contains("control storage error"));
+        assert!(control_storage.source().is_some());
+
+        let control_serve = super::ControlError::Serve("bind failed".to_string());
+        assert!(control_serve.to_string().contains("control serve error"));
+        assert!(control_serve.source().is_none());
+    }
+
+    #[test]
+    fn parse_nostr_auth_rejects_non_nostr_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTH_HEADER, "Bearer abc".parse().expect("header"));
+        let err = parse_nostr_auth(&headers).unwrap_err();
+        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn normalize_host_rejects_malformed_ipv6_host() {
+        let err = normalize_host("http://[::1").unwrap_err();
+        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn map_storage_error_maps_to_internal_http_error() {
+        let err = super::map_storage_error(StorageError::Internal {
+            message: "storage exploded".to_string(),
+        });
+        assert!(matches!(err, ControlHttpError::Internal(_)));
+    }
+
+    #[test]
+    fn without_env_var_restores_existing_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_CONTROL_TEST_RESTORE";
+        unsafe {
+            std::env::set_var(key, "before");
+        }
+        without_env_var(key, || {
+            assert!(std::env::var(key).is_err());
+        });
+        assert_eq!(std::env::var(key).expect("restored"), "before");
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_invalid_json_body() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let now = super::unix_timestamp();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let body = b"{not-json".to_vec();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_missing_body() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let now = super::unix_timestamp();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            None,
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn mock_transport_returns_request_error_when_responses_are_exhausted() {
+        let transport = MockTransport::new(Vec::new());
+        let err = transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Get,
+                url: "http://localhost/api/v1/user".to_string(),
+                body: None,
+            })
+            .await
+            .expect_err("expected missing mock response");
+        assert!(matches!(err, ForgejoError::Request(_)));
     }
 
     #[test]
