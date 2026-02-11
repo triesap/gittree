@@ -107,4 +107,11 @@ mod tests {
         let index = TagIndex::from_tags(&tags).expect("index");
         assert_eq!(index.values("e"), Some(&[][..]));
     }
+
+    #[test]
+    fn tag_error_display_messages_are_stable() {
+        assert_eq!(TagError::EmptyTag.to_string(), "tag is empty");
+        assert_eq!(TagError::EmptyName.to_string(), "tag name is empty");
+        assert_eq!(TagError::EmptyValue.to_string(), "tag value is empty");
+    }
 }
