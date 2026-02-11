@@ -132,10 +132,9 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<(), StorageErro
 mod tests {
     use super::{RelayPublishRequest, RelayPublishStatus};
 
-    #[test]
-    fn request_rejects_empty_required_fields() {
-        let request = RelayPublishRequest {
-            relay_url: "".to_string(),
+    fn valid_request() -> RelayPublishRequest {
+        RelayPublishRequest {
+            relay_url: "wss://relay.example".to_string(),
             event_id: "11".repeat(32),
             pubkey: "22".repeat(32),
             created_at: 1,
@@ -146,7 +145,13 @@ mod tests {
             forgejo_owner: "owner".to_string(),
             forgejo_repo: "repo".to_string(),
             identifier: "repo".to_string(),
-        };
+        }
+    }
+
+    #[test]
+    fn request_rejects_empty_required_fields() {
+        let mut request = valid_request();
+        request.relay_url = "".to_string();
         assert!(request.decode().is_err());
     }
 
@@ -165,5 +170,19 @@ mod tests {
             RelayPublishStatus::Published
         );
         assert!(RelayPublishStatus::parse("other").is_err());
+    }
+
+    #[test]
+    fn request_rejects_invalid_hex_lengths() {
+        let mut request = valid_request();
+        request.event_id = "aa".repeat(31);
+        assert!(request.decode().is_err());
+    }
+
+    #[test]
+    fn request_rejects_invalid_hex_payloads() {
+        let mut request = valid_request();
+        request.sig = format!("{}z", "a".repeat(127));
+        assert!(request.decode().is_err());
     }
 }
