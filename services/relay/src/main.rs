@@ -52,6 +52,10 @@ mod tests {
     use super::{run_with_args, run_with_args_and_serve};
     use gittree_relay::{RelayConfig, RelayError};
     use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -84,6 +88,18 @@ mod tests {
                 std::env::remove_var(key);
             },
         }
+    }
+
+    fn write_temp_services_config(contents: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let pid = process::id();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        path.push(format!("gittree-relay-main-test-{pid}-{ts}.toml"));
+        fs::write(&path, contents).expect("write temp config");
+        path
     }
 
     #[tokio::test]
@@ -120,6 +136,44 @@ mod tests {
     async fn run_with_unknown_flag_returns_cli_error() {
         let result = run_with_args(["gittree-relay", "--unknown"]).await;
         assert!(matches!(result, Err(RelayError::Cli(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_config_path_passes_loaded_config_to_serve() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = set_env_var_for_test(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+        );
+        let path = write_temp_services_config(
+            r#"
+[services.relay]
+bind = "127.0.0.1:9123"
+"#,
+        );
+        let captured = Arc::new(Mutex::new(None::<RelayConfig>));
+        let captured_ref = captured.clone();
+        let result = run_with_args_and_serve(
+            [
+                "gittree-relay",
+                "--config",
+                path.to_str().expect("path string"),
+            ],
+            move |config| {
+                *captured_ref.lock().expect("capture lock") = Some(config);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        let _ = fs::remove_file(path);
+        restore_env_var("GITTREE_STORAGE_READ_URL", previous);
+        assert!(result.is_ok());
+        let config = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("captured config");
+        assert_eq!(config.bind, "127.0.0.1:9123");
     }
 
     #[tokio::test]
@@ -184,5 +238,27 @@ mod tests {
 
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
         assert!(matches!(result, Err(RelayError::Serve(message)) if message == "boom"));
+    }
+
+    #[test]
+    fn env_helper_roundtrip_set_clear_restore() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_RELAY_MAIN_TEST_ENV";
+
+        let previous = set_env_var_for_test(key, "first");
+        assert!(previous.is_none());
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("first"));
+
+        let cleared_previous = clear_env_var_for_test(key);
+        assert_eq!(cleared_previous, Some(OsString::from("first")));
+        assert!(std::env::var_os(key).is_none());
+
+        restore_env_var(key, Some(OsString::from("second")));
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("second"));
+
+        restore_env_var(key, None);
+        assert!(std::env::var_os(key).is_none());
+
+        restore_env_var(key, previous);
     }
 }
