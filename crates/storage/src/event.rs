@@ -215,6 +215,154 @@ mod tests {
     }
 
     #[test]
+    fn event_record_rejects_empty_tenant_id() {
+        let err = EventRecord::new(
+            " ",
+            &hex_32(0x11),
+            &hex_32(0x22),
+            12,
+            1,
+            "content",
+            &hex_64(0x33),
+            vec![vec!["e".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidField {
+                field: "tenant_id",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn event_record_rejects_empty_tag_name_and_value() {
+        let err = EventRecord::new(
+            "default",
+            &hex_32(0x11),
+            &hex_32(0x22),
+            12,
+            1,
+            "content",
+            &hex_64(0x33),
+            vec![vec!["".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidField { field: "tags", .. }
+        ));
+
+        let err = EventRecord::new(
+            "default",
+            &hex_32(0x11),
+            &hex_32(0x22),
+            12,
+            1,
+            "content",
+            &hex_64(0x33),
+            vec![vec!["e".to_string(), "".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidField { field: "tags", .. }
+        ));
+    }
+
+    #[test]
+    fn event_record_rejects_invalid_hex_lengths() {
+        let err = EventRecord::new(
+            "default",
+            "11",
+            &hex_32(0x22),
+            12,
+            1,
+            "content",
+            &hex_64(0x33),
+            vec![vec!["e".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex { field: "id", .. }
+        ));
+
+        let err = EventRecord::new(
+            "default",
+            &hex_32(0x11),
+            "22",
+            12,
+            1,
+            "content",
+            &hex_64(0x33),
+            vec![vec!["e".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "pubkey",
+                ..
+            }
+        ));
+
+        let err = EventRecord::new(
+            "default",
+            &hex_32(0x11),
+            &hex_32(0x22),
+            12,
+            1,
+            "content",
+            "33",
+            vec![vec!["e".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex { field: "sig", .. }
+        ));
+    }
+
+    #[test]
+    fn event_record_rejects_invalid_hex_payloads() {
+        let bad_hex = format!("{}z", "1".repeat(63));
+        let err = EventRecord::new(
+            "default",
+            &bad_hex,
+            &hex_32(0x22),
+            12,
+            1,
+            "content",
+            &hex_64(0x33),
+            vec![vec!["e".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex { field: "id", .. }
+        ));
+
+        let bad_sig = format!("{}z", "3".repeat(127));
+        let err = EventRecord::new(
+            "default",
+            &hex_32(0x11),
+            &hex_32(0x22),
+            12,
+            1,
+            "content",
+            &bad_sig,
+            vec![vec!["e".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex { field: "sig", .. }
+        ));
+    }
+
+    #[test]
     fn event_query_defaults_empty() {
         let query = EventQuery::default();
         assert!(query.tenant_id.is_none());
