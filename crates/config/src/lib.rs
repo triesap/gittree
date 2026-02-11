@@ -2341,4 +2341,131 @@ public_git_url = "http://localhost:8085"
         assert_eq!(config.email_domain, "example.test");
         assert_eq!(config.max_skew_seconds, 120);
     }
+
+    #[test]
+    fn relay_targets_toml_file_reads_and_missing_file_errors() {
+        let path = write_temp_config(
+            r#"
+relay_urls = ["wss://relay.example", "https://relay.example"]
+"#,
+        );
+        let config = RelayTargetsConfig::from_toml_file(&path).expect("relay target file");
+        assert_eq!(
+            config.relay_urls,
+            vec![
+                "wss://relay.example".to_string(),
+                "https://relay.example".to_string()
+            ]
+        );
+        std::fs::remove_file(&path).expect("cleanup");
+
+        let err = RelayTargetsConfig::from_toml_file(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::ReadConfig { .. }));
+    }
+
+    #[test]
+    fn forgejo_and_ui_toml_file_paths_cover_success_and_missing_section() {
+        let forgejo_path = write_temp_config(
+            r#"
+[forgejo]
+base_url = "http://localhost:3000"
+api_token = "token"
+owner = "gittree"
+webhook_url = "http://localhost:8080/hook"
+webhook_secret = "secret"
+"#,
+        );
+        let forgejo = ForgejoConfig::from_toml_file(&forgejo_path).expect("forgejo file");
+        assert_eq!(forgejo.owner, "gittree");
+        std::fs::remove_file(&forgejo_path).expect("cleanup");
+
+        let missing_forgejo = ForgejoConfig::from_toml_str("").unwrap_err();
+        assert!(matches!(
+            missing_forgejo,
+            ConfigError::InvalidConfig { field, .. } if field == "forgejo"
+        ));
+
+        let ui_path = write_temp_config(
+            r#"
+[ui]
+repo_root = "/tmp/gittree-ui"
+public_git_url = "http://localhost:8085"
+"#,
+        );
+        let ui = UiConfig::from_toml_file(&ui_path).expect("ui file");
+        assert_eq!(ui.public_git_url, "http://localhost:8085");
+        std::fs::remove_file(&ui_path).expect("cleanup");
+
+        let missing_ui = UiConfig::from_toml_str("").unwrap_err();
+        assert!(matches!(
+            missing_ui,
+            ConfigError::InvalidConfig { field, .. } if field == "ui"
+        ));
+    }
+
+    #[test]
+    fn relay_compatibility_defaults_and_toml_parse_paths() {
+        let default_config = RelayCompatibilityConfig::default();
+        assert_eq!(default_config.mode, RelayCompatibilityMode::Strict);
+
+        let config = RelayCompatibilityConfig::from_toml_str("").expect("compat default");
+        assert_eq!(config.mode, RelayCompatibilityMode::Strict);
+
+        let invalid = RelayCompatibilityConfig::from_toml_str(
+            r#"
+[relay_compatibility]
+mode = "unknown"
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(invalid, ConfigError::InvalidRelayCompatibilityMode(_)));
+    }
+
+    #[test]
+    fn config_error_display_source_and_with_path_cover_variants() {
+        use std::error::Error as _;
+
+        let read = ConfigError::ReadConfig {
+            path: std::path::PathBuf::from("/tmp/missing.toml"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        assert!(read.to_string().contains("failed to read config file"));
+        assert!(read.source().is_some());
+
+        let parse_source = toml::from_str::<toml::Value>("invalid = [").unwrap_err();
+        let parse = ConfigError::TomlParse {
+            path: None,
+            source: parse_source,
+        };
+        assert!(parse.to_string().contains("failed to parse config"));
+        assert!(parse.source().is_some());
+
+        let parse_with_path = parse.with_path(std::path::Path::new("/tmp/config.toml"));
+        assert!(parse_with_path.to_string().contains("/tmp/config.toml"));
+
+        let invalid = ConfigError::InvalidRelayPolicyConfig {
+            field: "relay_policy.max_tags",
+            value: "0".to_string(),
+        };
+        assert!(invalid.to_string().contains("relay_policy.max_tags"));
+        assert!(invalid.source().is_none());
+    }
+
+    #[test]
+    fn with_env_var_restores_existing_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_CONFIG_TEST_RESTORE";
+        // SAFETY: test holds ENV_LOCK and restores previous values.
+        unsafe {
+            std::env::set_var(key, "before");
+        }
+        with_env_var(key, "during", || {
+            assert_eq!(std::env::var(key).expect("during value"), "during");
+        });
+        assert_eq!(std::env::var(key).expect("restored value"), "before");
+        // SAFETY: test holds ENV_LOCK and removes temporary key.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
 }
