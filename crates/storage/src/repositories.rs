@@ -1279,8 +1279,55 @@ mod tests {
                 .invite_by_code(&tenant.id, "code-1")
                 .await
                 .expect("lookup")
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_membership_and_invite_are_tenant_scoped() {
+        let store = InMemoryRepositories::new();
+        let tenant_a = sample_tenant("relay-a.local");
+        let tenant_b = sample_tenant("relay-b.local");
+        store.upsert_tenant(tenant_a.clone()).await.expect("tenant a");
+        store.upsert_tenant(tenant_b.clone()).await.expect("tenant b");
+
+        let member = sample_membership(&tenant_a.id, 0x70);
+        store
+            .upsert_membership(member.clone())
+            .await
+            .expect("membership");
+
+        assert!(
+            store
+                .membership_by_pubkey(&tenant_b.id, &member.pubkey)
+                .await
+                .expect("lookup")
                 .is_none()
         );
+        let removed_wrong_tenant = store
+            .remove_membership(&tenant_b.id, &member.pubkey)
+            .await
+            .expect("remove");
+        assert!(!removed_wrong_tenant);
+
+        let invite = sample_invite(&tenant_a.id, "tenant-scoped-code");
+        store.insert_invite(invite.clone()).await.expect("invite");
+        assert!(
+            store
+                .invite_by_code(&tenant_b.id, &invite.invite_code)
+                .await
+                .expect("lookup")
+                .is_none()
+        );
+        store
+            .delete_invite(&tenant_b.id, &invite.invite_code)
+            .await
+            .expect("delete");
+        let still_present = store
+            .invite_by_code(&tenant_a.id, &invite.invite_code)
+            .await
+            .expect("lookup");
+        assert_eq!(still_present, Some(invite));
     }
 
     #[tokio::test]

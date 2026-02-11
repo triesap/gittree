@@ -141,6 +141,7 @@ fn decode_hex_32(field: &'static str, value: &str) -> Result<Vec<u8>, StorageErr
 #[cfg(test)]
 mod tests {
     use super::{RelayInviteRecord, RelayMembershipRecord};
+    use crate::StorageError;
 
     #[test]
     fn membership_record_maps_fields() {
@@ -173,5 +174,110 @@ mod tests {
         assert_eq!(record.invite_code, "invite");
         assert_eq!(record.role, "member");
         assert_eq!(record.expires_at, Some(50));
+    }
+
+    #[test]
+    fn membership_record_rejects_invalid_fields() {
+        let empty_tenant =
+            RelayMembershipRecord::new("", &"11".repeat(32), "member", "active", 10, 10)
+                .expect_err("empty tenant should fail");
+        assert!(matches!(
+            empty_tenant,
+            StorageError::InvalidField { field: "tenant_id", .. }
+        ));
+
+        let invalid_pubkey =
+            RelayMembershipRecord::new("tenant", "abcd", "member", "active", 10, 10)
+                .expect_err("short pubkey should fail");
+        assert!(matches!(
+            invalid_pubkey,
+            StorageError::InvalidHex { field: "pubkey", .. }
+        ));
+
+        let updated_before_created = RelayMembershipRecord::new(
+            "tenant",
+            &"11".repeat(32),
+            "member",
+            "active",
+            10,
+            9,
+        )
+        .expect_err("updated_at before created_at should fail");
+        assert!(matches!(
+            updated_before_created,
+            StorageError::InvalidField { field: "updated_at", .. }
+        ));
+    }
+
+    #[test]
+    fn invite_record_rejects_invalid_fields() {
+        let empty_code = RelayInviteRecord::new(
+            "tenant",
+            "",
+            "member",
+            &"22".repeat(32),
+            None,
+            None,
+            10,
+        )
+        .expect_err("empty invite code should fail");
+        assert!(matches!(
+            empty_code,
+            StorageError::InvalidField {
+                field: "invite_code",
+                ..
+            }
+        ));
+
+        let invalid_inviter = RelayInviteRecord::new(
+            "tenant",
+            "invite",
+            "member",
+            "abcd",
+            None,
+            None,
+            10,
+        )
+        .expect_err("short inviter pubkey should fail");
+        assert!(matches!(
+            invalid_inviter,
+            StorageError::InvalidHex {
+                field: "inviter_pubkey",
+                ..
+            }
+        ));
+
+        let invalid_invitee = RelayInviteRecord::new(
+            "tenant",
+            "invite",
+            "member",
+            &"22".repeat(32),
+            Some("abcd"),
+            None,
+            10,
+        )
+        .expect_err("short invitee pubkey should fail");
+        assert!(matches!(
+            invalid_invitee,
+            StorageError::InvalidHex {
+                field: "invitee_pubkey",
+                ..
+            }
+        ));
+
+        let expires_before_created = RelayInviteRecord::new(
+            "tenant",
+            "invite",
+            "member",
+            &"22".repeat(32),
+            None,
+            Some(9),
+            10,
+        )
+        .expect_err("expired invite should fail");
+        assert!(matches!(
+            expires_before_created,
+            StorageError::InvalidField { field: "expires_at", .. }
+        ));
     }
 }
