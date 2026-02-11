@@ -576,6 +576,18 @@ mod tests {
     }
 
     #[test]
+    fn relay_adapter_error_display_variants_are_stable() {
+        let unsupported = RelayAdapterError::Unsupported("x".to_string());
+        assert!(unsupported.to_string().contains("unsupported"));
+        let invalid = RelayAdapterError::InvalidConfig("x".to_string());
+        assert!(invalid.to_string().contains("invalid config"));
+        let transport = RelayAdapterError::Transport("x".to_string());
+        assert!(transport.to_string().contains("transport error"));
+        let protocol = RelayAdapterError::Protocol("x".to_string());
+        assert!(protocol.to_string().contains("protocol error"));
+    }
+
+    #[test]
     fn relay_adapter_config_builder_applies_values() {
         let config = RelayAdapterConfig::new("wss://relay.example")
             .with_timeout(Duration::from_secs(9))
@@ -788,6 +800,16 @@ mod tests {
     }
 
     #[test]
+    fn load_secret_key_rejects_zero_secret_key() {
+        let adapter = WebsocketRelayAdapter::new(
+            RelayAdapterConfig::new("wss://relay.example")
+                .with_secret_key("00".repeat(32)),
+        );
+        let err = adapter.load_secret_key().expect_err("invalid secret");
+        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[test]
     fn load_secret_key_generates_secret_when_missing() {
         let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
         let key = adapter.load_secret_key().expect("secret");
@@ -808,6 +830,25 @@ mod tests {
         };
         let err = adapter.publish_event(&event).await.unwrap_err();
         assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+    }
+
+    #[tokio::test]
+    async fn websocket_adapter_probe_and_publish_map_connect_errors() {
+        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("ws://127.0.0.1:1"));
+        let probe_err = adapter.probe_write_read().await.expect_err("connect error");
+        assert!(matches!(probe_err, RelayAdapterError::Transport(_)));
+
+        let event = SignedNostrEvent {
+            id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "33".repeat(64),
+        };
+        let publish_err = adapter.publish_event(&event).await.expect_err("connect error");
+        assert!(matches!(publish_err, RelayAdapterError::Transport(_)));
     }
 
     #[tokio::test]
@@ -864,6 +905,20 @@ mod tests {
     async fn wait_for_ok_times_out_when_stream_never_yields() {
         let mut pending = stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
         let err = wait_for_ok(&mut pending, "evt", Duration::from_millis(20))
+            .await
+            .expect_err("timeout");
+        assert!(matches!(
+            err,
+            RelayAdapterError::Transport(message) if message == "probe ok timeout"
+        ));
+    }
+
+    #[tokio::test]
+    async fn wait_for_ok_with_zero_timeout_returns_immediately() {
+        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text("[\"OK\",\"evt\",true]".to_string()),
+        )]);
+        let err = wait_for_ok(&mut stream, "evt", Duration::ZERO)
             .await
             .expect_err("timeout");
         assert!(matches!(
@@ -930,5 +985,36 @@ mod tests {
             timeout_err,
             RelayAdapterError::Transport(message) if message == "probe event timeout"
         ));
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_with_zero_timeout_returns_immediately() {
+        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text(json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string()),
+        )]);
+        let err = wait_for_event(&mut stream, "sub-1", "evt-1", Duration::ZERO)
+            .await
+            .expect_err("timeout");
+        assert!(matches!(
+            err,
+            RelayAdapterError::Transport(message) if message == "probe event timeout"
+        ));
+    }
+
+    #[test]
+    fn parse_messages_ignore_non_array_json_values() {
+        let ok = parse_ok_message(&WsMessage::Text("{}".to_string())).expect("ok");
+        assert!(ok.is_none());
+        let event = parse_event_message(&WsMessage::Text("{}".to_string())).expect("event");
+        assert!(event.is_none());
+        let eose = parse_eose_message(&WsMessage::Text("{}".to_string())).expect("eose");
+        assert!(eose.is_none());
+    }
+
+    #[test]
+    fn parse_ok_message_ignores_non_text_message() {
+        let binary = WsMessage::Binary(vec![1, 2, 3]);
+        let parsed = parse_ok_message(&binary).expect("parsed");
+        assert!(parsed.is_none());
     }
 }
