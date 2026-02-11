@@ -1249,4 +1249,138 @@ mod tests {
             .expect_err("negative number should fail");
         assert!(matches!(err, ForgejoError::Parse(message) if message.contains("invalid pull request number")));
     }
+
+    #[tokio::test]
+    async fn create_user_non_success_returns_response_error() {
+        let responses = vec![ForgejoResponse {
+            status: 409,
+            body: "already exists".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect_err("status error");
+        assert!(matches!(err, ForgejoError::Response { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_org_non_success_returns_response_error() {
+        let responses = vec![ForgejoResponse {
+            status: 500,
+            body: "oops".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_org(
+                "admin",
+                ForgejoCreateOrg {
+                    username: "acme".to_string(),
+                    full_name: None,
+                    description: None,
+                    visibility: None,
+                },
+            )
+            .await
+            .expect_err("status error");
+        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_pull_request_non_success_returns_response_error() {
+        let responses = vec![ForgejoResponse {
+            status: 422,
+            body: "invalid branch".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_pull_request(
+                "gittree",
+                "demo",
+                ForgejoCreatePullRequest {
+                    head: "feature".to_string(),
+                    base: "main".to_string(),
+                    title: "Add thing".to_string(),
+                    body: None,
+                },
+            )
+            .await
+            .expect_err("status error");
+        assert!(matches!(err, ForgejoError::Response { status: 422, .. }));
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_returns_error_when_listing_hooks_fails() {
+        let responses = vec![ForgejoResponse {
+            status: 500,
+            body: "down".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .ensure_webhook("repo")
+            .await
+            .expect_err("hook list failure should surface");
+        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_returns_error_when_create_hook_fails() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 500,
+                body: "down".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .ensure_webhook("repo")
+            .await
+            .expect_err("hook create failure should surface");
+        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_repo_for_owner_rejects_invalid_response_payload() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: "{}".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: None,
+                    private: None,
+                    auto_init: None,
+                },
+            )
+            .await
+            .expect_err("invalid payload should fail");
+        assert!(matches!(err, ForgejoError::Parse(_)));
+    }
 }
