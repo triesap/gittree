@@ -3000,6 +3000,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn req_membership_requirements_reject_invalid_authenticated_pubkey_hex() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+            .with_membership(Some("tenant-1".to_string()), Some(membership))
+            .with_membership_requirements(true, false);
+        session.auth.as_mut().expect("auth").authenticated_pubkey = Some("not-hex".to_string());
+        let response = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Closed {
+                ref message, ..
+            } if message.contains("invalid pubkey")
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_membership_requirements_reject_invalid_authenticated_pubkey_hex() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+        let mut session = Session::with_broadcast(
+            MemoryStore::new(),
+            Policy::default(),
+            None,
+            tx,
+            true,
+            false,
+        )
+        .with_membership(Some("tenant-1".to_string()), Some(membership))
+        .with_membership_requirements(false, true);
+        session.auth.as_mut().expect("auth").authenticated_pubkey = Some("not-hex".to_string());
+        let response = session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("seed-invalid-auth")).expect("event"),
+            ))
+            .await;
+        assert!(matches!(
+            response[0],
+            ServerMessage::Ok {
+                accepted: false,
+                ref message,
+                ..
+            } if message.contains("invalid pubkey")
+        ));
+    }
+
+    #[tokio::test]
     async fn req_membership_and_invite_generation_handle_missing_signer_and_bad_auth_pubkey() {
         let membership = Arc::new(InMemoryRepositories::new());
         let tenant_id = "tenant-1";
@@ -3571,6 +3622,24 @@ mod tests {
             .await;
         let responses = session.dispatch_event(&signed_event("seed-empty"));
         assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_reports_invalid_tags() {
+        let store = MemoryStore::new();
+        let mut session = Session::new(store);
+        session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+
+        let mut event = signed_event("seed-invalid-tags");
+        event.tags = vec![Vec::new()];
+        let responses = session.dispatch_event(&event);
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
     }
 
     #[tokio::test]
