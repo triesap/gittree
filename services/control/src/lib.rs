@@ -2141,6 +2141,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_nostr_rejects_missing_auth() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_missing_host_header() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+        let auth_event =
+            nip98_sign_event(&secret.secret_bytes(), "POST", "http://localhost/v1/repos", None, now)
+                .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_missing_auth() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_invalid_json_body() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let body = b"{invalid-json".to_vec();
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn create_repo_rejects_pubkey_privkey_mismatch() {
         let (state, transport, _repos) = test_state(Vec::new());
         let (pubkey, _) = test_keys();
@@ -2378,6 +2478,40 @@ mod tests {
                     .header("content-type", "application/json")
                     .header(AUTH_HEADER, "Bearer token")
                     .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn control_event_rejects_missing_auth() {
+        let (pubkey, _privkey) = test_keys();
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let content = serde_json::to_string(&json!({
+            "action": "create_repo",
+            "name": "demo",
+            "pubkey": pubkey,
+            "privkey": "11".repeat(32),
+        }))
+        .expect("content");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "kind": KIND_GITTREE_CONTROL.0 as i64,
+                            "pubkey": pubkey,
+                            "content": content
+                        }))
+                        .expect("body"),
+                    ))
                     .unwrap(),
             )
             .await
