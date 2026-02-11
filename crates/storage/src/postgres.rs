@@ -2891,8 +2891,9 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
         .expect("insert outbox row");
 
         let repositories = test_db.repositories();
+        let claim_at = time::OffsetDateTime::now_utc() + time::Duration::minutes(1);
         let err = repositories
-            .claim_relay_publish(time::OffsetDateTime::now_utc())
+            .claim_relay_publish(claim_at)
             .await
             .expect_err("claim should fail for invalid tags json");
         assert!(matches!(err, StorageError::Serialization { field: "tags", .. }));
@@ -2926,7 +2927,8 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
             .await
             .expect("enqueue");
 
-        let now = time::OffsetDateTime::now_utc();
+        // Add a cushion so the test does not race db-side `now()` assignment under heavy load.
+        let now = time::OffsetDateTime::now_utc() + time::Duration::minutes(1);
         let claimed = repositories
             .claim_relay_publish(now)
             .await
