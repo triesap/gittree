@@ -2218,6 +2218,36 @@ public_git_url = "http://localhost:8085"
     }
 
     #[test]
+    fn ui_config_rejects_empty_repo_root() {
+        let config = UiConfig {
+            repo_root: std::path::PathBuf::new(),
+            public_git_url: "http://localhost:8085".to_string(),
+            auth_url: DEFAULT_UI_AUTH_URL.to_string(),
+            app_url: DEFAULT_UI_APP_URL.to_string(),
+            control_url: DEFAULT_UI_CONTROL_URL.to_string(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig { field, .. }) if field == "ui.repo_root"
+        ));
+    }
+
+    #[test]
+    fn ui_config_rejects_invalid_public_git_url() {
+        let config = UiConfig {
+            repo_root: std::path::PathBuf::from("/tmp/gittree-ui"),
+            public_git_url: "ftp://localhost:8085".to_string(),
+            auth_url: DEFAULT_UI_AUTH_URL.to_string(),
+            app_url: DEFAULT_UI_APP_URL.to_string(),
+            control_url: DEFAULT_UI_CONTROL_URL.to_string(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig { field, .. }) if field == "ui.public_git_url"
+        ));
+    }
+
+    #[test]
     fn control_auth_from_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_CONTROL_TOKEN, "token", || {
@@ -2230,6 +2260,30 @@ public_git_url = "http://localhost:8085"
     }
 
     #[test]
+    fn control_auth_rejects_empty_token() {
+        let config = ControlAuthConfig {
+            token: " ".to_string(),
+            admin_keys: Vec::new(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig { field, .. }) if field == "control.token"
+        ));
+    }
+
+    #[test]
+    fn control_auth_rejects_empty_admin_key() {
+        let config = ControlAuthConfig {
+            token: "token".to_string(),
+            admin_keys: vec![" ".to_string()],
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig { field, .. }) if field == "control.admin_keys"
+        ));
+    }
+
+    #[test]
     fn auth_config_defaults_apply() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         unsafe {
@@ -2239,6 +2293,30 @@ public_git_url = "http://localhost:8085"
         let config = AuthConfig::from_env().expect("auth");
         assert_eq!(config.email_domain, DEFAULT_AUTH_EMAIL_DOMAIN);
         assert_eq!(config.max_skew_seconds, DEFAULT_AUTH_MAX_SKEW_SECS);
+    }
+
+    #[test]
+    fn auth_config_rejects_empty_domain() {
+        let config = AuthConfig {
+            email_domain: " ".to_string(),
+            max_skew_seconds: 60,
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig { field, .. }) if field == "auth.email_domain"
+        ));
+    }
+
+    #[test]
+    fn auth_config_rejects_zero_skew() {
+        let config = AuthConfig {
+            email_domain: "example.test".to_string(),
+            max_skew_seconds: 0,
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig { field, .. }) if field == "auth.max_skew_seconds"
+        ));
     }
 
     #[test]
