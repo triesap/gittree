@@ -816,6 +816,45 @@ mod tests {
         assert!(matches!(err, ForgejoError::Request(message) if message.contains("boom")));
     }
 
+    #[test]
+    fn forgejo_error_display_covers_request_response_and_not_found() {
+        let request = ForgejoError::Request("boom".to_string());
+        assert!(format!("{request}").contains("boom"));
+
+        let response = ForgejoError::Response {
+            status: 418,
+            body: "teapot".to_string(),
+        };
+        let message = format!("{response}");
+        assert!(message.contains("418"), "{message}");
+        assert!(message.contains("teapot"), "{message}");
+
+        let not_found = ForgejoError::NotFound("missing".to_string());
+        assert!(format!("{not_found}").contains("missing"));
+    }
+
+    #[test]
+    fn forgejo_user_response_rejects_mismatched_login_and_username() {
+        let response = ForgejoUserResponse {
+            login: Some("alice".to_string()),
+            username: Some("bob".to_string()),
+            email: None,
+        };
+        let err = response.into_user().expect_err("parse");
+        assert!(matches!(err, ForgejoError::Parse(_)));
+    }
+
+    #[test]
+    fn forgejo_user_response_rejects_missing_username() {
+        let response = ForgejoUserResponse {
+            login: None,
+            username: None,
+            email: None,
+        };
+        let err = response.into_user().expect_err("parse");
+        assert!(matches!(err, ForgejoError::Parse(_)));
+    }
+
     #[tokio::test]
     async fn client_supports_arc_transport() {
         let responses = vec![ForgejoResponse {
@@ -884,6 +923,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_non_success_returns_response_error() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "not found".to_string(),
+            },
+            ForgejoResponse {
+                status: 500,
+                body: "nope".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .ensure_repo("beta", None)
+            .await
+            .expect_err("non success");
+        assert!(matches!(
+            err,
+            ForgejoError::Response { status: 500, body } if body == "nope"
+        ));
+    }
+
+    #[test]
+    fn client_new_constructs_reqwest_transport() {
+        let client = ForgejoClient::new(test_config()).expect("client");
+        assert_eq!(client.config.owner, "gittree");
+    }
+
+    #[tokio::test]
     async fn ensure_webhook_creates_when_missing() {
         let responses = vec![
             ForgejoResponse {
@@ -942,6 +1012,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_repo_for_owner_returns_existing() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: repo_json("alice", "delta"),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .ensure_repo_for_owner("alice", "delta", None)
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "alice/delta");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/api/v1/repos/alice/delta"));
+    }
+
+    #[tokio::test]
     async fn ensure_webhook_for_owner_targets_owner() {
         let responses = vec![
             ForgejoResponse {
@@ -967,6 +1057,28 @@ mod tests {
             .url
             .ends_with("/api/v1/repos/alice/repo/hooks"));
         assert!(requests[1]
+            .url
+            .ends_with("/api/v1/repos/alice/repo/hooks"));
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_for_owner_skips_create_when_already_present() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: r#"[{"config":{"url":"http://localhost:8090/"}}]"#.to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        client
+            .ensure_webhook_for_owner("alice", "repo")
+            .await
+            .expect("hook");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, ForgejoMethod::Get);
+        assert!(requests[0]
             .url
             .ends_with("/api/v1/repos/alice/repo/hooks"));
     }
