@@ -14,6 +14,7 @@ use gittree_storage::{
     PostgresRepositories, RelayMembershipRecord, RelayMembershipRepository, RelayTenantRecord,
     RelayTenantRepository, StorageError,
 };
+use std::future::IntoFuture;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -66,8 +67,16 @@ async fn serve_inner(config: RelayConfig) -> Result<(), RelayError> {
     let state = build_state(config.clone())?;
     let router = build_router(Arc::new(state));
     let listener = bind_listener(&config.bind).await?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+    run_server(axum::serve(listener, router).with_graceful_shutdown(shutdown_signal())).await
+}
+
+async fn run_server<E, S>(server: S) -> Result<(), RelayError>
+where
+    E: std::fmt::Display,
+    S: IntoFuture<Output = Result<(), E>>,
+{
+    server
+        .into_future()
         .await
         .map_err(|err| RelayError::Serve(err.to_string()))?;
     Ok(())
@@ -1279,6 +1288,21 @@ mod tests {
         config.bind = "127.0.0.1:99999".to_string();
         let err = super::serve_inner(config).await.expect_err("invalid bind");
         assert!(matches!(err, RelayError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn run_server_returns_ok_when_future_is_ok() {
+        super::run_server::<std::io::Error, _>(async { Ok(()) })
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn run_server_maps_error_to_serve() {
+        let err = super::run_server(async { Err(std::io::Error::other("boom")) })
+            .await
+            .expect_err("error");
+        assert!(matches!(err, RelayError::Serve(message) if message.contains("boom")));
     }
 
     #[tokio::test]
