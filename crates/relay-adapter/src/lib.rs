@@ -787,6 +787,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_ok_message_defaults_missing_id_and_bool_fields() {
+        let message = WsMessage::Text("[\"OK\",123,\"no-bool\",\"reason\"]".to_string());
+        let parsed = parse_ok_message(&message).expect("parsed");
+        assert_eq!(
+            parsed,
+            Some(("".to_string(), false, Some("reason".to_string())))
+        );
+    }
+
+    #[test]
     fn parse_ok_message_ignores_non_ok_messages() {
         let message = WsMessage::Text("[\"EVENT\",\"sub\",{}]".to_string());
         let parsed = parse_ok_message(&message).expect("parsed");
@@ -811,6 +821,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_message_defaults_non_string_sub_id_to_empty_string() {
+        let message = WsMessage::Text(json!(["EVENT", 123, {"id":"evt-1"}]).to_string());
+        let parsed = parse_event_message(&message).expect("parsed").expect("event");
+        assert_eq!(parsed.0, "");
+        assert_eq!(parsed.1.get("id").and_then(|value| value.as_str()), Some("evt-1"));
+    }
+
+    #[test]
     fn parse_event_message_rejects_invalid_json() {
         let message = WsMessage::Text("{".to_string());
         let err = parse_event_message(&message).unwrap_err();
@@ -829,6 +847,13 @@ mod tests {
         let message = WsMessage::Text("[\"EOSE\",\"sub-1\"]".to_string());
         let parsed = parse_eose_message(&message).expect("parsed");
         assert_eq!(parsed.as_deref(), Some("sub-1"));
+    }
+
+    #[test]
+    fn parse_eose_message_defaults_missing_sub_id_to_empty_string() {
+        let message = WsMessage::Text("[\"EOSE\",123]".to_string());
+        let parsed = parse_eose_message(&message).expect("parsed");
+        assert_eq!(parsed.as_deref(), Some(""));
     }
 
     #[test]
