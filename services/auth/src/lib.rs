@@ -1259,6 +1259,43 @@ mod tests {
     }
 
     #[test]
+    fn unix_timestamp_returns_non_negative_epoch_seconds() {
+        let now = unix_timestamp();
+        assert!(now >= 0);
+        assert!(now >= 1_600_000_000);
+    }
+
+    #[test]
+    fn generate_password_returns_hex_with_expected_length() {
+        let password = generate_password();
+        assert_eq!(password.len(), 64);
+        assert!(password.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn profile_response_maps_storage_fields() {
+        let record = ProfileRecord::new(
+            &"aa".repeat(32),
+            Some("Alice".to_string()),
+            Some("Bio".to_string()),
+            Some("https://gittr.ee/avatar.png".to_string()),
+            Some("https://gittr.ee".to_string()),
+            Some("earth".to_string()),
+            StorageProfileVisibility::Public,
+            100,
+            110,
+        )
+        .expect("profile");
+        let response = profile_response(&"aa".repeat(32), "gt_alice", record);
+        assert_eq!(response.username, "gt_alice");
+        assert_eq!(response.visibility, ApiProfileVisibility::Public);
+        assert_eq!(response.display_name, Some("Alice".to_string()));
+        assert_eq!(response.bio, Some("Bio".to_string()));
+        assert_eq!(response.created_at, 100);
+        assert_eq!(response.updated_at, 110);
+    }
+
+    #[test]
     fn profile_visibility_mapping_round_trip() {
         assert_eq!(
             api_visibility_from_storage(StorageProfileVisibility::Private),
@@ -1318,6 +1355,26 @@ mod tests {
             .await
             .expect("ensure");
         assert_eq!(result, existing);
+    }
+
+    #[tokio::test]
+    async fn ensure_profile_creates_default_when_missing() {
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let pubkey = "ab".repeat(32);
+        let created = ensure_profile(&profiles, &pubkey, "gt_test", 300)
+            .await
+            .expect("ensure");
+        assert_eq!(created.visibility, StorageProfileVisibility::Private);
+        assert_eq!(created.display_name, Some("gt_test".to_string()));
+
+        let pubkey_bytes = hex::decode(&pubkey).expect("pubkey");
+        let stored = repositories
+            .profile_by_pubkey(&pubkey_bytes)
+            .await
+            .expect("repo")
+            .expect("stored profile");
+        assert_eq!(stored, created);
     }
 
     #[test]
