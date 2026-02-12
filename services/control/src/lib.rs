@@ -20,7 +20,7 @@ use gittree_core::{format_grasp_server_url_as_clone_url, ControlAction, RepoAnno
 use gittree_forgejo::{
     ForgejoClient, ForgejoCreateOrg, ForgejoCreatePullRequest, ForgejoCreateRepo,
     ForgejoCreateUser, ForgejoError, ForgejoOrg, ForgejoPullRequest, ForgejoRepo, ForgejoTransport,
-    ForgejoUser,
+    ForgejoUser, ReqwestTransport,
 };
 use gittree_nostr_auth::{validate_nip98, Nip98Event, Nip98Request};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
@@ -239,9 +239,9 @@ pub fn build_repositories(
 }
 
 #[derive(Clone)]
-struct ControlAppState<T> {
+struct ControlAppState {
     auth: ControlAuthConfig,
-    forgejo: ForgejoClient<T>,
+    forgejo: ForgejoClient<Arc<dyn ForgejoTransport>>,
     forgejo_owner: String,
     repositories: Arc<dyn ControlRepositories>,
     relay_urls: Vec<String>,
@@ -263,12 +263,16 @@ pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
     let repositories = build_repositories(&config)?;
     let bind = config.bind.clone();
-    let forgejo_owner = config.forgejo.owner.clone();
     let relay_urls = config.relay_urls;
     let public_git_url = config.public_git_url;
-    let repo_private_default = config.forgejo.repo_private;
     let auth = config.auth;
-    let forgejo = ForgejoClient::new(config.forgejo).map_err(ControlError::Forgejo)?;
+    let forgejo_config = config.forgejo;
+    let forgejo_owner = forgejo_config.owner.clone();
+    let repo_private_default = forgejo_config.repo_private;
+    let transport =
+        ReqwestTransport::new(forgejo_config.api_token.clone()).map_err(ControlError::Forgejo)?;
+    let transport: Arc<dyn ForgejoTransport> = Arc::new(transport);
+    let forgejo = ForgejoClient::with_transport(forgejo_config, transport);
     let state = ControlAppState {
         auth,
         forgejo,
@@ -288,10 +292,7 @@ pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     Ok(())
 }
 
-fn build_router<T>(state: ControlAppState<T>) -> Router
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+fn build_router(state: ControlAppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::POST, Method::OPTIONS])
@@ -309,10 +310,7 @@ where
         .with_state(state)
 }
 
-async fn health_handler<T>(State(state): State<ControlAppState<T>>) -> &'static str
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+async fn health_handler(State(state): State<ControlAppState>) -> &'static str {
     let _ = (&state.auth, &state.forgejo);
     "ok"
 }
@@ -523,14 +521,11 @@ enum ControlEventResponse {
     CreatePullRequest { pull: ControlPullResponse },
 }
 
-async fn create_user_handler<T>(
-    State(state): State<ControlAppState<T>>,
+async fn create_user_handler(
+    State(state): State<ControlAppState>,
     headers: HeaderMap,
     Json(payload): Json<ControlCreateUserRequest>,
-) -> Result<Json<ControlUserResponse>, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<ControlUserResponse>, ControlHttpError> {
     authorize(&headers, &state.auth.token)?;
     require_non_empty("username", &payload.username)?;
     require_non_empty("email", &payload.email)?;
@@ -543,14 +538,11 @@ where
     Ok(Json(user.into()))
 }
 
-async fn create_org_handler<T>(
-    State(state): State<ControlAppState<T>>,
+async fn create_org_handler(
+    State(state): State<ControlAppState>,
     headers: HeaderMap,
     Json(payload): Json<ControlCreateOrgRequest>,
-) -> Result<Json<ControlOrgResponse>, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<ControlOrgResponse>, ControlHttpError> {
     authorize(&headers, &state.auth.token)?;
     require_non_empty("owner", &payload.owner)?;
     require_non_empty("name", &payload.name)?;
@@ -570,14 +562,11 @@ where
     Ok(Json(org.into()))
 }
 
-async fn create_repo_handler<T>(
-    State(state): State<ControlAppState<T>>,
+async fn create_repo_handler(
+    State(state): State<ControlAppState>,
     headers: HeaderMap,
     Json(payload): Json<ControlCreateRepoRequest>,
-) -> Result<Json<ControlRepoResponse>, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<ControlRepoResponse>, ControlHttpError> {
     authorize(&headers, &state.auth.token)?;
     require_non_empty("owner", &payload.owner)?;
     require_non_empty("name", &payload.name)?;
@@ -604,16 +593,13 @@ where
     Ok(Json(repo))
 }
 
-async fn create_repo_nostr_handler<T>(
-    State(state): State<ControlAppState<T>>,
+async fn create_repo_nostr_handler(
+    State(state): State<ControlAppState>,
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
     body: Bytes,
-) -> Result<Json<RepoCreateResponse>, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<RepoCreateResponse>, ControlHttpError> {
     let event = parse_nostr_auth(&headers)?;
     let request_url = build_request_url(&headers, &uri)?;
     let payload_hash = nip98_payload_hash(&body);
@@ -640,16 +626,13 @@ where
     Ok(Json(repo))
 }
 
-async fn create_tenant_handler<T>(
-    State(state): State<ControlAppState<T>>,
+async fn create_tenant_handler(
+    State(state): State<ControlAppState>,
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
     body: Bytes,
-) -> Result<Json<ControlCreateTenantResponse>, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<ControlCreateTenantResponse>, ControlHttpError> {
     let event = parse_nostr_auth(&headers)?;
     let request_url = build_request_url(&headers, &uri)?;
     let payload_hash = nip98_payload_hash(&body);
@@ -754,14 +737,11 @@ where
     }))
 }
 
-async fn create_pull_handler<T>(
-    State(state): State<ControlAppState<T>>,
+async fn create_pull_handler(
+    State(state): State<ControlAppState>,
     headers: HeaderMap,
     Json(payload): Json<ControlCreatePullRequest>,
-) -> Result<Json<ControlPullResponse>, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<ControlPullResponse>, ControlHttpError> {
     authorize(&headers, &state.auth.token)?;
     require_non_empty("owner", &payload.owner)?;
     require_non_empty("repo", &payload.repo)?;
@@ -785,14 +765,11 @@ where
     Ok(Json(pr.into()))
 }
 
-async fn control_event_handler<T>(
-    State(state): State<ControlAppState<T>>,
+async fn control_event_handler(
+    State(state): State<ControlAppState>,
     headers: HeaderMap,
     Json(payload): Json<ControlEventRequest>,
-) -> Result<Json<ControlEventResponse>, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<ControlEventResponse>, ControlHttpError> {
     authorize(&headers, &state.auth.token)?;
     require_non_empty("pubkey", &payload.pubkey)?;
     require_non_empty("content", &payload.content)?;
@@ -806,13 +783,10 @@ where
     Ok(Json(response))
 }
 
-async fn apply_control_action<T>(
-    state: &ControlAppState<T>,
+async fn apply_control_action(
+    state: &ControlAppState,
     action: ControlAction,
-) -> Result<ControlEventResponse, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<ControlEventResponse, ControlHttpError> {
     match action {
         ControlAction::CreateUser {
             username,
@@ -909,13 +883,10 @@ where
     }
 }
 
-async fn create_repo_with_announcement<T>(
-    state: &ControlAppState<T>,
+async fn create_repo_with_announcement(
+    state: &ControlAppState,
     input: CreateRepoInput,
-) -> Result<ControlRepoResponse, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<ControlRepoResponse, ControlHttpError> {
     let owner = input.owner.unwrap_or_else(|| state.forgejo_owner.clone());
     let identifier = input.identifier.unwrap_or_else(|| input.name.clone());
 
@@ -998,14 +969,11 @@ where
     Ok(repo.into())
 }
 
-async fn create_repo_from_signed_event<T>(
-    state: &ControlAppState<T>,
+async fn create_repo_from_signed_event(
+    state: &ControlAppState,
     auth_pubkey: &str,
     request: RepoCreateRequest,
-) -> Result<RepoCreateResponse, ControlHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<RepoCreateResponse, ControlHttpError> {
     let event = request.event;
     let (announcement, identifier, _npub) = validate_repo_announcement_event(
         &event,
@@ -1376,7 +1344,7 @@ mod tests {
     use gittree_core::{RepoAnnouncement, format_grasp_server_url_as_clone_url};
     use gittree_forgejo::{
         ForgejoClient, ForgejoError, ForgejoMethod, ForgejoRequest, ForgejoResponse,
-        ForgejoTransport, ReqwestTransport,
+        ForgejoTransport,
     };
     use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
     use gittree_storage::{
@@ -1437,28 +1405,11 @@ mod tests {
     fn test_state(
         responses: Vec<ForgejoResponse>,
     ) -> (
-        super::ControlAppState<MockTransport>,
-        MockTransport,
+        super::ControlAppState,
+        Arc<MockTransport>,
         Arc<InMemoryRepositories>,
     ) {
         test_state_with_auth(responses, Vec::new(), "gittree")
-    }
-
-    fn reqwest_state() -> super::ControlAppState<ReqwestTransport> {
-        let forgejo = ForgejoClient::new(test_config()).expect("forgejo client");
-        let repositories = Arc::new(InMemoryRepositories::new());
-        super::ControlAppState {
-            auth: ControlAuthConfig {
-                token: "token".to_string(),
-                admin_keys: Vec::new(),
-            },
-            forgejo,
-            forgejo_owner: "gittree".to_string(),
-            repositories: repositories.clone(),
-            relay_urls: vec!["ws://relay.local".to_string()],
-            public_git_url: "http://localhost:8085".to_string(),
-            repo_private_default: true,
-        }
     }
 
     fn test_state_with_auth(
@@ -1466,12 +1417,13 @@ mod tests {
         admin_keys: Vec<String>,
         owner: &str,
     ) -> (
-        super::ControlAppState<MockTransport>,
-        MockTransport,
+        super::ControlAppState,
+        Arc<MockTransport>,
         Arc<InMemoryRepositories>,
     ) {
-        let transport = MockTransport::new(responses);
-        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+        let transport = Arc::new(MockTransport::new(responses));
+        let transport_dyn: Arc<dyn ForgejoTransport> = transport.clone();
+        let client = ForgejoClient::with_transport(test_config(), transport_dyn);
         let repositories = Arc::new(InMemoryRepositories::new());
         let relay_urls = vec!["ws://relay.local".to_string()];
         (
@@ -2320,7 +2272,8 @@ mod tests {
 
     #[tokio::test]
     async fn reqwest_state_routes_fail_fast_before_network_io() {
-        let app = build_router(reqwest_state());
+        let (state, transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
         let (pubkey, privkey) = test_keys();
 
         let user_response = app
@@ -2454,6 +2407,10 @@ mod tests {
             .await
             .expect("nostr repo response");
         assert_eq!(nostr_repo_response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            transport.requests().is_empty(),
+            "unauthorized requests should not reach forgejo transport"
+        );
     }
 
     #[tokio::test]
