@@ -242,6 +242,21 @@ impl WebsocketRelayAdapter {
     }
 }
 
+async fn map_transport<E, Fut>(operation: Fut) -> Result<(), RelayAdapterError>
+where
+    E: std::fmt::Display,
+    Fut: std::future::IntoFuture<Output = Result<(), E>>,
+{
+    operation
+        .into_future()
+        .await
+        .map_err(|err| RelayAdapterError::Transport(err.to_string()))
+}
+
+fn to_protocol_json<T: Serialize>(value: &T) -> Result<String, RelayAdapterError> {
+    serde_json::to_string(value).map_err(|err| RelayAdapterError::Protocol(err.to_string()))
+}
+
 #[async_trait]
 impl RelayAdapter for WebsocketRelayAdapter {
     async fn relay_info(&self) -> Result<Option<RelayInfoDocument>, RelayAdapterError> {
@@ -257,23 +272,16 @@ impl RelayAdapter for WebsocketRelayAdapter {
 
         let secret_key = self.load_secret_key()?;
         let event = build_probe_event(&self.config.relay_url, &secret_key)?;
-        let event_json = serde_json::to_string(&event)
-            .map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
+        let event_json = to_protocol_json(&event)?;
         let event_message = format!("[\"EVENT\",{event_json}]");
-        write
-            .send(WsMessage::Text(event_message))
-            .await
-            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+        map_transport(write.send(WsMessage::Text(event_message))).await?;
 
         wait_for_ok(&mut read, &event.id, self.config.timeout).await?;
 
         let sub_id = format!("{PROBE_SUB_PREFIX}-{}", &event.id[..8]);
         let filter = json!({"ids":[event.id]});
         let req_message = format!("[\"REQ\",\"{sub_id}\",{filter}]");
-        write
-            .send(WsMessage::Text(req_message))
-            .await
-            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+        map_transport(write.send(WsMessage::Text(req_message))).await?;
 
         wait_for_event(&mut read, &sub_id, &event.id, self.config.timeout).await?;
         let close_message = format!("[\"CLOSE\",\"{sub_id}\"]");
@@ -287,13 +295,9 @@ impl RelayAdapter for WebsocketRelayAdapter {
             .await
             .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
         let (mut write, mut read) = stream.split();
-        let event_json = serde_json::to_string(event)
-            .map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
+        let event_json = to_protocol_json(event)?;
         let event_message = format!("[\"EVENT\",{event_json}]");
-        write
-            .send(WsMessage::Text(event_message))
-            .await
-            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+        map_transport(write.send(WsMessage::Text(event_message))).await?;
         wait_for_ok(&mut read, &event.id, self.config.timeout).await?;
         Ok(())
     }
@@ -514,6 +518,7 @@ mod tests {
         parse_eose_message, parse_event_message, parse_ok_message, sign_event_id, wait_for_event,
         wait_for_ok,
     };
+    use futures_util::{SinkExt, StreamExt};
     use futures_util::stream;
     use gittree_core::RepoAnnouncement;
     use serde_json::json;
@@ -537,6 +542,59 @@ mod tests {
             hashtags: Vec::new(),
             maintainers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn signed_event_from_announcement_uses_default_timestamp() {
+        let announcement = sample_announcement();
+        let secret_key = SecretKey::from_slice(&[3u8; 32]).expect("secret");
+
+        let event =
+            SignedNostrEvent::from_announcement(&announcement, &secret_key).expect("event");
+
+        assert_eq!(event.kind, gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT.0);
+        assert!(event.created_at > 0, "created at");
+        assert!(!event.id.is_empty(), "event id");
+        assert!(!event.sig.is_empty(), "signature");
+    }
+
+    #[tokio::test]
+    async fn map_transport_maps_ok_result() {
+        super::map_transport::<&'static str, _>(async { Ok::<(), &'static str>(()) })
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn map_transport_maps_error_result() {
+        let err = super::map_transport::<&'static str, _>(async {
+            Err::<(), &'static str>("boom")
+        })
+        .await
+        .expect_err("error");
+
+        let RelayAdapterError::Transport(message) = err else {
+            panic!("expected transport error, got {err}");
+        };
+        assert!(message.contains("boom"), "{message}");
+    }
+
+    #[test]
+    fn to_protocol_json_maps_serialization_errors() {
+        #[derive(Debug)]
+        struct AlwaysFail;
+
+        impl serde::Serialize for AlwaysFail {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+
+        let err = super::to_protocol_json(&AlwaysFail).expect_err("serialize");
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
     }
 
     #[test]
@@ -849,6 +907,101 @@ mod tests {
         };
         let publish_err = adapter.publish_event(&event).await.expect_err("connect error");
         assert!(matches!(publish_err, RelayAdapterError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn websocket_adapter_probe_and_publish_round_trip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let relay_url = format!("ws://{addr}");
+
+        let server = tokio::spawn(async move {
+            for connection_index in 0..2 {
+                let (tcp, _) = listener.accept().await.expect("accept");
+                let ws = tokio_tungstenite::accept_async(tcp).await.expect("handshake");
+                let (mut write, mut read) = ws.split();
+
+                let msg = read
+                    .next()
+                    .await
+                    .expect("client message")
+                    .expect("client message ok");
+                let text = msg.into_text().expect("text");
+                let value: serde_json::Value = serde_json::from_str(&text).expect("client json");
+                let array = value.as_array().expect("client message array");
+                assert_eq!(array.first().and_then(|v| v.as_str()), Some("EVENT"));
+                let event = array.get(1).cloned().unwrap_or_else(|| json!({}));
+                let event_id = event
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                assert!(!event_id.is_empty(), "event id");
+
+                // Send an unrelated OK first to exercise the ignore path, then a matching OK.
+                let wrong_ok = json!(["OK", "deadbeef", true, "ignored"]);
+                write
+                    .send(WsMessage::Text(wrong_ok.to_string()))
+                    .await
+                    .expect("send ok");
+                let ok = json!(["OK", event_id, true, "accepted"]);
+                write
+                    .send(WsMessage::Text(ok.to_string()))
+                    .await
+                    .expect("send ok");
+
+                if connection_index == 0 {
+                    let msg = read
+                        .next()
+                        .await
+                        .expect("client req")
+                        .expect("client req ok");
+                    let text = msg.into_text().expect("text");
+                    let req: serde_json::Value = serde_json::from_str(&text).expect("req json");
+                    let req_array = req.as_array().expect("req array");
+                    assert_eq!(req_array.first().and_then(|v| v.as_str()), Some("REQ"));
+                    let sub_id = req_array
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    assert!(!sub_id.is_empty(), "sub id");
+
+                    // Send an EVENT with the correct sub id but the wrong event id first.
+                    let wrong_event = json!({ "id": "00".repeat(32) });
+                    let wrong_event_msg = json!(["EVENT", sub_id, wrong_event]);
+                    write
+                        .send(WsMessage::Text(wrong_event_msg.to_string()))
+                        .await
+                        .expect("send event");
+
+                    // Follow up with the correct event.
+                    let correct_event_msg = json!(["EVENT", sub_id, event]);
+                    write
+                        .send(WsMessage::Text(correct_event_msg.to_string()))
+                        .await
+                        .expect("send event");
+
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+        });
+
+        let adapter = WebsocketRelayAdapter::new(
+            RelayAdapterConfig::new(&relay_url)
+                .with_timeout(Duration::from_secs(2))
+                .with_secret_key(&"01".repeat(32)),
+        );
+
+        adapter.probe_write_read().await.expect("probe");
+
+        let secret_key = SecretKey::from_slice(&[7u8; 32]).expect("secret");
+        let event = build_probe_event(&relay_url, &secret_key).expect("event");
+        adapter.publish_event(&event).await.expect("publish");
+
+        server.await.expect("server task");
     }
 
     #[tokio::test]
