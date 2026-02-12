@@ -349,19 +349,23 @@ async fn signup_handler(
         now,
         max_skew_seconds: state.auth.max_skew_seconds as i64,
     };
-    let auth = validate_nip98(&event, &request)
-        .map_err(|err| AuthHttpError::Unauthorized(err.to_string()))?;
+    let auth = match validate_nip98(&event, &request) {
+        Ok(auth) => auth,
+        Err(err) => return Err(AuthHttpError::Unauthorized(err.to_string())),
+    };
 
     let username = username_from_pubkey(&auth.pubkey)?;
-    let pubkey_bytes = hex::decode(&auth.pubkey)
-        .map_err(|_| AuthHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let pubkey_bytes = match hex::decode(&auth.pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(AuthHttpError::BadRequest("invalid pubkey".to_string())),
+    };
 
-    if let Some(existing) = state
-        .accounts
-        .account_by_pubkey(&pubkey_bytes)
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
-    {
+    let existing = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
+        Ok(existing) => existing,
+        Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
+    };
+
+    if let Some(existing) = existing {
         return Ok(Json(SignupResponse {
             pubkey: auth.pubkey,
             username: existing.forgejo_username,
@@ -371,7 +375,7 @@ async fn signup_handler(
 
     let email = format!("{}@{}", username, state.auth.email_domain);
     let password = generate_password();
-    let forgejo_user = state
+    let forgejo_user = match state
         .forgejo
         .ensure_user(ForgejoCreateUser {
             username: username.clone(),
@@ -382,15 +386,18 @@ async fn signup_handler(
             send_notify: Some(false),
         })
         .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
+    {
+        Ok(user) => user,
+        Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
+    };
 
-    let record = AccountRecord::new(&auth.pubkey, &forgejo_user.username)
-        .map_err(|err| AuthHttpError::BadRequest(err.to_string()))?;
-    state
-        .accounts
-        .upsert_account(record)
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
+    let record = match AccountRecord::new(&auth.pubkey, &forgejo_user.username) {
+        Ok(record) => record,
+        Err(err) => return Err(AuthHttpError::BadRequest(err.to_string())),
+    };
+    if let Err(err) = state.accounts.upsert_account(record).await {
+        return Err(AuthHttpError::Internal(err.to_string()));
+    }
 
     let profile = ProfileRecord::new(
         &auth.pubkey,
@@ -404,11 +411,9 @@ async fn signup_handler(
         now,
     )
     .map_err(profile_input_error)?;
-    state
-        .profiles
-        .upsert_profile(profile)
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
+    if let Err(err) = state.profiles.upsert_profile(profile).await {
+        return Err(AuthHttpError::Internal(err.to_string()));
+    }
 
     Ok(Json(SignupResponse {
         pubkey: auth.pubkey,
