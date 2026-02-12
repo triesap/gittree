@@ -211,6 +211,21 @@ mod tests {
 
     #[test]
     fn invite_record_rejects_invalid_fields() {
+        let empty_tenant = RelayInviteRecord::new(
+            " ",
+            "invite",
+            "member",
+            &"22".repeat(32),
+            None,
+            None,
+            10,
+        )
+        .expect_err("empty tenant should fail");
+        assert!(matches!(
+            empty_tenant,
+            StorageError::InvalidField { field: "tenant_id", .. }
+        ));
+
         let empty_code = RelayInviteRecord::new(
             "tenant",
             "",

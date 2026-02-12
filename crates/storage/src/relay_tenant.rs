@@ -162,6 +162,7 @@ fn normalize_optional_url(
 #[cfg(test)]
 mod tests {
     use super::RelayTenantRecord;
+    use crate::StorageError;
 
     fn valid_record() -> RelayTenantRecord {
         RelayTenantRecord::new(
@@ -241,6 +242,36 @@ mod tests {
     }
 
     #[test]
+    fn tenant_record_rejects_invalid_pubkey_hex_payload() {
+        let err = RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"zz".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .expect_err("invalid pubkey hex must fail");
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "relay_pubkey",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn tenant_record_rejects_empty_tenant_id() {
         assert!(RelayTenantRecord::new(
             " ",
@@ -261,6 +292,33 @@ mod tests {
             1,
         )
         .is_err());
+    }
+
+    #[test]
+    fn tenant_record_rejects_long_name() {
+        let err = RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            Some("x".repeat(super::MAX_NAME_LEN + 1)),
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .expect_err("long name must fail");
+        assert!(matches!(
+            err,
+            StorageError::InvalidField { field: "name", .. }
+        ));
     }
 
     #[test]
