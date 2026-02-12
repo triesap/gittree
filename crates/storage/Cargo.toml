@@ -15,4 +15,5 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "time"
 time = "0.3"
 
 [dev-dependencies]
+serde = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt"] }

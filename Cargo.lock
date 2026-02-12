@@ -2282,6 +2282,7 @@ dependencies = [
  "async-trait",
  "gittree-core",
  "hex",
+ "serde",
  "serde_json",
  "sqlx",
  "time",

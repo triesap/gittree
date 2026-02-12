@@ -1,6 +1,10 @@
 use crate::StorageError;
 use gittree_core::{RelayCapability, RelayCompatibilityReport};
 
+fn map_serde_error(field: &'static str, source: serde_json::Error) -> StorageError {
+    StorageError::Serialization { field, source }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayProbeMetadata {
     pub nip11_url: Option<String>,
@@ -48,12 +52,8 @@ impl RelayCompatibilityRecord {
             });
         }
 
-        let report_json = serde_json::to_string(report).map_err(|source| {
-            StorageError::Serialization {
-                field: "report",
-                source,
-            }
-        })?;
+        let report_json =
+            serde_json::to_string(report).map_err(|source| map_serde_error("report", source))?;
 
         Ok(Self {
             relay_url: report.relay_url.clone(),
@@ -71,10 +71,7 @@ impl RelayCompatibilityRecord {
     }
 
     pub fn report(&self) -> Result<RelayCompatibilityReport, StorageError> {
-        serde_json::from_str(&self.report_json).map_err(|source| StorageError::Serialization {
-            field: "report",
-            source,
-        })
+        serde_json::from_str(&self.report_json).map_err(|source| map_serde_error("report", source))
     }
 
     fn capabilities_as_strings(caps: &[RelayCapability]) -> Vec<String> {
@@ -86,6 +83,7 @@ impl RelayCompatibilityRecord {
 mod tests {
     use super::RelayCompatibilityRecord;
     use super::RelayProbeMetadata;
+    use crate::StorageError;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
 
     #[test]
@@ -170,7 +168,8 @@ mod tests {
             active_probe_error: None,
             checked_at: 0,
         };
-        assert!(record.report().is_err());
+        let err = record.report().unwrap_err();
+        assert!(matches!(err, StorageError::Serialization { field, .. } if field == "report"));
     }
 
     #[test]
@@ -190,5 +189,62 @@ mod tests {
         let record = RelayCompatibilityRecord::new(&report, 5, &metadata).expect("record");
         assert_eq!(record.active_probe_ok, Some(false));
         assert_eq!(record.active_probe_error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn probe_metadata_derives_clone_debug_and_eq() {
+        let metadata = RelayProbeMetadata {
+            nip11_url: Some("https://relay.example/".to_string()),
+            nip11_available: true,
+            active_probe_ok: Some(true),
+            active_probe_error: Some("timeout".to_string()),
+        };
+        let cloned = metadata.clone();
+        assert_eq!(metadata, cloned);
+        let rendered = format!("{metadata:?}");
+        assert!(rendered.contains("RelayProbeMetadata"));
+    }
+
+    #[test]
+    fn record_derives_clone_debug_and_eq() {
+        let report = RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        };
+        let metadata = RelayProbeMetadata {
+            nip11_url: None,
+            nip11_available: false,
+            active_probe_ok: Some(true),
+            active_probe_error: Some("timeout".to_string()),
+        };
+        let record = RelayCompatibilityRecord::new(&report, 7, &metadata).expect("record");
+        let cloned = record.clone();
+        assert_eq!(record, cloned);
+        let rendered = format!("{record:?}");
+        assert!(rendered.contains("RelayCompatibilityRecord"));
+    }
+
+    #[test]
+    fn to_json_maps_serialization_error_with_field_name() {
+        use serde::ser::Error as _;
+        use serde::ser::Serializer;
+        use serde::Serialize;
+
+        struct AlwaysFail;
+
+        impl Serialize for AlwaysFail {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                Err(S::Error::custom("always fail"))
+            }
+        }
+
+        let source = serde_json::to_string(&AlwaysFail).unwrap_err();
+        let err = super::map_serde_error("report", source);
+        assert!(matches!(err, StorageError::Serialization { field, .. } if field == "report"));
     }
 }
