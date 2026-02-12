@@ -1802,6 +1802,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_nostr_auth_accepts_valid_header() {
+        let (_, privkey) = test_keys();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            None,
+            super::unix_timestamp(),
+        )
+        .expect("event");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTH_HEADER,
+            nostr_auth_header(&event).parse().expect("authorization header"),
+        );
+        let parsed = parse_nostr_auth(&headers).expect("parsed event");
+        assert_eq!(parsed.pubkey, event.pubkey);
+        assert_eq!(parsed.kind, event.kind);
+    }
+
+    #[test]
     fn require_hex_len_and_npub_round_trip_cover_validation_edges() {
         let (pubkey, _) = test_keys();
         super::require_hex_len("pubkey", &pubkey, 64).expect("valid hex");
@@ -3720,6 +3742,37 @@ mod tests {
         event.id = super::build_event_id(&event).expect("event id");
         let err = super::verify_signed_event(&event).unwrap_err();
         assert!(matches!(err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn verify_signed_event_accepts_valid_signed_announcement() {
+        let (pubkey, privkey) = test_keys();
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url =
+            format_grasp_server_url_as_clone_url("http://localhost:8085", &npub, "demo")
+                .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("valid signed event".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: vec!["ws://relay.local".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(
+                &announcement,
+                &secret,
+                super::unix_timestamp(),
+            )
+            .expect("signed"),
+        );
+        super::verify_signed_event(&event).expect("valid signed event");
     }
 
     #[tokio::test]
