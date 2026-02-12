@@ -5,6 +5,13 @@ fn map_serde_error(field: &'static str, source: serde_json::Error) -> StorageErr
     StorageError::Serialization { field, source }
 }
 
+fn to_json_field(
+    field: &'static str,
+    encode: impl FnOnce() -> Result<String, serde_json::Error>,
+) -> Result<String, StorageError> {
+    encode().map_err(|source| map_serde_error(field, source))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayProbeMetadata {
     pub nip11_url: Option<String>,
@@ -52,8 +59,7 @@ impl RelayCompatibilityRecord {
             });
         }
 
-        let report_json =
-            serde_json::to_string(report).map_err(|source| map_serde_error("report", source))?;
+        let report_json = to_json_field("report", || serde_json::to_string(report))?;
 
         Ok(Self {
             relay_url: report.relay_url.clone(),
@@ -243,8 +249,8 @@ mod tests {
             }
         }
 
-        let source = serde_json::to_string(&AlwaysFail).unwrap_err();
-        let err = super::map_serde_error("report", source);
+        let err =
+            super::to_json_field("report", || serde_json::to_string(&AlwaysFail)).unwrap_err();
         assert!(matches!(err, StorageError::Serialization { field, .. } if field == "report"));
     }
 }
