@@ -221,6 +221,52 @@ mod tests {
     }
 
     #[test]
+    fn profile_visibility_as_str_matches_variants() {
+        assert_eq!(ProfileVisibility::Private.as_str(), "private");
+        assert_eq!(ProfileVisibility::Public.as_str(), "public");
+    }
+
+    #[test]
+    fn profile_visibility_rejects_invalid_value() {
+        let err = ProfileVisibility::parse("friends_only").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "visibility"));
+    }
+
+    #[test]
+    fn profile_record_rejects_updated_before_created() {
+        let err = ProfileRecord::new(
+            &"11".repeat(32),
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            9,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "updated_at"));
+    }
+
+    #[test]
+    fn profile_record_rejects_non_hex_pubkey_with_expected_length() {
+        let err = ProfileRecord::new(
+            &"zz".repeat(32),
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            20,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidHex { field, .. } if field == "pubkey"));
+    }
+
+    #[test]
     fn profile_record_rejects_invalid_avatar_url_scheme() {
         let err = ProfileRecord::new(
             &"11".repeat(32),
