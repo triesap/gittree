@@ -259,6 +259,17 @@ impl<T> ControlRepositories for T where
 {
 }
 
+async fn run_server<E, Fut>(server: Fut) -> Result<(), ControlError>
+where
+    E: std::fmt::Display,
+    Fut: std::future::IntoFuture<Output = Result<(), E>>,
+{
+    server
+        .into_future()
+        .await
+        .map_err(|err| ControlError::Serve(err.to_string()))
+}
+
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
     let repositories = build_repositories(&config)?;
@@ -286,10 +297,7 @@ pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|err| ControlError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
-        .await
-        .map_err(|err| ControlError::Serve(err.to_string()))?;
-    Ok(())
+    run_server(axum::serve(listener, router)).await
 }
 
 fn build_router(state: ControlAppState) -> Router {
@@ -1665,6 +1673,23 @@ mod tests {
                 .expect_err("invalid bind should fail");
             assert!(matches!(err, super::ControlError::Serve(_)));
         });
+    }
+
+    #[tokio::test]
+    async fn run_server_returns_ok_when_server_future_is_ok() {
+        super::run_server::<&'static str, _>(async { Ok::<(), &'static str>(()) })
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn run_server_maps_errors_to_control_serve_error() {
+        let err = super::run_server::<&'static str, _>(async {
+            Err::<(), &'static str>("boom")
+        })
+        .await
+        .expect_err("error");
+        assert!(matches!(err, super::ControlError::Serve(message) if message.contains("boom")));
     }
 
     #[test]
