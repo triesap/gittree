@@ -375,4 +375,61 @@ mod tests {
             "https://gittr.ee/{SAMPLE_NPUB}/repo123.git"
         )));
     }
+
+    #[test]
+    fn is_grasp_server_in_list_trims_trailing_slashes() {
+        let grasp_servers = vec![
+            "https://gittr.ee".to_string(),
+            "http://localhost:8080/".to_string(),
+        ];
+
+        assert!(is_grasp_server_in_list(
+            "https://gittr.ee/",
+            &grasp_servers
+        ));
+        assert!(is_grasp_server_in_list(
+            "http://localhost:8080",
+            &grasp_servers
+        ));
+        assert!(!is_grasp_server_in_list(
+            "https://missing.example",
+            &grasp_servers
+        ));
+    }
+
+    #[test]
+    fn is_grasp_server_in_list_rejects_empty_input_list() {
+        assert!(!is_grasp_server_in_list("https://gittr.ee", &[]));
+    }
+
+    #[test]
+    fn normalize_grasp_server_url_rejects_invalid_url() {
+        let err = normalize_grasp_server_url(" ");
+        assert!(matches!(err, Err(CoreError::InvalidField { field: "grasp_url", .. })));
+    }
+
+    #[test]
+    fn extract_npub_rejects_malformed_bech32_payload() {
+        let malformed = "npub1invalid";
+        let url = format!("https://gittr.ee/{malformed}/repo.git");
+        let err = extract_npub(&url).expect_err("malformed npub must be rejected");
+        assert!(matches!(
+            err,
+            CoreError::InvalidField {
+                field: "npub",
+                value
+            } if value == malformed
+        ));
+    }
+
+    #[test]
+    fn format_clone_url_rejects_non_npub_hrp() {
+        let nsec = bech32::encode::<bech32::Bech32>(
+            bech32::Hrp::parse("nsec").expect("valid hrp"),
+            &[0u8; 32],
+        )
+        .expect("encode nsec");
+        let err = format_grasp_server_url_as_clone_url("gittr.ee", &nsec, "repo");
+        assert!(matches!(err, Err(CoreError::InvalidField { field: "npub", .. })));
+    }
 }
