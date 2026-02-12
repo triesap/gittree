@@ -26,6 +26,13 @@ pub trait ForgejoTransport: Send + Sync {
     async fn send(&self, request: ForgejoRequest) -> Result<ForgejoResponse, ForgejoError>;
 }
 
+#[async_trait]
+impl<T: ForgejoTransport + ?Sized> ForgejoTransport for std::sync::Arc<T> {
+    async fn send(&self, request: ForgejoRequest) -> Result<ForgejoResponse, ForgejoError> {
+        (**self).send(request).await
+    }
+}
+
 #[derive(Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -782,6 +789,23 @@ mod tests {
         format!(
             r#"{{"login":"{username}","username":"{username}","email":"{username}@example.com"}}"#
         )
+    }
+
+    #[tokio::test]
+    async fn client_supports_arc_transport() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: repo_json("gittree", "alpha"),
+        }];
+        let transport = Arc::new(MockTransport::new(responses));
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client.ensure_repo("alpha", None).await.expect("repo");
+        assert_eq!(repo.full_name, "gittree/alpha");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, ForgejoMethod::Get);
     }
 
     #[tokio::test]
