@@ -116,7 +116,10 @@ fn nip98_event_id_bytes(unsigned: &Nip98UnsignedEvent) -> Result<[u8; 32], AppCo
 
 #[cfg(test)]
 mod tests {
-    use super::{nip98_payload_hash, nip98_sign_event, NIP98_KIND};
+    use super::{
+        nip98_event_id, nip98_payload_hash, nip98_sign_event, nip98_unsigned_event, NIP98_KIND,
+    };
+    use crate::AppCoreError;
     use gittree_nostr_auth::{validate_nip98, Nip98Event as AuthEvent, Nip98Request};
 
     const NOW: i64 = 1_700_000_000;
@@ -157,5 +160,72 @@ mod tests {
     #[test]
     fn payload_hash_returns_none_for_empty() {
         assert!(nip98_payload_hash(&[]).is_none());
+    }
+
+    #[test]
+    fn payload_hash_returns_hex_for_non_empty() {
+        let hash = nip98_payload_hash(b"hello").expect("hash");
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn unsigned_event_sets_kind_and_payload_tag() {
+        let payload = "ab".repeat(32);
+        let event = nip98_unsigned_event(
+            "11".repeat(32),
+            "PATCH",
+            "http://localhost:8089/v1/profile",
+            Some(payload.as_str()),
+            NOW,
+        );
+        assert_eq!(event.kind, NIP98_KIND);
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.first() == Some(&"u".to_string())));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.first() == Some(&"method".to_string())));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.first() == Some(&"payload".to_string())));
+    }
+
+    #[test]
+    fn event_id_matches_signed_event_id() {
+        let secret = [3u8; 32];
+        let signed = nip98_sign_event(
+            &secret,
+            "POST",
+            "http://localhost:8089/v1/signup",
+            None,
+            NOW,
+        )
+        .expect("signed");
+        let unsigned = nip98_unsigned_event(
+            signed.pubkey.clone(),
+            "POST",
+            "http://localhost:8089/v1/signup",
+            None,
+            NOW,
+        );
+        let expected = nip98_event_id(&unsigned).expect("event id");
+        assert_eq!(signed.id, expected);
+    }
+
+    #[test]
+    fn sign_event_rejects_zero_secret_key() {
+        let err = nip98_sign_event(
+            &[0u8; 32],
+            "POST",
+            "http://localhost:8089/v1/signup",
+            None,
+            NOW,
+        )
+        .expect_err("zero secret must fail");
+        assert!(matches!(err, AppCoreError::InvalidSecretKey));
     }
 }

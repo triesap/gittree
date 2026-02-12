@@ -171,7 +171,8 @@ pub fn pubkey_bytes_from_npub(npub: &str) -> Result<Vec<u8>, AppCoreError> {
 mod tests {
     use super::{
         clone_url, normalize_identifier, npub_from_bytes, pubkey_bytes_from_npub,
-        ProfileVisibility, RepoCreateRequest, RepoCreateResponse, SignedNostrEvent,
+        AppCoreError, ProfileVisibility, RepoCreateRequest, RepoCreateResponse, RepoDetail,
+        RepoListItem, SignedNostrEvent,
     };
 
     #[test]
@@ -238,5 +239,50 @@ mod tests {
     fn profile_visibility_serializes_to_strings() {
         let json = serde_json::to_string(&ProfileVisibility::Private).expect("json");
         assert_eq!(json, "\"private\"");
+    }
+
+    #[test]
+    fn repo_list_item_and_detail_constructors_round_trip() {
+        let item = RepoListItem::new(
+            "npub1demo".to_string(),
+            "demo".to_string(),
+            "alice/demo".to_string(),
+            "https://gittr.ee/npub1demo/demo.git".to_string(),
+        );
+        let detail = RepoDetail::from(item.clone());
+        assert_eq!(detail, RepoDetail::new(item.npub, item.identifier, item.forgejo, item.clone_url));
+    }
+
+    #[test]
+    fn app_core_error_display_is_stable() {
+        let invalid_pubkey = AppCoreError::InvalidPubkey;
+        assert_eq!(invalid_pubkey.to_string(), "invalid pubkey");
+
+        let invalid_secret = AppCoreError::InvalidSecretKey;
+        assert_eq!(invalid_secret.to_string(), "invalid secret key");
+
+        let invalid_encoding = AppCoreError::InvalidEventEncoding("bad json".to_string());
+        assert_eq!(
+            invalid_encoding.to_string(),
+            "invalid event encoding: bad json"
+        );
+
+        let invalid_sig = AppCoreError::InvalidSignature;
+        assert_eq!(invalid_sig.to_string(), "invalid signature");
+    }
+
+    #[test]
+    fn pubkey_bytes_from_npub_rejects_wrong_payload_length() {
+        let short = npub_from_bytes(&[9u8; 31]).expect("npub");
+        let err = pubkey_bytes_from_npub(&short).expect_err("invalid length");
+        assert!(matches!(err, AppCoreError::InvalidPubkey));
+    }
+
+    #[test]
+    fn pubkey_bytes_from_npub_rejects_wrong_hrp() {
+        let npub = npub_from_bytes(&[7u8; 32]).expect("npub");
+        let nsec = npub.replacen("npub1", "nsec1", 1);
+        let err = pubkey_bytes_from_npub(&nsec).expect_err("invalid hrp");
+        assert!(matches!(err, AppCoreError::InvalidPubkey));
     }
 }
