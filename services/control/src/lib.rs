@@ -1366,7 +1366,8 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
     use gittree_app_core::{
-        nip98_payload_hash, nip98_sign_event, RepoCreateRequest, RepoCreateResponse,
+        nip98_payload_hash, nip98_sign_event, pubkey_bytes_from_npub, RepoCreateRequest,
+        RepoCreateResponse,
         SignedNostrEvent as ApiSignedNostrEvent,
     };
     use gittree_config::{ControlAuthConfig, ForgejoConfig};
@@ -1777,6 +1778,34 @@ mod tests {
 
         let secret_err = parse_secret_key("bad").unwrap_err();
         assert!(matches!(secret_err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn require_hex_len_and_npub_round_trip_cover_validation_edges() {
+        let (pubkey, _) = test_keys();
+        super::require_hex_len("pubkey", &pubkey, 64).expect("valid hex");
+
+        let short_err = super::require_hex_len("pubkey", "aa", 64).unwrap_err();
+        assert!(matches!(short_err, ControlHttpError::BadRequest(_)));
+
+        let non_hex_err = super::require_hex_len("pubkey", &"zz".repeat(32), 64).unwrap_err();
+        assert!(matches!(non_hex_err, ControlHttpError::BadRequest(_)));
+
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let decoded = pubkey_bytes_from_npub(&npub).expect("decode");
+        assert_eq!(hex::encode(decoded), pubkey);
+    }
+
+    #[test]
+    fn parse_secret_key_and_unix_timestamp_cover_success_and_failure() {
+        let (_, privkey) = test_keys();
+        parse_secret_key(&privkey).expect("valid secret");
+
+        let invalid = parse_secret_key(&"gg".repeat(32)).unwrap_err();
+        assert!(matches!(invalid, ControlHttpError::BadRequest(_)));
+
+        let now = super::unix_timestamp();
+        assert!(now >= 1_600_000_000);
     }
 
     #[test]
