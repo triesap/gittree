@@ -1674,6 +1674,16 @@ secret_key = "22"
     }
 
     #[test]
+    fn relay_probe_validate_accepts_none_secret() {
+        let config = RelayProbeConfig {
+            active: true,
+            timeout_secs: 5,
+            secret_key: None,
+        };
+        config.validate().expect("none secret is valid");
+    }
+
+    #[test]
     fn relay_policy_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "9000", || {
@@ -1734,6 +1744,23 @@ secret_key = "22"
             std::env::remove_var(ENV_RELAY_POLICY_AUTH_REQUIRED);
         }
         let config = RelayPolicyConfig::from_env().expect("policy");
+        assert_eq!(config.max_content_len, DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN);
+        assert_eq!(config.max_tags, DEFAULT_RELAY_POLICY_MAX_TAGS);
+        assert_eq!(config.max_tag_values, DEFAULT_RELAY_POLICY_MAX_TAG_VALUES);
+        assert_eq!(config.max_tag_value_len, DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN);
+        assert_eq!(config.max_future_seconds, DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS);
+        assert_eq!(config.max_subscriptions, None);
+        assert_eq!(config.max_limit, None);
+        assert_eq!(config.max_message_bytes, None);
+        assert_eq!(config.max_events_per_min, None);
+        assert_eq!(config.max_requests_per_min, None);
+        assert_eq!(config.retention_max_age_seconds, None);
+        assert!(!config.auth_required);
+    }
+
+    #[test]
+    fn relay_policy_default_matches_expected_values() {
+        let config = RelayPolicyConfig::default();
         assert_eq!(config.max_content_len, DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN);
         assert_eq!(config.max_tags, DEFAULT_RELAY_POLICY_MAX_TAGS);
         assert_eq!(config.max_tag_values, DEFAULT_RELAY_POLICY_MAX_TAG_VALUES);
@@ -2081,6 +2108,17 @@ bind = "127.0.0.1:9101"
     }
 
     #[test]
+    fn services_toml_file_reports_read_error_for_missing_file() {
+        let path = write_temp_config("relay_bind = \"127.0.0.1:9998\"");
+        let _ = std::fs::remove_file(&path);
+        let result = ServicesConfig::from_toml_file(&path);
+        assert!(matches!(
+            result,
+            Err(ConfigError::ReadConfig { path: p, .. }) if p == path
+        ));
+    }
+
+    #[test]
     fn services_config_validate_rejects_invalid_bind() {
         let mut services = ServicesConfig::default();
         services.state.bind = "bad".to_string();
@@ -2092,6 +2130,12 @@ bind = "127.0.0.1:9101"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn services_config_validate_accepts_default_binds() {
+        let services = ServicesConfig::default();
+        services.validate().expect("default binds are valid");
     }
 
     #[test]
@@ -2110,6 +2154,13 @@ bind = "127.0.0.1:9101"
     }
 
     #[test]
+    fn services_config_from_env_validated_with_accepts_default_values() {
+        let services = ServicesConfig::from_env_validated_with(|_| None).expect("validated");
+        assert_eq!(services.relay.bind, DEFAULT_RELAY_BIND);
+        assert_eq!(services.auth.bind, DEFAULT_AUTH_BIND);
+    }
+
+    #[test]
     fn services_toml_file_validated_rejects_invalid_bind() {
         let toml = r#"
 [services.coordinator]
@@ -2124,6 +2175,18 @@ bind = "bad"
                 ..
             })
         ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn services_toml_file_validated_accepts_valid_bind() {
+        let toml = r#"
+[services.auth]
+bind = "127.0.0.1:9120"
+"#;
+        let path = write_temp_config(toml);
+        let services = ServicesConfig::from_toml_file_validated(&path).expect("validated");
+        assert_eq!(services.auth.bind, "127.0.0.1:9120");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2558,6 +2621,94 @@ mode = "unknown"
             ));
         });
 
+        with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max tag values");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_tag_values",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max tag value len");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_tag_value_len",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max future seconds");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_future_seconds",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max subscriptions");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_subscriptions",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max message bytes");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_message_bytes",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max events per min");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_events_per_min",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max requests per min");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.max_requests_per_min",
+                    ..
+                }
+            ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid retention max age");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayPolicyConfig {
+                    field: "relay_policy.retention_max_age_seconds",
+                    ..
+                }
+            ));
+        });
+
         with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "notabool", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid auth required");
             assert!(matches!(
@@ -2677,6 +2828,21 @@ mode = "unknown"
             super::parse_csv_values(" a, b ,, c ".to_string()),
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
+
+        let mut with_empty = |_name: &'static str| Some(" ".to_string());
+        let missing = super::env_required_string_with("TEST_REQUIRED", &mut with_empty)
+            .expect_err("blank required value should fail");
+        assert!(matches!(missing, ConfigError::MissingEnv("TEST_REQUIRED")));
+
+        let mut bool_empty = |_name: &'static str| Some(" ".to_string());
+        let default_true = super::env_bool_default_with("TEST_BOOL", true, &mut bool_empty)
+            .expect("blank bool uses default");
+        assert!(default_true);
+
+        let mut bool_none = |_name: &'static str| None;
+        let default_false = super::env_bool_default_with("TEST_BOOL", false, &mut bool_none)
+            .expect("missing bool uses default");
+        assert!(!default_false);
     }
 
     #[test]
@@ -2702,6 +2868,32 @@ mode = "unknown"
         let value = super::require_toml_field(Some("ok".to_string()), "x.field")
             .expect("present value");
         assert_eq!(value, "ok");
+
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(super::ENV_RELAY_PROBE_ACTIVE, " ", || {
+            let parsed = super::env_bool(super::ENV_RELAY_PROBE_ACTIVE).expect("blank bool");
+            assert_eq!(parsed, None);
+        });
+        with_env_var(super::ENV_RELAY_PROBE_TIMEOUT_SECS, " ", || {
+            let parsed = super::env_u64(super::ENV_RELAY_PROBE_TIMEOUT_SECS).expect("blank u64");
+            assert_eq!(parsed, None);
+        });
+        with_env_var(super::ENV_RELAY_POLICY_AUTH_REQUIRED, " ", || {
+            let parsed = super::env_bool_policy(
+                super::ENV_RELAY_POLICY_AUTH_REQUIRED,
+                "relay_policy.auth_required",
+            )
+            .expect("blank policy bool");
+            assert_eq!(parsed, None);
+        });
+        with_env_var(super::ENV_RELAY_POLICY_MAX_LIMIT, " ", || {
+            let parsed = super::env_u64_policy(
+                super::ENV_RELAY_POLICY_MAX_LIMIT,
+                "relay_policy.max_limit",
+            )
+            .expect("blank policy u64");
+            assert_eq!(parsed, None);
+        });
     }
 
     #[test]
