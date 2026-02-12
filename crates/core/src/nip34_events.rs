@@ -338,4 +338,112 @@ mod tests {
                 .expect_err("invalid status");
         assert!(matches!(err, crate::CoreError::InvalidField { field: "e", .. }));
     }
+
+    #[test]
+    fn round_trips_tags_for_all_variants() {
+        let pubkey = hex_of(0x11, 64);
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: Some("repo".to_string()),
+            description: Some("demo".to_string()),
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: HashMap::from([
+                ("HEAD".to_string(), "ref: refs/heads/main".to_string()),
+                (
+                    "refs/heads/main".to_string(),
+                    "0123456789abcdef0123456789abcdef01234567".to_string(),
+                ),
+            ]),
+        };
+        let patch = Patch {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            root_event: Some(hex_of(0x44, 64)),
+            reply_event: Some(hex_of(0x55, 64)),
+            is_root: true,
+            is_root_revision: true,
+            commit: Some(hex_of(0x66, 40)),
+            parent_commit: Some(hex_of(0x77, 40)),
+            commit_pgp_sig: Some("sig".to_string()),
+            committer: Some(CommitterTag {
+                name: "Alice".to_string(),
+                email: "alice@example.com".to_string(),
+                timestamp: 1_700_000_000,
+                timezone_minutes: -60,
+            }),
+        };
+        let pr = PullRequest {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            subject: Some("demo".to_string()),
+            labels: vec!["demo".to_string()],
+            tip_commit: hex_of(0x44, 40),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            branch_name: Some("main".to_string()),
+            revision_of: None,
+            merge_base: None,
+        };
+        let update = PullRequestUpdate {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            root_event_id: hex_of(0x44, 64),
+            root_author: hex_of(0x55, 64),
+            tip_commit: hex_of(0x66, 40),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            merge_base: Some(hex_of(0x77, 40)),
+        };
+        let issue = Issue {
+            repo_address: format!("30617:{pubkey}:repo"),
+            mentions: vec![hex_of(0x22, 64)],
+            subject: Some("bug report".to_string()),
+            labels: vec!["bug".to_string()],
+        };
+        let status = StatusEvent {
+            root_event: hex_of(0x33, 64),
+            reply_events: Vec::new(),
+            mentions: Vec::new(),
+            repo_address: Some(format!("30617:{pubkey}:repo")),
+            repo_refs: Vec::new(),
+            applied_refs: Vec::new(),
+            merge_commit: None,
+            applied_as_commits: Vec::new(),
+        };
+        let grasp_list = UserGraspList {
+            urls: vec!["wss://relay.example".to_string()],
+        };
+
+        let scenarios = [
+            (KIND_GIT_REPO_ANNOUNCEMENT, announcement.to_tags()),
+            (KIND_GIT_REPO_STATE, repo_state.to_tags()),
+            (KIND_GIT_PATCH, patch.to_tags()),
+            (KIND_GIT_PULL_REQUEST, pr.to_tags()),
+            (KIND_GIT_PULL_REQUEST_UPDATE, update.to_tags()),
+            (KIND_GIT_ISSUE, issue.to_tags()),
+            (KIND_GIT_STATUS_OPEN, status.to_tags()),
+            (KIND_USER_GRASP_LIST, grasp_list.to_tags()),
+        ];
+
+        for (kind, tags) in scenarios {
+            let event = Nip34Event::parse_validated(kind.0, &tags).expect("parse validated");
+            assert_eq!(event.kind(), kind);
+
+            let round_trip_tags = event.to_tags();
+            let reparsed =
+                Nip34Event::parse_validated(event.kind().0, &round_trip_tags).expect("reparse");
+            assert_eq!(reparsed.kind(), kind);
+        }
+    }
 }
