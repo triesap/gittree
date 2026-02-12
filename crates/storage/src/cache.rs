@@ -577,6 +577,7 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
     use time::OffsetDateTime;
+    use tokio::sync::Notify;
 
     #[derive(Debug, Default)]
     struct CountingRepo {
@@ -596,6 +597,39 @@ mod tests {
         mark_success_calls: AtomicUsize,
         mark_failed_calls: AtomicUsize,
         pending_calls: AtomicUsize,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct AsyncGate {
+        started: Arc<Notify>,
+        proceed: Arc<Notify>,
+    }
+
+    impl AsyncGate {
+        async fn wait_started(&self) {
+            self.started.notified().await;
+        }
+
+        fn allow(&self) {
+            self.proceed.notify_one();
+        }
+
+        async fn pause(&self) {
+            self.started.notify_one();
+            self.proceed.notified().await;
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PoisonRepo {
+        list_announcements_result: Vec<RepoAnnouncementRecord>,
+        latest_announcement_result: Option<RepoAnnouncementRecord>,
+        latest_state_result: Option<RepoStateRecord>,
+        relay_compatibility_result: Option<RelayCompatibilityRecord>,
+        list_announcements_gate: Option<AsyncGate>,
+        latest_announcement_gate: Option<AsyncGate>,
+        latest_state_gate: Option<AsyncGate>,
+        relay_compatibility_gate: Option<AsyncGate>,
     }
 
     impl CountingRepo {
@@ -774,6 +808,76 @@ mod tests {
         ) -> Result<i64, StorageError> {
             self.pending_calls.fetch_add(1, Ordering::SeqCst);
             Ok(7)
+        }
+    }
+
+    #[async_trait]
+    impl AnnouncementRepository for Arc<PoisonRepo> {
+        async fn insert_announcement(
+            &self,
+            _record: RepoAnnouncementRecord,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn list_announcements(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Vec<RepoAnnouncementRecord>, StorageError> {
+            if let Some(gate) = &self.list_announcements_gate {
+                gate.pause().await;
+            }
+            Ok(self.list_announcements_result.clone())
+        }
+
+        async fn latest_announcement(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoAnnouncementRecord>, StorageError> {
+            if let Some(gate) = &self.latest_announcement_gate {
+                gate.pause().await;
+            }
+            Ok(self.latest_announcement_result.clone())
+        }
+    }
+
+    #[async_trait]
+    impl StateRepository for Arc<PoisonRepo> {
+        async fn insert_state(&self, _record: RepoStateRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn latest_state(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoStateRecord>, StorageError> {
+            if let Some(gate) = &self.latest_state_gate {
+                gate.pause().await;
+            }
+            Ok(self.latest_state_result.clone())
+        }
+    }
+
+    #[async_trait]
+    impl RelayCompatibilityRepository for Arc<PoisonRepo> {
+        async fn upsert_relay_compatibility(
+            &self,
+            _record: RelayCompatibilityRecord,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn relay_compatibility(
+            &self,
+            _relay_url: &str,
+        ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
+            if let Some(gate) = &self.relay_compatibility_gate {
+                gate.pause().await;
+            }
+            Ok(self.relay_compatibility_result.clone())
         }
     }
 
@@ -1289,5 +1393,172 @@ mod tests {
             .await
             .unwrap_err();
         assert_internal_message(read_compat_err, "relay compatibility store poisoned");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected internal error")]
+    fn assert_internal_message_panics_for_non_internal_error() {
+        assert_internal_message(
+            StorageError::InvalidField {
+                field: "field",
+                value: "value".to_string(),
+            },
+            "unused",
+        );
+    }
+
+    #[tokio::test]
+    async fn list_announcements_reports_poisoned_refresh_write_lock() {
+        let gate = AsyncGate::default();
+        let record = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("record");
+        let inner = Arc::new(PoisonRepo {
+            list_announcements_result: vec![record.clone()],
+            latest_announcement_result: Some(record.clone()),
+            list_announcements_gate: Some(gate.clone()),
+            ..PoisonRepo::default()
+        });
+        let cached = Arc::new(CachedRepositories::new(inner));
+        let pubkey = record.pubkey.clone();
+        let cached_task = {
+            let cached = Arc::clone(&cached);
+            tokio::spawn(async move { cached.list_announcements(&pubkey, "repo").await })
+        };
+
+        gate.wait_started().await;
+        poison_lock(&cached.cache.announcements);
+        gate.allow();
+
+        let err = cached_task
+            .await
+            .expect("task")
+            .expect_err("poisoned refresh write lock must fail");
+        assert_internal_message(err, "announcement cache poisoned");
+    }
+
+    #[tokio::test]
+    async fn list_announcements_reports_poisoned_latest_refresh_write_lock() {
+        let gate = AsyncGate::default();
+        let record = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("record");
+        let inner = Arc::new(PoisonRepo {
+            list_announcements_result: vec![record.clone()],
+            latest_announcement_result: Some(record.clone()),
+            list_announcements_gate: Some(gate.clone()),
+            ..PoisonRepo::default()
+        });
+        let cached = Arc::new(CachedRepositories::new(inner));
+        let pubkey = record.pubkey.clone();
+        let cached_task = {
+            let cached = Arc::clone(&cached);
+            tokio::spawn(async move { cached.list_announcements(&pubkey, "repo").await })
+        };
+
+        gate.wait_started().await;
+        poison_lock(&cached.cache.latest_announcements);
+        gate.allow();
+
+        let err = cached_task
+            .await
+            .expect("task")
+            .expect_err("poisoned latest refresh write lock must fail");
+        assert_internal_message(err, "announcement cache poisoned");
+    }
+
+    #[tokio::test]
+    async fn latest_announcement_reports_poisoned_refresh_write_lock() {
+        let gate = AsyncGate::default();
+        let record = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("record");
+        let inner = Arc::new(PoisonRepo {
+            latest_announcement_result: Some(record.clone()),
+            latest_announcement_gate: Some(gate.clone()),
+            ..PoisonRepo::default()
+        });
+        let cached = Arc::new(CachedRepositories::new(inner));
+        let pubkey = record.pubkey.clone();
+        let cached_task = {
+            let cached = Arc::clone(&cached);
+            tokio::spawn(async move { cached.latest_announcement(&pubkey, "repo").await })
+        };
+
+        gate.wait_started().await;
+        poison_lock(&cached.cache.latest_announcements);
+        gate.allow();
+
+        let err = cached_task
+            .await
+            .expect("task")
+            .expect_err("poisoned latest announcement refresh write lock must fail");
+        assert_internal_message(err, "announcement cache poisoned");
+    }
+
+    #[tokio::test]
+    async fn latest_state_reports_poisoned_refresh_write_lock() {
+        let gate = AsyncGate::default();
+        let record = RepoStateRecord::new(&hex_32(0x33), &hex_32(0x44), 10, &sample_state("repo"))
+            .expect("record");
+        let inner = Arc::new(PoisonRepo {
+            latest_state_result: Some(record.clone()),
+            latest_state_gate: Some(gate.clone()),
+            ..PoisonRepo::default()
+        });
+        let cached = Arc::new(CachedRepositories::new(inner));
+        let pubkey = record.pubkey.clone();
+        let cached_task = {
+            let cached = Arc::clone(&cached);
+            tokio::spawn(async move { cached.latest_state(&pubkey, "repo").await })
+        };
+
+        gate.wait_started().await;
+        poison_lock(&cached.cache.latest_states);
+        gate.allow();
+
+        let err = cached_task
+            .await
+            .expect("task")
+            .expect_err("poisoned latest state refresh write lock must fail");
+        assert_internal_message(err, "state cache poisoned");
+    }
+
+    #[tokio::test]
+    async fn relay_compatibility_reports_poisoned_refresh_write_lock() {
+        let gate = AsyncGate::default();
+        let record = sample_relay_compatibility("wss://relay.example");
+        let inner = Arc::new(PoisonRepo {
+            relay_compatibility_result: Some(record.clone()),
+            relay_compatibility_gate: Some(gate.clone()),
+            ..PoisonRepo::default()
+        });
+        let cached = Arc::new(CachedRepositories::new(inner));
+        let cached_task = {
+            let cached = Arc::clone(&cached);
+            tokio::spawn(async move { cached.relay_compatibility("wss://relay.example").await })
+        };
+
+        gate.wait_started().await;
+        poison_lock(&cached.cache.relay_compatibility);
+        gate.allow();
+
+        let err = cached_task
+            .await
+            .expect("task")
+            .expect_err("poisoned relay compatibility refresh write lock must fail");
+        assert_internal_message(err, "relay compatibility cache poisoned");
     }
 }
