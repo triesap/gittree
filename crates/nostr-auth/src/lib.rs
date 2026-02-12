@@ -285,6 +285,90 @@ mod tests {
     }
 
     #[test]
+    fn nip98_error_display_is_stable() {
+        let cases = vec![
+            (Nip98Error::InvalidKind(42), "invalid kind: 42".to_string()),
+            (Nip98Error::MissingTag("u"), "missing tag: u".to_string()),
+            (
+                Nip98Error::InvalidHex {
+                    field: "event.id",
+                    value: "bad".to_string(),
+                },
+                "invalid hex for event.id: bad".to_string(),
+            ),
+            (
+                Nip98Error::InvalidMethod {
+                    expected: "POST".to_string(),
+                    found: "GET".to_string(),
+                },
+                "method mismatch (expected POST, got GET)".to_string(),
+            ),
+            (
+                Nip98Error::InvalidUrl {
+                    expected: "https://gittr.ee/v1/signup".to_string(),
+                    found: "https://gittr.ee/v1/other".to_string(),
+                },
+                "url mismatch (expected https://gittr.ee/v1/signup, got https://gittr.ee/v1/other)"
+                    .to_string(),
+            ),
+            (
+                Nip98Error::PayloadMismatch {
+                    expected: "11".repeat(32),
+                    found: "22".repeat(32),
+                },
+                format!(
+                    "payload mismatch (expected {}, got {})",
+                    "11".repeat(32),
+                    "22".repeat(32)
+                ),
+            ),
+            (
+                Nip98Error::TimeSkew {
+                    created_at: 1,
+                    now: 2,
+                    max_skew: 3,
+                },
+                "created_at outside skew (created_at 1, now 2, max 3)".to_string(),
+            ),
+            (
+                Nip98Error::InvalidEventId {
+                    expected: "11".repeat(32),
+                    found: "22".repeat(32),
+                },
+                format!(
+                    "event id mismatch (expected {}, got {})",
+                    "11".repeat(32),
+                    "22".repeat(32)
+                ),
+            ),
+            (
+                Nip98Error::InvalidSignature,
+                "invalid signature".to_string(),
+            ),
+            (
+                Nip98Error::InvalidEventEncoding("oops".to_string()),
+                "invalid event encoding: oops".to_string(),
+            ),
+            (
+                Nip98Error::InvalidPublicKey,
+                "invalid public key".to_string(),
+            ),
+            (
+                Nip98Error::InvalidSignatureEncoding,
+                "invalid signature encoding".to_string(),
+            ),
+            (
+                Nip98Error::InvalidEventIdEncoding,
+                "invalid event id encoding".to_string(),
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
     fn validates_signed_event() {
         let (event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         let request = Nip98Request {
