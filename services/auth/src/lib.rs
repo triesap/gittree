@@ -139,9 +139,11 @@ where
         application_name,
     };
 
-    config.validate().map_err(|err| {
-        AuthConfigError::Storage(StorageConfigError::InvalidConfig(err.to_string()))
-    })?;
+    if let Err(err) = config.validate() {
+        return Err(AuthConfigError::Storage(StorageConfigError::InvalidConfig(
+            err.to_string(),
+        )));
+    }
 
     Ok(config)
 }
@@ -155,9 +157,13 @@ where
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u32>().map(Some).map_err(|_| {
-                AuthConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
-            })
+            match value.parse::<u32>() {
+                Ok(parsed) => Ok(Some(parsed)),
+                Err(_) => Err(AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key,
+                    value,
+                })),
+            }
         }
         None => Ok(None),
     }
@@ -172,9 +178,13 @@ where
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u64>().map(Some).map_err(|_| {
-                AuthConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
-            })
+            match value.parse::<u64>() {
+                Ok(parsed) => Ok(Some(parsed)),
+                Err(_) => Err(AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key,
+                    value,
+                })),
+            }
         }
         None => Ok(None),
     }
