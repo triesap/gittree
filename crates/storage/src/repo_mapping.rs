@@ -74,4 +74,21 @@ mod tests {
         mapping.pubkey = "bad".to_string();
         assert!(RepoMappingRecord::new(&mapping).is_err());
     }
+
+    #[test]
+    fn mapping_record_rejects_non_hex_pubkey_with_expected_length() {
+        let mut mapping = RepoMapping::new(
+            "owner",
+            "repo",
+            "11".repeat(32),
+            "repo",
+        )
+        .expect("mapping");
+        mapping.pubkey = "zz".repeat(32);
+        let err = RepoMappingRecord::new(&mapping).expect_err("non-hex must fail");
+        assert!(matches!(
+            err,
+            crate::StorageError::InvalidHex { field: "pubkey", .. }
+        ));
+    }
 }

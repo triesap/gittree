@@ -253,4 +253,54 @@ mod tests {
             StorageError::InvalidField { field: "state", .. }
         ));
     }
+
+    #[test]
+    fn record_rejects_non_hex_with_expected_length() {
+        let announcement = sample_announcement();
+        let err = RepoAnnouncementRecord::new(&"zz".repeat(32), &hex_32(0x55), 0, &announcement)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "event_id",
+                ..
+            }
+        ));
+
+        let valid_state = RepoState {
+            identifier: "repo".to_string(),
+            state: HashMap::from([
+                ("HEAD".to_string(), "ref: refs/heads/main".to_string()),
+                (
+                    "refs/heads/main".to_string(),
+                    "0123456789abcdef0123456789abcdef01234567".to_string(),
+                ),
+            ]),
+        };
+        let err = RepoStateRecord::new(&hex_32(0x11), &"gg".repeat(32), 0, &valid_state)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex { field: "pubkey", .. }
+        ));
+    }
+
+    #[test]
+    fn state_record_rejects_invalid_state_json_on_read() {
+        let mut record = RepoStateRecord {
+            event_id: vec![0u8; 32],
+            pubkey: vec![1u8; 32],
+            identifier: "repo".to_string(),
+            created_at: 1,
+            state_json: "{\"broken\":".to_string(),
+        };
+        let err = record.state_map().unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::Serialization { field: "state", .. }
+        ));
+
+        record.state_json = "{\"refs/heads/main\":\"deadbeef\"}".to_string();
+        assert!(record.state_map().is_ok());
+    }
 }

@@ -280,4 +280,92 @@ mod tests {
             StorageError::InvalidField { field: "expires_at", .. }
         ));
     }
+
+    #[test]
+    fn membership_record_rejects_role_and_status_constraints() {
+        let empty_role = RelayMembershipRecord::new(
+            "tenant",
+            &"11".repeat(32),
+            "",
+            "active",
+            10,
+            10,
+        )
+        .expect_err("empty role should fail");
+        assert!(matches!(
+            empty_role,
+            StorageError::InvalidField { field: "role", .. }
+        ));
+
+        let long_status = RelayMembershipRecord::new(
+            "tenant",
+            &"11".repeat(32),
+            "member",
+            "x".repeat(41),
+            10,
+            10,
+        )
+        .expect_err("status length should fail");
+        assert!(matches!(
+            long_status,
+            StorageError::InvalidField {
+                field: "status",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn invite_record_rejects_role_code_and_non_hex_constraints() {
+        let long_code = RelayInviteRecord::new(
+            "tenant",
+            "x".repeat(121),
+            "member",
+            &"22".repeat(32),
+            None,
+            None,
+            10,
+        )
+        .expect_err("invite code length should fail");
+        assert!(matches!(
+            long_code,
+            StorageError::InvalidField {
+                field: "invite_code",
+                ..
+            }
+        ));
+
+        let long_role = RelayInviteRecord::new(
+            "tenant",
+            "invite",
+            "x".repeat(41),
+            &"22".repeat(32),
+            None,
+            None,
+            10,
+        )
+        .expect_err("role length should fail");
+        assert!(matches!(
+            long_role,
+            StorageError::InvalidField { field: "role", .. }
+        ));
+
+        let non_hex_inviter = RelayInviteRecord::new(
+            "tenant",
+            "invite",
+            "member",
+            &"zz".repeat(32),
+            None,
+            None,
+            10,
+        )
+        .expect_err("non-hex inviter should fail");
+        assert!(matches!(
+            non_hex_inviter,
+            StorageError::InvalidHex {
+                field: "inviter_pubkey",
+                ..
+            }
+        ));
+    }
 }
