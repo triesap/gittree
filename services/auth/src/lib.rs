@@ -817,6 +817,20 @@ mod tests {
         (state, repositories, transport)
     }
 
+    fn reqwest_state() -> AuthAppState<gittree_forgejo::ReqwestTransport> {
+        let forgejo = ForgejoClient::new(test_config()).expect("forgejo client");
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        AuthAppState {
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo,
+            accounts: repositories.clone(),
+            profiles: repositories,
+        }
+    }
+
     fn signed_event(
         url: &str,
         method: &str,
@@ -1185,6 +1199,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reqwest_state_routes_reject_unauthorized_before_network_io() {
+        let app = build_router(reqwest_state());
+
+        let signup_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("signup response");
+        assert_eq!(signup_response.status(), StatusCode::UNAUTHORIZED);
+
+        let profile_get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("profile get response");
+        assert_eq!(profile_get_response.status(), StatusCode::UNAUTHORIZED);
+
+        let profile_patch_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("profile patch response");
+        assert_eq!(profile_patch_response.status(), StatusCode::UNAUTHORIZED);
+
+        let public_profile_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile/not-an-npub")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("profile public response");
+        assert_eq!(public_profile_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn signup_returns_internal_when_forgejo_responses_are_incomplete() {
         let now = unix_timestamp();
         let url = "http://localhost/v1/signup";
@@ -1215,6 +1285,18 @@ mod tests {
     fn auth_http_error_internal_maps_to_500() {
         let response = AuthHttpError::Internal("boom".to_string()).into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn auth_http_error_status_mappings_cover_all_variants() {
+        let unauthorized = AuthHttpError::Unauthorized("nope".to_string()).into_response();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bad_request = AuthHttpError::BadRequest("bad".to_string()).into_response();
+        assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+
+        let not_found = AuthHttpError::NotFound("missing".to_string()).into_response();
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
