@@ -233,6 +233,17 @@ struct AuthAppState {
     profiles: Arc<dyn ProfileRepository>,
 }
 
+async fn run_server<E, Fut>(server: Fut) -> Result<(), AuthError>
+where
+    E: std::fmt::Display,
+    Fut: std::future::IntoFuture<Output = Result<(), E>>,
+{
+    server
+        .into_future()
+        .await
+        .map_err(|err| AuthError::Serve(err.to_string()))
+}
+
 pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
     let _observability = init_observability()?;
     let repositories = Arc::new(build_repositories(&config)?);
@@ -253,10 +264,7 @@ pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|err| AuthError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
-        .await
-        .map_err(|err| AuthError::Serve(err.to_string()))?;
-    Ok(())
+    run_server(axum::serve(listener, router)).await
 }
 
 fn build_router(state: AuthAppState) -> Router {
@@ -1111,6 +1119,21 @@ mod tests {
         handle.abort();
         let join_error = handle.await.expect_err("join should be cancelled");
         assert!(join_error.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn run_server_returns_ok_when_server_future_is_ok() {
+        super::run_server(async { Ok::<(), &'static str>(()) })
+            .await
+            .expect("server");
+    }
+
+    #[tokio::test]
+    async fn run_server_maps_errors_to_auth_serve_error() {
+        let err = super::run_server(async { Err::<(), &'static str>("boom") })
+            .await
+            .expect_err("serve error");
+        assert!(matches!(err, AuthError::Serve(message) if message == "boom"));
     }
 
 
