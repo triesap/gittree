@@ -1280,9 +1280,6 @@ fn npub_from_hex(pubkey: &str) -> Result<String, ControlHttpError> {
     }
     let bytes = hex::decode(pubkey)
         .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
-    if bytes.len() != 32 {
-        return Err(ControlHttpError::BadRequest("invalid pubkey".to_string()));
-    }
     let hrp = Hrp::parse("npub")
         .map_err(|_| ControlHttpError::Internal("npub hrp parse failed".to_string()))?;
     bech32::encode::<Bech32>(hrp, &bytes)
