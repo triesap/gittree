@@ -39,6 +39,17 @@ pub struct ReqwestTransport {
     token: String,
 }
 
+async fn map_request_error<E, Fut, T>(operation: Fut) -> Result<T, ForgejoError>
+where
+    E: std::fmt::Display,
+    Fut: std::future::IntoFuture<Output = Result<T, E>>,
+{
+    operation
+        .into_future()
+        .await
+        .map_err(|err| ForgejoError::Request(err.to_string()))
+}
+
 impl ReqwestTransport {
     pub fn new(token: impl Into<String>) -> Result<Self, ForgejoError> {
         let client = reqwest::Client::builder()
@@ -65,15 +76,9 @@ impl ForgejoTransport for ReqwestTransport {
             builder = builder.header("Content-Type", "application/json");
             builder = builder.body(body);
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|err| ForgejoError::Request(err.to_string()))?;
+        let response = map_request_error(builder.send()).await?;
         let status = response.status().as_u16();
-        let body = response
-            .text()
-            .await
-            .map_err(|err| ForgejoError::Request(err.to_string()))?;
+        let body = map_request_error(response.text()).await?;
         Ok(ForgejoResponse { status, body })
     }
 }
@@ -789,6 +794,26 @@ mod tests {
         format!(
             r#"{{"login":"{username}","username":"{username}","email":"{username}@example.com"}}"#
         )
+    }
+
+    #[tokio::test]
+    async fn map_request_error_returns_ok_value() {
+        let value = super::map_request_error::<&'static str, _, _>(async {
+            Ok::<u64, &'static str>(42)
+        })
+        .await
+        .expect("ok");
+        assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn map_request_error_maps_error_value() {
+        let err = super::map_request_error::<&'static str, _, _>(async {
+            Err::<u64, &'static str>("boom")
+        })
+        .await
+        .expect_err("error");
+        assert!(matches!(err, ForgejoError::Request(message) if message.contains("boom")));
     }
 
     #[tokio::test]
