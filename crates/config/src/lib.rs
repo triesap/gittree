@@ -2660,6 +2660,51 @@ mode = "unknown"
     }
 
     #[test]
+    fn helper_parsers_cover_additional_edges() {
+        assert_eq!(super::parse_bool("yes"), Some(true));
+        assert_eq!(super::parse_bool("No"), Some(false));
+        assert_eq!(super::parse_bool("maybe"), None);
+
+        assert!(super::is_hex_len("ab", 2));
+        assert!(!super::is_hex_len("aZ", 2));
+        assert!(!super::is_hex_len("abcd", 2));
+
+        assert_eq!(
+            super::parse_relay_urls(" wss://relay.one , ws://relay.two ,, ".to_string()),
+            vec!["wss://relay.one".to_string(), "ws://relay.two".to_string()]
+        );
+        assert_eq!(
+            super::parse_csv_values(" a, b ,, c ".to_string()),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn helper_validators_cover_additional_edges() {
+        super::validate_service_bind("relay", "127.0.0.1:8080").expect("valid bind");
+        assert!(matches!(
+            super::validate_service_bind("relay", "bad"),
+            Err(ConfigError::InvalidServiceBind { service: "relay", .. })
+        ));
+
+        super::validate_relay_url("wss://relay.example").expect("valid relay url");
+        assert!(matches!(
+            super::validate_relay_url("ftp://relay.example"),
+            Err(ConfigError::InvalidRelayUrl(_))
+        ));
+
+        super::validate_http_url("ui.app_url", "https://example.test").expect("valid http url");
+        assert!(matches!(
+            super::validate_http_url("ui.app_url", "ws://relay.example"),
+            Err(ConfigError::InvalidConfig { field: "ui.app_url", .. })
+        ));
+
+        let value = super::require_toml_field(Some("ok".to_string()), "x.field")
+            .expect("present value");
+        assert_eq!(value, "ok");
+    }
+
+    #[test]
     fn with_env_var_restores_existing_value() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let key = "GITTREE_CONFIG_TEST_RESTORE";
