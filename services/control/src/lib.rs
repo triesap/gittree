@@ -1536,6 +1536,36 @@ mod tests {
         }
     }
 
+    fn with_minimal_control_env<F: FnOnce()>(f: F) {
+        with_env_var("GITTREE_CONTROL_TOKEN", "token", || {
+            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+                        with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087/", || {
+                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                                with_env_var(
+                                    "GITTREE_STORAGE_READ_URL",
+                                    "postgres://user:pass@localhost:5432/gittree",
+                                    || {
+                                        with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
+                                            with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
+                                                with_env_var(
+                                                    "GITTREE_UI_PUBLIC_GIT_URL",
+                                                    "http://localhost:8085",
+                                                    f,
+                                                );
+                                            });
+                                        });
+                                    },
+                                );
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    }
+
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -1657,6 +1687,33 @@ mod tests {
                         });
                     });
                 });
+            });
+        });
+    }
+
+    #[test]
+    fn config_from_env_maps_config_errors_from_all_components() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_minimal_control_env(|| {
+            with_env_var("GITTREE_CONTROL_BIND", "bad-bind", || {
+                let err = ControlConfig::from_env().expect_err("invalid bind should fail");
+                assert!(matches!(err, super::ControlConfigError::Config(_)));
+            });
+            without_env_var("GITTREE_CONTROL_TOKEN", || {
+                let err = ControlConfig::from_env().expect_err("missing auth token should fail");
+                assert!(matches!(err, super::ControlConfigError::Config(_)));
+            });
+            without_env_var("GITTREE_FORGEJO_BASE_URL", || {
+                let err = ControlConfig::from_env().expect_err("missing forgejo base url should fail");
+                assert!(matches!(err, super::ControlConfigError::Config(_)));
+            });
+            with_env_var("GITTREE_RELAY_URLS", "ftp://relay.local", || {
+                let err = ControlConfig::from_env().expect_err("invalid relay urls should fail");
+                assert!(matches!(err, super::ControlConfigError::Config(_)));
+            });
+            without_env_var("GITTREE_UI_REPO_ROOT", || {
+                let err = ControlConfig::from_env().expect_err("missing ui repo root should fail");
+                assert!(matches!(err, super::ControlConfigError::Config(_)));
             });
         });
     }
@@ -1955,6 +2012,10 @@ mod tests {
                     ..
                 })
             ));
+        });
+        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", || {
+            let value = super::env_u64(super::ENV_STORAGE_IDLE_TIMEOUT_SECS).expect("env_u64");
+            assert_eq!(value, Some(60));
         });
     }
 
