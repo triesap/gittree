@@ -15,7 +15,7 @@ use gittree_app_core::{
 };
 use gittree_config::{AuthConfig as AuthSettings, ConfigError, ForgejoConfig, ServicesConfig};
 use gittree_forgejo::{
-    ForgejoClient, ForgejoCreateUser, ForgejoError, ForgejoTransport,
+    ForgejoClient, ForgejoCreateUser, ForgejoError, ForgejoTransport, ReqwestTransport,
 };
 use gittree_nostr_auth::{Nip98Event, Nip98Request, validate_nip98};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
@@ -226,9 +226,9 @@ pub fn init_observability() -> Result<ObservabilityHandle, AuthError> {
 }
 
 #[derive(Clone)]
-struct AuthAppState<T> {
+struct AuthAppState {
     auth: AuthSettings,
-    forgejo: ForgejoClient<T>,
+    forgejo: ForgejoClient<Arc<dyn ForgejoTransport>>,
     accounts: Arc<dyn AccountRepository>,
     profiles: Arc<dyn ProfileRepository>,
 }
@@ -238,7 +238,11 @@ pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
     let repositories = Arc::new(build_repositories(&config)?);
     let bind = config.bind.clone();
     let auth = config.auth;
-    let forgejo = ForgejoClient::new(config.forgejo).map_err(AuthError::Forgejo)?;
+    let forgejo_config = config.forgejo;
+    let transport =
+        ReqwestTransport::new(forgejo_config.api_token.clone()).map_err(AuthError::Forgejo)?;
+    let transport: Arc<dyn ForgejoTransport> = Arc::new(transport);
+    let forgejo = ForgejoClient::with_transport(forgejo_config, transport);
     let state = AuthAppState {
         auth,
         forgejo,
@@ -255,10 +259,7 @@ pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
     Ok(())
 }
 
-fn build_router<T>(state: AuthAppState<T>) -> Router
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+fn build_router(state: AuthAppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
@@ -275,10 +276,7 @@ where
         .with_state(state)
 }
 
-async fn health_handler<T>(State(state): State<AuthAppState<T>>) -> &'static str
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+async fn health_handler(State(state): State<AuthAppState>) -> &'static str {
     let _ = (&state.auth, &state.forgejo);
     "ok"
 }
@@ -315,16 +313,13 @@ impl IntoResponse for AuthHttpError {
     }
 }
 
-async fn signup_handler<T>(
-    State(state): State<AuthAppState<T>>,
+async fn signup_handler(
+    State(state): State<AuthAppState>,
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
     body: Bytes,
-) -> Result<Json<SignupResponse>, AuthHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<SignupResponse>, AuthHttpError> {
     let event = parse_nostr_auth(&headers)?;
     let request_url = build_request_url(&headers, &uri)?;
     let payload_hash = payload_hash(&body);
@@ -404,15 +399,12 @@ where
     }))
 }
 
-async fn profile_get_handler<T>(
-    State(state): State<AuthAppState<T>>,
+async fn profile_get_handler(
+    State(state): State<AuthAppState>,
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-) -> Result<Json<Profile>, AuthHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<Profile>, AuthHttpError> {
     let event = parse_nostr_auth(&headers)?;
     let request_url = build_request_url(&headers, &uri)?;
     let now = unix_timestamp();
@@ -442,16 +434,13 @@ where
     )))
 }
 
-async fn profile_patch_handler<T>(
-    State(state): State<AuthAppState<T>>,
+async fn profile_patch_handler(
+    State(state): State<AuthAppState>,
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
     body: Bytes,
-) -> Result<Json<Profile>, AuthHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<Profile>, AuthHttpError> {
     let event = parse_nostr_auth(&headers)?;
     let request_url = build_request_url(&headers, &uri)?;
     let payload_hash = payload_hash(&body);
@@ -497,13 +486,10 @@ where
     )))
 }
 
-async fn profile_public_handler<T>(
-    State(state): State<AuthAppState<T>>,
+async fn profile_public_handler(
+    State(state): State<AuthAppState>,
     Path(npub): Path<String>,
-) -> Result<Json<Profile>, AuthHttpError>
-where
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
+) -> Result<Json<Profile>, AuthHttpError> {
     let pubkey_bytes = pubkey_bytes_from_npub(&npub)
         .map_err(|_| AuthHttpError::BadRequest("invalid npub".to_string()))?;
     let account = state
@@ -801,9 +787,14 @@ mod tests {
 
     fn test_state(
         responses: Vec<ForgejoResponse>,
-    ) -> (AuthAppState<MockTransport>, Arc<gittree_storage::InMemoryRepositories>, MockTransport) {
-        let transport = MockTransport::new(responses);
-        let forgejo = ForgejoClient::with_transport(test_config(), transport.clone());
+    ) -> (
+        AuthAppState,
+        Arc<gittree_storage::InMemoryRepositories>,
+        Arc<MockTransport>,
+    ) {
+        let transport = Arc::new(MockTransport::new(responses));
+        let transport_dyn: Arc<dyn ForgejoTransport> = transport.clone();
+        let forgejo = ForgejoClient::with_transport(test_config(), transport_dyn);
         let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
         let state = AuthAppState {
             auth: AuthSettings {
@@ -815,20 +806,6 @@ mod tests {
             profiles: repositories.clone(),
         };
         (state, repositories, transport)
-    }
-
-    fn reqwest_state() -> AuthAppState<gittree_forgejo::ReqwestTransport> {
-        let forgejo = ForgejoClient::new(test_config()).expect("forgejo client");
-        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
-        AuthAppState {
-            auth: AuthSettings {
-                email_domain: "example.com".to_string(),
-                max_skew_seconds: 60,
-            },
-            forgejo,
-            accounts: repositories.clone(),
-            profiles: repositories,
-        }
     }
 
     fn signed_event(
@@ -1200,7 +1177,8 @@ mod tests {
 
     #[tokio::test]
     async fn reqwest_state_routes_reject_unauthorized_before_network_io() {
-        let app = build_router(reqwest_state());
+        let (state, _repos, transport) = test_state(Vec::new());
+        let app = build_router(state);
 
         let signup_response = app
             .clone()
@@ -1252,6 +1230,10 @@ mod tests {
             .await
             .expect("profile public response");
         assert_eq!(public_profile_response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            transport.requests().is_empty(),
+            "unauthorized requests should not reach forgejo transport"
+        );
     }
 
     #[tokio::test]
