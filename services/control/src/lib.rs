@@ -62,13 +62,27 @@ pub struct ControlConfig {
 
 impl ControlConfig {
     pub fn from_env() -> Result<Self, ControlConfigError> {
-        let services = ServicesConfig::from_env_validated().map_err(ControlConfigError::Config)?;
-        let auth = ControlAuthConfig::from_env().map_err(ControlConfigError::Config)?;
-        let forgejo = ForgejoConfig::from_env().map_err(ControlConfigError::Config)?;
+        let services = match ServicesConfig::from_env_validated() {
+            Ok(services) => services,
+            Err(err) => return Err(ControlConfigError::Config(err)),
+        };
+        let auth = match ControlAuthConfig::from_env() {
+            Ok(auth) => auth,
+            Err(err) => return Err(ControlConfigError::Config(err)),
+        };
+        let forgejo = match ForgejoConfig::from_env() {
+            Ok(forgejo) => forgejo,
+            Err(err) => return Err(ControlConfigError::Config(err)),
+        };
         let storage = storage_from_env()?;
-        let relay_targets =
-            RelayTargetsConfig::from_env_validated().map_err(ControlConfigError::Config)?;
-        let ui = UiConfig::from_env().map_err(ControlConfigError::Config)?;
+        let relay_targets = match RelayTargetsConfig::from_env_validated() {
+            Ok(relay_targets) => relay_targets,
+            Err(err) => return Err(ControlConfigError::Config(err)),
+        };
+        let ui = match UiConfig::from_env() {
+            Ok(ui) => ui,
+            Err(err) => return Err(ControlConfigError::Config(err)),
+        };
         Ok(Self {
             bind: services.control.bind,
             auth,
@@ -126,9 +140,14 @@ impl std::fmt::Display for StorageConfigError {
 impl std::error::Error for StorageConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, ControlConfigError> {
-    let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
-        ControlConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
-    })?;
+    let read_connection = match std::env::var(ENV_STORAGE_READ_URL) {
+        Ok(read_connection) => read_connection,
+        Err(_) => {
+            return Err(ControlConfigError::Storage(StorageConfigError::MissingEnv(
+                ENV_STORAGE_READ_URL,
+            )));
+        }
+    };
     let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
     let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
     let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
@@ -146,9 +165,11 @@ fn storage_from_env() -> Result<StorageConfig, ControlConfigError> {
         application_name,
     };
 
-    config.validate().map_err(|err| {
-        ControlConfigError::Storage(StorageConfigError::InvalidConfig(err.to_string()))
-    })?;
+    if let Err(err) = config.validate() {
+        return Err(ControlConfigError::Storage(StorageConfigError::InvalidConfig(
+            err.to_string(),
+        )));
+    }
 
     Ok(config)
 }
@@ -159,9 +180,13 @@ fn env_u32(key: &'static str) -> Result<Option<u32>, ControlConfigError> {
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u32>().map(Some).map_err(|_| {
-                ControlConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
-            })
+            match value.parse::<u32>() {
+                Ok(parsed) => Ok(Some(parsed)),
+                Err(_) => Err(ControlConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key,
+                    value,
+                })),
+            }
         }
         Err(_) => Ok(None),
     }
@@ -173,9 +198,13 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, ControlConfigError> {
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u64>().map(Some).map_err(|_| {
-                ControlConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
-            })
+            match value.parse::<u64>() {
+                Ok(parsed) => Ok(Some(parsed)),
+                Err(_) => Err(ControlConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key,
+                    value,
+                })),
+            }
         }
         Err(_) => Ok(None),
     }
