@@ -3688,6 +3688,115 @@ mod tests {
         assert!(matches!(err, ControlHttpError::BadRequest(_)));
     }
 
+    #[test]
+    fn verify_signed_event_rejects_invalid_pubkey_payload() {
+        let (pubkey, privkey) = test_keys();
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url =
+            format_grasp_server_url_as_clone_url("http://localhost:8085", &npub, "demo")
+                .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("invalid pubkey payload".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: vec!["ws://relay.local".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let mut event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(
+                &announcement,
+                &secret,
+                super::unix_timestamp(),
+            )
+            .expect("signed"),
+        );
+        event.pubkey = "00".repeat(32);
+        event.id = super::build_event_id(&event).expect("event id");
+        let err = super::verify_signed_event(&event).unwrap_err();
+        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_rejects_tampered_signature() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"full_name":"alice/demo","name":"demo","owner":{"username":"alice"},"html_url":"http://localhost/alice/demo"}"#.to_string(),
+        }];
+        let (state, _transport, repos) = test_state(responses);
+        let (pubkey, privkey) = test_keys();
+        repos
+            .upsert_account(AccountRecord::new(&pubkey, "alice").expect("account"))
+            .await
+            .expect("upsert");
+
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, "demo")
+            .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("tampered sig".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.clone()],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let now = super::unix_timestamp();
+        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
+            &announcement,
+            &secret,
+            now,
+        )
+        .expect("signed");
+        let mut event = api_event_from_relay(signed);
+        event.sig = "00".repeat(64);
+
+        let request = RepoCreateRequest {
+            event,
+            private: Some(false),
+        };
+        let body = serde_json::to_vec(&request).expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(message.contains("invalid event sig"));
+    }
+
     #[tokio::test]
     async fn control_event_routes_create_user_and_org_actions() {
         let responses = vec![
