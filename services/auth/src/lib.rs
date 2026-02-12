@@ -438,16 +438,17 @@ async fn profile_get_handler(
         now,
         max_skew_seconds: state.auth.max_skew_seconds as i64,
     };
-    let auth = validate_nip98(&event, &request)
-        .map_err(|err| AuthHttpError::Unauthorized(err.to_string()))?;
+    let auth = match validate_nip98(&event, &request) {
+        Ok(auth) => auth,
+        Err(err) => return Err(AuthHttpError::Unauthorized(err.to_string())),
+    };
 
     let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
-    let account = state
-        .accounts
-        .account_by_pubkey(&pubkey_bytes)
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
-        .ok_or_else(|| AuthHttpError::BadRequest("account not found".to_string()))?;
+    let account = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return Err(AuthHttpError::BadRequest("account not found".to_string())),
+        Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
+    };
     let profile = ensure_profile(&state.profiles, &auth.pubkey, &account.forgejo_username, now)
         .await?;
     Ok(Json(profile_response(
@@ -475,33 +476,38 @@ async fn profile_patch_handler(
         now,
         max_skew_seconds: state.auth.max_skew_seconds as i64,
     };
-    let auth = validate_nip98(&event, &request)
-        .map_err(|err| AuthHttpError::Unauthorized(err.to_string()))?;
+    let auth = match validate_nip98(&event, &request) {
+        Ok(auth) => auth,
+        Err(err) => return Err(AuthHttpError::Unauthorized(err.to_string())),
+    };
 
     if body.is_empty() {
         return Err(AuthHttpError::BadRequest(
             "missing profile update".to_string(),
         ));
     }
-    let update: ProfileUpdate = serde_json::from_slice(&body)
-        .map_err(|err| AuthHttpError::BadRequest(format!("invalid profile update: {err}")))?;
+    let update: ProfileUpdate = match serde_json::from_slice(&body) {
+        Ok(update) => update,
+        Err(err) => {
+            return Err(AuthHttpError::BadRequest(format!(
+                "invalid profile update: {err}"
+            )));
+        }
+    };
 
     let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
-    let account = state
-        .accounts
-        .account_by_pubkey(&pubkey_bytes)
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
-        .ok_or_else(|| AuthHttpError::BadRequest("account not found".to_string()))?;
+    let account = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return Err(AuthHttpError::BadRequest("account not found".to_string())),
+        Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
+    };
     let profile = ensure_profile(&state.profiles, &auth.pubkey, &account.forgejo_username, now)
         .await?;
     let updated = apply_profile_update(&auth.pubkey, profile, update, now)
         .map_err(profile_input_error)?;
-    state
-        .profiles
-        .upsert_profile(updated.clone())
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?;
+    if let Err(err) = state.profiles.upsert_profile(updated.clone()).await {
+        return Err(AuthHttpError::Internal(err.to_string()));
+    }
     Ok(Json(profile_response(
         &auth.pubkey,
         &account.forgejo_username,
@@ -513,20 +519,20 @@ async fn profile_public_handler(
     State(state): State<AuthAppState>,
     Path(npub): Path<String>,
 ) -> Result<Json<Profile>, AuthHttpError> {
-    let pubkey_bytes = pubkey_bytes_from_npub(&npub)
-        .map_err(|_| AuthHttpError::BadRequest("invalid npub".to_string()))?;
-    let account = state
-        .accounts
-        .account_by_pubkey(&pubkey_bytes)
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
-        .ok_or_else(|| AuthHttpError::NotFound("profile not found".to_string()))?;
-    let profile = state
-        .profiles
-        .profile_by_pubkey(&pubkey_bytes)
-        .await
-        .map_err(|err| AuthHttpError::Internal(err.to_string()))?
-        .ok_or_else(|| AuthHttpError::NotFound("profile not found".to_string()))?;
+    let pubkey_bytes = match pubkey_bytes_from_npub(&npub) {
+        Ok(pubkey_bytes) => pubkey_bytes,
+        Err(_) => return Err(AuthHttpError::BadRequest("invalid npub".to_string())),
+    };
+    let account = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return Err(AuthHttpError::NotFound("profile not found".to_string())),
+        Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
+    };
+    let profile = match state.profiles.profile_by_pubkey(&pubkey_bytes).await {
+        Ok(Some(profile)) => profile,
+        Ok(None) => return Err(AuthHttpError::NotFound("profile not found".to_string())),
+        Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
+    };
 
     if profile.visibility != StorageProfileVisibility::Public {
         return Err(AuthHttpError::NotFound("profile not found".to_string()));
@@ -541,10 +547,10 @@ async fn profile_public_handler(
 }
 
 fn build_request_url(headers: &HeaderMap, uri: &Uri) -> Result<String, AuthHttpError> {
-    let host = headers
-        .get("host")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| AuthHttpError::BadRequest("missing host header".to_string()))?;
+    let host = match headers.get("host").and_then(|value| value.to_str().ok()) {
+        Some(host) => host,
+        None => return Err(AuthHttpError::BadRequest("missing host header".to_string())),
+    };
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
@@ -552,7 +558,7 @@ fn build_request_url(headers: &HeaderMap, uri: &Uri) -> Result<String, AuthHttpE
     let path = uri
         .path_and_query()
         .map(|value| value.as_str())
-        .unwrap_or_else(|| uri.path());
+        .unwrap_or(uri.path());
     Ok(format!("{scheme}://{host}{path}"))
 }
 
