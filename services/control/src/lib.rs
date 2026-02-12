@@ -1363,6 +1363,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{HeaderMap, Request, StatusCode};
+    use axum::response::IntoResponse;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
     use gittree_app_core::{
@@ -1375,7 +1376,7 @@ mod tests {
     use gittree_core::{RepoAnnouncement, format_grasp_server_url_as_clone_url};
     use gittree_forgejo::{
         ForgejoClient, ForgejoError, ForgejoMethod, ForgejoRequest, ForgejoResponse,
-        ForgejoTransport,
+        ForgejoTransport, ReqwestTransport,
     };
     use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
     use gittree_storage::{
@@ -1441,6 +1442,23 @@ mod tests {
         Arc<InMemoryRepositories>,
     ) {
         test_state_with_auth(responses, Vec::new(), "gittree")
+    }
+
+    fn reqwest_state() -> super::ControlAppState<ReqwestTransport> {
+        let forgejo = ForgejoClient::new(test_config()).expect("forgejo client");
+        let repositories = Arc::new(InMemoryRepositories::new());
+        super::ControlAppState {
+            auth: ControlAuthConfig {
+                token: "token".to_string(),
+                admin_keys: Vec::new(),
+            },
+            forgejo,
+            forgejo_owner: "gittree".to_string(),
+            repositories: repositories.clone(),
+            relay_urls: vec!["ws://relay.local".to_string()],
+            public_git_url: "http://localhost:8085".to_string(),
+            repo_private_default: true,
+        }
     }
 
     fn test_state_with_auth(
@@ -2277,6 +2295,18 @@ mod tests {
         assert!(matches!(server, ControlHttpError::Internal(_)));
     }
 
+    #[test]
+    fn control_http_error_into_response_maps_status_codes() {
+        let unauthorized = ControlHttpError::Unauthorized("nope".to_string()).into_response();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bad_request = ControlHttpError::BadRequest("bad".to_string()).into_response();
+        assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+
+        let internal = ControlHttpError::Internal("boom".to_string()).into_response();
+        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
         let (state, _transport, _repos) = test_state(Vec::new());
@@ -2286,6 +2316,144 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reqwest_state_routes_fail_fast_before_network_io() {
+        let app = build_router(reqwest_state());
+        let (pubkey, privkey) = test_keys();
+
+        let user_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/users")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "username": "alice",
+                            "email": "alice@example.com",
+                            "password": "secret"
+                        }))
+                        .expect("user body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("user response");
+        assert_eq!(user_response.status(), StatusCode::UNAUTHORIZED);
+
+        let org_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/orgs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner": "gittree",
+                            "name": "demo"
+                        }))
+                        .expect("org body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("org response");
+        assert_eq!(org_response.status(), StatusCode::UNAUTHORIZED);
+
+        let repo_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner": "gittree",
+                            "name": "demo",
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("repo body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("repo response");
+        assert_eq!(repo_response.status(), StatusCode::UNAUTHORIZED);
+
+        let pull_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/pulls")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner": "gittree",
+                            "repo": "demo",
+                            "head": "feature",
+                            "base": "main",
+                            "title": "demo"
+                        }))
+                        .expect("pull body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("pull response");
+        assert_eq!(pull_response.status(), StatusCode::UNAUTHORIZED);
+
+        let event_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "kind": KIND_GITTREE_CONTROL.0,
+                            "pubkey": "11".repeat(32),
+                            "content": "{\"action\":\"create_user\"}"
+                        }))
+                        .expect("event body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("event response");
+        assert_eq!(event_response.status(), StatusCode::UNAUTHORIZED);
+
+        let tenant_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("tenant response");
+        assert_eq!(tenant_response.status(), StatusCode::UNAUTHORIZED);
+
+        let nostr_repo_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("nostr repo response");
+        assert_eq!(nostr_repo_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -3428,6 +3596,36 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn create_repo_rejects_empty_identifier_when_present() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "name":"demo",
+                            "identifier":" ",
+                            "auto_init":true,
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
     #[test]
     fn helper_validators_cover_reject_paths() {
         let missing = super::require_non_empty("owner", "   ").unwrap_err();
@@ -3441,6 +3639,12 @@ mod tests {
 
         let bad_npub = npub_from_hex("11").unwrap_err();
         assert!(matches!(bad_npub, ControlHttpError::BadRequest(_)));
+
+        let auth = ControlAuthConfig {
+            token: "token".to_string(),
+            admin_keys: vec!["aa".repeat(32)],
+        };
+        authorize_admin_pubkey(&"aa".repeat(32), &auth).expect("admin key accepted");
     }
 
     #[test]
