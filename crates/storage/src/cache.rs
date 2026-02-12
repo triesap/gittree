@@ -6,7 +6,7 @@ use crate::{
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
@@ -98,16 +98,32 @@ impl<R> CachedRepositories<R> {
         }
 
         while map.len() > max_entries {
-            let Some(oldest) = map
+            let oldest = map
                 .iter()
                 .min_by_key(|(_, entry)| entry.stored_at)
                 .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
+                .expect("cache map non-empty when eviction needed");
             map.remove(&oldest);
         }
     }
+}
+
+fn cache_read<'a, T>(
+    lock: &'a RwLock<T>,
+    message: &'static str,
+) -> Result<RwLockReadGuard<'a, T>, StorageError> {
+    lock.read().map_err(|_| StorageError::Internal {
+        message: message.to_string(),
+    })
+}
+
+fn cache_write<'a, T>(
+    lock: &'a RwLock<T>,
+    message: &'static str,
+) -> Result<RwLockWriteGuard<'a, T>, StorageError> {
+    lock.write().map_err(|_| StorageError::Internal {
+        message: message.to_string(),
+    })
 }
 
 #[async_trait]
@@ -127,13 +143,7 @@ where
         let key = Self::key(&record.pubkey, &record.identifier);
         let now = Instant::now();
 
-        let mut lists = self
-            .cache
-            .announcements
-            .write()
-            .map_err(|_| StorageError::Internal {
-                message: "announcement cache poisoned".to_string(),
-            })?;
+        let mut lists = cache_write(&self.cache.announcements, "announcement cache poisoned")?;
         if let Some(entry) = lists.get_mut(&key) {
             if self.is_fresh(entry) {
                 entry.value.push(record.clone());
@@ -145,12 +155,7 @@ where
         drop(lists);
 
         let mut latest =
-            self.cache
-                .latest_announcements
-                .write()
-                .map_err(|_| StorageError::Internal {
-                    message: "announcement cache poisoned".to_string(),
-                })?;
+            cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
         let should_update = match latest.get(&key) {
             Some(entry) if self.is_fresh(entry) && entry.value.created_at > record.created_at => {
                 false
@@ -182,13 +187,7 @@ where
 
         let key = Self::key(pubkey, identifier);
         let (cached, stale) = {
-            let lists = self
-                .cache
-                .announcements
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "announcement cache poisoned".to_string(),
-                })?;
+            let lists = cache_read(&self.cache.announcements, "announcement cache poisoned")?;
             match lists.get(&key) {
                 Some(entry) if self.is_fresh(entry) => (Some(entry.value.clone()), false),
                 Some(_) => (None, true),
@@ -197,12 +196,7 @@ where
         };
         if stale {
             let mut lists =
-                self.cache
-                    .announcements
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "announcement cache poisoned".to_string(),
-                    })?;
+                cache_write(&self.cache.announcements, "announcement cache poisoned")?;
             lists.remove(&key);
         }
         if let Some(cached) = cached {
@@ -212,13 +206,7 @@ where
         let records = self.inner.list_announcements(pubkey, identifier).await?;
         let now = Instant::now();
 
-        let mut lists = self
-            .cache
-            .announcements
-            .write()
-            .map_err(|_| StorageError::Internal {
-                message: "announcement cache poisoned".to_string(),
-            })?;
+        let mut lists = cache_write(&self.cache.announcements, "announcement cache poisoned")?;
         lists.insert(
             key.clone(),
             CacheEntry {
@@ -230,12 +218,7 @@ where
         drop(lists);
 
         let mut latest =
-            self.cache
-                .latest_announcements
-                .write()
-                .map_err(|_| StorageError::Internal {
-                    message: "announcement cache poisoned".to_string(),
-                })?;
+            cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
         if records.is_empty() {
             latest.remove(&key);
         } else if let Some(record) = records
@@ -268,12 +251,7 @@ where
         let key = Self::key(pubkey, identifier);
         let (cached, stale) = {
             let latest =
-                self.cache
-                    .latest_announcements
-                    .read()
-                    .map_err(|_| StorageError::Internal {
-                        message: "announcement cache poisoned".to_string(),
-                    })?;
+                cache_read(&self.cache.latest_announcements, "announcement cache poisoned")?;
             match latest.get(&key) {
                 Some(entry) if self.is_fresh(entry) => (Some(entry.value.clone()), false),
                 Some(_) => (None, true),
@@ -282,12 +260,7 @@ where
         };
         if stale {
             let mut latest =
-                self.cache
-                    .latest_announcements
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "announcement cache poisoned".to_string(),
-                    })?;
+                cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
             latest.remove(&key);
         }
         if let Some(cached) = cached {
@@ -298,12 +271,7 @@ where
         if let Some(record) = record.clone() {
             let now = Instant::now();
             let mut latest =
-                self.cache
-                    .latest_announcements
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "announcement cache poisoned".to_string(),
-                    })?;
+                cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
             latest.insert(
                 key,
                 CacheEntry {
@@ -331,13 +299,7 @@ where
         self.inner.insert_state(record.clone()).await?;
         let key = Self::key(&record.pubkey, &record.identifier);
         let now = Instant::now();
-        let mut latest = self
-            .cache
-            .latest_states
-            .write()
-            .map_err(|_| StorageError::Internal {
-                message: "state cache poisoned".to_string(),
-            })?;
+        let mut latest = cache_write(&self.cache.latest_states, "state cache poisoned")?;
         let should_update = match latest.get(&key) {
             Some(entry) if self.is_fresh(entry) && entry.value.created_at > record.created_at => {
                 false
@@ -368,13 +330,7 @@ where
 
         let key = Self::key(pubkey, identifier);
         let (cached, stale) = {
-            let latest = self
-                .cache
-                .latest_states
-                .read()
-                .map_err(|_| StorageError::Internal {
-                    message: "state cache poisoned".to_string(),
-                })?;
+            let latest = cache_read(&self.cache.latest_states, "state cache poisoned")?;
             match latest.get(&key) {
                 Some(entry) if self.is_fresh(entry) => (Some(entry.value.clone()), false),
                 Some(_) => (None, true),
@@ -382,13 +338,7 @@ where
             }
         };
         if stale {
-            let mut latest =
-                self.cache
-                    .latest_states
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "state cache poisoned".to_string(),
-                    })?;
+            let mut latest = cache_write(&self.cache.latest_states, "state cache poisoned")?;
             latest.remove(&key);
         }
         if let Some(cached) = cached {
@@ -398,13 +348,7 @@ where
         let record = self.inner.latest_state(pubkey, identifier).await?;
         if let Some(record) = record.clone() {
             let now = Instant::now();
-            let mut latest =
-                self.cache
-                    .latest_states
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "state cache poisoned".to_string(),
-                    })?;
+            let mut latest = cache_write(&self.cache.latest_states, "state cache poisoned")?;
             latest.insert(
                 key,
                 CacheEntry {
@@ -438,12 +382,7 @@ where
         let key = record.relay_url.clone();
         let now = Instant::now();
         let mut entries =
-            self.cache
-                .relay_compatibility
-                .write()
-                .map_err(|_| StorageError::Internal {
-                    message: "relay compatibility cache poisoned".to_string(),
-                })?;
+            cache_write(&self.cache.relay_compatibility, "relay compatibility cache poisoned")?;
         entries.insert(
             key,
             CacheEntry {
@@ -464,13 +403,10 @@ where
         }
 
         let (cached, stale) = {
-            let entries =
-                self.cache
-                    .relay_compatibility
-                    .read()
-                    .map_err(|_| StorageError::Internal {
-                        message: "relay compatibility cache poisoned".to_string(),
-                    })?;
+            let entries = cache_read(
+                &self.cache.relay_compatibility,
+                "relay compatibility cache poisoned",
+            )?;
             match entries.get(relay_url) {
                 Some(entry) if self.is_fresh(entry) => (Some(entry.value.clone()), false),
                 Some(_) => (None, true),
@@ -478,13 +414,10 @@ where
             }
         };
         if stale {
-            let mut entries =
-                self.cache
-                    .relay_compatibility
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "relay compatibility cache poisoned".to_string(),
-                    })?;
+            let mut entries = cache_write(
+                &self.cache.relay_compatibility,
+                "relay compatibility cache poisoned",
+            )?;
             entries.remove(relay_url);
         }
         if let Some(cached) = cached {
@@ -494,13 +427,10 @@ where
         let record = self.inner.relay_compatibility(relay_url).await?;
         if let Some(record) = record.clone() {
             let now = Instant::now();
-            let mut entries =
-                self.cache
-                    .relay_compatibility
-                    .write()
-                    .map_err(|_| StorageError::Internal {
-                        message: "relay compatibility cache poisoned".to_string(),
-                    })?;
+            let mut entries = cache_write(
+                &self.cache.relay_compatibility,
+                "relay compatibility cache poisoned",
+            )?;
             entries.insert(
                 relay_url.to_string(),
                 CacheEntry {
@@ -935,6 +865,48 @@ mod tests {
             StorageError::Internal { message } => assert_eq!(message, expected),
             other => panic!("expected internal error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cache_lock_helpers_map_poison_to_internal_error() {
+        let lock = RwLock::new(1u8);
+        let _guard = super::cache_read(&lock, "ok").expect("read lock ok");
+        drop(_guard);
+
+        poison_lock(&lock);
+
+        let err = super::cache_read(&lock, "cache poisoned")
+            .expect_err("poisoned read lock must fail");
+        assert_internal_message(err, "cache poisoned");
+
+        let err = super::cache_write(&lock, "cache poisoned")
+            .expect_err("poisoned write lock must fail");
+        assert_internal_message(err, "cache poisoned");
+    }
+
+    #[tokio::test]
+    async fn poison_repo_insert_methods_are_noops() {
+        let repo = Arc::new(PoisonRepo::default());
+
+        let announcement = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("announcement");
+        repo.insert_announcement(announcement)
+            .await
+            .expect("insert announcement");
+
+        let state = RepoStateRecord::new(&hex_32(0x33), &hex_32(0x44), 10, &sample_state("repo"))
+            .expect("state");
+        repo.insert_state(state).await.expect("insert state");
+
+        let relay_compat = sample_relay_compatibility("wss://relay.example");
+        repo.upsert_relay_compatibility(relay_compat)
+            .await
+            .expect("upsert relay compatibility");
     }
 
     #[tokio::test]
