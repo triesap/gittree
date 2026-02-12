@@ -118,6 +118,7 @@ fn nip98_event_id_bytes(unsigned: &Nip98UnsignedEvent) -> Result<[u8; 32], AppCo
 mod tests {
     use super::{
         nip98_event_id, nip98_payload_hash, nip98_sign_event, nip98_unsigned_event, NIP98_KIND,
+        Nip98Event, Nip98UnsignedEvent,
     };
     use crate::AppCoreError;
     use gittree_nostr_auth::{validate_nip98, Nip98Event as AuthEvent, Nip98Request};
@@ -227,5 +228,36 @@ mod tests {
         )
         .expect_err("zero secret must fail");
         assert!(matches!(err, AppCoreError::InvalidSecretKey));
+    }
+
+    #[test]
+    fn unsigned_event_round_trips_json() {
+        let payload = "ab".repeat(32);
+        let event = nip98_unsigned_event(
+            "11".repeat(32),
+            "PATCH",
+            "http://localhost:8089/v1/profile",
+            Some(payload.as_str()),
+            NOW,
+        );
+        let encoded = serde_json::to_string(&event).expect("json");
+        let decoded: Nip98UnsignedEvent = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn signed_event_round_trips_json() {
+        let secret = [5u8; 32];
+        let event = nip98_sign_event(
+            &secret,
+            "POST",
+            "http://localhost:8089/v1/signup",
+            None,
+            NOW,
+        )
+        .expect("event");
+        let encoded = serde_json::to_string(&event).expect("json");
+        let decoded: Nip98Event = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, event);
     }
 }
