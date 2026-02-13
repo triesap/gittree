@@ -361,9 +361,19 @@ mod tests {
         cleanup_database("not-a-postgres-url", "ignored").await;
     }
 
+    #[tokio::test]
+    async fn provision_database_executes_and_returns_option() {
+        if let Some((pool, database_name, base_url)) = provision_database().await {
+            pool.close().await;
+            cleanup_database(&base_url, &database_name).await;
+        }
+    }
+
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
-        let base_url = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
+        let base_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL") {
+            Ok(value) => value,
+            Err(_) => DEFAULT_TEST_DATABASE_URL.to_string(),
+        };
         let mut admin_options = PgConnectOptions::from_str(&base_url).ok()?;
         admin_options = admin_options.database("postgres");
         let admin_pool = PgPoolOptions::new()

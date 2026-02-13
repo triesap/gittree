@@ -1473,6 +1473,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_event_repo_filters_tenant_ids_and_valid_hex_refs() {
+        let store = InMemoryRepositories::new();
+        let event_id = "aa".repeat(32);
+        let author = "bb".repeat(32);
+
+        let mut tenant_a = event_record(&event_id, &author, 2);
+        tenant_a.tenant_id = "tenant-a".to_string();
+        let mut tenant_b = event_record(&"cc".repeat(32), &author, 1);
+        tenant_b.tenant_id = "tenant-b".to_string();
+
+        store.insert_event(tenant_a.clone()).await.expect("insert tenant a");
+        store.insert_event(tenant_b).await.expect("insert tenant b");
+
+        let query = EventQuery {
+            tenant_id: Some("tenant-a".to_string()),
+            ids: vec![event_id],
+            authors: vec![author],
+            ..EventQuery::default()
+        };
+
+        let results = store.query_events(&query).await.expect("query");
+        assert_eq!(results, vec![tenant_a]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_event_repo_applies_until_and_tie_break_sorting() {
+        let store = InMemoryRepositories::new();
+        let author = "cc".repeat(32);
+
+        let mut first = event_record(&"aa".repeat(32), &author, 10);
+        first.tenant_id = "tenant-a".to_string();
+        let mut second = event_record(&"bb".repeat(32), &author, 10);
+        second.tenant_id = "tenant-a".to_string();
+        let mut newer = event_record(&"dd".repeat(32), &author, 11);
+        newer.tenant_id = "tenant-a".to_string();
+
+        store.insert_event(second.clone()).await.expect("insert second");
+        store.insert_event(first.clone()).await.expect("insert first");
+        store.insert_event(newer).await.expect("insert newer");
+
+        let results = store
+            .query_events(&EventQuery {
+                tenant_id: Some("tenant-a".to_string()),
+                until: Some(10),
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query");
+
+        assert_eq!(results, vec![first, second]);
+    }
+
+    #[tokio::test]
     async fn in_memory_outbox_missing_entries_return_internal_error() {
         let store = InMemoryRepositories::new();
         assert!(

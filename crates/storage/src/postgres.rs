@@ -1209,10 +1209,15 @@ WHERE tenant_id = $1 AND id = $2
 impl RelayPublishRepository for PostgresRepositories {
     async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError> {
         let entry = request.decode()?;
-        let tags = serde_json::to_value(&entry.tags).map_err(|source| StorageError::Serialization {
-            field: "tags",
-            source,
-        })?;
+        let tags = match serde_json::to_value(&entry.tags) {
+            Ok(tags) => tags,
+            Err(source) => {
+                return Err(StorageError::Serialization {
+                    field: "tags",
+                    source,
+                });
+            }
+        };
         sqlx::query(
             r#"
 INSERT INTO relay_publish_outbox (
@@ -1433,8 +1438,10 @@ mod tests {
 
     impl TestDatabase {
         async fn provision() -> Option<Self> {
-            let base_url = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
-                .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
+            let base_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL") {
+                Ok(value) => value,
+                Err(_) => DEFAULT_TEST_DATABASE_URL.to_string(),
+            };
             let mut admin_options = match PgConnectOptions::from_str(&base_url) {
                 Ok(options) => options,
                 Err(_) => return None,
@@ -1555,6 +1562,20 @@ WHERE datname = $1
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_database_cleanup_returns_early_for_invalid_base_url() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/invalid")
+            .expect("lazy pool");
+        let harness = TestDatabase {
+            base_url: "not-a-postgres-url".to_string(),
+            database_name: unique_database_name(),
+            pool,
+        };
+        harness.cleanup().await;
     }
 
     #[test]
