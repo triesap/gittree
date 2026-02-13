@@ -3736,6 +3736,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_pull_rejects_empty_fields() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        for payload in [
+            json!({
+                "owner":" ",
+                "repo":"demo",
+                "head":"feature",
+                "base":"main",
+                "title":"t"
+            }),
+            json!({
+                "owner":"gittree",
+                "repo":" ",
+                "head":"feature",
+                "base":"main",
+                "title":"t"
+            }),
+            json!({
+                "owner":"gittree",
+                "repo":"demo",
+                "head":" ",
+                "base":"main",
+                "title":"t"
+            }),
+            json!({
+                "owner":"gittree",
+                "repo":"demo",
+                "head":"feature",
+                "base":" ",
+                "title":"t"
+            }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/control/pulls")
+                        .header("content-type", "application/json")
+                        .header(AUTH_HEADER, "Bearer token")
+                        .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        }
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn create_pull_returns_internal_on_forgejo_error() {
         let responses = vec![ForgejoResponse {
             status: 503,
@@ -3889,6 +3941,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_event_rejects_empty_pubkey() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": " ",
+            "content": "{}"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn control_event_rejects_invalid_action_payload() {
         let (pubkey, _privkey) = test_keys();
         let (state, _transport, _repos) = test_state(Vec::new());
@@ -3978,6 +4054,80 @@ mod tests {
                             "auto_init":true,
                             "pubkey": pubkey,
                             "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_repo_rejects_empty_name_pubkey_and_privkey() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "name":" ",
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "name":"demo",
+                            "pubkey":" ",
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "name":"demo",
+                            "pubkey": test_keys().0,
+                            "privkey":" "
                         }))
                         .expect("body"),
                     ))
@@ -4443,6 +4593,95 @@ mod tests {
         assert!(requests[0]
             .url
             .ends_with("/api/v1/repos/gittree/demo/pulls"));
+    }
+
+    #[tokio::test]
+    async fn control_event_create_actions_surface_forgejo_failures() {
+        let (pubkey, _privkey) = test_keys();
+
+        let (state, _transport, _repos) = test_state(vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }]);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": pubkey,
+            "content": serde_json::to_string(&json!({
+                "action": "create_user",
+                "username": "alice",
+                "email": "alice@example.com",
+                "password": "secret"
+            })).expect("content")
+        });
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let (state, _transport, _repos) = test_state(vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }]);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": test_keys().0,
+            "content": serde_json::to_string(&json!({
+                "action": "create_org",
+                "name": "acme"
+            })).expect("content")
+        });
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let (state, _transport, _repos) = test_state(vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }]);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": test_keys().0,
+            "content": serde_json::to_string(&json!({
+                "action": "create_pull_request",
+                "owner": "gittree",
+                "repo": "demo",
+                "head": "feature",
+                "base": "main",
+                "title": "Add thing"
+            })).expect("content")
+        });
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
