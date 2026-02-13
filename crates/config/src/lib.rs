@@ -328,14 +328,20 @@ impl AuthConfig {
     where
         F: FnMut(&'static str) -> Option<String>,
     {
-        let email_domain = env_optional_string_with(ENV_AUTH_EMAIL_DOMAIN, &mut get_var)
-            .unwrap_or_else(|| DEFAULT_AUTH_EMAIL_DOMAIN.to_string());
-        let max_skew_seconds = match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, &mut get_var)
-        {
-            Some(value) => value.parse::<u64>().map_err(|_| ConfigError::InvalidConfig {
-                field: "auth.max_skew_seconds",
-                value,
-            })?,
+        let email_domain = match env_optional_string_with(ENV_AUTH_EMAIL_DOMAIN, &mut get_var) {
+            Some(value) => value,
+            None => DEFAULT_AUTH_EMAIL_DOMAIN.to_string(),
+        };
+        let max_skew_seconds = match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, &mut get_var) {
+            Some(value) => match value.parse::<u64>() {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    return Err(ConfigError::InvalidConfig {
+                        field: "auth.max_skew_seconds",
+                        value,
+                    });
+                }
+            },
             None => DEFAULT_AUTH_MAX_SKEW_SECS,
         };
         let config = Self {
@@ -411,8 +417,10 @@ impl RelayCompatibilityConfig {
     }
 
     pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
-        let parsed: TomlRelayCompatibilityRoot = toml::from_str(input)
-            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let parsed: TomlRelayCompatibilityRoot = match toml::from_str(input) {
+            Ok(value) => value,
+            Err(source) => return Err(ConfigError::TomlParse { path: None, source }),
+        };
         parsed.into_config()
     }
 }
@@ -450,8 +458,10 @@ impl RelayProbeConfig {
     }
 
     pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
-        let parsed: TomlRelayProbeRoot = toml::from_str(input)
-            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let parsed: TomlRelayProbeRoot = match toml::from_str(input) {
+            Ok(value) => value,
+            Err(source) => return Err(ConfigError::TomlParse { path: None, source }),
+        };
         let config = parsed.into_config();
         config.validate()?;
         Ok(config)
@@ -582,8 +592,10 @@ impl RelayPolicyConfig {
     }
 
     pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
-        let parsed: TomlRelayPolicyRoot = toml::from_str(input)
-            .map_err(|source| ConfigError::TomlParse { path: None, source })?;
+        let parsed: TomlRelayPolicyRoot = match toml::from_str(input) {
+            Ok(value) => value,
+            Err(source) => return Err(ConfigError::TomlParse { path: None, source }),
+        };
         let config = parsed.into_config();
         config.validate()?;
         Ok(config)
@@ -756,7 +768,10 @@ fn env_or_default_with<F>(key: &'static str, default: &str, get_var: &mut F) -> 
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    get_var(key).unwrap_or_else(|| default.to_string())
+    match get_var(key) {
+        Some(value) => value,
+        None => default.to_string(),
+    }
 }
 
 fn env_required_string_with<F>(key: &'static str, get_var: &mut F) -> Result<String, ConfigError>
@@ -783,7 +798,10 @@ where
             if value.trim().is_empty() {
                 return Ok(default);
             }
-            parse_bool(&value).ok_or_else(|| ConfigError::InvalidConfig { field: key, value })
+            match parse_bool(&value) {
+                Some(parsed) => Ok(parsed),
+                None => Err(ConfigError::InvalidConfig { field: key, value }),
+            }
         }
         None => Ok(default),
     }
@@ -967,9 +985,10 @@ struct TomlConfig {
 impl TomlConfig {
     fn into_config(self) -> GittreeConfig {
         GittreeConfig {
-            relay_bind: self
-                .relay_bind
-                .unwrap_or_else(|| DEFAULT_RELAY_BIND.to_string()),
+            relay_bind: match self.relay_bind {
+                Some(value) => value,
+                None => DEFAULT_RELAY_BIND.to_string(),
+            },
         }
     }
 }
@@ -1344,15 +1363,19 @@ impl Default for GittreeConfig {
 
 impl GittreeConfig {
     pub fn from_env() -> Self {
-        let relay_bind =
-            std::env::var(ENV_RELAY_BIND).unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_string());
+        let relay_bind = match std::env::var(ENV_RELAY_BIND) {
+            Ok(value) => value,
+            Err(_) => DEFAULT_RELAY_BIND.to_string(),
+        };
 
         Self { relay_bind }
     }
 
     pub fn from_env_with_keys(relay_bind_key: &str) -> Self {
-        let relay_bind =
-            std::env::var(relay_bind_key).unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_string());
+        let relay_bind = match std::env::var(relay_bind_key) {
+            Ok(value) => value,
+            Err(_) => DEFAULT_RELAY_BIND.to_string(),
+        };
 
         Self { relay_bind }
     }
@@ -1489,9 +1512,11 @@ mod tests {
     use crate::ENV_UI_PUBLIC_GIT_URL;
     use crate::ENV_UI_REPO_ROOT;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static TEMP_CONFIG_COUNTER: AtomicU64 = AtomicU64::new(0);
     const ENV_RELAY_BIND_TEST1: &str = "GITTREE_RELAY_BIND_TEST1";
     const ENV_RELAY_BIND_TEST2: &str = "GITTREE_RELAY_BIND_TEST2";
 
@@ -1500,10 +1525,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
             .as_nanos();
+        let counter = TEMP_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "gittree-config-{nanos}-{}.toml",
-            std::process::id()
+            "gittree-config-{nanos}-{}-{counter}.toml",
+            std::process::id(),
         ));
         std::fs::write(&path, contents).expect("write config file");
         path

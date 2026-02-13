@@ -1,27 +1,49 @@
 use crate::{CoreError, Result};
 
 pub fn normalize_grasp_server_url(input: &str) -> Result<String> {
-    let mut parsed = url::Url::parse(input)
-        .or_else(|_| url::Url::parse(&format!("https://{input}")))
-        .map_err(|_| CoreError::InvalidField {
-            field: "grasp_url",
-            value: input.to_string(),
-        })?;
+    let mut parsed = match url::Url::parse(input) {
+        Ok(value) => value,
+        Err(_) => {
+            let fallback = format!("https://{input}");
+            match url::Url::parse(&fallback) {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(CoreError::InvalidField {
+                        field: "grasp_url",
+                        value: input.to_string(),
+                    });
+                }
+            }
+        }
+    };
 
     if parsed.host_str().is_none() {
-        parsed =
-            url::Url::parse(&format!("https://{input}")).map_err(|_| CoreError::InvalidField {
-                field: "grasp_url",
-                value: input.to_string(),
-            })?;
+        let fallback = format!("https://{input}");
+        parsed = match url::Url::parse(&fallback) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(CoreError::InvalidField {
+                    field: "grasp_url",
+                    value: input.to_string(),
+                });
+            }
+        };
     }
 
     let scheme = parsed.scheme();
-    let host = parsed.host_str().ok_or_else(|| CoreError::InvalidField {
-        field: "grasp_url",
-        value: input.to_string(),
-    })?;
-    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let host = match parsed.host_str() {
+        Some(value) => value,
+        None => {
+            return Err(CoreError::InvalidField {
+                field: "grasp_url",
+                value: input.to_string(),
+            });
+        }
+    };
+    let port = match parsed.port() {
+        Some(value) => format!(":{value}"),
+        None => String::new(),
+    };
     let path = parsed.path();
 
     let mut normalized = match scheme {
@@ -55,11 +77,15 @@ pub fn extract_npub(input: &str) -> Result<&str> {
 }
 
 pub fn is_grasp_server_in_list(url: &str, grasp_servers: &[String]) -> bool {
-    if !grasp_servers.is_empty() {
-        grasp_servers
-            .iter()
-            .any(|s| s.trim_end_matches('/') == url.trim_end_matches('/'))
+    if grasp_servers.is_empty() {
+        false
     } else {
+        let trimmed_url = url.trim_end_matches('/');
+        for server in grasp_servers {
+            if server.trim_end_matches('/') == trimmed_url {
+                return true;
+            }
+        }
         false
     }
 }
@@ -128,10 +154,15 @@ pub fn format_grasp_server_url_as_blossom_url(url: &str) -> Result<String> {
 }
 
 fn validate_npub(npub: &str) -> Result<()> {
-    let (hrp, _) = bech32::decode(npub).map_err(|_| CoreError::InvalidField {
-        field: "npub",
-        value: npub.to_string(),
-    })?;
+    let (hrp, _) = match bech32::decode(npub) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(CoreError::InvalidField {
+                field: "npub",
+                value: npub.to_string(),
+            });
+        }
+    };
     if hrp.as_str() != "npub" {
         return Err(CoreError::InvalidField {
             field: "npub",
