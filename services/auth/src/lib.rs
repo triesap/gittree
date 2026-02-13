@@ -1029,6 +1029,20 @@ mod tests {
     }
 
     #[test]
+    fn auth_config_error_storage_variant_exposes_source() {
+        let err = AuthConfigError::Storage(StorageConfigError::InvalidConfig("broken".to_string()));
+        assert_eq!(err.to_string(), "auth storage config error: broken");
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn env_u64_with_parses_valid_values() {
+        let parsed = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some("120".to_string()))
+            .expect("valid u64");
+        assert_eq!(parsed, Some(120));
+    }
+
+    #[test]
     fn auth_error_display_and_source_cover_all_variants() {
         let config = AuthError::Config(AuthConfigError::Config(ConfigError::MissingEnv(
             "GITTREE_FORGEJO_BASE_URL",

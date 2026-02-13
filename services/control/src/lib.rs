@@ -1388,6 +1388,7 @@ mod tests {
     use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde_json::json;
     use std::collections::VecDeque;
+    use std::process::Command;
     use std::sync::{Arc, Mutex};
     use time::OffsetDateTime;
     use tower::ServiceExt;
@@ -1758,6 +1759,58 @@ mod tests {
                 .block_on(async { super::serve(config).await })
                 .expect_err("invalid bind should fail");
             assert!(matches!(err, super::ControlError::Serve(_)));
+        });
+    }
+
+    #[test]
+    fn serve_starts_and_can_be_aborted() {
+        if std::env::var("GITTREE_CONTROL_SERVE_SUBPROCESS").as_deref() == Ok("1") {
+            let config = ControlConfig {
+                bind: "127.0.0.1:0".to_string(),
+                auth: ControlAuthConfig {
+                    token: "token".to_string(),
+                    admin_keys: Vec::new(),
+                },
+                forgejo: test_config(),
+                storage: gittree_storage::StorageConfig {
+                    read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                    write_connection: None,
+                    max_connections: 10,
+                    min_connections: 2,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: None,
+                },
+                relay_urls: vec!["ws://relay.local".to_string()],
+                public_git_url: "http://localhost:8085".to_string(),
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async move {
+                    let handle = tokio::spawn(async move { super::serve(config).await });
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    assert!(!handle.is_finished(), "serve should still be running");
+                    handle.abort();
+                    let join_error = handle.await.expect_err("join should be cancelled");
+                    assert!(join_error.is_cancelled());
+                });
+            return;
+        }
+
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_JSON", "false", || {
+            let exe = std::env::current_exe().expect("current exe");
+            let status = Command::new(exe)
+                .arg("--exact")
+                .arg("tests::serve_starts_and_can_be_aborted")
+                .arg("--nocapture")
+                .env("GITTREE_CONTROL_SERVE_SUBPROCESS", "1")
+                .env("GITTREE_LOG_JSON", "false")
+                .status()
+                .expect("spawn subprocess");
+            assert!(status.success(), "subprocess serve run should succeed");
         });
     }
 
