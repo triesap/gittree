@@ -376,7 +376,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
     use axum::routing::get;
-    use axum::response::IntoResponse;
     use futures_util::{SinkExt, StreamExt};
     use gittree_storage::{
         InMemoryRepositories, RelayInviteRecord, RelayMembershipRecord, RelayMembershipRepository,
@@ -548,9 +547,7 @@ mod tests {
         let app = build_router(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        tokio::spawn(axum::serve(listener, app).into_future());
         addr
     }
 
@@ -793,9 +790,7 @@ mod tests {
         let app = build_router(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        tokio::spawn(axum::serve(listener, app).into_future());
 
         let url = format!("ws://{addr}/");
         let err = connect_async(url).await.expect_err("expected handshake failure");
@@ -900,9 +895,7 @@ mod tests {
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        tokio::spawn(axum::serve(listener, app).into_future());
 
         let url = format!("ws://{addr}/");
         let (mut socket, _) = connect_async(url).await.expect("connect");
@@ -1069,10 +1062,9 @@ mod tests {
             metrics: Arc::new(RelayMetrics::new()),
         };
         let headers = axum::http::HeaderMap::new();
-        let response = resolve_tenant(&state, &headers)
-            .await
-            .err()
-            .unwrap_or_else(|| StatusCode::IM_A_TEAPOT.into_response());
+        let result = resolve_tenant(&state, &headers).await;
+        assert!(result.is_err());
+        let response = result.err().expect("missing host should error");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1090,10 +1082,11 @@ mod tests {
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("host", "tenant.local".parse().expect("host"));
-        let response = resolve_tenant(&state, &headers)
-            .await
+        let result = resolve_tenant(&state, &headers).await;
+        assert!(result.is_err());
+        let response = result
             .err()
-            .unwrap_or_else(|| StatusCode::IM_A_TEAPOT.into_response());
+            .expect("storage failure should map to http 500");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -1114,10 +1107,9 @@ mod tests {
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("host", "tenant.local".parse().expect("host"));
-        let response = resolve_tenant(&state, &headers)
-            .await
-            .err()
-            .unwrap_or_else(|| StatusCode::IM_A_TEAPOT.into_response());
+        let result = resolve_tenant(&state, &headers).await;
+        assert!(result.is_err());
+        let response = result.err().expect("unknown host should map to http 404");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1309,10 +1301,10 @@ mod tests {
     async fn build_state_returns_storage_error_for_invalid_pool_settings() {
         let mut config = sample_config();
         config.storage.max_connections = 0;
-        match build_state(config) {
-            Ok(_) => panic!("expected storage error"),
-            Err(err) => assert!(matches!(err, RelayError::Storage(_))),
-        }
+        let result = build_state(config);
+        assert!(result.is_err());
+        let err = result.err().expect("expected storage error");
+        assert!(matches!(err, RelayError::Storage(_)));
     }
 
     #[tokio::test]
@@ -1325,6 +1317,16 @@ mod tests {
         ));
         let state = build_state(config).expect("state");
         assert!(state.admission.is_some());
+    }
+
+    #[tokio::test]
+    async fn build_state_returns_storage_error_for_invalid_write_connection() {
+        let mut config = sample_config();
+        config.storage.write_connection = Some("not-a-valid-url".to_string());
+        let result = build_state(config);
+        assert!(result.is_err());
+        let err = result.err().expect("expected invalid write url");
+        assert!(matches!(err, RelayError::Storage(_)));
     }
 
 }
