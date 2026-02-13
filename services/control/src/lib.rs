@@ -747,8 +747,10 @@ async fn create_tenant_handler(
         .map_err(map_storage_error)?;
 
     let owner_pubkey = auth.pubkey.clone();
-    let owner_pubkey_bytes = hex::decode(&owner_pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let owner_pubkey_bytes = match hex::decode(&owner_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
     let membership = RelayMembershipRecord {
         tenant_id: tenant_id.clone(),
         pubkey: owner_pubkey_bytes,
@@ -960,8 +962,10 @@ async fn create_repo_with_announcement(
         maintainers: vec![input.pubkey.clone()],
     };
 
-    let signed = RelaySignedNostrEvent::from_announcement(&announcement, &secret_key)
-        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    let signed = match RelaySignedNostrEvent::from_announcement(&announcement, &secret_key) {
+        Ok(event) => event,
+        Err(err) => return Err(ControlHttpError::BadRequest(err.to_string())),
+    };
     if signed.pubkey != input.pubkey {
         return Err(ControlHttpError::BadRequest(
             "pubkey does not match privkey".to_string(),
@@ -1019,8 +1023,10 @@ async fn create_repo_from_signed_event(
         &state.public_git_url,
     )?;
 
-    let pubkey_bytes = hex::decode(auth_pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let pubkey_bytes = match hex::decode(auth_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
     let account = state
         .repositories
         .account_by_pubkey(&pubkey_bytes)
@@ -1157,10 +1163,7 @@ fn build_request_url(headers: &HeaderMap, uri: &Uri) -> Result<String, ControlHt
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("http");
-    let path = uri
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or_else(|| uri.path());
+    let path = uri.path_and_query().map_or(uri.path(), |value| value.as_str());
     Ok(format!("{scheme}://{host}{path}"))
 }
 
@@ -1222,18 +1225,30 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
         ));
     }
 
-    let event_id = hex::decode(&event.id)
-        .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
-    let msg = Message::from_digest_slice(&event_id)
-        .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
-    let sig_bytes = hex::decode(&event.sig)
-        .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
-    let sig = secp256k1::schnorr::Signature::from_slice(&sig_bytes)
-        .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
-    let pubkey_bytes = hex::decode(&event.pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
-    let pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let event_id = match hex::decode(&event.id) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid event id".to_string())),
+    };
+    let msg = match Message::from_digest_slice(&event_id) {
+        Ok(message) => message,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid event id".to_string())),
+    };
+    let sig_bytes = match hex::decode(&event.sig) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid event sig".to_string())),
+    };
+    let sig = match secp256k1::schnorr::Signature::from_slice(&sig_bytes) {
+        Ok(signature) => signature,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid event sig".to_string())),
+    };
+    let pubkey_bytes = match hex::decode(&event.pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
+    let pubkey = match XOnlyPublicKey::from_slice(&pubkey_bytes) {
+        Ok(value) => value,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
     let secp = Secp256k1::new();
     secp.verify_schnorr(&sig, &msg, &pubkey)
         .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
@@ -1249,8 +1264,10 @@ fn build_event_id(event: &ApiSignedNostrEvent) -> Result<String, ControlHttpErro
         event.tags,
         event.content
     ]);
-    let serialized = serde_json::to_string(&payload)
-        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    let serialized = match serde_json::to_string(&payload) {
+        Ok(serialized) => serialized,
+        Err(err) => return Err(ControlHttpError::BadRequest(err.to_string())),
+    };
     let mut hasher = sha2::Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
@@ -1315,12 +1332,16 @@ fn npub_from_hex(pubkey: &str) -> Result<String, ControlHttpError> {
     if pubkey.len() != 64 {
         return Err(ControlHttpError::BadRequest("invalid pubkey".to_string()));
     }
-    let bytes = hex::decode(pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let bytes = match hex::decode(pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
     let hrp = Hrp::parse("npub")
-        .map_err(|_| ControlHttpError::Internal("npub hrp parse failed".to_string()))?;
-    bech32::encode::<Bech32>(hrp, &bytes)
-        .map_err(|_| ControlHttpError::Internal("npub encode failed".to_string()))
+        .expect("npub hrp should always parse");
+    match bech32::encode::<Bech32>(hrp, &bytes) {
+        Ok(value) => Ok(value),
+        Err(_) => Err(ControlHttpError::Internal("npub encode failed".to_string())),
+    }
 }
 
 fn map_forgejo_error(error: ForgejoError) -> ControlHttpError {
