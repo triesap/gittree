@@ -3103,6 +3103,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_nostr_rejects_invalid_nip98_request_context() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let body = b"{}".to_vec();
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "GET",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn create_tenant_rejects_missing_auth() {
         let (state, _transport, _repos) = test_state(Vec::new());
         let app = build_router(state);
@@ -3128,6 +3163,85 @@ mod tests {
         let secret_bytes = hex::decode(&privkey).expect("privkey");
         let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
         let body = b"{invalid-json".to_vec();
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_invalid_nip98_request_context() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let body = serde_json::to_vec(&json!({
+            "host": "relay.local",
+            "name": "Relay Local"
+        }))
+        .expect("body");
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "GET",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let header = nostr_auth_header(&auth_event);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_invalid_metadata_constraints() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let body = serde_json::to_vec(&json!({
+            "host": "relay.local",
+            "name": "a".repeat(121),
+            "icon": "ftp://invalid.example/icon.png"
+        }))
+        .expect("body");
         let now = super::unix_timestamp();
         let auth_event = nip98_sign_event(
             &secret.secret_bytes(),
@@ -3596,6 +3710,31 @@ mod tests {
             "kind": KIND_GITTREE_CONTROL.0,
             "pubkey": pubkey,
             "content": " "
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn control_event_rejects_invalid_action_payload() {
+        let (pubkey, _privkey) = test_keys();
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let app = build_router(state);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": pubkey,
+            "content": "{\"action\":\"create_repo\""
         });
         let response = app
             .oneshot(
