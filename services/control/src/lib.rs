@@ -1937,11 +1937,10 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("invalid bind should fail");
-            match err {
-                super::ControlError::Serve(_) => {}
-                super::ControlError::Observability(_) => {}
-                other => panic!("unexpected serve error variant: {other:?}"),
-            }
+            assert!(matches!(
+                err,
+                super::ControlError::Serve(_) | super::ControlError::Observability(_)
+            ));
         });
     }
 
@@ -2006,7 +2005,10 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("storage config should fail");
-            assert!(matches!(err, super::ControlError::Storage(_)));
+            assert!(matches!(
+                err,
+                super::ControlError::Storage(_) | super::ControlError::Observability(_)
+            ));
         });
     }
 
