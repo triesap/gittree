@@ -1072,6 +1072,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_for_ok_ignores_non_ok_messages_until_match() {
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"NOTICE\",\"ignore\"]".to_string(),
+            )),
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"OK\",\"evt\",true,\"accepted\"]".to_string(),
+            )),
+        ]);
+        wait_for_ok(&mut stream, "evt", Duration::from_secs(1))
+            .await
+            .expect("matching ok should succeed");
+    }
+
+    #[tokio::test]
     async fn wait_for_ok_reports_closed_stream() {
         let mut empty = stream::iter(Vec::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>::new());
         let err = wait_for_ok(&mut empty, "evt", Duration::from_secs(1))
@@ -1143,6 +1158,21 @@ mod tests {
         wait_for_event(&mut stream, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect("matching event should be found");
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_ignores_events_without_id_until_match() {
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                json!(["EVENT", "sub-1", {"content":"missing id"}]).to_string(),
+            )),
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string(),
+            )),
+        ]);
+        wait_for_event(&mut stream, "sub-1", "evt-1", Duration::from_secs(1))
+            .await
+            .expect("matching event should be found after missing id");
     }
 
     #[tokio::test]
