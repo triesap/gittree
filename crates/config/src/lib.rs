@@ -2550,6 +2550,87 @@ mode = "unknown"
     }
 
     #[test]
+    fn toml_file_parse_errors_attach_path_across_configs() {
+        let path = write_temp_config("not = [");
+
+        let relay_targets_err = RelayTargetsConfig::from_toml_file(&path).unwrap_err();
+        assert!(matches!(
+            relay_targets_err,
+            ConfigError::TomlParse {
+                path: Some(ref p),
+                ..
+            } if p == &path
+        ));
+
+        let forgejo_err = ForgejoConfig::from_toml_file(&path).unwrap_err();
+        assert!(matches!(
+            forgejo_err,
+            ConfigError::TomlParse {
+                path: Some(ref p),
+                ..
+            } if p == &path
+        ));
+
+        let ui_err = UiConfig::from_toml_file(&path).unwrap_err();
+        assert!(matches!(
+            ui_err,
+            ConfigError::TomlParse {
+                path: Some(ref p),
+                ..
+            } if p == &path
+        ));
+
+        let services_err = ServicesConfig::from_toml_file(&path).unwrap_err();
+        assert!(matches!(
+            services_err,
+            ConfigError::TomlParse {
+                path: Some(ref p),
+                ..
+            } if p == &path
+        ));
+
+        let gittree_err = GittreeConfig::from_toml_file(&path).unwrap_err();
+        assert!(matches!(
+            gittree_err,
+            ConfigError::TomlParse {
+                path: Some(ref p),
+                ..
+            } if p == &path
+        ));
+
+        std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    #[test]
+    fn url_validators_cover_parse_and_scheme_errors() {
+        super::validate_relay_url("wss://relay.example").expect("relay url");
+        let relay_scheme_err = super::validate_relay_url("ftp://relay.example").unwrap_err();
+        assert!(matches!(relay_scheme_err, ConfigError::InvalidRelayUrl(_)));
+        let relay_parse_err = super::validate_relay_url("not a url").unwrap_err();
+        assert!(matches!(relay_parse_err, ConfigError::InvalidRelayUrl(_)));
+
+        super::validate_http_url("ui.public_git_url", "https://gittr.ee").expect("http url");
+        let http_scheme_err =
+            super::validate_http_url("ui.public_git_url", "ws://gittr.ee").unwrap_err();
+        assert!(matches!(
+            http_scheme_err,
+            ConfigError::InvalidConfig {
+                field: "ui.public_git_url",
+                ..
+            }
+        ));
+        let http_parse_err =
+            super::validate_http_url("ui.public_git_url", "://bad").unwrap_err();
+        assert!(matches!(
+            http_parse_err,
+            ConfigError::InvalidConfig {
+                field: "ui.public_git_url",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn auth_and_probe_env_parsers_reject_invalid_numbers_and_bools() {
         let auth_values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "bad")]);
         let auth_err =
