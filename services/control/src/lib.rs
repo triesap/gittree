@@ -1426,6 +1426,179 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FailingControlRepositories {
+        inner: Arc<InMemoryRepositories>,
+        fail_upsert_tenant: bool,
+        fail_upsert_membership: bool,
+    }
+
+    impl FailingControlRepositories {
+        fn new(
+            inner: Arc<InMemoryRepositories>,
+            fail_upsert_tenant: bool,
+            fail_upsert_membership: bool,
+        ) -> Self {
+            Self {
+                inner,
+                fail_upsert_tenant,
+                fail_upsert_membership,
+            }
+        }
+    }
+
+    fn forced_storage_error(message: &str) -> StorageError {
+        StorageError::Internal {
+            message: message.to_string(),
+        }
+    }
+
+    #[async_trait]
+    impl AccountRepository for FailingControlRepositories {
+        async fn upsert_account(&self, record: AccountRecord) -> Result<(), StorageError> {
+            self.inner.upsert_account(record).await
+        }
+
+        async fn account_by_pubkey(
+            &self,
+            pubkey: &[u8],
+        ) -> Result<Option<AccountRecord>, StorageError> {
+            self.inner.account_by_pubkey(pubkey).await
+        }
+
+        async fn account_by_username(
+            &self,
+            username: &str,
+        ) -> Result<Option<AccountRecord>, StorageError> {
+            self.inner.account_by_username(username).await
+        }
+    }
+
+    #[async_trait]
+    impl RelayPublishRepository for FailingControlRepositories {
+        async fn enqueue_relay_publish(
+            &self,
+            request: gittree_storage::RelayPublishRequest,
+        ) -> Result<(), StorageError> {
+            self.inner.enqueue_relay_publish(request).await
+        }
+
+        async fn claim_relay_publish(
+            &self,
+            now: OffsetDateTime,
+        ) -> Result<Option<gittree_storage::RelayPublishJob>, StorageError> {
+            self.inner.claim_relay_publish(now).await
+        }
+
+        async fn mark_relay_publish_succeeded(&self, id: i64) -> Result<(), StorageError> {
+            self.inner.mark_relay_publish_succeeded(id).await
+        }
+
+        async fn mark_relay_publish_failed(
+            &self,
+            id: i64,
+            error: &str,
+            retry_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .mark_relay_publish_failed(id, error, retry_at)
+                .await
+        }
+
+        async fn pending_relay_publishes(
+            &self,
+            pubkey: &[u8],
+            identifier: &str,
+            kind: u32,
+        ) -> Result<i64, StorageError> {
+            self.inner
+                .pending_relay_publishes(pubkey, identifier, kind)
+                .await
+        }
+    }
+
+    #[async_trait]
+    impl RelayTenantRepository for FailingControlRepositories {
+        async fn upsert_tenant(
+            &self,
+            record: gittree_storage::RelayTenantRecord,
+        ) -> Result<(), StorageError> {
+            if self.fail_upsert_tenant {
+                return Err(forced_storage_error("forced tenant upsert failure"));
+            }
+            self.inner.upsert_tenant(record).await
+        }
+
+        async fn tenant_by_id(
+            &self,
+            tenant_id: &str,
+        ) -> Result<Option<gittree_storage::RelayTenantRecord>, StorageError> {
+            self.inner.tenant_by_id(tenant_id).await
+        }
+
+        async fn tenant_by_host(
+            &self,
+            host: &str,
+        ) -> Result<Option<gittree_storage::RelayTenantRecord>, StorageError> {
+            self.inner.tenant_by_host(host).await
+        }
+
+        async fn list_tenants(&self) -> Result<Vec<gittree_storage::RelayTenantRecord>, StorageError> {
+            self.inner.list_tenants().await
+        }
+    }
+
+    #[async_trait]
+    impl RelayMembershipRepository for FailingControlRepositories {
+        async fn upsert_membership(
+            &self,
+            record: gittree_storage::RelayMembershipRecord,
+        ) -> Result<(), StorageError> {
+            if self.fail_upsert_membership {
+                return Err(forced_storage_error("forced membership upsert failure"));
+            }
+            self.inner.upsert_membership(record).await
+        }
+
+        async fn membership_by_pubkey(
+            &self,
+            tenant_id: &str,
+            pubkey: &[u8],
+        ) -> Result<Option<gittree_storage::RelayMembershipRecord>, StorageError> {
+            self.inner.membership_by_pubkey(tenant_id, pubkey).await
+        }
+
+        async fn list_memberships(
+            &self,
+            tenant_id: &str,
+        ) -> Result<Vec<gittree_storage::RelayMembershipRecord>, StorageError> {
+            self.inner.list_memberships(tenant_id).await
+        }
+
+        async fn remove_membership(&self, tenant_id: &str, pubkey: &[u8]) -> Result<bool, StorageError> {
+            self.inner.remove_membership(tenant_id, pubkey).await
+        }
+
+        async fn insert_invite(
+            &self,
+            record: gittree_storage::RelayInviteRecord,
+        ) -> Result<(), StorageError> {
+            self.inner.insert_invite(record).await
+        }
+
+        async fn invite_by_code(
+            &self,
+            tenant_id: &str,
+            invite_code: &str,
+        ) -> Result<Option<gittree_storage::RelayInviteRecord>, StorageError> {
+            self.inner.invite_by_code(tenant_id, invite_code).await
+        }
+
+        async fn delete_invite(&self, tenant_id: &str, invite_code: &str) -> Result<(), StorageError> {
+            self.inner.delete_invite(tenant_id, invite_code).await
+        }
+    }
+
     fn test_config() -> ForgejoConfig {
         ForgejoConfig {
             base_url: "http://localhost:3000".to_string(),
@@ -2133,6 +2306,188 @@ mod tests {
             message: "storage exploded".to_string(),
         });
         assert!(matches!(err, ControlHttpError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn failing_control_repositories_exercises_delegate_methods() {
+        let inner = Arc::new(InMemoryRepositories::new());
+        let repositories = FailingControlRepositories::new(inner.clone(), false, false);
+        let pubkey_hex = "11".repeat(32);
+        let pubkey_bytes = hex::decode(&pubkey_hex).expect("pubkey");
+
+        let account = AccountRecord::new(&pubkey_hex, "alice").expect("account");
+        repositories
+            .upsert_account(account.clone())
+            .await
+            .expect("upsert account");
+        assert!(
+            repositories
+                .account_by_pubkey(&pubkey_bytes)
+                .await
+                .expect("account by pubkey")
+                .is_some()
+        );
+        assert!(
+            repositories
+                .account_by_username("alice")
+                .await
+                .expect("account by username")
+                .is_some()
+        );
+
+        let tenant = gittree_storage::RelayTenantRecord::new(
+            "tenant-1",
+            "relay.local",
+            &pubkey_hex,
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            "v1",
+            Some("Relay".to_string()),
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            10,
+            10,
+        )
+        .expect("tenant");
+        repositories
+            .upsert_tenant(tenant.clone())
+            .await
+            .expect("upsert tenant");
+        assert!(
+            repositories
+                .tenant_by_id(&tenant.id)
+                .await
+                .expect("tenant by id")
+                .is_some()
+        );
+        assert!(
+            repositories
+                .tenant_by_host(&tenant.host)
+                .await
+                .expect("tenant by host")
+                .is_some()
+        );
+        assert!(
+            !repositories
+                .list_tenants()
+                .await
+                .expect("list tenants")
+                .is_empty()
+        );
+
+        let membership = gittree_storage::RelayMembershipRecord::new(
+            tenant.id.clone(),
+            &pubkey_hex,
+            "owner",
+            "active",
+            10,
+            10,
+        )
+        .expect("membership");
+        repositories
+            .upsert_membership(membership.clone())
+            .await
+            .expect("upsert membership");
+        assert!(
+            repositories
+                .membership_by_pubkey(&tenant.id, &pubkey_bytes)
+                .await
+                .expect("membership by pubkey")
+                .is_some()
+        );
+        assert!(
+            !repositories
+                .list_memberships(&tenant.id)
+                .await
+                .expect("list memberships")
+                .is_empty()
+        );
+
+        let invite = gittree_storage::RelayInviteRecord::new(
+            tenant.id.clone(),
+            "invite-1",
+            "member",
+            &pubkey_hex,
+            None,
+            Some(20),
+            10,
+        )
+        .expect("invite");
+        repositories
+            .insert_invite(invite.clone())
+            .await
+            .expect("insert invite");
+        assert!(
+            repositories
+                .invite_by_code(&tenant.id, &invite.invite_code)
+                .await
+                .expect("invite by code")
+                .is_some()
+        );
+        repositories
+            .delete_invite(&tenant.id, &invite.invite_code)
+            .await
+            .expect("delete invite");
+        assert!(
+            repositories
+                .invite_by_code(&tenant.id, &invite.invite_code)
+                .await
+                .expect("invite removed")
+                .is_none()
+        );
+        assert!(
+            repositories
+                .remove_membership(&tenant.id, &pubkey_bytes)
+                .await
+                .expect("remove membership")
+        );
+
+        let publish = gittree_storage::RelayPublishRequest {
+            relay_url: "wss://relay.local".to_string(),
+            event_id: "22".repeat(32),
+            pubkey: pubkey_hex.clone(),
+            created_at: 10,
+            kind: 30_117,
+            tags: vec![vec!["d".to_string(), "demo".to_string()]],
+            content: String::new(),
+            sig: "33".repeat(64),
+            forgejo_owner: "alice".to_string(),
+            forgejo_repo: "demo".to_string(),
+            identifier: "demo".to_string(),
+        };
+        repositories
+            .enqueue_relay_publish(publish)
+            .await
+            .expect("enqueue publish");
+        let pending = repositories
+            .pending_relay_publishes(&pubkey_bytes, "demo", 30_117)
+            .await
+            .expect("pending count");
+        assert_eq!(pending, 1);
+        let job = repositories
+            .claim_relay_publish(OffsetDateTime::now_utc())
+            .await
+            .expect("claim publish")
+            .expect("job");
+        repositories
+            .mark_relay_publish_failed(job.id, "err", OffsetDateTime::now_utc())
+            .await
+            .expect("mark failed");
+        repositories
+            .mark_relay_publish_succeeded(job.id)
+            .await
+            .expect("mark succeeded");
+
+        let fail_tenant = FailingControlRepositories::new(inner.clone(), true, false);
+        assert!(fail_tenant.upsert_tenant(tenant.clone()).await.is_err());
+
+        let fail_membership = FailingControlRepositories::new(inner, false, true);
+        assert!(fail_membership.upsert_membership(membership).await.is_err());
     }
 
     #[test]
@@ -3095,6 +3450,80 @@ mod tests {
             .expect("membership lookup")
             .expect("membership");
         assert_eq!(membership.role, "owner");
+    }
+
+    #[tokio::test]
+    async fn create_tenant_returns_internal_when_tenant_upsert_fails() {
+        let (mut state, _transport, repos) = test_state(Vec::new());
+        state.repositories = Arc::new(FailingControlRepositories::new(repos, true, false));
+        let (_pubkey, privkey) = test_keys();
+        let body = serde_json::to_vec(&json!({
+            "host": "relay.local",
+            "name": "Relay Local"
+        }))
+        .expect("body");
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_returns_internal_when_membership_upsert_fails() {
+        let (mut state, _transport, repos) = test_state(Vec::new());
+        state.repositories = Arc::new(FailingControlRepositories::new(repos, false, true));
+        let (_pubkey, privkey) = test_keys();
+        let body = serde_json::to_vec(&json!({
+            "host": "relay.local",
+            "name": "Relay Local"
+        }))
+        .expect("body");
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
