@@ -403,15 +403,16 @@ where
             .ok_or_else(|| RelayAdapterError::Transport("relay closed".to_string()))?
             .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
         if let Some((ok_id, ok, reason)) = parse_ok_message(&msg)? {
-            if ok_id == event_id {
-                if ok {
-                    return Ok(());
-                }
-                return Err(RelayAdapterError::Protocol(format!(
-                    "event rejected: {}",
-                    reason.unwrap_or_else(|| "unknown".to_string())
-                )));
+            if ok_id != event_id {
+                continue;
             }
+            if ok {
+                return Ok(());
+            }
+            return Err(RelayAdapterError::Protocol(format!(
+                "event rejected: {}",
+                reason.unwrap_or_else(|| "unknown".to_string())
+            )));
         }
     }
 }
@@ -437,11 +438,12 @@ where
             .ok_or_else(|| RelayAdapterError::Transport("relay closed".to_string()))?
             .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
         if let Some((event_sub_id, event)) = parse_event_message(&msg)? {
-            if event_sub_id == sub_id {
-                if let Some(id) = event.get("id").and_then(|value| value.as_str()) {
-                    if id == event_id {
-                        return Ok(());
-                    }
+            if event_sub_id != sub_id {
+                continue;
+            }
+            if let Some(id) = event.get("id").and_then(|value| value.as_str()) {
+                if id == event_id {
+                    return Ok(());
                 }
             }
         }
@@ -572,11 +574,10 @@ mod tests {
         })
         .await
         .expect_err("error");
-
-        let RelayAdapterError::Transport(message) = err else {
-            panic!("expected transport error, got {err}");
-        };
-        assert!(message.contains("boom"), "{message}");
+        assert!(matches!(
+            &err,
+            RelayAdapterError::Transport(message) if message.contains("boom")
+        ));
     }
 
     #[test]
