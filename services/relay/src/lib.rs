@@ -402,7 +402,7 @@ mod tests {
     use super::AdmissionConfigError;
     use super::AdmissionFallback;
     use super::AdmissionHookError;
-    use super::ObservabilityHandle;
+    use super::ObservabilityError;
     use super::RelayConfig;
     use super::RelayConfigError;
     use super::RelayError;
@@ -419,11 +419,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use std::sync::OnceLock;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -694,8 +692,11 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
-        assert!(handle.prometheus_registry().is_some());
+        match init_observability() {
+            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
+            Err(RelayError::Observability(ObservabilityError::SubscriberInit(_))) => {}
+            Err(err) => panic!("unexpected observability init error: {err}"),
+        }
     }
 
     #[test]

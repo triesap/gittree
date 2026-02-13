@@ -75,11 +75,10 @@ where
     E: std::fmt::Display,
     S: IntoFuture<Output = Result<(), E>>,
 {
-    server
-        .into_future()
-        .await
-        .map_err(|err| RelayError::Serve(err.to_string()))?;
-    Ok(())
+    match server.into_future().await {
+        Ok(()) => Ok(()),
+        Err(err) => Err(RelayError::Serve(err.to_string())),
+    }
 }
 
 fn build_state(config: RelayConfig) -> Result<RelayState, RelayError> {
@@ -112,9 +111,10 @@ fn build_state(config: RelayConfig) -> Result<RelayState, RelayError> {
 }
 
 async fn bind_listener(bind: &str) -> Result<tokio::net::TcpListener, RelayError> {
-    tokio::net::TcpListener::bind(bind)
-        .await
-        .map_err(|err| RelayError::Serve(err.to_string()))
+    match tokio::net::TcpListener::bind(bind).await {
+        Ok(listener) => Ok(listener),
+        Err(err) => Err(RelayError::Serve(err.to_string())),
+    }
 }
 
 fn build_router(state: Arc<RelayState>) -> Router {
@@ -1283,10 +1283,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_returns_serve_error_for_invalid_bind_address() {
+        let mut config = sample_config();
+        config.bind = "127.0.0.1:99999".to_string();
+        let err = super::serve(config).await.expect_err("invalid bind");
+        assert!(matches!(err, RelayError::Serve(_)));
+    }
+
+    #[tokio::test]
     async fn run_server_returns_ok_when_future_is_ok() {
         super::run_server::<std::io::Error, _>(async { Ok(()) })
             .await
             .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn run_server_accepts_axum_server_with_graceful_shutdown_type() {
+        let state = build_state(sample_config()).expect("state");
+        let app = build_router(Arc::new(state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {});
+        super::run_server(server).await.expect("graceful shutdown");
+    }
+
+    #[tokio::test]
+    async fn run_server_polls_axum_server_with_shutdown_signal_type() {
+        let state = build_state(sample_config()).expect("state");
+        let app = build_router(Arc::new(state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+        let result = tokio::time::timeout(Duration::from_millis(20), super::run_server(server)).await;
+        assert!(result.is_err(), "run_server should still be pending without a shutdown signal");
     }
 
     #[tokio::test]
