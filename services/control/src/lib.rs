@@ -293,10 +293,10 @@ where
     E: std::fmt::Display,
     Fut: std::future::IntoFuture<Output = Result<(), E>>,
 {
-    server
-        .into_future()
-        .await
-        .map_err(|err| ControlError::Serve(err.to_string()))
+    match server.into_future().await {
+        Ok(()) => Ok(()),
+        Err(err) => Err(ControlError::Serve(err.to_string())),
+    }
 }
 
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
@@ -323,9 +323,10 @@ pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
         repo_private_default,
     };
     let router = build_router(state);
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .map_err(|err| ControlError::Serve(err.to_string()))?;
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(value) => value,
+        Err(err) => return Err(ControlError::Serve(err.to_string())),
+    };
     run_server(axum::serve(listener, router)).await
 }
 

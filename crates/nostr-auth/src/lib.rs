@@ -177,11 +177,13 @@ fn require_hex(field: &'static str, value: &str, len: usize) -> Result<(), Nip98
 }
 
 fn tag_value<'a>(tags: &'a [Vec<String>], key: &str) -> Option<&'a str> {
-    tags.iter()
-        .find_map(|tag| match tag.as_slice() {
-            [tag_key, tag_value, ..] if tag_key == key => Some(tag_value.as_str()),
-            _ => None,
-        })
+    for tag in tags {
+        match tag.as_slice() {
+            [tag_key, tag_value, ..] if tag_key == key => return Some(tag_value.as_str()),
+            _ => continue,
+        }
+    }
+    None
 }
 
 fn build_event_id(event: &Nip98Event) -> Result<String, Nip98Error> {
@@ -193,8 +195,10 @@ fn build_event_id(event: &Nip98Event) -> Result<String, Nip98Error> {
         event.tags,
         event.content
     ]);
-    let serialized =
-        serde_json::to_string(&payload).map_err(|err| Nip98Error::InvalidEventEncoding(err.to_string()))?;
+    let serialized = match serde_json::to_string(&payload) {
+        Ok(value) => value,
+        Err(err) => return Err(Nip98Error::InvalidEventEncoding(err.to_string())),
+    };
     let mut hasher = sha2::Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
@@ -202,14 +206,30 @@ fn build_event_id(event: &Nip98Event) -> Result<String, Nip98Error> {
 }
 
 fn verify_signature(event: &Nip98Event) -> Result<(), Nip98Error> {
-    let event_id = hex::decode(&event.id).map_err(|_| Nip98Error::InvalidEventIdEncoding)?;
-    let msg = Message::from_digest_slice(&event_id).map_err(|_| Nip98Error::InvalidEventIdEncoding)?;
-    let sig_bytes = hex::decode(&event.sig).map_err(|_| Nip98Error::InvalidSignatureEncoding)?;
-    let sig = secp256k1::schnorr::Signature::from_slice(&sig_bytes)
-        .map_err(|_| Nip98Error::InvalidSignatureEncoding)?;
-    let pubkey_bytes = hex::decode(&event.pubkey).map_err(|_| Nip98Error::InvalidPublicKey)?;
-    let pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes)
-        .map_err(|_| Nip98Error::InvalidPublicKey)?;
+    let event_id = match hex::decode(&event.id) {
+        Ok(value) => value,
+        Err(_) => return Err(Nip98Error::InvalidEventIdEncoding),
+    };
+    let msg = match Message::from_digest_slice(&event_id) {
+        Ok(value) => value,
+        Err(_) => return Err(Nip98Error::InvalidEventIdEncoding),
+    };
+    let sig_bytes = match hex::decode(&event.sig) {
+        Ok(value) => value,
+        Err(_) => return Err(Nip98Error::InvalidSignatureEncoding),
+    };
+    let sig = match secp256k1::schnorr::Signature::from_slice(&sig_bytes) {
+        Ok(value) => value,
+        Err(_) => return Err(Nip98Error::InvalidSignatureEncoding),
+    };
+    let pubkey_bytes = match hex::decode(&event.pubkey) {
+        Ok(value) => value,
+        Err(_) => return Err(Nip98Error::InvalidPublicKey),
+    };
+    let pubkey = match XOnlyPublicKey::from_slice(&pubkey_bytes) {
+        Ok(value) => value,
+        Err(_) => return Err(Nip98Error::InvalidPublicKey),
+    };
     let secp = Secp256k1::verification_only();
     secp.verify_schnorr(&sig, &msg, &pubkey)
         .map_err(|_| Nip98Error::InvalidSignature)
