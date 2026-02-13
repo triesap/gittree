@@ -1429,6 +1429,7 @@ mod tests {
     #[derive(Clone)]
     struct FailingControlRepositories {
         inner: Arc<InMemoryRepositories>,
+        fail_tenant_lookup: bool,
         fail_upsert_tenant: bool,
         fail_upsert_membership: bool,
     }
@@ -1436,11 +1437,13 @@ mod tests {
     impl FailingControlRepositories {
         fn new(
             inner: Arc<InMemoryRepositories>,
+            fail_tenant_lookup: bool,
             fail_upsert_tenant: bool,
             fail_upsert_membership: bool,
         ) -> Self {
             Self {
                 inner,
+                fail_tenant_lookup,
                 fail_upsert_tenant,
                 fail_upsert_membership,
             }
@@ -1540,6 +1543,9 @@ mod tests {
             &self,
             host: &str,
         ) -> Result<Option<gittree_storage::RelayTenantRecord>, StorageError> {
+            if self.fail_tenant_lookup {
+                return Err(forced_storage_error("forced tenant lookup failure"));
+            }
             self.inner.tenant_by_host(host).await
         }
 
@@ -1931,7 +1937,76 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("invalid bind should fail");
-            assert!(matches!(err, super::ControlError::Serve(_)));
+            match err {
+                super::ControlError::Serve(_) => {}
+                super::ControlError::Observability(_) => {}
+                other => panic!("unexpected serve error variant: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn serve_maps_observability_and_storage_errors_before_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        with_env_var("GITTREE_LOG_JSON", "not-a-bool", || {
+            let config = ControlConfig {
+                bind: "127.0.0.1:0".to_string(),
+                auth: ControlAuthConfig {
+                    token: "token".to_string(),
+                    admin_keys: Vec::new(),
+                },
+                forgejo: test_config(),
+                storage: gittree_storage::StorageConfig {
+                    read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                    write_connection: None,
+                    max_connections: 10,
+                    min_connections: 2,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: None,
+                },
+                relay_urls: vec!["ws://relay.local".to_string()],
+                public_git_url: "http://localhost:8085".to_string(),
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let err = runtime
+                .block_on(async { super::serve(config).await })
+                .expect_err("observability config should fail");
+            assert!(matches!(err, super::ControlError::ObservabilityConfig(_)));
+        });
+
+        with_env_var("GITTREE_LOG_JSON", "false", || {
+            let config = ControlConfig {
+                bind: "127.0.0.1:0".to_string(),
+                auth: ControlAuthConfig {
+                    token: "token".to_string(),
+                    admin_keys: Vec::new(),
+                },
+                forgejo: test_config(),
+                storage: gittree_storage::StorageConfig {
+                    read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                    write_connection: None,
+                    max_connections: 1,
+                    min_connections: 2,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: None,
+                },
+                relay_urls: vec!["ws://relay.local".to_string()],
+                public_git_url: "http://localhost:8085".to_string(),
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let err = runtime
+                .block_on(async { super::serve(config).await })
+                .expect_err("storage config should fail");
+            assert!(matches!(err, super::ControlError::Storage(_)));
         });
     }
 
@@ -2276,6 +2351,23 @@ mod tests {
     }
 
     #[test]
+    fn storage_from_env_parses_optional_pool_settings() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(super::ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "3", || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", || {
+                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "300", || {
+                        let config = super::storage_from_env().expect("storage config");
+                        assert_eq!(config.min_connections, 3);
+                        assert_eq!(config.idle_timeout_secs, Some(60));
+                        assert_eq!(config.max_lifetime_secs, Some(300));
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
     fn build_repositories_maps_invalid_pool_config_to_control_error() {
         let config = super::ControlConfig {
             bind: "127.0.0.1:0".to_string(),
@@ -2311,7 +2403,7 @@ mod tests {
     #[tokio::test]
     async fn failing_control_repositories_exercises_delegate_methods() {
         let inner = Arc::new(InMemoryRepositories::new());
-        let repositories = FailingControlRepositories::new(inner.clone(), false, false);
+        let repositories = FailingControlRepositories::new(inner.clone(), false, false, false);
         let pubkey_hex = "11".repeat(32);
         let pubkey_bytes = hex::decode(&pubkey_hex).expect("pubkey");
 
@@ -2483,10 +2575,10 @@ mod tests {
             .await
             .expect("mark succeeded");
 
-        let fail_tenant = FailingControlRepositories::new(inner.clone(), true, false);
+        let fail_tenant = FailingControlRepositories::new(inner.clone(), false, true, false);
         assert!(fail_tenant.upsert_tenant(tenant.clone()).await.is_err());
 
-        let fail_membership = FailingControlRepositories::new(inner, false, true);
+        let fail_membership = FailingControlRepositories::new(inner, false, false, true);
         assert!(fail_membership.upsert_membership(membership).await.is_err());
     }
 
@@ -2767,6 +2859,40 @@ mod tests {
                     .header("host", "localhost")
                     .header(AUTH_HEADER, nostr_auth_header(&auth_event))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_missing_host_header() {
+        let (state, _transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let body = serde_json::to_vec(&json!({
+            "host": "relay.local",
+            "name": "Relay Local"
+        }))
+        .expect("body");
+        let now = super::unix_timestamp();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
@@ -3455,7 +3581,44 @@ mod tests {
     #[tokio::test]
     async fn create_tenant_returns_internal_when_tenant_upsert_fails() {
         let (mut state, _transport, repos) = test_state(Vec::new());
-        state.repositories = Arc::new(FailingControlRepositories::new(repos, true, false));
+        state.repositories = Arc::new(FailingControlRepositories::new(repos, false, true, false));
+        let (_pubkey, privkey) = test_keys();
+        let body = serde_json::to_vec(&json!({
+            "host": "relay.local",
+            "name": "Relay Local"
+        }))
+        .expect("body");
+        let secret_bytes = hex::decode(&privkey).expect("privkey");
+        let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
+        let now = super::unix_timestamp();
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/relay/tenants",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/relay/tenants")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, nostr_auth_header(&auth_event))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn create_tenant_returns_internal_when_host_lookup_fails() {
+        let (mut state, _transport, repos) = test_state(Vec::new());
+        state.repositories = Arc::new(FailingControlRepositories::new(repos, true, false, false));
         let (_pubkey, privkey) = test_keys();
         let body = serde_json::to_vec(&json!({
             "host": "relay.local",
@@ -3492,7 +3655,7 @@ mod tests {
     #[tokio::test]
     async fn create_tenant_returns_internal_when_membership_upsert_fails() {
         let (mut state, _transport, repos) = test_state(Vec::new());
-        state.repositories = Arc::new(FailingControlRepositories::new(repos, false, true));
+        state.repositories = Arc::new(FailingControlRepositories::new(repos, false, false, true));
         let (_pubkey, privkey) = test_keys();
         let body = serde_json::to_vec(&json!({
             "host": "relay.local",
@@ -3923,6 +4086,59 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_rejects_invalid_privkey_hex_and_scalar() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let (pubkey, _privkey) = test_keys();
+        let app = build_router(state);
+
+        let invalid_hex = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": pubkey,
+                            "privkey": "zzzz"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(invalid_hex.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let invalid_scalar = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": test_keys().0,
+                            "privkey": "00".repeat(32)
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(invalid_scalar.status(), axum::http::StatusCode::BAD_REQUEST);
         assert!(transport.requests().is_empty());
     }
 
