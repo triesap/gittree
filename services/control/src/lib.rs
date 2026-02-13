@@ -2750,6 +2750,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_user_returns_internal_on_forgejo_error() {
+        let responses = vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }];
+        let (state, transport, _repos) = test_state(responses);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/users")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "username":"alice",
+                            "email":"alice@example.com",
+                            "password":"secret"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn create_org_posts_to_admin_endpoint() {
         let responses = vec![ForgejoResponse {
             status: 201,
@@ -2781,6 +2812,37 @@ mod tests {
         assert!(requests[0]
             .url
             .ends_with("/api/v1/admin/users/admin/orgs"));
+    }
+
+    #[tokio::test]
+    async fn create_org_returns_internal_on_forgejo_error() {
+        let responses = vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }];
+        let (state, transport, _repos) = test_state(responses);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/orgs")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"admin",
+                            "name":"acme",
+                            "full_name":"Acme Org"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(transport.requests().len(), 1);
     }
 
     #[tokio::test]
@@ -3674,6 +3736,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_pull_returns_internal_on_forgejo_error() {
+        let responses = vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }];
+        let (state, transport, _repos) = test_state(responses);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/pulls")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "repo":"demo",
+                            "head":"feature",
+                            "base":"main",
+                            "title":"Add thing"
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn control_event_rejects_non_admin_pubkey() {
         let (pubkey, privkey) = test_keys();
         let (state, _transport, _repos) = test_state_with_auth(
@@ -4134,6 +4229,35 @@ mod tests {
         let relay_urls = vec!["ws://relay.local".to_string()];
         let err = super::validate_repo_announcement_event(&event, &event.pubkey, &relay_urls, " ")
             .expect_err("invalid public git url should fail");
+        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn validate_repo_announcement_event_rejects_missing_clone_after_tag_parse() {
+        let (_pubkey, privkey) = test_keys();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let tags = vec![
+            vec!["d".to_string(), "demo".to_string()],
+            vec!["relays".to_string(), "ws://relay.local".to_string()],
+        ];
+        let event = api_event_from_relay(
+            RelaySignedNostrEvent::signed(
+                super::unix_timestamp(),
+                gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT.0,
+                tags,
+                String::new(),
+                &secret,
+            )
+            .expect("signed"),
+        );
+        let relay_urls = vec!["ws://relay.local".to_string()];
+        let err = super::validate_repo_announcement_event(
+            &event,
+            &event.pubkey,
+            &relay_urls,
+            "http://localhost:8085",
+        )
+        .expect_err("missing clone tag should fail validation");
         assert!(matches!(err, ControlHttpError::BadRequest(_)));
     }
 
