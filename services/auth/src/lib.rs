@@ -797,6 +797,76 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct ScriptedAccountRepository {
+        account: Option<AccountRecord>,
+        lookup_error: Option<String>,
+        upsert_error: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountRepository for ScriptedAccountRepository {
+        async fn upsert_account(&self, _record: AccountRecord) -> Result<(), StorageError> {
+            if let Some(message) = self.upsert_error.as_ref() {
+                return Err(StorageError::Internal {
+                    message: message.clone(),
+                });
+            }
+            Ok(())
+        }
+
+        async fn account_by_pubkey(&self, _pubkey: &[u8]) -> Result<Option<AccountRecord>, StorageError> {
+            if let Some(message) = self.lookup_error.as_ref() {
+                return Err(StorageError::Internal {
+                    message: message.clone(),
+                });
+            }
+            Ok(self.account.clone())
+        }
+
+        async fn account_by_username(&self, username: &str) -> Result<Option<AccountRecord>, StorageError> {
+            if let Some(message) = self.lookup_error.as_ref() {
+                return Err(StorageError::Internal {
+                    message: message.clone(),
+                });
+            }
+            let account = self
+                .account
+                .as_ref()
+                .filter(|account| account.forgejo_username == username)
+                .cloned();
+            Ok(account)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ScriptedProfileRepository {
+        profile: Option<ProfileRecord>,
+        lookup_error: Option<String>,
+        upsert_error: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProfileRepository for ScriptedProfileRepository {
+        async fn upsert_profile(&self, _record: ProfileRecord) -> Result<(), StorageError> {
+            if let Some(message) = self.upsert_error.as_ref() {
+                return Err(StorageError::Internal {
+                    message: message.clone(),
+                });
+            }
+            Ok(())
+        }
+
+        async fn profile_by_pubkey(&self, _pubkey: &[u8]) -> Result<Option<ProfileRecord>, StorageError> {
+            if let Some(message) = self.lookup_error.as_ref() {
+                return Err(StorageError::Internal {
+                    message: message.clone(),
+                });
+            }
+            Ok(self.profile.clone())
+        }
+    }
+
     fn test_config() -> ForgejoConfig {
         ForgejoConfig {
             base_url: "http://localhost:3000".to_string(),
@@ -835,6 +905,26 @@ mod tests {
             profiles: repositories.clone(),
         };
         (state, repositories, transport)
+    }
+
+    fn scripted_state(
+        responses: Vec<ForgejoResponse>,
+        accounts: Arc<dyn AccountRepository>,
+        profiles: Arc<dyn ProfileRepository>,
+    ) -> (AuthAppState, Arc<MockTransport>) {
+        let transport = Arc::new(MockTransport::new(responses));
+        let transport_dyn: Arc<dyn ForgejoTransport> = transport.clone();
+        let forgejo = ForgejoClient::with_transport(test_config(), transport_dyn);
+        let state = AuthAppState {
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo,
+            accounts,
+            profiles,
+        };
+        (state, transport)
     }
 
     fn signed_event(
@@ -1321,6 +1411,145 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    #[tokio::test]
+    async fn signup_returns_internal_when_account_lookup_fails() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "POST", now, None);
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            lookup_error: Some("account lookup failed".to_string()),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_empty_username_from_forgejo_response() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "POST", now, None);
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: String::new(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: r#"{"login":"","username":"","email":"empty@example.com"}"#.to_string(),
+            },
+        ];
+        let (state, _repos, _transport) = test_state(responses);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn signup_returns_internal_when_account_upsert_fails() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "POST", now, None);
+        let username = username_from_pubkey(&event.pubkey).expect("username");
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: String::new(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: user_json(&username),
+            },
+        ];
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            upsert_error: Some("account upsert failed".to_string()),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(responses, accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn signup_returns_internal_when_profile_upsert_fails() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "POST", now, None);
+        let username = username_from_pubkey(&event.pubkey).expect("username");
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: String::new(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: user_json(&username),
+            },
+        ];
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository::default());
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository {
+            upsert_error: Some("profile upsert failed".to_string()),
+            ..ScriptedProfileRepository::default()
+        });
+        let (state, _transport) = scripted_state(responses, accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[test]
     fn auth_http_error_internal_maps_to_500() {
         let response = AuthHttpError::Internal("boom".to_string()).into_response();
@@ -1685,6 +1914,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_get_rejects_invalid_nip98_signature_context() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let event = signed_event(url, "PATCH", now, None);
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn profile_get_returns_internal_when_account_lookup_fails() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let event = signed_event(url, "GET", now, None);
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            lookup_error: Some("account lookup failed".to_string()),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn profile_patch_updates_profile() {
         let now = unix_timestamp();
         let url = "http://localhost/v1/profile";
@@ -1836,6 +2116,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_patch_rejects_invalid_nip98_signature_context() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let update = ProfileUpdate {
+            display_name: Some("Ada".to_string()),
+            ..ProfileUpdate::default()
+        };
+        let body = Bytes::from(serde_json::to_vec(&update).expect("update json"));
+        let hash = payload_hash(&body).expect("hash");
+        let event = signed_event(url, "GET", now, Some(&hash));
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn profile_patch_returns_internal_when_account_lookup_fails() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let update = ProfileUpdate {
+            display_name: Some("Ada".to_string()),
+            ..ProfileUpdate::default()
+        };
+        let body = Bytes::from(serde_json::to_vec(&update).expect("update json"));
+        let hash = payload_hash(&body).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&hash));
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            lookup_error: Some("account lookup failed".to_string()),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn profile_patch_returns_internal_when_profile_upsert_fails() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let update = ProfileUpdate {
+            display_name: Some("Ada".to_string()),
+            ..ProfileUpdate::default()
+        };
+        let body = Bytes::from(serde_json::to_vec(&update).expect("update json"));
+        let hash = payload_hash(&body).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&hash));
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
+        let profile = ProfileRecord::new(
+            &event.pubkey,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+            StorageProfileVisibility::Private,
+            now,
+            now,
+        )
+        .expect("profile");
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            account: Some(account),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository {
+            profile: Some(profile),
+            upsert_error: Some("profile upsert failed".to_string()),
+            ..ScriptedProfileRepository::default()
+        });
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn profile_public_returns_profile_for_public() {
         let now = unix_timestamp();
         let event = signed_event("http://localhost/v1/profile", "GET", now, None);
@@ -1952,5 +2349,88 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn profile_public_returns_not_found_when_profile_is_missing() {
+        let now = unix_timestamp();
+        let event = signed_event("http://localhost/v1/profile", "GET", now, None);
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let npub = npub_from_bytes(&pubkey_bytes).expect("npub");
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            account: Some(account),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/profile/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn profile_public_returns_internal_when_account_lookup_fails() {
+        let now = unix_timestamp();
+        let event = signed_event("http://localhost/v1/profile", "GET", now, None);
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let npub = npub_from_bytes(&pubkey_bytes).expect("npub");
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            lookup_error: Some("account lookup failed".to_string()),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/profile/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn profile_public_returns_internal_when_profile_lookup_fails() {
+        let now = unix_timestamp();
+        let event = signed_event("http://localhost/v1/profile", "GET", now, None);
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
+        let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
+        let npub = npub_from_bytes(&pubkey_bytes).expect("npub");
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            account: Some(account),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository {
+            lookup_error: Some("profile lookup failed".to_string()),
+            ..ScriptedProfileRepository::default()
+        });
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/profile/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
