@@ -198,10 +198,12 @@ pub struct HttpAdmissionTransport {
 
 impl HttpAdmissionTransport {
     pub fn new(timeout: Duration) -> Result<Self, AdmissionHookError> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|err| AdmissionHookError::Transport(err.to_string()))?;
+        let builder = reqwest::Client::builder()
+            .timeout(timeout);
+        let client = match builder.build() {
+            Ok(client) => client,
+            Err(err) => return Err(AdmissionHookError::Transport(err.to_string())),
+        };
         Ok(Self { client })
     }
 }
@@ -691,6 +693,19 @@ mod tests {
             AdmissionFallback::Reject,
         );
         let client = AdmissionHookClient::new(config, transport);
+        let decision = decide_via_trait(&client, &sample_event()).await;
+        assert!(matches!(decision, AdmissionDecision::Accept));
+    }
+
+    #[tokio::test]
+    async fn admission_decider_trait_dispatches_to_http_client() {
+        let endpoint = spawn_accept_server().await;
+        let config = AdmissionHookConfig::new(
+            endpoint,
+            Duration::from_secs(1),
+            AdmissionFallback::Reject,
+        );
+        let client = AdmissionHookClient::new_http(config).expect("client");
         let decision = decide_via_trait(&client, &sample_event()).await;
         assert!(matches!(decision, AdmissionDecision::Accept));
     }

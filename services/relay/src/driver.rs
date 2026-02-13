@@ -91,11 +91,7 @@ impl<S: EventStore> SessionDriver<S> {
 fn encode_response(message: ServerMessage) -> String {
     match encode_server_message(&message) {
         Ok(serialized) => serialized,
-        Err(err) => {
-            let notice = Notice::message(err.to_string());
-            encode_server_message(&notice.into())
-                .unwrap_or_else(|_| "[\"NOTICE\",\"failed to encode response\"]".to_string())
-        }
+        Err(_) => "[\"NOTICE\",\"failed to encode response\"]".to_string(),
     }
 }
 
