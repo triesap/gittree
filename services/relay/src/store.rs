@@ -555,21 +555,28 @@ fn map_repo_err(err: gittree_storage::StorageError) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::{
-        EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome, collect_tag_values,
-        exact_hex_filters, parse_address,
+        EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome, apply_delete_repo,
+        apply_replaceable_repo, collect_tag_values, event_to_record, exact_hex_filters,
+        parse_address, replaceable_key,
     };
     use async_trait::async_trait;
     use crate::NostrEvent;
-    use gittree_storage::{EventQuery, EventRecord, EventRepository, InMemoryRepositories, StorageError};
+    use gittree_storage::{
+        EventQuery, EventRecord, EventRepository, InMemoryRepositories,
+        PostgresRepositories, StorageConfig, StorageError,
+        TagRecord,
+    };
     use serde_json::json;
+    use std::time::Duration;
     use std::sync::Arc;
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     struct ScriptedEventRepo {
         fail_insert: bool,
         fail_get: bool,
         fail_delete: bool,
         fail_query: bool,
+        query_results: Vec<EventRecord>,
     }
 
     impl ScriptedEventRepo {
@@ -579,6 +586,7 @@ mod tests {
                 fail_get: false,
                 fail_delete: false,
                 fail_query: false,
+                query_results: Vec::new(),
             }
         }
 
@@ -588,6 +596,7 @@ mod tests {
                 fail_get: true,
                 fail_delete: false,
                 fail_query: false,
+                query_results: Vec::new(),
             }
         }
 
@@ -597,6 +606,7 @@ mod tests {
                 fail_get: false,
                 fail_delete: false,
                 fail_query: true,
+                query_results: Vec::new(),
             }
         }
 
@@ -606,6 +616,17 @@ mod tests {
                 fail_get: false,
                 fail_delete: true,
                 fail_query: false,
+                query_results: Vec::new(),
+            }
+        }
+
+        fn with_query_results(query_results: Vec<EventRecord>) -> Self {
+            Self {
+                fail_insert: false,
+                fail_get: false,
+                fail_delete: false,
+                fail_query: false,
+                query_results,
             }
         }
     }
@@ -677,8 +698,26 @@ mod tests {
             if self.fail_delete {
                 return Ok(vec![delete_target_record()]);
             }
-            Ok(Vec::new())
+            Ok(self.query_results.clone())
         }
+    }
+
+    fn unreachable_postgres_repo() -> PostgresRepositories {
+        let storage = StorageConfig {
+            read_connection: "postgres://user:pass@127.0.0.1:1/gittree".to_string(),
+            write_connection: None,
+            max_connections: 1,
+            min_connections: 0,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: Some("gittree-store-test".to_string()),
+        };
+        let pool_options = storage
+            .pool_options()
+            .expect("pool options")
+            .acquire_timeout(Duration::from_secs(1));
+        let connect_options = storage.read_connect_options().expect("connect options");
+        PostgresRepositories::new(pool_options.connect_lazy_with(connect_options))
     }
 
     fn sample_event(id: &str) -> NostrEvent {
@@ -1212,6 +1251,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_store_scripted_query_post_filter_and_sort_paths() {
+        let mut older = sample_event(&"a1".repeat(32));
+        older.created_at = 10;
+        let mut newer = sample_event(&"a2".repeat(32));
+        newer.created_at = 10;
+        let records = vec![
+            event_to_record(&older, "default").expect("older record"),
+            event_to_record(&newer, "default").expect("newer record"),
+        ];
+        let store = RepositoryStore::new(ScriptedEventRepo::with_query_results(records));
+        let filter = crate::Filter::from_json(&json!({"ids": ["a"]})).expect("filter");
+        let results = store.query(&[filter]).await.expect("query");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, older.id);
+        assert_eq!(results[1].id, newer.id);
+    }
+
+    #[tokio::test]
+    async fn repository_store_scripted_query_post_filter_maps_tag_index_errors() {
+        let event = sample_event(&"af".repeat(32));
+        let mut record = event_to_record(&event, "default").expect("record");
+        record.tags = vec![TagRecord::new("", "broken")];
+        let store = RepositoryStore::new(ScriptedEventRepo::with_query_results(vec![record]));
+        let filter = crate::Filter::from_json(&json!({"ids": ["a"]})).expect("filter");
+        let err = store.query(&[filter]).await.expect_err("invalid tag index");
+        assert!(matches!(err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
     async fn repository_store_delete_event_propagates_lookup_and_address_query_errors() {
         let lookup_store = RepositoryStore::new(ScriptedEventRepo::get_error());
         let mut delete_lookup = sample_event(&"73".repeat(32));
@@ -1260,6 +1328,58 @@ mod tests {
             .await
             .expect_err("delete address should fail");
         assert!(matches!(query_err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn repository_store_postgres_eventstore_paths_surface_backend_errors() {
+        let store = RepositoryStore::new(unreachable_postgres_repo());
+        let insert_err = store
+            .insert(sample_event("not-hex-id"))
+            .await
+            .expect_err("insert should fail before backend call");
+        assert!(matches!(insert_err, StoreError::Backend(_)));
+
+        let id = "not-hex-id";
+        let get_err = store.get(&id).await.expect_err("postgres get should fail");
+        assert!(matches!(get_err, StoreError::Backend(_)));
+
+        let delete_err = store
+            .delete(&id)
+            .await
+            .expect_err("postgres delete should fail");
+        assert!(matches!(delete_err, StoreError::Backend(_)));
+
+        let query = store.query(&[]).await.expect("empty query");
+        assert!(query.is_empty());
+
+        let dyn_store: Arc<dyn EventStore> = Arc::new(RepositoryStore::new(unreachable_postgres_repo()));
+        let dyn_delete_err = EventStore::delete(&dyn_store, "still-not-hex")
+            .await
+            .expect_err("dyn delete should fail");
+        assert!(matches!(dyn_delete_err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn repository_store_postgres_helper_generics_are_exercised() {
+        let repo = unreachable_postgres_repo();
+
+        let mut delete = sample_event(&"84".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "not-hex".to_string();
+        delete.tags = vec![vec!["e".to_string(), "11".repeat(32)]];
+        let delete_err = apply_delete_repo(&repo, "default", &delete)
+            .await
+            .expect_err("invalid pubkey should fail");
+        assert!(matches!(delete_err, StoreError::Backend(_)));
+
+        let mut replaceable = sample_event(&"85".repeat(32));
+        replaceable.kind = 0;
+        replaceable.pubkey = "aa".repeat(32);
+        let key = replaceable_key(&replaceable).expect("replaceable key");
+        let replaceable_err = apply_replaceable_repo(&repo, "default", &replaceable, &key)
+            .await
+            .expect_err("postgres replaceable query should fail");
+        assert!(matches!(replaceable_err, StoreError::Backend(_)));
     }
 
     #[test]
