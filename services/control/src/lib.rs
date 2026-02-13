@@ -1934,6 +1934,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_nostr_auth_rejects_non_json_payload() {
+        let mut headers = HeaderMap::new();
+        let encoded = BASE64_STANDARD.encode(b"not-json");
+        headers.insert(
+            AUTH_HEADER,
+            format!("Nostr {encoded}").parse().expect("header"),
+        );
+        let err = parse_nostr_auth(&headers).unwrap_err();
+        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+    }
+
+    #[test]
     fn require_hex_len_and_npub_round_trip_cover_validation_edges() {
         let (pubkey, _) = test_keys();
         super::require_hex_len("pubkey", &pubkey, 64).expect("valid hex");
@@ -1956,6 +1968,8 @@ mod tests {
 
         let invalid = parse_secret_key(&"gg".repeat(32)).unwrap_err();
         assert!(matches!(invalid, ControlHttpError::BadRequest(_)));
+        let zero_scalar = parse_secret_key(&"00".repeat(32)).unwrap_err();
+        assert!(matches!(zero_scalar, ControlHttpError::BadRequest(_)));
 
         let now = super::unix_timestamp();
         assert!(now >= 1_600_000_000);
@@ -3909,6 +3923,40 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn create_repo_rejects_invalid_public_git_url_before_forgejo() {
+        let (mut state, transport, _repos) = test_state(Vec::new());
+        state.public_git_url = " ".to_string();
+        let (pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"gittree",
+                            "name":"demo",
+                            "auto_init":true,
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            transport.requests().is_empty(),
+            "invalid public git url should fail before forgejo requests"
+        );
+    }
+
     #[test]
     fn helper_validators_cover_reject_paths() {
         let missing = super::require_non_empty("owner", "   ").unwrap_err();
@@ -4026,6 +4074,67 @@ mod tests {
             .expect("signed"),
         );
         super::verify_signed_event(&event).expect("valid signed event");
+    }
+
+    #[test]
+    fn validate_repo_announcement_event_rejects_invalid_tags_shape() {
+        let (_, privkey) = test_keys();
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let signed = RelaySignedNostrEvent::signed(
+            super::unix_timestamp(),
+            gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT.0,
+            vec![
+                vec!["clone".to_string(), "https://gittr.ee/repo.git".to_string()],
+                vec!["relays".to_string(), "ws://relay.local".to_string()],
+            ],
+            String::new(),
+            &secret,
+        )
+        .expect("signed");
+        let event = api_event_from_relay(signed);
+        let relay_urls = vec!["ws://relay.local".to_string()];
+        let err = super::validate_repo_announcement_event(
+            &event,
+            &event.pubkey,
+            &relay_urls,
+            "http://localhost:8085",
+        )
+        .expect_err("missing d tag should fail");
+        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn validate_repo_announcement_event_rejects_invalid_public_git_url() {
+        let (pubkey, privkey) = test_keys();
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url =
+            format_grasp_server_url_as_clone_url("http://localhost:8085", &npub, "demo")
+                .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("invalid public git url".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: vec!["ws://relay.local".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(
+                &announcement,
+                &secret,
+                super::unix_timestamp(),
+            )
+            .expect("signed"),
+        );
+        let relay_urls = vec!["ws://relay.local".to_string()];
+        let err = super::validate_repo_announcement_event(&event, &event.pubkey, &relay_urls, " ")
+            .expect_err("invalid public git url should fail");
+        assert!(matches!(err, ControlHttpError::BadRequest(_)));
     }
 
     #[tokio::test]
