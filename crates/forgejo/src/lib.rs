@@ -471,10 +471,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
                 return Ok(repo.into_repo());
             }
             403 | 404 => {
-                tracing::debug!(
-                    status = response.status,
-                    "org repo creation unavailable; falling back to user endpoint"
-                );
+                tracing::debug!(status = response.status, "org repo creation unavailable");
             }
             409 => {
                 return self
@@ -853,6 +850,18 @@ mod tests {
         };
         let err = response.into_user().expect_err("parse");
         assert!(matches!(err, ForgejoError::Parse(_)));
+    }
+
+    #[test]
+    fn forgejo_user_response_accepts_username_without_login() {
+        let response = ForgejoUserResponse {
+            login: None,
+            username: Some("alice".to_string()),
+            email: Some("alice@example.com".to_string()),
+        };
+        let user = response.into_user().expect("parse");
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.email.as_deref(), Some("alice@example.com"));
     }
 
     #[tokio::test]
@@ -1296,6 +1305,68 @@ mod tests {
 
         let repo = client.ensure_repo("fallback", None).await.expect("repo");
         assert_eq!(repo.full_name, "gittree/fallback");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].url.ends_with("/api/v1/orgs/gittree/repos"));
+        assert!(requests[2].url.ends_with("/api/v1/user/repos"));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_falls_back_to_user_endpoint_on_org_not_found() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "org endpoint unavailable".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("gittree", "fallback-404"),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .ensure_repo("fallback-404", None)
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "gittree/fallback-404");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].url.ends_with("/api/v1/orgs/gittree/repos"));
+        assert!(requests[2].url.ends_with("/api/v1/user/repos"));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_with_arc_transport_falls_back_on_org_forbidden() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("gittree", "arc-fallback"),
+            },
+        ];
+        let transport = Arc::new(MockTransport::new(responses));
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .ensure_repo("arc-fallback", None)
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "gittree/arc-fallback");
 
         let requests = transport.requests();
         assert_eq!(requests.len(), 3);
