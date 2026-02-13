@@ -1,5 +1,5 @@
 use crate::StorageError;
-use sqlx::{Executor, Postgres};
+use sqlx::postgres::PgConnection;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,19 +63,19 @@ impl MigrationRunner {
             .unwrap_or(0)
     }
 
-    pub async fn run<E>(&self, executor: &mut E) -> Result<i64, StorageError>
-    where
-        for<'c> &'c mut E: Executor<'c, Database = Postgres>,
-    {
-        ensure_migrations_table(executor).await?;
-        let current = current_version(executor).await?;
+    pub async fn run(&self, connection: &mut PgConnection) -> Result<i64, StorageError> {
+        ensure_migrations_table(connection).await?;
+        let current = current_version(connection).await?;
         let mut applied = current;
 
-        for migration in self.migrations.iter().filter(|m| m.version > current) {
-            sqlx::raw_sql(migration.sql).execute(&mut *executor).await?;
+        for migration in &self.migrations {
+            if migration.version <= current {
+                continue;
+            }
+            sqlx::raw_sql(migration.sql).execute(&mut *connection).await?;
             sqlx::query("INSERT INTO migrations (serial_number) VALUES ($1)")
                 .bind(migration.version)
-                .execute(&mut *executor)
+                .execute(&mut *connection)
                 .await?;
             applied = migration.version;
         }
@@ -84,22 +84,16 @@ impl MigrationRunner {
     }
 }
 
-async fn ensure_migrations_table<E>(executor: &mut E) -> Result<(), StorageError>
-where
-    for<'c> &'c mut E: Executor<'c, Database = Postgres>,
-{
+async fn ensure_migrations_table(connection: &mut PgConnection) -> Result<(), StorageError> {
     sqlx::query("CREATE TABLE IF NOT EXISTS migrations (serial_number BIGINT PRIMARY KEY)")
-        .execute(&mut *executor)
+        .execute(&mut *connection)
         .await?;
     Ok(())
 }
 
-async fn current_version<E>(executor: &mut E) -> Result<i64, StorageError>
-where
-    for<'c> &'c mut E: Executor<'c, Database = Postgres>,
-{
+async fn current_version(connection: &mut PgConnection) -> Result<i64, StorageError> {
     let version: Option<i64> = sqlx::query_scalar("SELECT max(serial_number) FROM migrations")
-        .fetch_one(&mut *executor)
+        .fetch_one(&mut *connection)
         .await?;
     Ok(version.unwrap_or(0))
 }
@@ -351,6 +345,20 @@ mod tests {
         pool.close().await;
 
         cleanup_database(&base_url, &database_name).await;
+    }
+
+    #[test]
+    fn unique_database_name_is_prefixed_and_varies() {
+        let first = unique_database_name();
+        let second = unique_database_name();
+        assert!(first.starts_with("gittree_migrations_test_"));
+        assert!(second.starts_with("gittree_migrations_test_"));
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn cleanup_database_returns_early_for_invalid_base_url() {
+        cleanup_database("not-a-postgres-url", "ignored").await;
     }
 
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
