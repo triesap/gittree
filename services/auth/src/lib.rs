@@ -355,10 +355,7 @@ async fn signup_handler(
     };
 
     let username = username_from_pubkey(&auth.pubkey)?;
-    let pubkey_bytes = match hex::decode(&auth.pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(AuthHttpError::BadRequest("invalid pubkey".to_string())),
-    };
+    let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
 
     let existing = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
         Ok(existing) => existing,
@@ -1112,6 +1109,11 @@ mod tests {
     }
 
     #[test]
+    fn auth_service_config_from_env_returns_result_without_panicking() {
+        let _ = AuthServiceConfig::from_env();
+    }
+
+    #[test]
     fn auth_config_error_config_variant_exposes_source() {
         let err = AuthConfigError::Config(ConfigError::MissingEnv("GITTREE_AUTH_BIND"));
         assert_eq!(err.to_string(), "auth config error: missing env GITTREE_AUTH_BIND");
@@ -1130,6 +1132,34 @@ mod tests {
         let parsed = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some("120".to_string()))
             .expect("valid u64");
         assert_eq!(parsed, Some(120));
+    }
+
+    #[tokio::test]
+    async fn scripted_account_repository_account_by_username_handles_match_and_miss() {
+        let account =
+            AccountRecord::new("11".repeat(32).as_str(), "alice").expect("account");
+        let repository = ScriptedAccountRepository {
+            account: Some(account),
+            ..ScriptedAccountRepository::default()
+        };
+        let hit = AccountRepository::account_by_username(&repository, "alice")
+            .await
+            .expect("lookup");
+        assert!(hit.is_some());
+        let miss = AccountRepository::account_by_username(&repository, "bob")
+            .await
+            .expect("lookup");
+        assert!(miss.is_none());
+    }
+
+    #[tokio::test]
+    async fn scripted_account_repository_account_by_username_surfaces_lookup_error() {
+        let repository = ScriptedAccountRepository {
+            lookup_error: Some("lookup failed".to_string()),
+            ..ScriptedAccountRepository::default()
+        };
+        let result = AccountRepository::account_by_username(&repository, "alice").await;
+        assert!(matches!(result, Err(StorageError::Internal { .. })));
     }
 
     #[test]
