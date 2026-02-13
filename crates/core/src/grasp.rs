@@ -87,10 +87,6 @@ pub fn is_grasp_server_clone_url(url: &str) -> bool {
             return false;
         }
 
-        if !after_npub.ends_with(".git") {
-            return false;
-        }
-
         let repo_name = &after_npub[..after_npub.len() - 4];
         !repo_name.is_empty()
     } else {
