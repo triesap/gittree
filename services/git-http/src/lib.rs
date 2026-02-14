@@ -838,9 +838,13 @@ mod tests {
     use super::AUTH_HEADER;
     use super::AuthConfig;
     use super::BASE64_STANDARD;
+    use super::ENV_STORAGE_MAX_CONNECTIONS;
+    use super::ENV_STORAGE_MIN_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
     use super::ENV_TIMEOUT_SECS;
     use super::ENV_UPSTREAM_URL;
+    use super::GitHttpConfigError;
+    use super::GitHttpError;
     use super::GitHttpAppState;
     use super::GitHttpConfig;
     use super::GitHttpMetrics;
@@ -848,26 +852,34 @@ mod tests {
     use super::GitHttpRoute;
     use super::GitHttpService;
     use super::ObservabilityHandle;
+    use super::StorageConfigError;
     use super::UpstreamClient;
     use super::UpstreamError;
     use super::UpstreamRequest;
     use super::UpstreamResponse;
+    use super::ReqwestUpstreamClient;
     use super::init_observability;
     use super::payload_hash;
     use super::route_request;
     use async_trait::async_trait;
     use axum::body::{Body, Bytes, to_bytes};
-    use axum::http::{HeaderMap, Request, StatusCode};
+    use axum::http::{HeaderMap, Method, Request, StatusCode};
+    use axum::response::IntoResponse;
     use base64::Engine;
+    use gittree_config::ConfigError;
     use gittree_core::{RepoAnnouncement, RepoMapping};
     use gittree_nostr_auth::{Nip98Event, NIP98_KIND};
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RepoAnnouncementRecord, RepoMappingRecord,
-        RepoMappingRepository,
+        RepoMappingRepository, StorageError,
     };
     use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde_json::json;
     use sha2::Digest;
+    use std::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -893,6 +905,31 @@ mod tests {
                 std::env::remove_var(key);
             },
         }
+    }
+
+    fn start_mock_http_server(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let status = status.to_string();
+        let content_type = content_type.to_string();
+        let body = body.to_string();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), handle)
     }
 
     #[test]
@@ -923,6 +960,79 @@ mod tests {
                         config.timeout,
                         Duration::from_secs(super::DEFAULT_TIMEOUT_SECS)
                     );
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_invalid_upstream_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var(ENV_UPSTREAM_URL, "not-a-url", || {
+                let err = GitHttpConfig::from_env().expect_err("invalid upstream");
+                assert!(matches!(
+                    err,
+                    GitHttpConfigError::InvalidEnv {
+                        key: ENV_UPSTREAM_URL,
+                        ..
+                    }
+                ));
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_invalid_timeout_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                with_env_var(ENV_TIMEOUT_SECS, "bad-timeout", || {
+                    let err = GitHttpConfig::from_env().expect_err("invalid timeout");
+                    assert!(matches!(
+                        err,
+                        GitHttpConfigError::InvalidEnv {
+                            key: ENV_TIMEOUT_SECS,
+                            ..
+                        }
+                    ));
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_invalid_storage_numeric_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
+                    let err = GitHttpConfig::from_env().expect_err("invalid storage value");
+                    assert!(matches!(
+                        err,
+                        GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: ENV_STORAGE_MAX_CONNECTIONS,
+                            ..
+                        })
+                    ));
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_invalid_storage_bounds() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
+            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                        let err = GitHttpConfig::from_env().expect_err("invalid bounds");
+                        assert!(matches!(
+                            err,
+                            GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(_))
+                        ));
+                    });
                 });
             });
         });
@@ -965,6 +1075,36 @@ mod tests {
         );
         let route = route_request(&request);
         assert!(matches!(route, GitHttpRoute::NotFound));
+    }
+
+    #[test]
+    fn route_request_rejects_missing_service_param() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
+            None,
+        );
+        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+    }
+
+    #[test]
+    fn route_request_rejects_invalid_service_param() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
+            Some("service=git-bad"),
+        );
+        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+    }
+
+    #[test]
+    fn route_request_rejects_wrong_method_for_receive_pack() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/git-receive-pack",
+            None,
+        );
+        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
     }
 
     fn test_auth() -> AuthConfig {
@@ -1026,7 +1166,7 @@ mod tests {
     ) -> String {
         let bytes = hex::decode(event_id).expect("decode");
         let msg = Message::from_digest_slice(&bytes).expect("msg");
-        let sig = secp.sign_schnorr(&msg, keypair);
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, keypair);
         hex::encode(sig.as_ref())
     }
 
@@ -1271,5 +1411,199 @@ mod tests {
         let metrics = GitHttpMetrics::new();
         let route = GitHttpRoute::NotFound;
         metrics.record(&route, 200, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn build_request_url_and_auth_parsing_cover_error_paths() {
+        let headers = HeaderMap::new();
+        let uri: axum::http::Uri = "/owner/repo.git/git-receive-pack?service=git-receive-pack"
+            .parse()
+            .expect("uri");
+        let err = super::build_request_url(&headers, &uri).expect_err("missing host");
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "git.example".parse().expect("host"));
+        headers.insert("x-forwarded-proto", "https".parse().expect("proto"));
+        let url = super::build_request_url(&headers, &uri).expect("url");
+        assert!(url.starts_with("https://git.example/"));
+
+        let missing_auth = super::parse_nostr_auth(&HeaderMap::new()).expect_err("missing auth");
+        assert_eq!(missing_auth.into_response().status(), StatusCode::UNAUTHORIZED);
+
+        let mut invalid_prefix = HeaderMap::new();
+        invalid_prefix.insert(AUTH_HEADER, "Bearer token".parse().expect("auth"));
+        let err = super::parse_nostr_auth(&invalid_prefix).expect_err("invalid prefix");
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+
+        let mut invalid_base64 = HeaderMap::new();
+        invalid_base64.insert(AUTH_HEADER, "Nostr !!!".parse().expect("auth"));
+        let err = super::parse_nostr_auth(&invalid_base64).expect_err("invalid base64");
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+
+        let token = BASE64_STANDARD.encode(b"{\"invalid\":true}");
+        let mut invalid_event = HeaderMap::new();
+        invalid_event.insert(
+            AUTH_HEADER,
+            format!("Nostr {token}").parse().expect("auth"),
+        );
+        let err = super::parse_nostr_auth(&invalid_event).expect_err("invalid event");
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn payload_hash_handles_empty_and_non_empty_inputs() {
+        assert!(super::payload_hash(&Bytes::new()).is_none());
+        assert!(super::payload_hash(&Bytes::from_static(b"payload")).is_some());
+    }
+
+    #[test]
+    fn git_http_error_display_and_source_cover_variants() {
+        let config = GitHttpError::Config(GitHttpConfigError::MissingEnv("MISSING"));
+        assert!(format!("{config}").contains("git-http error"));
+        assert!(config.source().is_some());
+
+        let observability_config = GitHttpError::ObservabilityConfig(
+            ObservabilityConfigError::InvalidEnv {
+                key: "KEY",
+                value: "bad".to_string(),
+            },
+        );
+        assert!(format!("{observability_config}").contains("observability config error"));
+        assert!(observability_config.source().is_some());
+
+        let observability =
+            GitHttpError::Observability(ObservabilityError::MetricsInit("failed".to_string()));
+        assert!(format!("{observability}").contains("observability error"));
+        assert!(observability.source().is_some());
+
+        let storage = GitHttpError::Storage(StorageError::Internal {
+            message: "db".to_string(),
+        });
+        assert!(format!("{storage}").contains("git-http storage error"));
+        assert!(storage.source().is_some());
+
+        let upstream = GitHttpError::Upstream("upstream".to_string());
+        assert_eq!(format!("{upstream}"), "git-http upstream error: upstream");
+        assert!(upstream.source().is_none());
+
+        let serve = GitHttpError::Serve("bind".to_string());
+        assert_eq!(format!("{serve}"), "git-http serve error: bind");
+        assert!(serve.source().is_none());
+    }
+
+    #[test]
+    fn git_http_config_and_storage_error_display_paths_are_stable() {
+        let config = GitHttpConfigError::Config(ConfigError::InvalidConfig {
+            field: "field",
+            value: "value".to_string(),
+        });
+        assert!(format!("{config}").contains("git-http config error"));
+        assert!(config.source().is_some());
+
+        let missing_env = GitHttpConfigError::MissingEnv("ENV");
+        assert_eq!(format!("{missing_env}"), "missing env ENV");
+        assert!(missing_env.source().is_none());
+
+        let invalid_env = GitHttpConfigError::InvalidEnv {
+            key: "ENV",
+            value: "bad".to_string(),
+        };
+        assert_eq!(format!("{invalid_env}"), "invalid env ENV: bad");
+        assert!(invalid_env.source().is_none());
+
+        let storage = GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(
+            "invalid storage".to_string(),
+        ));
+        assert!(format!("{storage}").contains("storage config error"));
+        assert!(storage.source().is_some());
+
+        assert_eq!(
+            format!("{}", StorageConfigError::MissingEnv("READ")),
+            "missing env READ"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                StorageConfigError::InvalidEnv {
+                    key: "MAX",
+                    value: "bad".to_string()
+                }
+            ),
+            "invalid env MAX: bad"
+        );
+    }
+
+    #[test]
+    fn git_http_http_error_into_response_maps_status_codes() {
+        assert_eq!(
+            super::GitHttpHttpError::NotFound("missing".to_string())
+                .into_response()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            super::GitHttpHttpError::BadRequest("bad".to_string())
+                .into_response()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            super::GitHttpHttpError::Unauthorized("unauthorized".to_string())
+                .into_response()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            super::GitHttpHttpError::Storage("storage".to_string())
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            super::GitHttpHttpError::Upstream("upstream".to_string())
+                .into_response()
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            super::GitHttpHttpError::Internal("internal".to_string())
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_upstream_client_sends_request_and_reads_response() {
+        let (base_url, handle) = start_mock_http_server("200 OK", "text/plain", "upstream");
+        let client = ReqwestUpstreamClient::new(Duration::from_secs(1)).expect("client");
+        let response = client
+            .send(UpstreamRequest {
+                method: Method::GET,
+                url: base_url,
+                headers: HeaderMap::new(),
+                body: Bytes::new(),
+            })
+            .await
+            .expect("upstream response");
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, Bytes::from_static(b"upstream"));
+        handle.join().expect("server join");
+    }
+
+    #[tokio::test]
+    async fn reqwest_upstream_client_maps_transport_errors() {
+        let client = ReqwestUpstreamClient::new(Duration::from_millis(100)).expect("client");
+        let err = client
+            .send(UpstreamRequest {
+                method: Method::GET,
+                url: "http://127.0.0.1:1".to_string(),
+                headers: HeaderMap::new(),
+                body: Bytes::new(),
+            })
+            .await
+            .expect_err("expected transport error");
+        assert!(matches!(err, UpstreamError::Request(_)));
     }
 }
