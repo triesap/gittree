@@ -415,17 +415,30 @@ fn extract_signature(headers: &HeaderMap) -> Result<&str, WebhookHttpError> {
 
 #[cfg(test)]
 mod tests {
+    use super::HttpSyncNotifier;
+    use super::StorageConfigError;
+    use super::SyncNotifier;
     use super::WebhookAckPayload;
     use super::WebhookAppState;
     use super::WebhookConfig;
-    use super::SyncNotifier;
+    use super::WebhookConfigError;
+    use super::WebhookError;
     use super::build_router;
     use async_trait::async_trait;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+    use axum::response::IntoResponse;
+    use gittree_config::ConfigError;
     use gittree_core::RepoMapping;
-    use gittree_storage::{InMemoryRepositories, RepoMappingRecord, RepoMappingRepository};
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError};
+    use gittree_storage::{
+        InMemoryRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig,
+        StorageError,
+    };
     use hmac::Mac;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::error::Error;
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
@@ -448,6 +461,122 @@ mod tests {
         ) -> Result<(), String> {
             self.payloads.lock().expect("payloads").push(payload);
             Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FailingNotifier;
+
+    #[async_trait]
+    impl SyncNotifier for FailingNotifier {
+        async fn notify(
+            &self,
+            _payload: gittree_git_hook::PostReceivePayload,
+        ) -> Result<(), String> {
+            Err("upstream down".to_string())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ErrorRepoMappingRepository;
+
+    #[async_trait]
+    impl RepoMappingRepository for ErrorRepoMappingRepository {
+        async fn upsert_mapping(&self, _record: RepoMappingRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn mapping_by_forgejo(
+            &self,
+            _owner: &str,
+            _repo: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "mapping lookup failed".to_string(),
+            })
+        }
+
+        async fn mapping_by_repo(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn forgejo_push_payload() -> &'static str {
+        r#"
+        {
+            "ref": "refs/heads/main",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "1111111111111111111111111111111111111111",
+            "repository": {
+                "name": "repo",
+                "full_name": "owner/repo",
+                "owner": { "username": "owner" }
+            }
+        }"#
+    }
+
+    fn sign_payload(secret: &[u8], payload: &[u8]) -> String {
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret).expect("mac");
+        mac.update(payload);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn signed_request(
+        payload: &[u8],
+        signature_header: &str,
+        signature: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .header(signature_header, format!("sha256={signature}"))
+            .body(Body::from(payload.to_vec()))
+            .expect("request")
+    }
+
+    fn start_mock_http_server(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let status = status.to_string();
+        let content_type = content_type.to_string();
+        let body = body.to_string();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn sample_sync_payload() -> gittree_git_hook::PostReceivePayload {
+        gittree_git_hook::PostReceivePayload {
+            pubkey: "11".repeat(32),
+            identifier: "repo".to_string(),
+            updates: vec![gittree_git_hook::RefUpdatePayload {
+                old: "0".repeat(40),
+                new: "1".repeat(40),
+                reference: "refs/heads/main".to_string(),
+            }],
         }
     }
 
@@ -528,33 +657,11 @@ mod tests {
         };
         let app = build_router(state);
 
-        let payload = r#"
-        {
-            "ref": "refs/heads/main",
-            "before": "0000000000000000000000000000000000000000",
-            "after": "1111111111111111111111111111111111111111",
-            "repository": {
-                "name": "repo",
-                "full_name": "owner/repo",
-                "owner": { "username": "owner" }
-            }
-        }"#;
-
-        let mut mac =
-            hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").expect("mac");
-        mac.update(payload.as_bytes());
-        let signature = hex::encode(mac.finalize().into_bytes());
+        let payload = forgejo_push_payload();
+        let signature = sign_payload(b"secret", payload.as_bytes());
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/json")
-                    .header("x-gitea-signature", format!("sha256={signature}"))
-                    .body(Body::from(payload))
-                    .unwrap(),
-            )
+            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -582,35 +689,320 @@ mod tests {
         };
         let app = build_router(state);
 
-        let payload = r#"
-        {
-            "ref": "refs/heads/main",
-            "before": "0000000000000000000000000000000000000000",
-            "after": "1111111111111111111111111111111111111111",
-            "repository": {
-                "name": "repo",
-                "full_name": "owner/repo",
-                "owner": { "username": "owner" }
-            }
-        }"#;
+        let payload = forgejo_push_payload();
+        let signature = sign_payload(b"secret", payload.as_bytes());
 
-        let mut mac =
-            hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").expect("mac");
-        mac.update(payload.as_bytes());
-        let signature = hex::encode(mac.finalize().into_bytes());
+        let response = app
+            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
 
+    #[tokio::test]
+    async fn forgejo_webhook_accepts_forgejo_signature_header() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let mapping = RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
+        let record = RepoMappingRecord::new(&mapping).expect("record");
+        repositories
+            .upsert_mapping(record)
+            .await
+            .expect("insert mapping");
+        let notifier = MockNotifier::default();
+        let state = WebhookAppState {
+            repositories,
+            notifier,
+            forgejo_secret: "secret".to_string(),
+        };
+        let app = build_router(state);
+        let payload = forgejo_push_payload();
+        let signature = sign_payload(b"secret", payload.as_bytes());
+        let response = app
+            .oneshot(signed_request(payload.as_bytes(), "x-forgejo-signature", &signature))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn forgejo_webhook_rejects_missing_signature_header() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let state = WebhookAppState {
+            repositories,
+            notifier: MockNotifier::default(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let app = build_router(state);
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/")
                     .header("content-type", "application/json")
-                    .header("x-gitea-signature", format!("sha256={signature}"))
-                    .body(Body::from(payload))
-                    .unwrap(),
+                    .body(Body::from(forgejo_push_payload()))
+                    .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn forgejo_webhook_rejects_invalid_signature() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let state = WebhookAppState {
+            repositories,
+            notifier: MockNotifier::default(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let app = build_router(state);
+        let response = app
+            .oneshot(signed_request(
+                forgejo_push_payload().as_bytes(),
+                "x-gitea-signature",
+                &"00".repeat(32),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn forgejo_webhook_rejects_invalid_utf8_payload() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let state = WebhookAppState {
+            repositories,
+            notifier: MockNotifier::default(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let app = build_router(state);
+        let payload = [0xff, 0xfe, 0xfd];
+        let signature = sign_payload(b"secret", &payload);
+        let response = app
+            .oneshot(signed_request(&payload, "x-gitea-signature", &signature))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn forgejo_webhook_rejects_invalid_payload_json() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let state = WebhookAppState {
+            repositories,
+            notifier: MockNotifier::default(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let app = build_router(state);
+        let payload = b"not-json";
+        let signature = sign_payload(b"secret", payload);
+        let response = app
+            .oneshot(signed_request(payload, "x-gitea-signature", &signature))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn forgejo_webhook_returns_bad_gateway_when_notifier_fails() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let mapping = RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
+        let record = RepoMappingRecord::new(&mapping).expect("record");
+        repositories
+            .upsert_mapping(record)
+            .await
+            .expect("insert mapping");
+        let state = WebhookAppState {
+            repositories,
+            notifier: FailingNotifier,
+            forgejo_secret: "secret".to_string(),
+        };
+        let app = build_router(state);
+        let payload = forgejo_push_payload();
+        let signature = sign_payload(b"secret", payload.as_bytes());
+        let response = app
+            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn forgejo_webhook_returns_internal_on_mapping_error() {
+        let state = WebhookAppState {
+            repositories: Arc::new(ErrorRepoMappingRepository),
+            notifier: MockNotifier::default(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let app = build_router(state);
+        let payload = forgejo_push_payload();
+        let signature = sign_payload(b"secret", payload.as_bytes());
+        let response = app
+            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn extract_signature_validates_missing_and_non_utf8_headers() {
+        let mut headers = HeaderMap::new();
+        let missing = super::extract_signature(&headers).expect_err("missing signature");
+        assert_eq!(missing.into_response().status(), StatusCode::UNAUTHORIZED);
+
+        headers.insert(
+            "x-gitea-signature",
+            HeaderValue::from_bytes(&[0xff, 0xfe]).expect("header"),
+        );
+        let invalid = super::extract_signature(&headers).expect_err("invalid signature");
+        assert_eq!(invalid.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn webhook_error_display_and_source_cover_variants() {
+        let config_variant = WebhookError::Config(WebhookConfigError::MissingEnv("MISSING"));
+        assert!(format!("{config_variant}").contains("webhook error"));
+        assert!(config_variant.source().is_some());
+
+        let observability_config_variant = WebhookError::ObservabilityConfig(
+            ObservabilityConfigError::InvalidEnv {
+                key: "KEY",
+                value: "bad".to_string(),
+            },
+        );
+        assert!(
+            format!("{observability_config_variant}").contains("observability config error")
+        );
+        assert!(observability_config_variant.source().is_some());
+
+        let observability_variant =
+            WebhookError::Observability(ObservabilityError::MetricsInit("failed".to_string()));
+        assert!(format!("{observability_variant}").contains("observability error"));
+        assert!(observability_variant.source().is_some());
+
+        let storage_variant = WebhookError::Storage(StorageError::Internal {
+            message: "db".to_string(),
+        });
+        assert!(format!("{storage_variant}").contains("webhook storage error"));
+        assert!(storage_variant.source().is_some());
+
+        let notify_variant = WebhookError::Notify("sync".to_string());
+        assert_eq!(format!("{notify_variant}"), "webhook notify error: sync");
+        assert!(notify_variant.source().is_none());
+
+        let serve_variant = WebhookError::Serve("bind".to_string());
+        assert_eq!(format!("{serve_variant}"), "webhook serve error: bind");
+        assert!(serve_variant.source().is_none());
+    }
+
+    #[test]
+    fn webhook_config_and_storage_error_display_paths_are_stable() {
+        let config_error = WebhookConfigError::Config(ConfigError::InvalidConfig {
+            field: "field",
+            value: "value".to_string(),
+        });
+        assert!(format!("{config_error}").contains("webhook config error"));
+        assert!(config_error.source().is_some());
+
+        let storage_error =
+            WebhookConfigError::Storage(StorageConfigError::MissingEnv("READ_URL"));
+        assert!(format!("{storage_error}").contains("webhook storage config error"));
+        assert!(storage_error.source().is_some());
+
+        let missing_env = WebhookConfigError::MissingEnv("ENV_KEY");
+        assert_eq!(format!("{missing_env}"), "missing env ENV_KEY");
+        assert!(missing_env.source().is_none());
+
+        let invalid_env = WebhookConfigError::InvalidEnv {
+            key: "ENV_KEY",
+            value: "bad".to_string(),
+        };
+        assert_eq!(format!("{invalid_env}"), "invalid env ENV_KEY: bad");
+        assert!(invalid_env.source().is_none());
+
+        assert_eq!(
+            format!("{}", StorageConfigError::MissingEnv("READ_URL")),
+            "missing env READ_URL"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                StorageConfigError::InvalidEnv {
+                    key: "MAX",
+                    value: "bad".to_string()
+                }
+            ),
+            "invalid env MAX: bad"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                StorageConfigError::InvalidConfig("invalid pool".to_string())
+            ),
+            "invalid pool"
+        );
+    }
+
+    #[test]
+    fn build_repositories_returns_storage_error_for_invalid_pool_settings() {
+        let config = WebhookConfig {
+            bind: "127.0.0.1:8087".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 0,
+                min_connections: 0,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            sync_url: "http://localhost:8084".to_string(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let err = super::build_repositories(&config).expect_err("expected error");
+        assert!(matches!(err, WebhookError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn build_repositories_accepts_valid_storage_config() {
+        let config = WebhookConfig {
+            bind: "127.0.0.1:8087".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            sync_url: "http://localhost:8084".to_string(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let _repos = super::build_repositories(&config).expect("repositories");
+    }
+
+    #[tokio::test]
+    async fn http_sync_notifier_accepts_success_status() {
+        let (endpoint, handle) = start_mock_http_server("200 OK", "application/json", "{}");
+        let notifier = HttpSyncNotifier::new(endpoint).expect("notifier");
+        notifier
+            .notify(sample_sync_payload())
+            .await
+            .expect("notify");
+        handle.join().expect("server join");
+    }
+
+    #[tokio::test]
+    async fn http_sync_notifier_reports_non_success_status() {
+        let (endpoint, handle) =
+            start_mock_http_server("500 Internal Server Error", "text/plain", "failed");
+        let notifier = HttpSyncNotifier::new(endpoint).expect("notifier");
+        let err = notifier
+            .notify(sample_sync_payload())
+            .await
+            .expect_err("should fail");
+        assert!(err.contains("sync error"));
+        handle.join().expect("server join");
     }
 }
