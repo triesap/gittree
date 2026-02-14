@@ -589,8 +589,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::read_input;
+    use super::env_path;
     use super::validate_input_source;
+    use super::HookConfigError;
     use super::HookError;
+    use super::HookMode;
+    use super::HookServiceError;
     use super::MappingResolver;
     use super::PostReceiveNotifier;
     use super::PostReceivePayload;
@@ -605,8 +609,43 @@ mod tests {
     use gittree_core::RepoMapping;
     use gittree_core::RepoState;
     use std::collections::HashMap;
+    use std::error::Error;
     use std::io::Write;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env_var(key: &str, value: Option<&str>, run: impl FnOnce()) {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = std::env::var(key).ok();
+
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::set_var(key, value) };
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+
+        run();
+
+        match previous {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::set_var(key, value) };
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+    }
 
     #[test]
     fn read_input_reads_file() {
@@ -632,6 +671,85 @@ mod tests {
     fn validate_input_source_accepts_file_or_pipe() {
         assert!(validate_input_source(false, None).is_ok());
         assert!(validate_input_source(true, Some(std::path::Path::new("input.txt"))).is_ok());
+    }
+
+    #[test]
+    fn hook_mode_from_env_defaults_to_pre_receive() {
+        with_env_var(super::ENV_HOOK_MODE, None, || {
+            let mode = HookMode::from_env().expect("mode");
+            assert_eq!(mode, HookMode::PreReceive);
+        });
+    }
+
+    #[test]
+    fn hook_mode_from_env_accepts_post_receive() {
+        with_env_var(super::ENV_HOOK_MODE, Some("post-receive"), || {
+            let mode = HookMode::from_env().expect("mode");
+            assert_eq!(mode, HookMode::PostReceive);
+        });
+    }
+
+    #[test]
+    fn hook_mode_from_env_rejects_unknown_mode() {
+        with_env_var(super::ENV_HOOK_MODE, Some("bad-mode"), || {
+            let err = HookMode::from_env().expect_err("invalid mode");
+            assert!(matches!(err, HookConfigError::InvalidMode(_)));
+        });
+    }
+
+    #[test]
+    fn env_path_ignores_empty_values() {
+        with_env_var("GITTREE_TEST_PATH", Some("   "), || {
+            assert!(env_path("GITTREE_TEST_PATH").is_none());
+        });
+        with_env_var("GITTREE_TEST_PATH", Some("/tmp/input.txt"), || {
+            assert_eq!(
+                env_path("GITTREE_TEST_PATH"),
+                Some(std::path::PathBuf::from("/tmp/input.txt"))
+            );
+        });
+    }
+
+    #[test]
+    fn read_input_reports_missing_file_errors() {
+        let missing = std::path::Path::new("/tmp/does-not-exist-gittree-hook.txt");
+        let err = read_input(Some(missing)).expect_err("read should fail");
+        assert!(matches!(err, HookServiceError::Core(_)));
+    }
+
+    #[test]
+    fn hook_config_and_service_errors_display_and_source() {
+        let missing_env = HookConfigError::MissingEnv("KEY");
+        assert_eq!(missing_env.to_string(), "missing env KEY");
+        assert!(missing_env.source().is_none());
+
+        let invalid_mode = HookConfigError::InvalidMode("bad".to_string());
+        assert_eq!(invalid_mode.to_string(), "invalid hook mode: bad");
+        assert!(invalid_mode.source().is_none());
+
+        let config_wrapped =
+            HookConfigError::Config(gittree_config::ConfigError::MissingEnv("STATE"));
+        assert!(config_wrapped.source().is_some());
+
+        let config_service = HookServiceError::Config(HookConfigError::MissingEnv("STATE"));
+        assert_eq!(config_service.to_string(), "hook config error: missing env STATE");
+        assert!(config_service.source().is_some());
+
+        let parse_service = HookServiceError::Parse(HookError::InvalidPayload("bad".to_string()));
+        assert_eq!(parse_service.to_string(), "hook parse error: invalid payload: bad");
+        assert!(parse_service.source().is_some());
+
+        let core_service = HookServiceError::Core("boom".to_string());
+        assert_eq!(core_service.to_string(), "hook core error: boom");
+        assert!(core_service.source().is_none());
+
+        let state_service = HookServiceError::State("down".to_string());
+        assert_eq!(state_service.to_string(), "hook state error: down");
+        assert!(state_service.source().is_none());
+
+        let reject_service = HookServiceError::Reject("nope".to_string());
+        assert_eq!(reject_service.to_string(), "nope");
+        assert!(reject_service.source().is_none());
     }
 
     #[test]
