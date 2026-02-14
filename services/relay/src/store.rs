@@ -66,12 +66,14 @@ impl MemoryStoreState {
             let Some(key) = parse_address(&address) else {
                 continue;
             };
-            if let Some(existing_id) = self.replaceable.get(&key).cloned() {
-                if let Some(existing) = self.events.get(&existing_id) {
-                    if existing.pubkey == event.pubkey && existing.created_at <= event.created_at {
-                        self.remove_event(&existing_id);
-                    }
-                }
+            let Some(existing_id) = self.replaceable.get(&key).cloned() else {
+                continue;
+            };
+            let Some(existing) = self.events.get(&existing_id) else {
+                continue;
+            };
+            if existing.pubkey == event.pubkey && existing.created_at <= event.created_at {
+                self.remove_event(&existing_id);
             }
         }
     }
@@ -316,12 +318,13 @@ async fn apply_delete_repo<R: EventRepository>(
             .get_event(tenant_id, &bytes)
             .await
             .map_err(map_repo_err)?;
-        if let Some(record) = record {
-            if record.pubkey == author && record.created_at <= event.created_at {
-                repo.delete_event(tenant_id, &record.id)
-                    .await
-                    .map_err(map_repo_err)?;
-            }
+        let Some(record) = record else {
+            continue;
+        };
+        if record.pubkey == author && record.created_at <= event.created_at {
+            repo.delete_event(tenant_id, &record.id)
+                .await
+                .map_err(map_repo_err)?;
         }
     }
 
@@ -555,9 +558,9 @@ fn map_repo_err(err: gittree_storage::StorageError) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::{
-        EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome, apply_delete_repo,
-        apply_replaceable_repo, collect_tag_values, event_to_record, exact_hex_filters,
-        parse_address, replaceable_key,
+        EventStore, MemoryStore, MemoryStoreState, RepositoryStore, StoreError, StoreOutcome,
+        apply_delete_repo, apply_replaceable_repo, collect_tag_values, event_to_record,
+        exact_hex_filters, parse_address, replaceable_key,
     };
     use async_trait::async_trait;
     use crate::NostrEvent;
@@ -672,6 +675,13 @@ mod tests {
                     return Ok(Some(delete_target_record()));
                 }
                 return Ok(None);
+            }
+            if let Some(record) = self
+                .query_results
+                .iter()
+                .find(|record| record.id.as_slice() == event_id)
+            {
+                return Ok(Some(record.clone()));
             }
             Ok(None)
         }
@@ -973,6 +983,22 @@ mod tests {
         ];
         store.insert(delete.clone()).await.expect("insert delete");
         assert!(store.get(&delete.id).await.expect("get delete").is_some());
+    }
+
+    #[test]
+    fn memory_store_state_apply_delete_skips_stale_replaceable_pointer() {
+        let mut state = MemoryStoreState::default();
+        let mut delete = sample_event("delete-stale-replaceable");
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 10;
+        let address = format!("30023:{}:demo", delete.pubkey);
+        let key = parse_address(&address).expect("address");
+        state.replaceable.insert(key.clone(), "missing-id".to_string());
+        delete.tags = vec![vec!["a".to_string(), address]];
+
+        state.apply_delete(&delete);
+        assert!(state.replaceable.contains_key(&key));
     }
 
     #[tokio::test]
@@ -1421,6 +1447,34 @@ mod tests {
         apply_delete_repo(&repo, "default", &delete)
             .await
             .expect("invalid and mismatched targets should be skipped");
+    }
+
+    #[tokio::test]
+    async fn apply_delete_repo_deletes_matching_e_target() {
+        let repo = ScriptedEventRepo::with_query_results(vec![delete_target_record()]);
+        let mut delete = sample_event(&"88".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 5;
+        delete.tags = vec![vec!["e".to_string(), "11".repeat(32)]];
+
+        apply_delete_repo(&repo, "default", &delete)
+            .await
+            .expect("matching target should delete");
+    }
+
+    #[tokio::test]
+    async fn apply_delete_repo_skips_missing_e_target() {
+        let repo = ScriptedEventRepo::with_query_results(Vec::new());
+        let mut delete = sample_event(&"89".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 5;
+        delete.tags = vec![vec!["e".to_string(), "11".repeat(32)]];
+
+        apply_delete_repo(&repo, "default", &delete)
+            .await
+            .expect("missing target should be skipped");
     }
 
     #[tokio::test]
