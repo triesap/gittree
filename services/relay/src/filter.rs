@@ -203,6 +203,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_filter_rejects_non_object_and_formats_invalid_filter_error() {
+        let err = Filter::from_json(&json!(["not", "an", "object"])).unwrap_err();
+        assert_eq!(err, FilterError::InvalidFilter);
+        assert_eq!(err.to_string(), "invalid filter");
+    }
+
+    #[test]
+    fn parse_filter_ignores_unknown_keys_and_rejects_empty_tag_keys() {
+        let filter = Filter::from_json(&json!({"unsupported": 1})).expect("filter");
+        assert!(filter.ids.is_empty());
+        assert!(filter.authors.is_empty());
+
+        let err = Filter::from_json(&json!({"#": ["value"]})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("#".to_string()));
+    }
+
+    #[test]
+    fn parse_filter_rejects_invalid_array_value_types() {
+        let err = Filter::from_json(&json!({"ids": [1]})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("ids".to_string()));
+
+        let err = Filter::from_json(&json!({"kinds": "nope"})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("kinds".to_string()));
+
+        let err = Filter::from_json(&json!({"kinds": ["x"]})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("kinds".to_string()));
+
+        let err = Filter::from_json(&json!({"since": "x"})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("since".to_string()));
+
+        let err = Filter::from_json(&json!({"limit": "x"})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("limit".to_string()));
+
+        let err = Filter::from_json(&json!({"#e": "x"})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("#e".to_string()));
+    }
+
+    #[test]
     fn matches_event_with_prefixes_and_time() {
         let value = json!({
             "ids": ["abc"],
@@ -224,5 +262,23 @@ mod tests {
         let event = sample_event();
         let tags = TagIndex::from_tags(&event.tags).expect("tags");
         assert!(!filter.matches(&event, &tags));
+    }
+
+    #[test]
+    fn matches_rejects_author_kind_since_and_missing_tag() {
+        let event = sample_event();
+        let tags = TagIndex::from_tags(&event.tags).expect("tags");
+
+        let author_mismatch = Filter::from_json(&json!({"authors": ["bb"]})).expect("filter");
+        assert!(!author_mismatch.matches(&event, &tags));
+
+        let kind_mismatch = Filter::from_json(&json!({"kinds": [2]})).expect("filter");
+        assert!(!kind_mismatch.matches(&event, &tags));
+
+        let since_mismatch = Filter::from_json(&json!({"since": 101})).expect("filter");
+        assert!(!since_mismatch.matches(&event, &tags));
+
+        let missing_tag = Filter::from_json(&json!({"#p": ["missing"]})).expect("filter");
+        assert!(!missing_tag.matches(&event, &tags));
     }
 }
