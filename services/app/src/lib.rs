@@ -400,17 +400,50 @@ async fn health_handler() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_router, AppUiState};
+    use super::{
+        build_router, AppApiError, AppError, AppServiceConfig, AppServiceConfigError, AppUiState,
+        StorageConfigError,
+    };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use axum::response::IntoResponse;
     use gittree_app_core::RepoListResponse;
+    use gittree_app_ui::server::AppUiError;
+    use gittree_config::{ConfigError, UiConfig};
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
     use gittree_storage::{
         InMemoryRepositories, ProfileRecord, ProfileRepository, ProfileVisibility, RepoMappingRecord,
-        RepoMappingRepository,
+        RepoMappingRepository, StorageConfig, StorageError,
     };
     use leptos::config::LeptosOptions;
-    use std::sync::Arc;
+    use std::error::Error;
+    use std::path::PathBuf;
+    use std::sync::{Arc, OnceLock};
     use tower::util::ServiceExt;
+
+    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
+
+    fn test_ui_config() -> UiConfig {
+        UiConfig {
+            repo_root: PathBuf::from("/tmp/gittree"),
+            public_git_url: "http://localhost:8085".to_string(),
+            auth_url: "http://localhost:8089".to_string(),
+            app_url: "http://localhost:8090".to_string(),
+            control_url: "http://localhost:8088".to_string(),
+        }
+    }
+
+    fn test_storage_config() -> StorageConfig {
+        StorageConfig {
+            read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+            write_connection: None,
+            max_connections: 10,
+            min_connections: 1,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: None,
+        }
+    }
 
     fn test_state(
         repositories: Arc<dyn RepoMappingRepository>,
@@ -436,6 +469,178 @@ mod tests {
 
     fn pubkey_hex(byte: u8) -> String {
         format!("{:02x}", byte).repeat(32)
+    }
+
+    #[test]
+    fn normalize_base_path_handles_edge_cases() {
+        assert_eq!(super::normalize_base_path(""), "/");
+        assert_eq!(super::normalize_base_path("/"), "/");
+        assert_eq!(super::normalize_base_path("ui"), "/ui");
+        assert_eq!(super::normalize_base_path("/ui/"), "/ui");
+    }
+
+    #[test]
+    fn app_and_storage_error_display_paths_are_stable() {
+        let config_error = AppServiceConfigError::Config(ConfigError::InvalidConfig {
+            field: "ui.repo_root",
+            value: "bad".to_string(),
+        });
+        assert!(format!("{config_error}").contains("app config error"));
+        assert!(config_error.source().is_some());
+
+        let storage_error = AppServiceConfigError::Storage(StorageConfigError::MissingEnv("READ"));
+        assert!(format!("{storage_error}").contains("app storage config error"));
+        assert!(storage_error.source().is_some());
+
+        let missing_env = AppServiceConfigError::MissingEnv("MISSING");
+        assert_eq!(format!("{missing_env}"), "missing env MISSING");
+        assert!(missing_env.source().is_none());
+
+        let invalid_env = AppServiceConfigError::InvalidEnv {
+            key: "KEY",
+            value: "bad".to_string(),
+        };
+        assert_eq!(format!("{invalid_env}"), "invalid env KEY: bad");
+        assert!(invalid_env.source().is_none());
+
+        assert_eq!(format!("{}", StorageConfigError::MissingEnv("READ")), "missing env READ");
+        assert_eq!(
+            format!(
+                "{}",
+                StorageConfigError::InvalidEnv {
+                    key: "MAX",
+                    value: "bad".to_string(),
+                }
+            ),
+            "invalid env MAX: bad"
+        );
+        assert_eq!(
+            format!("{}", StorageConfigError::InvalidConfig("invalid pool".to_string())),
+            "invalid pool"
+        );
+    }
+
+    #[test]
+    fn app_error_display_and_source_cover_variants() {
+        let config = AppError::Config(AppServiceConfigError::MissingEnv("MISSING"));
+        assert!(format!("{config}").contains("app error"));
+        assert!(config.source().is_some());
+
+        let observability_config = AppError::ObservabilityConfig(
+            ObservabilityConfigError::InvalidEnv {
+                key: "KEY",
+                value: "bad".to_string(),
+            },
+        );
+        assert!(format!("{observability_config}").contains("observability config error"));
+        assert!(observability_config.source().is_some());
+
+        let observability =
+            AppError::Observability(ObservabilityError::MetricsInit("failed".to_string()));
+        assert!(format!("{observability}").contains("observability error"));
+        assert!(observability.source().is_some());
+
+        let storage = AppError::Storage(StorageError::Internal {
+            message: "db".to_string(),
+        });
+        assert!(format!("{storage}").contains("app storage error"));
+        assert!(storage.source().is_some());
+
+        let serve = AppError::Serve("bind".to_string());
+        assert_eq!(format!("{serve}"), "app serve error: bind");
+        assert!(serve.source().is_none());
+    }
+
+    #[test]
+    fn app_api_error_maps_all_status_codes() {
+        assert_eq!(
+            AppApiError::Ui(AppUiError::BadRequest("bad".to_string()))
+                .into_response()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppApiError::Ui(AppUiError::NotFound("missing".to_string()))
+                .into_response()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppApiError::Ui(AppUiError::Storage("storage".to_string()))
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            AppApiError::Ui(AppUiError::Internal("internal".to_string()))
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn build_repositories_handles_valid_and_invalid_storage() {
+        let valid_config = AppServiceConfig {
+            bind: "127.0.0.1:8090".parse().expect("bind"),
+            base_path: "/".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let _repos = super::build_repositories(&valid_config).expect("repositories");
+
+        let invalid_config = AppServiceConfig {
+            storage: StorageConfig {
+                max_connections: 0,
+                min_connections: 0,
+                ..test_storage_config()
+            },
+            ..valid_config
+        };
+        let err = super::build_repositories(&invalid_config).expect_err("invalid pool config");
+        assert!(matches!(err, AppError::Storage(_)));
+    }
+
+    #[test]
+    fn init_observability_returns_registry() {
+        let handle = OBSERVABILITY.get_or_init(|| super::init_observability().expect("init"));
+        assert!(handle.prometheus_registry().is_some());
+    }
+
+    #[tokio::test]
+    async fn build_router_nests_routes_for_non_root_base_path() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = AppUiState::new(
+            repositories,
+            profiles,
+            "/tmp/gittree".into(),
+            "http://localhost:8085".to_string(),
+            "http://localhost:8089".to_string(),
+            "http://localhost:8090".to_string(),
+            "http://localhost:8088".to_string(),
+            "/ui".to_string(),
+            LeptosOptions::builder()
+                .output_name("gittree-app-ui")
+                .site_root("crates/app-ui/dist")
+                .site_pkg_dir("pkg")
+                .site_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().expect("addr"))
+                .build(),
+        );
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
