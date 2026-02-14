@@ -87,9 +87,9 @@ impl SignedNostrEvent {
         secret_key: &SecretKey,
         created_at: i64,
     ) -> Result<Self, RelayAdapterError> {
-        announcement
-            .validate()
-            .map_err(|err| RelayAdapterError::InvalidConfig(err.to_string()))?;
+        if let Err(err) = announcement.validate() {
+            return Err(RelayAdapterError::InvalidConfig(err.to_string()));
+        }
         let tags = announcement.to_tags();
         Self::signed(
             created_at,
@@ -227,12 +227,20 @@ impl WebsocketRelayAdapter {
     fn load_secret_key(&self) -> Result<SecretKey, RelayAdapterError> {
         match &self.config.secret_key {
             Some(hex_key) => {
-                let bytes = hex::decode(hex_key).map_err(|_| {
-                    RelayAdapterError::InvalidConfig("secret key must be hex".to_string())
-                })?;
-                SecretKey::from_slice(&bytes).map_err(|err| {
-                    RelayAdapterError::InvalidConfig(format!("invalid secret key: {err}"))
-                })
+                let bytes = match hex::decode(hex_key) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return Err(RelayAdapterError::InvalidConfig(
+                            "secret key must be hex".to_string(),
+                        ));
+                    }
+                };
+                match SecretKey::from_slice(&bytes) {
+                    Ok(secret_key) => Ok(secret_key),
+                    Err(err) => Err(RelayAdapterError::InvalidConfig(format!(
+                        "invalid secret key: {err}"
+                    ))),
+                }
             }
             None => {
                 let mut rng = OsRng;
@@ -247,14 +255,17 @@ where
     E: std::fmt::Display,
     Fut: std::future::IntoFuture<Output = Result<(), E>>,
 {
-    operation
-        .into_future()
-        .await
-        .map_err(|err| RelayAdapterError::Transport(err.to_string()))
+    match operation.into_future().await {
+        Ok(()) => Ok(()),
+        Err(err) => Err(RelayAdapterError::Transport(err.to_string())),
+    }
 }
 
 fn to_protocol_json<T: Serialize>(value: &T) -> Result<String, RelayAdapterError> {
-    serde_json::to_string(value).map_err(|err| RelayAdapterError::Protocol(err.to_string()))
+    match serde_json::to_string(value) {
+        Ok(serialized) => Ok(serialized),
+        Err(err) => Err(RelayAdapterError::Protocol(err.to_string())),
+    }
 }
 
 #[async_trait]
@@ -265,9 +276,10 @@ impl RelayAdapter for WebsocketRelayAdapter {
 
     async fn probe_write_read(&self) -> Result<(), RelayAdapterError> {
         let url = self.normalized_url()?;
-        let (stream, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+        let (stream, _) = match tokio_tungstenite::connect_async(url).await {
+            Ok(connection) => connection,
+            Err(err) => return Err(RelayAdapterError::Transport(err.to_string())),
+        };
         let (mut write, mut read) = stream.split();
 
         let secret_key = self.load_secret_key()?;
@@ -291,9 +303,10 @@ impl RelayAdapter for WebsocketRelayAdapter {
 
     async fn publish_event(&self, event: &SignedNostrEvent) -> Result<(), RelayAdapterError> {
         let url = self.normalized_url()?;
-        let (stream, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+        let (stream, _) = match tokio_tungstenite::connect_async(url).await {
+            Ok(connection) => connection,
+            Err(err) => return Err(RelayAdapterError::Transport(err.to_string())),
+        };
         let (mut write, mut read) = stream.split();
         let event_json = to_protocol_json(event)?;
         let event_message = format!("[\"EVENT\",{event_json}]");
@@ -304,17 +317,29 @@ impl RelayAdapter for WebsocketRelayAdapter {
 }
 
 fn normalize_ws_url(input: &str) -> Result<Url, RelayAdapterError> {
-    let mut url = Url::parse(input)
-        .map_err(|_| RelayAdapterError::InvalidConfig("invalid relay url".to_string()))?;
+    let mut url = match Url::parse(input) {
+        Ok(url) => url,
+        Err(_) => {
+            return Err(RelayAdapterError::InvalidConfig(
+                "invalid relay url".to_string(),
+            ));
+        }
+    };
     match url.scheme() {
         "wss" | "ws" => {}
         "https" => {
-            url.set_scheme("wss")
-                .map_err(|_| RelayAdapterError::InvalidConfig("invalid relay url".to_string()))?;
+            if url.set_scheme("wss").is_err() {
+                return Err(RelayAdapterError::InvalidConfig(
+                    "invalid relay url".to_string(),
+                ));
+            }
         }
         "http" => {
-            url.set_scheme("ws")
-                .map_err(|_| RelayAdapterError::InvalidConfig("invalid relay url".to_string()))?;
+            if url.set_scheme("ws").is_err() {
+                return Err(RelayAdapterError::InvalidConfig(
+                    "invalid relay url".to_string(),
+                ));
+            }
         }
         _ => {
             return Err(RelayAdapterError::InvalidConfig(
@@ -354,8 +379,10 @@ fn build_event_id(
     content: &str,
 ) -> Result<String, RelayAdapterError> {
     let payload = json!([0, pubkey, created_at, kind, tags, content]);
-    let serialized = serde_json::to_string(&payload)
-        .map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
+    let serialized = match serde_json::to_string(&payload) {
+        Ok(serialized) => serialized,
+        Err(err) => return Err(RelayAdapterError::Protocol(err.to_string())),
+    };
     let mut hasher = Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
@@ -367,11 +394,18 @@ fn sign_event_id(
     keypair: &Keypair,
     event_id: &str,
 ) -> Result<String, RelayAdapterError> {
-    let bytes = hex::decode(event_id).map_err(|_| {
-        RelayAdapterError::Protocol("failed to decode event id".to_string())
-    })?;
-    let msg = Message::from_digest_slice(&bytes)
-        .map_err(|_| RelayAdapterError::Protocol("invalid event id".to_string()))?;
+    let bytes = match hex::decode(event_id) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Err(RelayAdapterError::Protocol(
+                "failed to decode event id".to_string(),
+            ));
+        }
+    };
+    let msg = match Message::from_digest_slice(&bytes) {
+        Ok(message) => message,
+        Err(_) => return Err(RelayAdapterError::Protocol("invalid event id".to_string())),
+    };
     let sig = secp.sign_schnorr(&msg, keypair);
     Ok(hex::encode(sig.as_ref()))
 }
