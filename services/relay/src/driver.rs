@@ -89,7 +89,14 @@ impl<S: EventStore> SessionDriver<S> {
 }
 
 fn encode_response(message: ServerMessage) -> String {
-    match encode_server_message(&message) {
+    encode_response_with(message, |payload| encode_server_message(payload))
+}
+
+fn encode_response_with<F, E>(message: ServerMessage, encode: F) -> String
+where
+    F: FnOnce(&ServerMessage) -> Result<String, E>,
+{
+    match encode(&message) {
         Ok(serialized) => serialized,
         Err(_) => "[\"NOTICE\",\"failed to encode response\"]".to_string(),
     }
@@ -98,7 +105,7 @@ fn encode_response(message: ServerMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::SessionDriver;
-    use crate::{EventStore, MemoryStore, NostrEvent, Policy, Session};
+    use crate::{EventStore, MemoryStore, NostrEvent, Policy, ServerMessage, Session};
     use serde_json::Value;
     use tokio::sync::{broadcast, mpsc};
     use tokio::time::{Duration, timeout};
@@ -225,6 +232,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_breaks_when_outbound_closes_mid_response_batch() {
+        let store = MemoryStore::new();
+        let event = sample_event("evt-batch");
+        store.insert(event).await.expect("insert");
+
+        let session = Session::new(store);
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let task = tokio::spawn(driver.run(in_rx, out_tx));
+
+        in_tx
+            .send(r#"["REQ","sub",{}]"#.to_string())
+            .await
+            .expect("send inbound");
+        let _ = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("first frame");
+        drop(out_rx);
+        drop(in_tx);
+        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+    }
+
+    #[tokio::test]
     async fn run_with_broadcast_returns_when_initial_send_fails() {
         let session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
         let driver = SessionDriver::new(session);
@@ -299,5 +331,33 @@ mod tests {
         drop(broadcast_tx);
 
         timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+    }
+
+    #[tokio::test]
+    async fn run_with_broadcast_returns_on_closed_inputs() {
+        let session = Session::new(MemoryStore::new());
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, _out_rx) = mpsc::channel(1);
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(1);
+        drop(in_tx);
+        drop(broadcast_tx);
+        timeout(
+            Duration::from_secs(1),
+            driver.run_with_broadcast(in_rx, out_tx, broadcast_rx),
+        )
+        .await
+        .expect("timeout");
+    }
+
+    #[test]
+    fn encode_response_falls_back_when_encoder_errors() {
+        let encoded = super::encode_response_with(
+            ServerMessage::Notice {
+                message: "any".to_string(),
+            },
+            |_| -> Result<String, ()> { Err(()) },
+        );
+        assert_eq!(encoded, "[\"NOTICE\",\"failed to encode response\"]");
     }
 }
