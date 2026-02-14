@@ -44,17 +44,18 @@ where
     E: std::fmt::Display,
     Fut: std::future::IntoFuture<Output = Result<T, E>>,
 {
-    operation
-        .into_future()
-        .await
-        .map_err(|err| ForgejoError::Request(err.to_string()))
+    match operation.into_future().await {
+        Ok(value) => Ok(value),
+        Err(err) => Err(ForgejoError::Request(err.to_string())),
+    }
 }
 
 impl ReqwestTransport {
     pub fn new(token: impl Into<String>) -> Result<Self, ForgejoError> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|err| ForgejoError::Request(err.to_string()))?;
+        let client = match reqwest::Client::builder().build() {
+            Ok(client) => client,
+            Err(err) => return Err(ForgejoError::Request(err.to_string())),
+        };
         Ok(Self {
             client,
             token: token.into(),
@@ -738,6 +739,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[derive(Clone, Default)]
     struct MockTransport {
@@ -932,6 +934,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_repo_serializes_optional_description_when_present() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "not found".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("gittree", "beta"),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .ensure_repo("beta", Some("repo description"))
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "gittree/beta");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        let body = requests[1].body.clone().expect("body");
+        assert!(body.contains("\"description\":\"repo description\""));
+    }
+
+    #[tokio::test]
     async fn create_repo_non_success_returns_response_error() {
         let responses = vec![
             ForgejoResponse {
@@ -1038,6 +1067,34 @@ mod tests {
         let requests = transport.requests();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].url.ends_with("/api/v1/repos/alice/delta"));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_for_owner_serializes_optional_description_when_present() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("alice", "delta"),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .ensure_repo_for_owner("alice", "delta", Some("owner description"))
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "alice/delta");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].url.ends_with("/api/v1/admin/users/alice/repos"));
+        let body = requests[1].body.clone().expect("body");
+        assert!(body.contains("\"description\":\"owner description\""));
     }
 
     #[tokio::test]
@@ -1151,6 +1208,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_user_with_arc_transport_returns_existing() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: user_json("alice"),
+        }];
+        let transport = Arc::new(MockTransport::new(responses));
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let user = client
+            .ensure_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: Some(true),
+                send_notify: Some(false),
+            })
+            .await
+            .expect("user");
+
+        assert_eq!(user.username, "alice");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, ForgejoMethod::Get);
+        assert!(requests[0].url.ends_with("/api/v1/users/alice"));
+    }
+
+    #[tokio::test]
     async fn ensure_user_creates_when_missing() {
         let responses = vec![
             ForgejoResponse {
@@ -1163,6 +1248,42 @@ mod tests {
             },
         ];
         let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let user = client
+            .ensure_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: Some(true),
+                send_notify: Some(false),
+            })
+            .await
+            .expect("user");
+
+        assert_eq!(user.username, "alice");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, ForgejoMethod::Get);
+        assert!(requests[0].url.ends_with("/api/v1/users/alice"));
+        assert_eq!(requests[1].method, ForgejoMethod::Post);
+        assert!(requests[1].url.ends_with("/api/v1/admin/users"));
+    }
+
+    #[tokio::test]
+    async fn ensure_user_with_arc_transport_creates_when_missing() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: user_json("alice"),
+            },
+        ];
+        let transport = Arc::new(MockTransport::new(responses));
         let client = ForgejoClient::with_transport(test_config(), transport.clone());
 
         let user = client
@@ -1372,6 +1493,33 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert!(requests[1].url.ends_with("/api/v1/orgs/gittree/repos"));
         assert!(requests[2].url.ends_with("/api/v1/user/repos"));
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_with_arc_transport_serializes_optional_description() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("gittree", "arc-description"),
+            },
+        ];
+        let transport = Arc::new(MockTransport::new(responses));
+        let client = ForgejoClient::with_transport(test_config(), transport.clone());
+
+        let repo = client
+            .ensure_repo("arc-description", Some("arc description"))
+            .await
+            .expect("repo");
+        assert_eq!(repo.full_name, "gittree/arc-description");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        let body = requests[1].body.clone().expect("body");
+        assert!(body.contains("\"description\":\"arc description\""));
     }
 
     #[tokio::test]
@@ -1770,6 +1918,43 @@ mod tests {
             .await
             .expect_err("invalid url should fail");
         assert!(matches!(err, ForgejoError::Request(_)));
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_reads_response_body_on_success() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let body = "{\"status\":\"ok\"}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request_buf = [0_u8; 1024];
+            let _ = socket.read(&mut request_buf).await.expect("read request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            socket.shutdown().await.expect("shutdown");
+        });
+
+        let transport = ReqwestTransport::new("token").expect("transport");
+        let response = transport
+            .send(ForgejoRequest {
+                method: ForgejoMethod::Get,
+                url: format!("http://{addr}/"),
+                body: None,
+            })
+            .await
+            .expect("successful response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body);
+        server.await.expect("server");
     }
 
     #[tokio::test]
