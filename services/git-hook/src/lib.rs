@@ -650,6 +650,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_updates_ignores_blank_lines() {
+        let input = "\n\nold new refs/heads/main\n  \n";
+        let updates = parse_updates(input).expect("updates");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].reference, "refs/heads/main");
+    }
+
+    #[test]
     fn parse_forgejo_push_accepts_payload() {
         let payload = r#"
         {
@@ -688,6 +696,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_forgejo_push_rejects_invalid_full_name() {
+        let payload = r#"
+        {
+            "ref": "refs/heads/main",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "1111111111111111111111111111111111111111",
+            "repository": {
+                "name": "repo",
+                "full_name": "ownerrepo",
+                "owner": { "username": "owner" }
+            }
+        }
+        "#;
+        let err = parse_forgejo_push(payload).unwrap_err();
+        assert!(matches!(err, HookError::InvalidPayload(_)));
+    }
+
+    #[test]
     fn verify_forgejo_signature_accepts_valid() {
         let secret = "secret";
         let payload = b"{\"ok\":true}";
@@ -703,6 +729,40 @@ mod tests {
     fn verify_forgejo_signature_rejects_invalid() {
         let err = verify_forgejo_signature("secret", b"payload", "sha256=deadbeef").unwrap_err();
         assert!(matches!(err, HookError::InvalidSignature(_)));
+    }
+
+    #[test]
+    fn verify_forgejo_signature_rejects_missing_secret() {
+        let err = verify_forgejo_signature("", b"payload", "sha256=deadbeef").unwrap_err();
+        assert!(matches!(err, HookError::InvalidSignature(_)));
+    }
+
+    #[test]
+    fn verify_forgejo_signature_rejects_missing_signature_header() {
+        let err = verify_forgejo_signature("secret", b"payload", "   ").unwrap_err();
+        assert!(matches!(err, HookError::InvalidSignature(_)));
+    }
+
+    #[test]
+    fn verify_forgejo_signature_rejects_invalid_encoding() {
+        let err = verify_forgejo_signature("secret", b"payload", "sha256=zz").unwrap_err();
+        assert!(matches!(err, HookError::InvalidSignature(_)));
+    }
+
+    #[test]
+    fn hook_error_display_messages_are_stable() {
+        assert_eq!(
+            HookError::InvalidLine("line".to_string()).to_string(),
+            "invalid ref line: line"
+        );
+        assert_eq!(
+            HookError::InvalidPayload("payload".to_string()).to_string(),
+            "invalid payload: payload"
+        );
+        assert_eq!(
+            HookError::InvalidSignature("signature".to_string()).to_string(),
+            "invalid signature: signature"
+        );
     }
 
     struct MockFetcher {
@@ -776,6 +836,20 @@ mod tests {
         let decision =
             evaluate_pre_receive(&FailingFetcher, repo_path, &updates).expect("decision");
         assert!(matches!(decision, gittree_core::UpdateDecision::Accept));
+    }
+
+    #[test]
+    fn evaluate_pre_receive_propagates_fetch_errors_for_non_nostr_updates() {
+        let updates = vec![super::RefUpdate {
+            old: "0".repeat(40),
+            new: "1".repeat(40),
+            reference: "refs/heads/main".to_string(),
+        }];
+        let repo_path = std::path::Path::new("/tmp")
+            .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
+            .join("repo.git");
+        let err = evaluate_pre_receive(&FailingFetcher, repo_path, &updates).unwrap_err();
+        assert!(matches!(err, super::HookServiceError::State(_)));
     }
 
     struct MockNotifier {
