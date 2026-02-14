@@ -52,10 +52,7 @@ where
 
 impl ReqwestTransport {
     pub fn new(token: impl Into<String>) -> Result<Self, ForgejoError> {
-        let client = match reqwest::Client::builder().build() {
-            Ok(client) => client,
-            Err(err) => return Err(ForgejoError::Request(err.to_string())),
-        };
+        let client = reqwest::Client::new();
         Ok(Self {
             client,
             token: token.into(),
@@ -989,6 +986,12 @@ mod tests {
     fn client_new_constructs_reqwest_transport() {
         let client = ForgejoClient::new(test_config()).expect("client");
         assert_eq!(client.config.owner, "gittree");
+    }
+
+    #[test]
+    fn reqwest_transport_new_accepts_owned_token() {
+        let transport = ReqwestTransport::new("token".to_string()).expect("transport");
+        drop(transport);
     }
 
     #[tokio::test]
