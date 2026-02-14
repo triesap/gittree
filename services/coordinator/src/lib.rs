@@ -978,9 +978,11 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use axum::response::IntoResponse;
     use gittree_config::ConfigError;
     use gittree_config::ForgejoConfig;
-    use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
+    use gittree_core::UserGraspList;
+    use gittree_core::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_USER_GRASP_LIST};
     use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
@@ -1539,6 +1541,233 @@ mod tests {
         assert!(matches!(action, CoordinatorAction::Provisioned { .. }));
         let again = handle_announcement_event(&repo_root, &hooks, &event).expect("handle");
         assert!(matches!(again, CoordinatorAction::SkippedExisting { .. }));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn action_payload_maps_skipped_and_ignored_variants() {
+        let skipped = CoordinatorAction::SkippedExisting {
+            repo_path: PathBuf::from("/tmp/repo.git"),
+        };
+        let skipped_payload = CoordinatorActionPayload::from(skipped);
+        assert!(matches!(
+            skipped_payload,
+            CoordinatorActionPayload::SkippedExisting { ref repo_path }
+            if repo_path == "/tmp/repo.git"
+        ));
+
+        let ignored_payload = CoordinatorActionPayload::from(CoordinatorAction::Ignored);
+        assert!(matches!(ignored_payload, CoordinatorActionPayload::Ignored));
+    }
+
+    #[tokio::test]
+    async fn http_error_maps_event_errors_to_expected_status() {
+        let cases = vec![
+            (
+                super::CoordinatorEventError::Parse("bad parse".to_string()),
+                axum::http::StatusCode::BAD_REQUEST,
+                "bad parse",
+            ),
+            (
+                super::CoordinatorEventError::MissingNpub,
+                axum::http::StatusCode::BAD_REQUEST,
+                "missing npub",
+            ),
+            (
+                super::CoordinatorEventError::Plan(super::ProvisionPlanError::InvalidRepo(
+                    "bad plan".to_string(),
+                )),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "bad plan",
+            ),
+            (
+                super::CoordinatorEventError::Init(super::RepoInitError::InvalidRepo(
+                    "bad init".to_string(),
+                )),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "bad init",
+            ),
+            (
+                super::CoordinatorEventError::Hooks(super::HookInstallError::MissingSource(
+                    "/tmp/missing-hook".to_string(),
+                )),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "missing hook source",
+            ),
+            (
+                super::CoordinatorEventError::Storage(StorageError::Internal {
+                    message: "storage failed".to_string(),
+                }),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "storage failed",
+            ),
+            (
+                super::CoordinatorEventError::Forgejo(gittree_forgejo::ForgejoError::Request(
+                    "forgejo failed".to_string(),
+                )),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "forgejo failed",
+            ),
+            (
+                super::CoordinatorEventError::Mapping(gittree_core::CoreError::InvalidField {
+                    field: "repo",
+                    value: "bad".to_string(),
+                }),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid field repo: bad",
+            ),
+        ];
+
+        for (error, expected_status, expected_body_fragment) in cases {
+            let response = super::CoordinatorHttpError::from(error).into_response();
+            assert_eq!(response.status(), expected_status);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+            let text = String::from_utf8(body.to_vec()).expect("utf8");
+            assert!(
+                text.contains(expected_body_fragment),
+                "body `{text}` did not contain `{expected_body_fragment}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn announcement_endpoint_rejects_invalid_kind() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-coordinator-http-invalid-kind");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let app = super::build_router(super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        });
+        let payload = CoordinatorEventPayload {
+            kind: u64::from(u32::MAX) + 1,
+            event_id: "44".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: Vec::new(),
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/announcement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(text.contains("invalid kind"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn handle_event_ignores_non_repo_nip34_events() {
+        let list = UserGraspList {
+            urls: vec!["wss://relay.example".to_string()],
+        };
+        let event = RelayEvent {
+            kind: KIND_USER_GRASP_LIST.0,
+            event_id: "55".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: list.to_tags(),
+        };
+        let temp_dir = temp_dir("gittree-ignored-event");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let action = handle_announcement_event(&temp_dir, &hooks, &event).expect("ignored");
+        assert!(matches!(action, CoordinatorAction::Ignored));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn handle_event_with_storage_ignores_non_repo_nip34_events() {
+        let list = UserGraspList {
+            urls: vec!["wss://relay.example".to_string()],
+        };
+        let event = RelayEvent {
+            kind: KIND_USER_GRASP_LIST.0,
+            event_id: "66".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: list.to_tags(),
+        };
+        let temp_dir = temp_dir("gittree-ignored-storage-event");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
+        let storage = InMemoryRepositories::new();
+        let action = handle_announcement_event_with_storage(
+            &temp_dir,
+            &hooks,
+            &storage,
+            &forgejo,
+            &event,
+        )
+        .await
+        .expect("ignored");
+        assert!(matches!(action, CoordinatorAction::Ignored));
+        assert!(transport.requests().is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn handle_event_surfaces_parse_and_missing_npub_errors() {
+        let invalid = RelayEvent {
+            kind: KIND_GIT_REPO_ANNOUNCEMENT.0,
+            event_id: "77".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: Vec::new(),
+        };
+        let temp_dir = temp_dir("gittree-invalid-event");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let parse_error = handle_announcement_event(&temp_dir, &hooks, &invalid)
+            .expect_err("parse error expected");
+        assert!(matches!(parse_error, super::CoordinatorEventError::Parse(_)));
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://relay.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let missing_npub = RelayEvent {
+            kind: KIND_GIT_REPO_ANNOUNCEMENT.0,
+            event_id: "88".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: announcement.to_tags(),
+        };
+        let missing_npub_error = handle_announcement_event(&temp_dir, &hooks, &missing_npub)
+            .expect_err("missing npub expected");
+        assert!(matches!(
+            missing_npub_error,
+            super::CoordinatorEventError::MissingNpub
+        ));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
