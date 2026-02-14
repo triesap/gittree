@@ -1103,6 +1103,25 @@ mod tests {
         }
     }
 
+    fn sample_publish_job(kind: u32, tags: Vec<Vec<String>>, identifier: &str) -> RelayPublishJob {
+        RelayPublishJob {
+            id: 7,
+            relay_url: "wss://relay.example".to_string(),
+            event_id: vec![0x11; 32],
+            pubkey: vec![0x22; 32],
+            created_at: 42,
+            kind,
+            tags,
+            content: "content".to_string(),
+            sig: vec![0x33; 64],
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            identifier: identifier.to_string(),
+            attempt_count: 1,
+            publish_after: OffsetDateTime::from_unix_timestamp(0).expect("ts"),
+        }
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
@@ -1837,6 +1856,27 @@ mod tests {
     }
 
     #[test]
+    fn repo_init_surfaces_git_init_and_config_failures() {
+        let temp_dir = temp_dir("gittree-repo-init-git-errors");
+
+        let parent_file = temp_dir.join("parent-file");
+        fs::write(&parent_file, "not a directory").expect("parent file");
+        let git_init_plan = sample_plan(parent_file.join("repo.git"));
+        let git_init_error = super::init_repo(&git_init_plan).expect_err("git init should fail");
+        assert!(matches!(git_init_error, super::RepoInitError::Git(_)));
+        assert!(format!("{git_init_error}").contains("git init failed"));
+
+        let mut git_config_plan = sample_plan(temp_dir.join("config-repo.git"));
+        git_config_plan.git_config = vec![super::GitConfigEntry::new("bad key", "value")];
+        let git_config_error =
+            super::init_repo(&git_config_plan).expect_err("git config should fail");
+        assert!(matches!(git_config_error, super::RepoInitError::Git(_)));
+        assert!(format!("{git_config_error}").contains("git config failed"));
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
     fn error_display_and_source_cover_repo_hook_and_event_variants() {
         let io_error = std::io::Error::other("io failure");
         let repo_io = super::RepoInitError::Io(io_error);
@@ -1934,6 +1974,115 @@ mod tests {
             gittree_forgejo::ForgejoError::Request(message)
             if message.contains("missing mock response")
         ));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn finalize_outbox_job_ignores_non_announcement_event_kinds() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-finalize-ignored");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let list = UserGraspList {
+            urls: vec!["wss://relay.example".to_string()],
+        };
+        let job = sample_publish_job(KIND_USER_GRASP_LIST.0, list.to_tags(), "repo");
+        super::finalize_outbox_job(&state, &job)
+            .await
+            .expect("ignored event should succeed");
+        assert!(transport.requests().is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn finalize_outbox_job_persists_state_and_provisions_repo() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-finalize-success");
+        let bin_dir = temp_dir.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let pre_source = bin_dir.join("pre-receive");
+        let post_source = bin_dir.join("post-receive");
+        fs::write(&pre_source, "#!/bin/sh\necho pre\n").expect("pre hook");
+        fs::write(&post_source, "#!/bin/sh\necho post\n").expect("post hook");
+        let hooks = HookInstallConfig {
+            pre_receive_source: pre_source,
+            post_receive_source: post_source,
+        };
+
+        let forgejo_responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "not found".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("owner", "repo"),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
+            },
+        ];
+        let (forgejo, transport) = forgejo_client_with_responses(forgejo_responses);
+        let repo_root = temp_dir.join("repos");
+        let state = super::CoordinatorAppState {
+            repositories: repositories.clone(),
+            repo_root: repo_root.clone(),
+            hooks,
+            forgejo,
+        };
+
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: Some("repo description".to_string()),
+            root_commit: None,
+            clone: vec![format!("https://gittr.ee/{npub}/repo.git")],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let job = sample_publish_job(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            announcement.to_tags(),
+            &announcement.identifier,
+        );
+
+        super::finalize_outbox_job(&state, &job)
+            .await
+            .expect("finalize succeeds");
+        assert_eq!(transport.requests().len(), 4);
+
+        let stored = repositories
+            .latest_announcement(&job.pubkey, &announcement.identifier)
+            .await
+            .expect("latest");
+        assert!(stored.is_some());
+
+        let mapping = repositories
+            .mapping_by_repo(&job.pubkey, &announcement.identifier)
+            .await
+            .expect("mapping");
+        let mapping = mapping.expect("mapping stored");
+        assert_eq!(mapping.forgejo_owner, "owner");
+        assert_eq!(mapping.forgejo_repo, "repo");
+        assert!(repo_root.join(npub).join("repo.git").exists());
         let _ = fs::remove_dir_all(temp_dir);
     }
 
