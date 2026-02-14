@@ -692,11 +692,15 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        match init_observability() {
-            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
-            Err(RelayError::Observability(ObservabilityError::SubscriberInit(_))) => {}
-            Err(err) => panic!("unexpected observability init error: {err}"),
-        }
+        let result = init_observability();
+        let init_ok = matches!(&result, Ok(handle) if handle.prometheus_registry().is_some());
+        let already_initialized = matches!(
+            result,
+            Err(RelayError::Observability(ObservabilityError::SubscriberInit(_)))
+        );
+        assert!(
+            init_ok || already_initialized
+        );
     }
 
     #[test]
