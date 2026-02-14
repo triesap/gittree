@@ -11,11 +11,13 @@ impl<S: EventStore> SessionDriver<S> {
     }
 
     pub async fn handle_text(&mut self, input: &str) -> Vec<String> {
-        if let Some(limit) = self.session.max_message_bytes() {
-            if input.len() > limit {
-                let notice = Notice::message("message too large");
-                return vec![encode_response(notice.into())];
-            }
+        if self
+            .session
+            .max_message_bytes()
+            .is_some_and(|limit| input.len() > limit)
+        {
+            let notice = Notice::message("message too large");
+            return vec![encode_response(notice.into())];
         }
         let responses = self.session.handle_raw(input).await;
         responses
@@ -50,7 +52,6 @@ impl<S: EventStore> SessionDriver<S> {
         outbound: mpsc::Sender<String>,
         mut broadcast_rx: broadcast::Receiver<crate::NostrEvent>,
     ) {
-        let outbound = outbound;
         for message in self.session.initial_messages() {
             if outbound.send(encode_response(message)).await.is_err() {
                 return;
@@ -58,7 +59,10 @@ impl<S: EventStore> SessionDriver<S> {
         }
         loop {
             tokio::select! {
-                Some(input) = inbound.recv() => {
+                input = inbound.recv() => {
+                    let Some(input) = input else {
+                        return;
+                    };
                     let responses = self.handle_text(&input).await;
                     for response in responses {
                         if outbound.send(response).await.is_err() {
@@ -79,9 +83,6 @@ impl<S: EventStore> SessionDriver<S> {
                             return;
                         }
                     }
-                }
-                else => {
-                    return;
                 }
             }
         }
