@@ -515,7 +515,7 @@ fn parse_event_message(
         return Ok(None);
     }
     let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let event = array.get(2).cloned().unwrap_or_else(|| json!({}));
+    let event = array[2].clone();
     Ok(Some((sub_id, event)))
 }
 
@@ -862,6 +862,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_message_ignores_missing_event_payload() {
+        let message = WsMessage::Text(json!(["EVENT", "sub-1"]).to_string());
+        let parsed = parse_event_message(&message).expect("parsed");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
     fn parse_event_message_rejects_invalid_json() {
         let message = WsMessage::Text("{".to_string());
         let err = parse_event_message(&message).unwrap_err();
@@ -990,7 +997,7 @@ mod tests {
                 let value: serde_json::Value = serde_json::from_str(&text).expect("client json");
                 let array = value.as_array().expect("client message array");
                 assert_eq!(array.first().and_then(|v| v.as_str()), Some("EVENT"));
-                let event = array.get(1).cloned().unwrap_or_else(|| json!({}));
+                let event = array[1].clone();
                 let event_id = event
                     .get("id")
                     .and_then(|v| v.as_str())
@@ -1086,6 +1093,18 @@ mod tests {
             .await
             .expect_err("rejected");
         assert!(matches!(err, RelayAdapterError::Protocol(_)));
+
+        let mut rejected_unknown =
+            stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+                WsMessage::Text("[\"OK\",\"evt\",false]".to_string()),
+            )]);
+        let err = wait_for_ok(&mut rejected_unknown, "evt", Duration::from_secs(1))
+            .await
+            .expect_err("rejected");
+        assert!(matches!(
+            err,
+            RelayAdapterError::Protocol(message) if message.contains("unknown")
+        ));
     }
 
     #[tokio::test]
@@ -1124,6 +1143,14 @@ mod tests {
         let err = wait_for_ok(&mut empty, "evt", Duration::from_secs(1))
             .await
             .expect_err("closed");
+        assert!(matches!(err, RelayAdapterError::Transport(_)));
+
+        let mut failed = stream::iter(vec![Err::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+        )]);
+        let err = wait_for_ok(&mut failed, "evt", Duration::from_secs(1))
+            .await
+            .expect_err("stream error");
         assert!(matches!(err, RelayAdapterError::Transport(_)));
     }
 
@@ -1217,6 +1244,14 @@ mod tests {
             closed,
             RelayAdapterError::Transport(message) if message == "relay closed"
         ));
+
+        let mut failed = stream::iter(vec![Err::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+        )]);
+        let err = wait_for_event(&mut failed, "sub-1", "evt-1", Duration::from_secs(1))
+            .await
+            .expect_err("stream error");
+        assert!(matches!(err, RelayAdapterError::Transport(_)));
 
         let mut pending = stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
         let timeout_err = wait_for_event(&mut pending, "sub-1", "evt-1", Duration::from_millis(20))
