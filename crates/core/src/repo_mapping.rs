@@ -114,6 +114,12 @@ mod tests {
     }
 
     #[test]
+    fn forgejo_repo_rejects_embedded_slash_segments() {
+        assert!(ForgejoRepo::new("owner/path", "repo").is_err());
+        assert!(ForgejoRepo::new("owner", "repo/path").is_err());
+    }
+
+    #[test]
     fn repo_mapping_accepts_valid_fields() {
         let pubkey = "11".repeat(32);
         let mapping = RepoMapping::new("owner", "repo", pubkey.clone(), "repo")
@@ -132,5 +138,11 @@ mod tests {
     fn repo_mapping_rejects_missing_identifier() {
         let pubkey = "11".repeat(32);
         assert!(RepoMapping::new("owner", "repo", pubkey, "").is_err());
+    }
+
+    #[test]
+    fn repo_mapping_rejects_invalid_forgejo_repo_fields() {
+        let pubkey = "11".repeat(32);
+        assert!(RepoMapping::new("owner/path", "repo", pubkey, "repo").is_err());
     }
 }
