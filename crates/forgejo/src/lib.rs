@@ -816,6 +816,26 @@ mod tests {
     }
 
     #[test]
+    fn serialize_json_maps_serializer_failure() {
+        struct FailingSerialize;
+
+        impl serde::Serialize for FailingSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("serialize boom"))
+            }
+        }
+
+        let err = super::serialize_json(&FailingSerialize).expect_err("serialize should fail");
+        assert!(matches!(
+            err,
+            ForgejoError::Parse(message) if message.contains("serialize boom")
+        ));
+    }
+
+    #[test]
     fn forgejo_error_display_covers_request_response_and_not_found() {
         let request = ForgejoError::Request("boom".to_string());
         assert!(format!("{request}").contains("boom"));
