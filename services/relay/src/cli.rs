@@ -128,12 +128,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_defaults_without_optional_flags() {
+        let cli = RelayCli::parse(["gittree-relay"]).expect("parse cli");
+        assert_eq!(cli.config_path, None);
+        assert_eq!(cli.bind, None);
+        assert!(!cli.help);
+    }
+
+    #[test]
+    fn parse_uses_last_value_when_flags_repeat() {
+        let args = [
+            "gittree-relay",
+            "--config=first.toml",
+            "--config",
+            "second.toml",
+            "--bind",
+            "127.0.0.1:7000",
+            "--bind=127.0.0.1:8000",
+        ];
+        let cli = RelayCli::parse(args).expect("parse cli");
+        assert_eq!(cli.config_path, Some(PathBuf::from("second.toml")));
+        assert_eq!(cli.bind, Some("127.0.0.1:8000".to_string()));
+    }
+
+    #[test]
     fn parse_rejects_unknown_flag() {
         let err = RelayCli::parse(["gittree-relay", "--nope"]).unwrap_err();
-        match err {
-            RelayCliError::UnknownFlag(flag) => assert_eq!(flag, "--nope"),
-            other => panic!("expected unknown flag error, got {other:?}"),
-        }
+        assert_eq!(err, RelayCliError::UnknownFlag("--nope".to_string()));
     }
 
     #[test]
@@ -151,10 +172,10 @@ mod tests {
     #[test]
     fn parse_rejects_empty_equals_values() {
         let config_err = RelayCli::parse(["gittree-relay", "--config="]).unwrap_err();
-        assert!(matches!(config_err, RelayCliError::MissingValue("--config")));
+        assert_eq!(config_err, RelayCliError::MissingValue("--config"));
 
         let bind_err = RelayCli::parse(["gittree-relay", "--bind="]).unwrap_err();
-        assert!(matches!(bind_err, RelayCliError::MissingValue("--bind")));
+        assert_eq!(bind_err, RelayCliError::MissingValue("--bind"));
     }
 
     #[test]
