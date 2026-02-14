@@ -978,11 +978,14 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use gittree_config::ConfigError;
     use gittree_config::ForgejoConfig;
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayPublishJob, RepoMappingRepository,
+        StorageConfig, StorageError,
     };
     use std::collections::VecDeque;
     use std::fs;
@@ -1057,6 +1060,32 @@ mod tests {
         )
     }
 
+    fn sample_storage_config(read_connection: &str) -> StorageConfig {
+        StorageConfig {
+            read_connection: read_connection.to_string(),
+            write_connection: None,
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: None,
+        }
+    }
+
+    fn sample_coordinator_config(storage: StorageConfig) -> CoordinatorConfig {
+        CoordinatorConfig {
+            bind: "127.0.0.1:9091".to_string(),
+            storage,
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: PathBuf::from("/tmp/gittree-repos"),
+            hooks: HookInstallConfig {
+                pre_receive_source: PathBuf::from("/tmp/gittree-pre-receive"),
+                post_receive_source: PathBuf::from("/tmp/gittree-post-receive"),
+            },
+            forgejo: test_forgejo_config(),
+        }
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
@@ -1074,6 +1103,21 @@ mod tests {
         }
     }
 
+    fn with_unset_env_var<F: FnOnce()>(key: &str, f: F) {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        f();
+        if let Some(old) = previous {
+            // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
+            unsafe {
+                std::env::set_var(key, old);
+            }
+        }
+    }
+
     fn with_forgejo_envs<F: FnOnce()>(f: F) {
         with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
             with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
@@ -1084,6 +1128,34 @@ mod tests {
                 });
             });
         });
+    }
+
+    fn with_required_coordinator_envs<F: FnOnce()>(f: F) {
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091", || {
+                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                        with_env_var(super::ENV_COORDINATOR_REPO_ROOT, "/tmp/gittree-repos", || {
+                            with_env_var(
+                                super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
+                                "/tmp/gittree-pre-receive",
+                                || {
+                                    with_env_var(
+                                        super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
+                                        "/tmp/gittree-post-receive",
+                                        || {
+                                            with_forgejo_envs(f);
+                                        },
+                                    );
+                                },
+                            );
+                        });
+                    });
+                });
+            },
+        );
     }
 
     #[test]
@@ -1174,6 +1246,158 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn config_rejects_invalid_storage_integer_envs() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_required_coordinator_envs(|| {
+            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "nope", || {
+                let err = CoordinatorConfig::from_env().expect_err("invalid max connections");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::Storage(super::StorageConfigError::InvalidEnv {
+                        key: super::ENV_STORAGE_MAX_CONNECTIONS,
+                        ..
+                    })
+                ));
+            });
+            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+                let err = CoordinatorConfig::from_env().expect_err("invalid idle timeout");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::Storage(super::StorageConfigError::InvalidEnv {
+                        key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                        ..
+                    })
+                ));
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_missing_and_empty_paths() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_unset_env_var(super::ENV_COORDINATOR_REPO_ROOT, || {
+            let err = super::env_path(super::ENV_COORDINATOR_REPO_ROOT).expect_err("missing path");
+            assert!(matches!(
+                err,
+                super::CoordinatorConfigError::MissingEnv(super::ENV_COORDINATOR_REPO_ROOT)
+            ));
+        });
+        with_env_var(super::ENV_COORDINATOR_REPO_ROOT, "  ", || {
+            let err = super::env_path(super::ENV_COORDINATOR_REPO_ROOT).expect_err("empty path");
+            assert!(matches!(
+                err,
+                super::CoordinatorConfigError::InvalidEnv {
+                    key: super::ENV_COORDINATOR_REPO_ROOT,
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn coordinator_and_storage_error_display_and_source() {
+        let config = super::CoordinatorConfigError::Config(ConfigError::MissingEnv("MISSING_ENV"));
+        assert_eq!(
+            format!("{config}"),
+            "coordinator config error: missing env MISSING_ENV"
+        );
+        assert!(std::error::Error::source(&config).is_some());
+
+        let storage = super::CoordinatorConfigError::Storage(super::StorageConfigError::InvalidConfig(
+            "invalid storage config".to_string(),
+        ));
+        assert_eq!(
+            format!("{storage}"),
+            "coordinator storage config error: invalid storage config"
+        );
+        assert!(std::error::Error::source(&storage).is_some());
+
+        let missing = super::CoordinatorConfigError::MissingEnv("REQUIRED");
+        assert_eq!(format!("{missing}"), "missing env REQUIRED");
+        assert!(std::error::Error::source(&missing).is_none());
+
+        let invalid = super::CoordinatorConfigError::InvalidEnv {
+            key: "BAD_KEY",
+            value: "value".to_string(),
+        };
+        assert_eq!(format!("{invalid}"), "invalid env BAD_KEY: value");
+        assert!(std::error::Error::source(&invalid).is_none());
+
+        let storage_missing = super::StorageConfigError::MissingEnv("STORAGE_KEY");
+        assert_eq!(format!("{storage_missing}"), "missing env STORAGE_KEY");
+        let storage_invalid = super::StorageConfigError::InvalidEnv {
+            key: "STORAGE_KEY",
+            value: "NaN".to_string(),
+        };
+        assert_eq!(
+            format!("{storage_invalid}"),
+            "invalid env STORAGE_KEY: NaN"
+        );
+    }
+
+    #[test]
+    fn coordinator_error_display_and_source() {
+        let config = super::CoordinatorError::Config(
+            super::CoordinatorConfigError::MissingEnv("CFG_MISSING"),
+        );
+        assert_eq!(format!("{config}"), "coordinator error: missing env CFG_MISSING");
+        assert!(std::error::Error::source(&config).is_some());
+
+        let observability_config = super::CoordinatorError::ObservabilityConfig(
+            ObservabilityConfigError::InvalidEnv {
+                key: "OTEL_METRICS_ENABLED",
+                value: "wat".to_string(),
+            },
+        );
+        assert!(format!("{observability_config}")
+            .contains("coordinator observability config error"));
+        assert!(std::error::Error::source(&observability_config).is_some());
+
+        let observability =
+            super::CoordinatorError::Observability(ObservabilityError::LogInit("boom".to_string()));
+        assert!(format!("{observability}").contains("coordinator observability error"));
+        assert!(std::error::Error::source(&observability).is_some());
+
+        let storage = super::CoordinatorError::Storage(StorageError::Internal {
+            message: "storage down".to_string(),
+        });
+        assert!(format!("{storage}").contains("coordinator storage error"));
+        assert!(std::error::Error::source(&storage).is_some());
+
+        let forgejo = super::CoordinatorError::Forgejo(gittree_forgejo::ForgejoError::Request(
+            "request failed".to_string(),
+        ));
+        assert!(format!("{forgejo}").contains("coordinator forgejo error"));
+        assert!(std::error::Error::source(&forgejo).is_some());
+
+        let serve = super::CoordinatorError::Serve("bind failed".to_string());
+        assert_eq!(format!("{serve}"), "coordinator serve error: bind failed");
+        assert!(std::error::Error::source(&serve).is_none());
+    }
+
+    #[tokio::test]
+    async fn build_repositories_maps_storage_errors_and_accepts_valid_config() {
+        let invalid_storage = StorageConfig {
+            max_connections: 0,
+            ..sample_storage_config("postgres://user:pass@localhost:5432/gittree")
+        };
+        let invalid_config = sample_coordinator_config(invalid_storage);
+        let invalid = super::build_repositories(&invalid_config).expect_err("invalid config");
+        assert!(matches!(
+            invalid,
+            super::CoordinatorError::Storage(StorageError::InvalidPoolConfig {
+                field: "max_connections",
+                value: 0
+            })
+        ));
+
+        let valid_config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        super::build_repositories(&valid_config).expect("valid config");
     }
 
     #[test]
