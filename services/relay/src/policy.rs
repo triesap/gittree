@@ -171,6 +171,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_too_many_tag_values() {
+        let mut event = sample_event();
+        event.tags = vec![vec![
+            "e".to_string(),
+            "1".to_string(),
+            "2".to_string(),
+            "3".to_string(),
+        ]];
+        let policy = Policy {
+            max_tag_values: 2,
+            ..Policy::default()
+        };
+        let err = policy.validate_event(&event, 0).unwrap_err();
+        assert_eq!(err, PolicyError::TooManyTagValues);
+    }
+
+    #[test]
     fn rejects_tag_value_too_long() {
         let mut event = sample_event();
         event.tags = vec![vec!["e".to_string(), "long".to_string()]];
@@ -192,5 +209,25 @@ mod tests {
         };
         let err = policy.validate_event(&event, 0).unwrap_err();
         assert_eq!(err, PolicyError::EventInFuture);
+    }
+
+    #[test]
+    fn policy_error_display_messages_are_stable() {
+        assert_eq!(PolicyError::ContentTooLong.to_string(), "content too long");
+        assert_eq!(PolicyError::TooManyTags.to_string(), "too many tags");
+        assert_eq!(
+            PolicyError::TooManyTagValues.to_string(),
+            "too many tag values"
+        );
+        assert_eq!(
+            PolicyError::TagValueTooLong.to_string(),
+            "tag value too long"
+        );
+        assert_eq!(
+            PolicyError::EventInFuture.to_string(),
+            "event timestamp too far in future"
+        );
+        let dyn_error: &dyn std::error::Error = &PolicyError::ContentTooLong;
+        assert!(dyn_error.source().is_none());
     }
 }
