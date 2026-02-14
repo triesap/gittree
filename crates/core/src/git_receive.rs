@@ -190,13 +190,11 @@ mod tests {
             "refs/heads/main",
         );
         let decision = evaluate_ref_update(&update, Some(&invalid_state_missing_head()));
-        match decision {
-            UpdateDecision::Reject { reason } => {
-                assert!(reason.contains("invalid repo state"));
-                assert!(reason.contains("HEAD"));
-            }
-            UpdateDecision::Accept => panic!("expected invalid-state rejection"),
-        }
+        assert!(matches!(
+            decision,
+            UpdateDecision::Reject { ref reason }
+                if reason.contains("invalid repo state") && reason.contains("HEAD")
+        ));
     }
 
     #[test]
@@ -218,14 +216,13 @@ mod tests {
             "refs/heads/main",
         );
         let decision = evaluate_ref_update(&update, Some(&sample_state()));
-        match decision {
-            UpdateDecision::Reject { reason } => {
-                assert!(reason.contains("cannot push refs/heads/main"));
-                assert!(reason.contains("1111111"));
-                assert!(reason.contains("0123456"));
-            }
-            UpdateDecision::Accept => panic!("expected rejection"),
-        }
+        assert!(matches!(
+            decision,
+            UpdateDecision::Reject { ref reason }
+                if reason.contains("cannot push refs/heads/main")
+                    && reason.contains("1111111")
+                    && reason.contains("0123456")
+        ));
     }
 
     #[test]
@@ -278,13 +275,11 @@ mod tests {
         )];
 
         let decision = evaluate_updates(&updates, Some(&invalid_state_missing_head()));
-        match decision {
-            UpdateDecision::Reject { reason } => {
-                assert!(reason.contains("invalid repo state"));
-                assert!(reason.contains("HEAD"));
-            }
-            UpdateDecision::Accept => panic!("expected invalid-state rejection"),
-        }
+        assert!(matches!(
+            decision,
+            UpdateDecision::Reject { ref reason }
+                if reason.contains("invalid repo state") && reason.contains("HEAD")
+        ));
     }
 
     #[test]
