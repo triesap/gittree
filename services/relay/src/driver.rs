@@ -335,14 +335,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_with_broadcast_returns_when_broadcast_send_fails_without_inbound_input() {
+        let session = Session::new(MemoryStore::new());
+        let driver = SessionDriver::new(session);
+        let (_in_tx, in_rx) = mpsc::channel(1);
+        let (out_tx, out_rx) = mpsc::channel(1);
+        drop(out_rx);
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(1);
+        let task = tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
+        broadcast_tx.send(sample_event("broadcast-only")).expect("send broadcast");
+        drop(broadcast_tx);
+        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+    }
+
+    #[tokio::test]
     async fn run_with_broadcast_returns_on_closed_inputs() {
         let session = Session::new(MemoryStore::new());
         let driver = SessionDriver::new(session);
         let (in_tx, in_rx) = mpsc::channel(1);
         let (out_tx, _out_rx) = mpsc::channel(1);
-        let (broadcast_tx, broadcast_rx) = broadcast::channel(1);
+        let (_broadcast_tx, broadcast_rx) = broadcast::channel(1);
         drop(in_tx);
-        drop(broadcast_tx);
         timeout(
             Duration::from_secs(1),
             driver.run_with_broadcast(in_rx, out_tx, broadcast_rx),
