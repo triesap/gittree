@@ -957,6 +957,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_store_delete_missing_targets_is_noop() {
+        let store = MemoryStore::new();
+        let mut delete = sample_event("delete-missing-targets");
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 10;
+        delete.tags = vec![
+            vec!["e".to_string(), "missing-event".to_string()],
+            vec!["a".to_string(), "bad-address".to_string()],
+            vec![
+                "a".to_string(),
+                format!("30023:{}:demo", delete.pubkey),
+            ],
+        ];
+        store.insert(delete.clone()).await.expect("insert delete");
+        assert!(store.get(&delete.id).await.expect("get delete").is_some());
+    }
+
+    #[tokio::test]
     async fn memory_store_query_reports_invalid_tag_index() {
         let store = MemoryStore::new();
         let mut event = sample_event("bad-tags");
@@ -1380,6 +1399,48 @@ mod tests {
             .await
             .expect_err("postgres replaceable query should fail");
         assert!(matches!(replaceable_err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn apply_delete_repo_skips_invalid_targets_and_mismatched_records() {
+        let repo = ScriptedEventRepo::delete_error();
+        let mut delete = sample_event(&"86".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "bb".repeat(32);
+        delete.created_at = -1;
+        delete.tags = vec![
+            vec!["e".to_string(), "zz-not-hex".to_string()],
+            vec!["e".to_string(), "11".repeat(32)],
+            vec!["a".to_string(), "bad-address".to_string()],
+            vec![
+                "a".to_string(),
+                format!("30023:{}:demo", delete.pubkey),
+            ],
+        ];
+
+        apply_delete_repo(&repo, "default", &delete)
+            .await
+            .expect("invalid and mismatched targets should be skipped");
+    }
+
+    #[tokio::test]
+    async fn apply_replaceable_repo_returns_duplicate_when_existing_is_newer() {
+        let mut existing = sample_event(&"87".repeat(32));
+        existing.kind = 0;
+        existing.pubkey = "aa".repeat(32);
+        existing.created_at = 10;
+        let record = event_to_record(&existing, "default").expect("existing record");
+        let repo = ScriptedEventRepo::with_query_results(vec![record]);
+
+        let mut incoming = sample_event(&"88".repeat(32));
+        incoming.kind = 0;
+        incoming.pubkey = "aa".repeat(32);
+        incoming.created_at = 5;
+        let key = replaceable_key(&incoming).expect("replaceable key");
+        let duplicate = apply_replaceable_repo(&repo, "default", &incoming, &key)
+            .await
+            .expect("apply");
+        assert!(duplicate);
     }
 
     #[test]

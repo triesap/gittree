@@ -256,6 +256,15 @@ mod tests {
     }
 
     #[test]
+    fn matches_when_tag_value_intersects() {
+        let value = json!({"#e": ["1", "missing"]});
+        let filter = Filter::from_json(&value).expect("filter");
+        let event = sample_event();
+        let tags = TagIndex::from_tags(&event.tags).expect("tags");
+        assert!(filter.matches(&event, &tags));
+    }
+
+    #[test]
     fn rejects_when_tag_missing() {
         let value = json!({"#e": ["nope"]});
         let filter = Filter::from_json(&value).expect("filter");
