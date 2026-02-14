@@ -436,6 +436,18 @@ mod tests {
     }
 
     #[test]
+    fn normalize_grasp_server_url_rejects_hostless_urls_with_unparseable_fallback() {
+        let err = normalize_grasp_server_url("data:text/plain,hello world");
+        assert!(matches!(err, Err(CoreError::InvalidField { field: "grasp_url", .. })));
+    }
+
+    #[test]
+    fn normalize_grasp_server_url_rejects_path_only_input() {
+        let err = normalize_grasp_server_url("/");
+        assert!(matches!(err, Err(CoreError::InvalidField { field: "grasp_url", .. })));
+    }
+
+    #[test]
     fn extract_npub_rejects_malformed_bech32_payload() {
         let malformed = "npub1invalid";
         let url = format!("https://gittr.ee/{malformed}/repo.git");

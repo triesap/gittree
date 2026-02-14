@@ -327,6 +327,21 @@ mod tests {
     }
 
     #[test]
+    fn status_from_tags_allows_duplicate_same_root_and_ignores_unknown_tags() {
+        let root = hex_of(0x11, 64);
+        let tags = vec![
+            vec!["e".to_string(), root.clone(), "".to_string(), "root".to_string()],
+            vec!["e".to_string(), root.clone(), "".to_string(), "root".to_string()],
+            vec!["e".to_string(), hex_of(0x22, 64), "".to_string(), "unknown".to_string()],
+            vec!["x-unknown".to_string(), "ignored".to_string()],
+        ];
+
+        let status = StatusEvent::from_tags(&tags).expect("status");
+        assert_eq!(status.root_event, root);
+        assert!(status.reply_events.is_empty());
+    }
+
+    #[test]
     fn status_validate_rejects_invalid_reply_repo_ref_and_merge_commit() {
         let mut status = StatusEvent {
             root_event: hex_of(0x11, 64),
@@ -411,6 +426,25 @@ mod tests {
                 field: "applied-as-commits",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn status_validate_rejects_invalid_mentions() {
+        let status = StatusEvent {
+            root_event: hex_of(0x11, 64),
+            reply_events: Vec::new(),
+            mentions: vec!["abcd".to_string()],
+            repo_address: None,
+            repo_refs: Vec::new(),
+            applied_refs: Vec::new(),
+            merge_commit: None,
+            applied_as_commits: Vec::new(),
+        };
+
+        assert!(matches!(
+            status.validate(),
+            Err(CoreError::InvalidField { field: "p", .. })
         ));
     }
 }

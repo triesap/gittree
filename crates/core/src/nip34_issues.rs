@@ -151,6 +151,19 @@ mod tests {
     }
 
     #[test]
+    fn issue_from_tags_ignores_unknown_tags() {
+        let pubkey = hex_of(0x11, 64);
+        let tags = vec![
+            vec!["a".to_string(), format!("30617:{pubkey}:repo")],
+            vec!["x-unknown".to_string(), "value".to_string()],
+        ];
+        let issue = Issue::from_tags(&tags).expect("issue");
+        assert_eq!(issue.repo_address, format!("30617:{pubkey}:repo"));
+        assert!(issue.mentions.is_empty());
+        assert!(issue.labels.is_empty());
+    }
+
+    #[test]
     fn issue_validate_rejects_invalid_mentions_and_labels() {
         let pubkey = hex_of(0x11, 64);
         let bad_mention = Issue {

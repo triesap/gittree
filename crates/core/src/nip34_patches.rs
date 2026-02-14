@@ -356,6 +356,45 @@ mod tests {
     }
 
     #[test]
+    fn patch_from_tags_ignores_unhandled_e_markers() {
+        let pubkey = hex_of(0x11, 64);
+        let tags = vec![
+            vec!["a".to_string(), format!("30617:{pubkey}:repo")],
+            vec![
+                "e".to_string(),
+                hex_of(0x22, 64),
+                "".to_string(),
+                "other".to_string(),
+            ],
+            vec!["e".to_string(), hex_of(0x33, 64)],
+            vec!["x-unknown".to_string(), "ignored".to_string()],
+        ];
+
+        let patch = Patch::from_tags(&tags).expect("patch");
+        assert!(patch.root_event.is_none());
+        assert!(patch.reply_event.is_none());
+    }
+
+    #[test]
+    fn patch_validate_accepts_without_parent_commit() {
+        let pubkey = hex_of(0x11, 64);
+        let patch = Patch {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            root_event: Some(hex_of(0x44, 64)),
+            reply_event: None,
+            is_root: true,
+            is_root_revision: false,
+            commit: Some(hex_of(0x55, 40)),
+            parent_commit: None,
+            commit_pgp_sig: None,
+            committer: None,
+        };
+        patch.validate().expect("valid patch");
+    }
+
+    #[test]
     fn patch_validation_rejects_invalid_optional_fields() {
         let pubkey = hex_of(0x11, 64);
         let base = Patch {

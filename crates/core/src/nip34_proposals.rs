@@ -389,6 +389,24 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_validate_accepts_without_optional_subject_branch_or_merge_base() {
+        let pubkey = hex_of(0x11, 64);
+        let pr = PullRequest {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            subject: None,
+            labels: Vec::new(),
+            tip_commit: hex_of(0x44, 40),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            branch_name: None,
+            revision_of: None,
+            merge_base: None,
+        };
+        pr.validate().expect("valid pull request");
+    }
+
+    #[test]
     fn pull_request_update_round_trips_tags() {
         let pubkey = hex_of(0x11, 64);
         let update = PullRequestUpdate {
@@ -406,6 +424,37 @@ mod tests {
         let parsed = PullRequestUpdate::from_tags(&tags).expect("parse");
         assert_eq!(parsed, update);
         parsed.validate().expect("valid");
+    }
+
+    #[test]
+    fn pull_request_update_from_tags_ignores_unknown_tags() {
+        let pubkey = hex_of(0x11, 64);
+        let tags = vec![
+            vec!["a".to_string(), format!("30617:{pubkey}:repo")],
+            vec!["E".to_string(), hex_of(0x44, 64)],
+            vec!["P".to_string(), hex_of(0x55, 64)],
+            vec!["c".to_string(), hex_of(0x66, 40)],
+            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+            vec!["x-unknown".to_string(), "ignored".to_string()],
+        ];
+        let parsed = PullRequestUpdate::from_tags(&tags).expect("parse");
+        assert_eq!(parsed.clone, vec!["https://git.example/repo.git".to_string()]);
+    }
+
+    #[test]
+    fn pull_request_update_validate_accepts_without_merge_base() {
+        let pubkey = hex_of(0x11, 64);
+        let update = PullRequestUpdate {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: vec![hex_of(0x22, 40)],
+            mentions: vec![hex_of(0x33, 64)],
+            root_event_id: hex_of(0x44, 64),
+            root_author: hex_of(0x55, 64),
+            tip_commit: hex_of(0x66, 40),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            merge_base: None,
+        };
+        update.validate().expect("valid update");
     }
 
     #[test]

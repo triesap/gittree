@@ -529,6 +529,24 @@ mod tests {
     }
 
     #[test]
+    fn announcement_validation_accepts_valid_root_commit() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        announcement.validate().expect("valid root commit");
+    }
+
+    #[test]
     fn announcement_validation_rejects_bad_maintainer() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
@@ -991,6 +1009,15 @@ mod tests {
             repo_state.validate(),
             Err(crate::CoreError::MissingField("d"))
         ));
+    }
+
+    #[test]
+    fn state_validation_accepts_empty_state() {
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: HashMap::new(),
+        };
+        repo_state.validate().expect("empty state is valid");
     }
 
     #[test]
