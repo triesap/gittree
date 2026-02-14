@@ -392,6 +392,59 @@ mod tests {
     }
 
     #[test]
+    fn announcement_from_tags_parses_short_root_and_ignores_unknown_tags() {
+        let root = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let tags = vec![
+            vec!["d".to_string(), "repo".to_string()],
+            vec!["r".to_string(), root.clone()],
+            vec![
+                "clone".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ],
+            vec!["relays".to_string(), "wss://relay.example".to_string()],
+            vec!["t".to_string(), "nostr".to_string()],
+            vec!["t".to_string(), "nostr".to_string()],
+            vec!["x-ignored".to_string(), "value".to_string()],
+        ];
+
+        let parsed = RepoAnnouncement::from_tags(&tags).expect("parse");
+        assert_eq!(parsed.root_commit, Some(root));
+        assert_eq!(parsed.hashtags, vec!["nostr".to_string()]);
+    }
+
+    #[test]
+    fn announcement_from_tags_requires_identifier() {
+        let tags = vec![
+            vec![
+                "clone".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ],
+            vec!["relays".to_string(), "wss://relay.example".to_string()],
+        ];
+        let err = RepoAnnouncement::from_tags(&tags).expect_err("missing identifier should fail");
+        assert!(matches!(err, crate::CoreError::MissingField("d")));
+    }
+
+    #[test]
+    fn announcement_to_tags_omits_optional_fields_when_empty() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let tags = announcement.to_tags();
+        assert_eq!(tags, vec![vec!["d".to_string(), "repo".to_string()]]);
+    }
+
+    #[test]
     fn announcement_validation_requires_identifier() {
         let announcement = RepoAnnouncement {
             identifier: "".to_string(),
@@ -500,6 +553,46 @@ mod tests {
     }
 
     #[test]
+    fn announcement_validation_rejects_empty_clone_or_relay_entries() {
+        let bad_clone = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["   ".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        assert!(matches!(
+            bad_clone.validate(),
+            Err(crate::CoreError::InvalidField { field: "clone", .. })
+        ));
+
+        let bad_relay = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["   ".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        assert!(matches!(
+            bad_relay.validate(),
+            Err(crate::CoreError::InvalidField {
+                field: "relays",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn announcement_lists_grasp_host_when_clone_and_relay_present() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
@@ -518,6 +611,23 @@ mod tests {
             .lists_grasp_host("gittr.ee")
             .expect("host check");
         assert!(listed);
+    }
+
+    #[test]
+    fn announcement_lists_grasp_host_rejects_invalid_host_input() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        assert!(announcement.lists_grasp_host("://invalid").is_err());
     }
 
     #[test]
@@ -644,6 +754,31 @@ mod tests {
     }
 
     #[test]
+    fn announcement_grasp_servers_skips_invalid_duplicate_and_non_npub_urls() {
+        let valid = format!("https://gittr.ee/{}/repo.git", SAMPLE_NPUB);
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![
+                valid.clone(),
+                valid.clone(),
+                "https://gittr.ee/notnpub/repo.git".to_string(),
+                "://invalid".to_string(),
+            ],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let servers = announcement.grasp_servers();
+        assert_eq!(servers, vec!["gittr.ee".to_string()]);
+    }
+
+    #[test]
     fn announcement_maintainer_keys_returns_cloned_list() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
@@ -660,6 +795,23 @@ mod tests {
 
         let keys = announcement.maintainer_keys();
         assert_eq!(keys, vec!["11".repeat(32)]);
+    }
+
+    #[test]
+    fn announcement_maintainer_keys_returns_empty_for_missing_maintainers() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        assert!(announcement.maintainer_keys().is_empty());
     }
 
     #[test]
@@ -687,6 +839,42 @@ mod tests {
     }
 
     #[test]
+    fn state_from_tags_requires_identifier() {
+        let tags = vec![vec![
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        ]];
+        let err = RepoState::from_tags(&tags).expect_err("missing identifier should fail");
+        assert!(matches!(err, crate::CoreError::MissingField("d")));
+    }
+
+    #[test]
+    fn state_from_tags_ignores_invalid_or_unknown_tags() {
+        let tags = vec![
+            vec!["d".to_string(), "repo".to_string()],
+            vec![
+                "refs/heads/main".to_string(),
+                "0123456789abcdef0123456789abcdef01234567".to_string(),
+            ],
+            vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
+            vec!["refs/heads/dev".to_string(), "bad".to_string()],
+            vec!["x-ignored".to_string(), "value".to_string()],
+        ];
+
+        let parsed = RepoState::from_tags(&tags).expect("parse");
+        assert_eq!(parsed.identifier, "repo");
+        assert_eq!(
+            parsed.state.get("refs/heads/main"),
+            Some(&"0123456789abcdef0123456789abcdef01234567".to_string())
+        );
+        assert_eq!(
+            parsed.state.get("HEAD"),
+            Some(&"ref: refs/heads/main".to_string())
+        );
+        assert!(!parsed.state.contains_key("refs/heads/dev"));
+    }
+
+    #[test]
     fn state_head_ref_parses_symbolic() {
         let mut state = HashMap::new();
         state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
@@ -695,6 +883,15 @@ mod tests {
             state,
         };
         assert_eq!(repo_state.head_ref(), Some("refs/heads/main".to_string()));
+    }
+
+    #[test]
+    fn state_head_ref_returns_none_without_head() {
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: HashMap::new(),
+        };
+        assert_eq!(repo_state.head_ref(), None);
     }
 
     #[test]
@@ -716,6 +913,46 @@ mod tests {
     }
 
     #[test]
+    fn state_head_commit_handles_direct_ref_hash_and_invalid_head() {
+        let mut ref_head_state = HashMap::new();
+        ref_head_state.insert("HEAD".to_string(), "refs/heads/main".to_string());
+        ref_head_state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let ref_head_repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: ref_head_state,
+        };
+        assert_eq!(
+            ref_head_repo_state.head_commit(),
+            Some("0123456789abcdef0123456789abcdef01234567".to_string())
+        );
+
+        let mut hash_head_state = HashMap::new();
+        hash_head_state.insert(
+            "HEAD".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let hash_head_repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: hash_head_state,
+        };
+        assert_eq!(
+            hash_head_repo_state.head_commit(),
+            Some("0123456789abcdef0123456789abcdef01234567".to_string())
+        );
+
+        let mut invalid_head_state = HashMap::new();
+        invalid_head_state.insert("HEAD".to_string(), "invalid".to_string());
+        let invalid_head_repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: invalid_head_state,
+        };
+        assert_eq!(invalid_head_repo_state.head_commit(), None);
+    }
+
+    #[test]
     fn state_ref_map_excludes_head() {
         let mut state = HashMap::new();
         state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
@@ -730,6 +967,17 @@ mod tests {
         let refs = repo_state.ref_map();
         assert!(!refs.contains_key("HEAD"));
         assert!(refs.contains_key("refs/heads/main"));
+    }
+
+    #[test]
+    fn state_ref_map_with_only_head_is_empty() {
+        let mut state = HashMap::new();
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+        assert!(repo_state.ref_map().is_empty());
     }
 
     #[test]
@@ -809,6 +1057,42 @@ mod tests {
         assert!(matches!(
             repo_state.validate(),
             Err(crate::CoreError::InvalidTag { .. })
+        ));
+    }
+
+    #[test]
+    fn state_validation_accepts_head_hash_and_rejects_direct_ref_value() {
+        let mut head_hash_state = HashMap::new();
+        head_hash_state.insert(
+            "HEAD".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        head_hash_state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let head_hash_repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: head_hash_state,
+        };
+        head_hash_repo_state.validate().expect("head hash should validate");
+
+        let mut direct_ref_state = HashMap::new();
+        direct_ref_state.insert("HEAD".to_string(), "refs/heads/main".to_string());
+        direct_ref_state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let direct_ref_repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: direct_ref_state,
+        };
+        assert!(matches!(
+            direct_ref_repo_state.validate(),
+            Err(crate::CoreError::InvalidTag {
+                tag: "state",
+                value
+            }) if value == "refs/heads/main"
         ));
     }
 }
