@@ -221,6 +221,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_non_empty_optional_full_name() {
+        let json = r#"{"action":"create_org","name":"acme","full_name":"acme corp"}"#;
+        let action =
+            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+                .expect("action");
+        assert!(matches!(action, ControlAction::CreateOrg { .. }));
+    }
+
+    #[test]
+    fn parse_accepts_missing_optional_full_name() {
+        let json = r#"{"action":"create_org","name":"acme"}"#;
+        let action =
+            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+                .expect("action");
+        assert!(matches!(action, ControlAction::CreateOrg { .. }));
+    }
+
+    #[test]
     fn parse_rejects_invalid_pubkey() {
         let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"not-hex","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
         let err =
@@ -260,6 +278,24 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_accepts_non_empty_optional_owner_and_identifier() {
+        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","identifier":"repo-slug","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
+        let action =
+            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+                .expect("action");
+        assert!(matches!(action, ControlAction::CreateRepo { .. }));
+    }
+
+    #[test]
+    fn parse_accepts_missing_optional_owner_and_identifier() {
+        let json = r#"{"action":"create_repo","name":"hello-ngit","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
+        let action =
+            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+                .expect("action");
+        assert!(matches!(action, ControlAction::CreateRepo { .. }));
     }
 
     #[test]
