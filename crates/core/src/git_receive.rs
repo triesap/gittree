@@ -126,6 +126,18 @@ mod tests {
         }
     }
 
+    fn invalid_state_missing_head() -> RepoState {
+        let mut state = HashMap::new();
+        state.insert(
+            "refs/heads/main".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        RepoState {
+            identifier: "repo".to_string(),
+            state,
+        }
+    }
+
     #[test]
     fn accepts_valid_nostr_ref_without_state() {
         let update = RefUpdate::new(
@@ -145,7 +157,7 @@ mod tests {
             "refs/nostr/invalid",
         );
         let decision = evaluate_ref_update(&update, None);
-        assert!(matches!(decision, UpdateDecision::Reject { .. }));
+        assert_ne!(decision, UpdateDecision::Accept);
     }
 
     #[test]
@@ -156,7 +168,7 @@ mod tests {
             "refs/heads/main",
         );
         let decision = evaluate_ref_update(&update, None);
-        assert!(matches!(decision, UpdateDecision::Reject { .. }));
+        assert_ne!(decision, UpdateDecision::Accept);
     }
 
     #[test]
@@ -167,7 +179,24 @@ mod tests {
             "refs/heads/pr/123",
         );
         let decision = evaluate_ref_update(&update, Some(&sample_state()));
-        assert!(matches!(decision, UpdateDecision::Reject { .. }));
+        assert_ne!(decision, UpdateDecision::Accept);
+    }
+
+    #[test]
+    fn rejects_when_state_event_is_invalid() {
+        let update = RefUpdate::new(
+            "0000000000000000000000000000000000000000",
+            "0123456789abcdef0123456789abcdef01234567",
+            "refs/heads/main",
+        );
+        let decision = evaluate_ref_update(&update, Some(&invalid_state_missing_head()));
+        match decision {
+            UpdateDecision::Reject { reason } => {
+                assert!(reason.contains("invalid repo state"));
+                assert!(reason.contains("HEAD"));
+            }
+            UpdateDecision::Accept => panic!("expected invalid-state rejection"),
+        }
     }
 
     #[test]
@@ -207,7 +236,7 @@ mod tests {
             "refs/heads/dev",
         );
         let decision = evaluate_ref_update(&update, Some(&sample_state()));
-        assert!(matches!(decision, UpdateDecision::Reject { .. }));
+        assert_ne!(decision, UpdateDecision::Accept);
     }
 
     #[test]
@@ -218,7 +247,7 @@ mod tests {
             "refs/notes/review",
         );
         let decision = evaluate_ref_update(&update, Some(&sample_state()));
-        assert!(matches!(decision, UpdateDecision::Reject { .. }));
+        assert_ne!(decision, UpdateDecision::Accept);
     }
 
     #[test]
@@ -237,6 +266,43 @@ mod tests {
         ];
 
         let decision = evaluate_updates(&updates, Some(&sample_state()));
-        assert!(matches!(decision, UpdateDecision::Reject { .. }));
+        assert_ne!(decision, UpdateDecision::Accept);
+    }
+
+    #[test]
+    fn evaluate_updates_rejects_invalid_state_before_processing_updates() {
+        let updates = vec![RefUpdate::new(
+            "0000000000000000000000000000000000000000",
+            "0123456789abcdef0123456789abcdef01234567",
+            "refs/heads/main",
+        )];
+
+        let decision = evaluate_updates(&updates, Some(&invalid_state_missing_head()));
+        match decision {
+            UpdateDecision::Reject { reason } => {
+                assert!(reason.contains("invalid repo state"));
+                assert!(reason.contains("HEAD"));
+            }
+            UpdateDecision::Accept => panic!("expected invalid-state rejection"),
+        }
+    }
+
+    #[test]
+    fn evaluate_updates_accepts_empty_update_list_without_state() {
+        let updates: Vec<RefUpdate<'static>> = Vec::new();
+        let decision = evaluate_updates(&updates, None);
+        assert_eq!(decision, UpdateDecision::Accept);
+    }
+
+    #[test]
+    fn evaluate_updates_accepts_when_all_updates_match_state() {
+        let updates = vec![RefUpdate::new(
+            "0000000000000000000000000000000000000000",
+            "0123456789abcdef0123456789abcdef01234567",
+            "refs/heads/main",
+        )];
+
+        let decision = evaluate_updates(&updates, Some(&sample_state()));
+        assert_eq!(decision, UpdateDecision::Accept);
     }
 }
