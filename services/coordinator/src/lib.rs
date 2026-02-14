@@ -983,7 +983,9 @@ mod tests {
     use gittree_config::ForgejoConfig;
     use gittree_core::UserGraspList;
     use gittree_core::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_USER_GRASP_LIST};
-    use gittree_forgejo::{ForgejoClient, ForgejoRequest, ForgejoResponse, ForgejoTransport};
+    use gittree_forgejo::{
+        ForgejoClient, ForgejoMethod, ForgejoRequest, ForgejoResponse, ForgejoTransport,
+    };
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayPublishJob, RepoMappingRepository,
@@ -1085,6 +1087,19 @@ mod tests {
                 post_receive_source: PathBuf::from("/tmp/gittree-post-receive"),
             },
             forgejo: test_forgejo_config(),
+        }
+    }
+
+    fn sample_plan(repo_path: PathBuf) -> super::RepoProvisionPlan {
+        let hooks_dir = repo_path.join("hooks");
+        super::RepoProvisionPlan {
+            npub: "npub1test".to_string(),
+            identifier: "repo".to_string(),
+            pre_receive_hook: hooks_dir.join("pre-receive"),
+            post_receive_hook: hooks_dir.join("post-receive"),
+            hooks_dir,
+            repo_path,
+            git_config: Vec::new(),
         }
     }
 
@@ -1273,6 +1288,40 @@ mod tests {
                         ..
                     })
                 ));
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_missing_read_url_and_invalid_pool_ranges() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_required_coordinator_envs(|| {
+            with_unset_env_var(ENV_STORAGE_READ_URL, || {
+                let err = CoordinatorConfig::from_env().expect_err("missing read url");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::Storage(super::StorageConfigError::MissingEnv(
+                        ENV_STORAGE_READ_URL
+                    ))
+                ));
+            });
+
+            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                    let err = CoordinatorConfig::from_env().expect_err("invalid pool range");
+                    assert!(matches!(
+                        err,
+                        super::CoordinatorConfigError::Storage(
+                            super::StorageConfigError::InvalidConfig(_)
+                        )
+                    ));
+                });
+            });
+
+            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
+                let config =
+                    CoordinatorConfig::from_env().expect("empty max connections uses default");
+                assert_eq!(config.storage.max_connections, 10);
             });
         });
     }
@@ -1769,6 +1818,148 @@ mod tests {
             super::CoordinatorEventError::MissingNpub
         ));
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn repo_init_rejects_non_directory_and_missing_head() {
+        let temp_dir = temp_dir("gittree-repo-init-errors");
+        let repo_path = temp_dir.join("repo.git");
+        fs::write(&repo_path, "not a dir").expect("repo file");
+        let plan = sample_plan(repo_path.clone());
+        let non_dir_error = super::init_repo(&plan).expect_err("non-directory should fail");
+        assert!(matches!(non_dir_error, super::RepoInitError::InvalidRepo(_)));
+
+        fs::remove_file(&repo_path).expect("remove file");
+        fs::create_dir_all(&repo_path).expect("repo dir");
+        let missing_head_error = super::init_repo(&plan).expect_err("missing head should fail");
+        assert!(matches!(missing_head_error, super::RepoInitError::InvalidRepo(_)));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn error_display_and_source_cover_repo_hook_and_event_variants() {
+        let io_error = std::io::Error::other("io failure");
+        let repo_io = super::RepoInitError::Io(io_error);
+        assert!(format!("{repo_io}").contains("repo init io error"));
+        assert!(std::error::Error::source(&repo_io).is_some());
+
+        let repo_invalid = super::RepoInitError::InvalidRepo("invalid repo".to_string());
+        assert_eq!(format!("{repo_invalid}"), "invalid repo");
+        assert!(std::error::Error::source(&repo_invalid).is_none());
+
+        let repo_path = super::RepoInitError::InvalidPath("invalid path".to_string());
+        assert_eq!(format!("{repo_path}"), "invalid path");
+        assert!(std::error::Error::source(&repo_path).is_none());
+
+        let repo_git = super::RepoInitError::Git("git failed".to_string());
+        assert_eq!(format!("{repo_git}"), "git failed");
+        assert!(std::error::Error::source(&repo_git).is_none());
+
+        let hook_io = super::HookInstallError::Io(std::io::Error::other("hook io"));
+        assert!(format!("{hook_io}").contains("hook install io error"));
+        assert!(std::error::Error::source(&hook_io).is_some());
+
+        let hook_missing = super::HookInstallError::MissingSource("/tmp/missing".to_string());
+        assert_eq!(format!("{hook_missing}"), "missing hook source: /tmp/missing");
+        assert!(std::error::Error::source(&hook_missing).is_none());
+
+        let plan_error = super::ProvisionPlanError::InvalidRepo("invalid plan".to_string());
+        assert_eq!(format!("{plan_error}"), "invalid plan");
+        assert!(std::error::Error::source(&plan_error).is_none());
+
+        let parse = super::CoordinatorEventError::Parse("parse".to_string());
+        assert_eq!(format!("{parse}"), "parse");
+        assert!(std::error::Error::source(&parse).is_none());
+
+        let missing_npub = super::CoordinatorEventError::MissingNpub;
+        assert_eq!(format!("{missing_npub}"), "missing npub in clone urls");
+        assert!(std::error::Error::source(&missing_npub).is_none());
+
+        let plan = super::CoordinatorEventError::Plan(super::ProvisionPlanError::InvalidRepo(
+            "plan".to_string(),
+        ));
+        assert_eq!(format!("{plan}"), "plan");
+        assert!(std::error::Error::source(&plan).is_some());
+
+        let init =
+            super::CoordinatorEventError::Init(super::RepoInitError::InvalidRepo("init".to_string()));
+        assert_eq!(format!("{init}"), "init");
+        assert!(std::error::Error::source(&init).is_some());
+
+        let hooks = super::CoordinatorEventError::Hooks(super::HookInstallError::MissingSource(
+            "/tmp/hook".to_string(),
+        ));
+        assert_eq!(format!("{hooks}"), "missing hook source: /tmp/hook");
+        assert!(std::error::Error::source(&hooks).is_some());
+
+        let storage = super::CoordinatorEventError::Storage(StorageError::Internal {
+            message: "storage".to_string(),
+        });
+        assert_eq!(format!("{storage}"), "storage error: internal error: storage");
+        assert!(std::error::Error::source(&storage).is_some());
+
+        let forgejo = super::CoordinatorEventError::Forgejo(gittree_forgejo::ForgejoError::Request(
+            "forgejo".to_string(),
+        ));
+        assert_eq!(format!("{forgejo}"), "forgejo request error: forgejo");
+        assert!(std::error::Error::source(&forgejo).is_some());
+
+        let mapping = super::CoordinatorEventError::Mapping(gittree_core::CoreError::MissingField(
+            "identifier",
+        ));
+        assert_eq!(format!("{mapping}"), "missing required field: identifier");
+        assert!(std::error::Error::source(&mapping).is_some());
+    }
+
+    #[tokio::test]
+    async fn install_hooks_and_mock_transport_cover_missing_source_and_response() {
+        let temp_dir = temp_dir("gittree-hook-errors");
+        let plan = sample_plan(temp_dir.join("repo.git"));
+        let config = HookInstallConfig {
+            pre_receive_source: temp_dir.join("missing-pre"),
+            post_receive_source: temp_dir.join("missing-post"),
+        };
+        let hook_error = super::install_hooks(&plan, &config).expect_err("missing source");
+        assert!(matches!(hook_error, super::HookInstallError::MissingSource(_)));
+
+        let transport = MockTransport::default();
+        let request = ForgejoRequest {
+            method: ForgejoMethod::Get,
+            url: "http://localhost:3000/api/v1/repos/gittree/repo".to_string(),
+            body: None,
+        };
+        let response_error = transport.send(request).await.expect_err("missing response");
+        assert!(matches!(
+            response_error,
+            gittree_forgejo::ForgejoError::Request(message)
+            if message.contains("missing mock response")
+        ));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn env_helpers_restore_previous_values_for_set_and_unset_paths() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_COORDINATOR_ENV_HELPER_TEST";
+
+        with_unset_env_var(key, || {
+            with_env_var(key, "value", || {
+                assert_eq!(std::env::var(key).expect("set in closure"), "value");
+            });
+            assert!(std::env::var_os(key).is_none());
+        });
+
+        with_env_var(key, "original", || {
+            with_env_var(key, "temporary", || {
+                assert_eq!(std::env::var(key).expect("temporary value"), "temporary");
+            });
+            assert_eq!(std::env::var(key).expect("restored original"), "original");
+
+            with_unset_env_var(key, || {
+                assert!(std::env::var_os(key).is_none());
+            });
+            assert_eq!(std::env::var(key).expect("restored after unset"), "original");
+        });
     }
 
     #[tokio::test]
