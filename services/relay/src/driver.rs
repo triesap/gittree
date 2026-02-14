@@ -328,9 +328,42 @@ mod tests {
 
         drop(out_rx);
         broadcast_tx.send(sample_event("broadcast")).expect("send broadcast");
-        drop(in_tx);
         drop(broadcast_tx);
 
+        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+        drop(in_tx);
+    }
+
+    #[tokio::test]
+    async fn run_with_broadcast_emits_event_for_matching_subscription() {
+        let session = Session::new(MemoryStore::new());
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(2);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(2);
+        let task = tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
+
+        in_tx
+            .send(r#"["REQ","sub",{}]"#.to_string())
+            .await
+            .expect("send req");
+        let first = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("response");
+        let first: Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(first[0], Value::String("EOSE".to_string()));
+
+        broadcast_tx.send(sample_event("broadcast-hit")).expect("send broadcast");
+        let second = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("response");
+        let second: Value = serde_json::from_str(&second).expect("json");
+        assert_eq!(second[0], Value::String("EVENT".to_string()));
+
+        drop(in_tx);
+        drop(broadcast_tx);
         timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
     }
 
