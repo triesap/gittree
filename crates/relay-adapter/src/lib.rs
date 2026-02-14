@@ -328,18 +328,10 @@ fn normalize_ws_url(input: &str) -> Result<Url, RelayAdapterError> {
     match url.scheme() {
         "wss" | "ws" => {}
         "https" => {
-            if url.set_scheme("wss").is_err() {
-                return Err(RelayAdapterError::InvalidConfig(
-                    "invalid relay url".to_string(),
-                ));
-            }
+            let _ = url.set_scheme("wss");
         }
         "http" => {
-            if url.set_scheme("ws").is_err() {
-                return Err(RelayAdapterError::InvalidConfig(
-                    "invalid relay url".to_string(),
-                ));
-            }
+            let _ = url.set_scheme("ws");
         }
         _ => {
             return Err(RelayAdapterError::InvalidConfig(
@@ -379,10 +371,7 @@ fn build_event_id(
     content: &str,
 ) -> Result<String, RelayAdapterError> {
     let payload = json!([0, pubkey, created_at, kind, tags, content]);
-    let serialized = match serde_json::to_string(&payload) {
-        Ok(serialized) => serialized,
-        Err(err) => return Err(RelayAdapterError::Protocol(err.to_string())),
-    };
+    let serialized = payload.to_string();
     let mut hasher = Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
@@ -796,6 +785,15 @@ mod tests {
         let secp = Secp256k1::new();
         let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
         let err = sign_event_id(&secp, &keypair, "zz").unwrap_err();
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[test]
+    fn sign_event_id_rejects_invalid_digest_length() {
+        let secret_key = SecretKey::from_slice(&[9u8; 32]).expect("secret");
+        let secp = Secp256k1::new();
+        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+        let err = sign_event_id(&secp, &keypair, "aa").unwrap_err();
         assert!(matches!(err, RelayAdapterError::Protocol(_)));
     }
 
