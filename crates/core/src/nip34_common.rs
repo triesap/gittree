@@ -71,6 +71,7 @@ pub fn is_hex_len(value: &str, len: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::CoreError;
     use super::RepoAddress;
     use super::is_hex_hash;
     use super::is_hex_len;
@@ -100,15 +101,53 @@ mod tests {
     }
 
     #[test]
+    fn repo_address_new_rejects_invalid_components() {
+        assert!(matches!(
+            RepoAddress::new("", "repo"),
+            Err(CoreError::InvalidField { field: "a", .. })
+        ));
+
+        assert!(matches!(
+            RepoAddress::new("zz".repeat(32), "repo"),
+            Err(CoreError::InvalidField { field: "a", .. })
+        ));
+
+        assert!(matches!(
+            RepoAddress::new("11".repeat(32), ""),
+            Err(CoreError::InvalidField { field: "a", .. })
+        ));
+    }
+
+    #[test]
+    fn repo_address_parse_rejects_invalid_shapes_and_segments() {
+        let pubkey = "11".repeat(32);
+        let cases = [
+            format!("1:{pubkey}:repo"),
+            format!("30617::{pubkey}"),
+            format!("30617:{pubkey}:"),
+            format!("30617:{pubkey}:repo:extra"),
+            format!("30617:{}:repo", "11".repeat(31)),
+            format!("30617:{}:repo", "zz".repeat(32)),
+        ];
+        for value in cases {
+            assert!(RepoAddress::parse(&value).is_err(), "value should fail: {value}");
+            assert!(validate_repo_address(&value).is_err(), "value should fail: {value}");
+        }
+    }
+
+    #[test]
     fn hex_hash_accepts_40_and_64() {
         assert!(is_hex_hash(&"11".repeat(20)));
         assert!(is_hex_hash(&"11".repeat(32)));
         assert!(!is_hex_hash("11"));
+        assert!(!is_hex_hash(&"gg".repeat(20)));
+        assert!(!is_hex_hash(&"gg".repeat(32)));
     }
 
     #[test]
     fn hex_len_checks_length() {
         assert!(is_hex_len(&"aa".repeat(32), 64));
         assert!(!is_hex_len(&"aa".repeat(31), 64));
+        assert!(!is_hex_len(&"gg".repeat(32), 64));
     }
 }
