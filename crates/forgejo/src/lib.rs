@@ -52,11 +52,14 @@ where
 
 impl ReqwestTransport {
     pub fn new(token: impl Into<String>) -> Result<Self, ForgejoError> {
+        let token = token.into();
+        if token.trim().is_empty() {
+            return Err(ForgejoError::Request(
+                "forgejo api token must not be empty".to_string(),
+            ));
+        }
         let client = reqwest::Client::new();
-        Ok(Self {
-            client,
-            token: token.into(),
-        })
+        Ok(Self { client, token })
     }
 }
 
@@ -989,9 +992,35 @@ mod tests {
     }
 
     #[test]
+    fn client_new_rejects_empty_api_token() {
+        let mut config = test_config();
+        config.api_token = "   ".to_string();
+        let err = match ForgejoClient::new(config) {
+            Ok(_) => panic!("empty token should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            ForgejoError::Request(message) if message.contains("must not be empty")
+        ));
+    }
+
+    #[test]
     fn reqwest_transport_new_accepts_owned_token() {
         let transport = ReqwestTransport::new("token".to_string()).expect("transport");
         drop(transport);
+    }
+
+    #[test]
+    fn reqwest_transport_new_rejects_empty_token() {
+        let err = match ReqwestTransport::new("") {
+            Ok(_) => panic!("empty token should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            ForgejoError::Request(message) if message.contains("must not be empty")
+        ));
     }
 
     #[tokio::test]
