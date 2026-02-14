@@ -64,10 +64,17 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
 }
 
 async fn serve_inner(config: RelayConfig) -> Result<(), RelayError> {
+    serve_inner_with_shutdown(config, shutdown_signal()).await
+}
+
+async fn serve_inner_with_shutdown<F>(config: RelayConfig, shutdown: F) -> Result<(), RelayError>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     let state = build_state(config.clone())?;
     let router = build_router(Arc::new(state));
     let listener = bind_listener(&config.bind).await?;
-    run_server(axum::serve(listener, router).with_graceful_shutdown(shutdown_signal())).await
+    run_server(axum::serve(listener, router).with_graceful_shutdown(shutdown)).await
 }
 
 async fn run_server<E, S>(server: S) -> Result<(), RelayError>
@@ -237,7 +244,14 @@ async fn health_handler() -> &'static str {
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    await_shutdown_signal(tokio::signal::ctrl_c()).await;
+}
+
+async fn await_shutdown_signal<S>(signal: S)
+where
+    S: std::future::Future<Output = Result<(), std::io::Error>>,
+{
+    let _ = signal.await;
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: TenantContext) {
@@ -1267,6 +1281,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn await_shutdown_signal_handles_ready_results() {
+        super::await_shutdown_signal(async { Ok(()) }).await;
+        super::await_shutdown_signal(async {
+            Err(std::io::Error::other("ignored in shutdown helper"))
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bind_listener_accepts_ephemeral_bind_address() {
+        let listener = bind_listener("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        assert!(addr.port() > 0);
+    }
+
+    #[tokio::test]
     async fn bind_listener_returns_serve_error_for_invalid_bind_address() {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
@@ -1288,6 +1318,15 @@ mod tests {
         config.bind = "127.0.0.1:99999".to_string();
         let err = super::serve(config).await.expect_err("invalid bind");
         assert!(matches!(err, RelayError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_inner_with_shutdown_returns_ok_for_ephemeral_bind() {
+        let mut config = sample_config();
+        config.bind = "127.0.0.1:0".to_string();
+        super::serve_inner_with_shutdown(config, async {})
+            .await
+            .expect("serve");
     }
 
     #[tokio::test]
