@@ -610,7 +610,8 @@ mod tests {
     use gittree_core::RepoState;
     use std::collections::HashMap;
     use std::error::Error;
-    use std::io::Write;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -645,6 +646,27 @@ mod tests {
                 unsafe { std::env::remove_var(key) };
             }
         }
+    }
+
+    fn start_mock_http_server(status: &str, content_type: &str, body: &str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server addr");
+        let status = status.to_string();
+        let content_type = content_type.to_string();
+        let body = body.to_string();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), handle)
     }
 
     #[test]
@@ -968,6 +990,90 @@ mod tests {
             .join("repo.git");
         let err = evaluate_pre_receive(&FailingFetcher, repo_path, &updates).unwrap_err();
         assert!(matches!(err, super::HookServiceError::State(_)));
+    }
+
+    #[test]
+    fn http_state_fetcher_returns_none_for_not_found() {
+        let (base_url, handle) = start_mock_http_server("404 Not Found", "text/plain", "missing");
+        let fetcher =
+            super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1)).expect("fetcher");
+        let state = fetcher
+            .latest_state("11".repeat(32).as_str(), "repo")
+            .expect("state fetch");
+        assert!(state.is_none());
+        handle.join().expect("server join");
+    }
+
+    #[test]
+    fn http_state_fetcher_returns_error_on_non_success() {
+        let (base_url, handle) =
+            start_mock_http_server("500 Internal Server Error", "text/plain", "boom");
+        let fetcher =
+            super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1)).expect("fetcher");
+        let err = fetcher
+            .latest_state("11".repeat(32).as_str(), "repo")
+            .expect_err("state should fail");
+        assert!(matches!(err, super::HookServiceError::State(_)));
+        handle.join().expect("server join");
+    }
+
+    #[test]
+    fn http_state_fetcher_parses_success_response() {
+        let body = format!(
+            "{{\"identifier\":\"repo\",\"state\":{{\"HEAD\":\"ref: refs/heads/main\",\"refs/heads/main\":\"{}\"}}}}",
+            "11".repeat(20)
+        );
+        let (base_url, handle) = start_mock_http_server("200 OK", "application/json", &body);
+        let fetcher =
+            super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1)).expect("fetcher");
+        let state = fetcher
+            .latest_state("11".repeat(32).as_str(), "repo")
+            .expect("state fetch")
+            .expect("state payload");
+        assert_eq!(state.identifier, "repo");
+        assert_eq!(
+            state.state.get("refs/heads/main"),
+            Some(&"11".repeat(20))
+        );
+        handle.join().expect("server join");
+    }
+
+    #[test]
+    fn http_post_receive_notifier_reports_error_status() {
+        let (endpoint, handle) =
+            start_mock_http_server("500 Internal Server Error", "text/plain", "nope");
+        let notifier = super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
+            .expect("notifier");
+        let payload = PostReceivePayload {
+            pubkey: "11".repeat(32),
+            identifier: "repo".to_string(),
+            updates: vec![super::RefUpdatePayload {
+                old: "0".repeat(40),
+                new: "1".repeat(40),
+                reference: "refs/heads/main".to_string(),
+            }],
+        };
+        let err = notifier.notify(payload).expect_err("notify should fail");
+        assert!(matches!(err, super::HookServiceError::State(_)));
+        handle.join().expect("server join");
+    }
+
+    #[test]
+    fn http_post_receive_notifier_accepts_success_status() {
+        let (endpoint, handle) = start_mock_http_server("200 OK", "application/json", "{}");
+        let notifier = super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
+            .expect("notifier");
+        let payload = PostReceivePayload {
+            pubkey: "11".repeat(32),
+            identifier: "repo".to_string(),
+            updates: vec![super::RefUpdatePayload {
+                old: "0".repeat(40),
+                new: "1".repeat(40),
+                reference: "refs/heads/main".to_string(),
+            }],
+        };
+        notifier.notify(payload).expect("notify");
+        handle.join().expect("server join");
     }
 
     struct MockNotifier {
