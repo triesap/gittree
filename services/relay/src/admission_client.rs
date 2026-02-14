@@ -198,12 +198,10 @@ pub struct HttpAdmissionTransport {
 
 impl HttpAdmissionTransport {
     pub fn new(timeout: Duration) -> Result<Self, AdmissionHookError> {
-        let builder = reqwest::Client::builder()
-            .timeout(timeout);
-        let client = match builder.build() {
-            Ok(client) => client,
-            Err(err) => return Err(AdmissionHookError::Transport(err.to_string())),
-        };
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|err| AdmissionHookError::Transport(err.to_string()))?;
         Ok(Self { client })
     }
 }
@@ -330,6 +328,7 @@ mod tests {
     use async_trait::async_trait;
     use gittree_core::AdmissionDecision;
     use gittree_core::EventFilter;
+    use std::future::IntoFuture;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -391,9 +390,7 @@ mod tests {
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        tokio::spawn(axum::serve(listener, app).into_future());
         format!("http://{addr}/decide")
     }
 
@@ -404,9 +401,7 @@ mod tests {
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        tokio::spawn(axum::serve(listener, app).into_future());
         format!("http://{addr}/decide")
     }
 
