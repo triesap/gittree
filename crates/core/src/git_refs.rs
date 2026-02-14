@@ -141,6 +141,18 @@ mod tests {
     }
 
     #[test]
+    fn match_state_ref_reports_missing_for_unresolved_symbolic_ref() {
+        let mut state = std::collections::HashMap::new();
+        state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state,
+        };
+        let result = match_state_ref("HEAD", "deadbeef", &repo_state);
+        assert_eq!(result, StateRefMatch::Missing);
+    }
+
+    #[test]
     fn match_state_ref_reports_unsupported() {
         let state = sample_state();
         let result = match_state_ref("refs/notes/review", "deadbeef", &state);

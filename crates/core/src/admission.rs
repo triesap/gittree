@@ -196,11 +196,9 @@ mod tests {
         let decision =
             evaluate_admission(KIND_GIT_PATCH.0, "pubkey", "eventid", &[], Some("relay"))
                 .expect("decision");
-        match decision {
-            AdmissionDecision::RequiresRelatedEvents { filters } => {
-                assert!(!filters.is_empty());
-            }
-            _ => panic!("expected related event filters"),
-        }
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { ref filters } if !filters.is_empty()
+        ));
     }
 }
