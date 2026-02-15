@@ -1270,6 +1270,33 @@ mod tests {
             stored_at: Instant::now(),
         };
         assert!(cached.is_fresh(&fresh));
+
+        let bounded = CachedRepositories::with_config(
+            Arc::new(CountingRepo::new()),
+            CacheConfig::new(Some(Duration::from_secs(1)), 1),
+        );
+        let now = Instant::now();
+        let mut bounded_map: HashMap<String, CacheEntry<i32>> = HashMap::new();
+        bounded_map.insert(
+            "old".to_string(),
+            CacheEntry {
+                value: 1,
+                stored_at: now - Duration::from_secs(2),
+            },
+        );
+        bounded_map.insert(
+            "new".to_string(),
+            CacheEntry {
+                value: 2,
+                stored_at: now,
+            },
+        );
+        bounded.evict_if_needed(&mut bounded_map);
+        assert_eq!(bounded_map.len(), 1);
+        assert!(bounded.is_fresh(&CacheEntry {
+            value: 3,
+            stored_at: now,
+        }));
     }
 
     fn exercise_helper_instantiations<R>(cached: &CachedRepositories<Arc<R>>) {
