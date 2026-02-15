@@ -350,6 +350,12 @@ mod tests {
         assert_eq!(migration.to_string(), "migration error: stopped");
         assert!(migration.source().is_none());
 
+        let internal = StorageError::Internal {
+            message: "boom".to_string(),
+        };
+        assert_eq!(internal.to_string(), "internal error: boom");
+        assert!(internal.source().is_none());
+
         let database = StorageError::Database {
             source: sqlx::Error::RowNotFound,
         };
