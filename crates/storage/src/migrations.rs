@@ -221,10 +221,13 @@ mod tests {
     use super::core_migrations;
     use crate::StorageError;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::collections::HashSet;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
+    static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn runner_orders_migrations() {
@@ -374,11 +377,14 @@ mod tests {
 
     #[test]
     fn unique_database_name_is_prefixed_and_varies() {
-        let first = unique_database_name();
-        let second = unique_database_name();
-        assert!(first.starts_with("gittree_migrations_test_"));
-        assert!(second.starts_with("gittree_migrations_test_"));
-        assert_ne!(first, second);
+        let names: Vec<String> = (0..8).map(|_| unique_database_name()).collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| name.starts_with("gittree_migrations_test_"))
+        );
+        let unique: HashSet<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), names.len());
     }
 
     fn require_db_tests() -> bool {
@@ -492,6 +498,12 @@ WHERE datname = $1
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        format!("gittree_migrations_test_{}_{}", std::process::id(), now)
+        let counter = TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "gittree_migrations_test_{}_{}_{}",
+            std::process::id(),
+            now,
+            counter
+        )
     }
 }
