@@ -130,6 +130,22 @@ mod tests {
     }
 
     #[test]
+    fn repo_mapping_accepts_owned_string_inputs() {
+        let pubkey = "22".repeat(32);
+        let mapping = RepoMapping::new(
+            "owner".to_string(),
+            "repo".to_string(),
+            pubkey.clone(),
+            "repo".to_string(),
+        )
+        .expect("mapping");
+        assert_eq!(mapping.pubkey, pubkey);
+        assert_eq!(mapping.identifier, "repo");
+        assert_eq!(mapping.forgejo.owner, "owner");
+        assert_eq!(mapping.forgejo.name, "repo");
+    }
+
+    #[test]
     fn repo_mapping_rejects_invalid_pubkey() {
         assert!(RepoMapping::new("owner", "repo", "bad", "repo").is_err());
     }
