@@ -350,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn runner_run_is_idempotent_on_database() {
         let Some((pool, database_name, base_url)) = provision_database().await else {
-            eprintln!("skipping runner_run_is_idempotent_on_database: postgres unavailable");
+            skip_or_fail_without_db("runner_run_is_idempotent_on_database");
             return;
         };
         let runner = MigrationRunner::new(core_migrations()).expect("runner");
@@ -379,6 +379,17 @@ mod tests {
         assert!(first.starts_with("gittree_migrations_test_"));
         assert!(second.starts_with("gittree_migrations_test_"));
         assert_ne!(first, second);
+    }
+
+    fn skip_or_fail_without_db(test_name: &str) {
+        if std::env::var("GITTREE_STORAGE_REQUIRE_DB_TESTS")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
+            panic!("{test_name}: postgres unavailable and GITTREE_STORAGE_REQUIRE_DB_TESTS=1");
+        }
+        eprintln!("skipping {test_name}: postgres unavailable");
     }
 
     #[tokio::test]

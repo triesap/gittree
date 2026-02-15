@@ -1552,6 +1552,17 @@ WHERE datname = $1
         assert!(matches!(err, StorageError::Database { .. }));
     }
 
+    fn skip_or_fail_without_db(test_name: &str) {
+        if std::env::var("GITTREE_STORAGE_REQUIRE_DB_TESTS")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
+            panic!("{test_name}: postgres unavailable and GITTREE_STORAGE_REQUIRE_DB_TESTS=1");
+        }
+        eprintln!("skipping {test_name}: postgres unavailable");
+    }
+
     #[test]
     fn to_offset_datetime_rejects_invalid_timestamp() {
         let err = PostgresRepositories::to_offset_datetime(i64::MIN).unwrap_err();
@@ -2011,7 +2022,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_repo_mapping_round_trip_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_repo_mapping_round_trip_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_repo_mapping_round_trip_db");
             return;
         };
 
@@ -2050,7 +2061,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_repositories_return_none_for_missing_rows_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_repositories_return_none_for_missing_rows_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_repositories_return_none_for_missing_rows_db");
             return;
         };
 
@@ -2196,7 +2207,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_announcement_state_and_compatibility_round_trip_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_announcement_state_and_compatibility_round_trip_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_announcement_state_and_compatibility_round_trip_db");
             return;
         };
 
@@ -2327,7 +2338,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_account_and_profile_round_trip_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_account_and_profile_round_trip_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_account_and_profile_round_trip_db");
             return;
         };
 
@@ -2383,7 +2394,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_relay_publish_round_trip_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_relay_publish_round_trip_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_relay_publish_round_trip_db");
             return;
         };
 
@@ -2437,7 +2448,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_tenant_membership_invite_round_trip_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_tenant_membership_invite_round_trip_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_tenant_membership_invite_round_trip_db");
             return;
         };
 
@@ -2559,7 +2570,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_event_repository_round_trip_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_event_repository_round_trip_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_event_repository_round_trip_db");
             return;
         };
 
@@ -2707,7 +2718,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_upserts_replace_existing_rows_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_upserts_replace_existing_rows_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_upserts_replace_existing_rows_db");
             return;
         };
 
@@ -2824,7 +2835,7 @@ WHERE datname = $1
     #[tokio::test]
     async fn postgres_decoder_helpers_report_row_errors_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_decoder_helpers_report_row_errors_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_decoder_helpers_report_row_errors_db");
             return;
         };
 
@@ -2895,7 +2906,7 @@ SELECT
     #[tokio::test]
     async fn postgres_relay_publish_claim_reports_invalid_tags_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_relay_publish_claim_reports_invalid_tags_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_relay_publish_claim_reports_invalid_tags_db");
             return;
         };
 
@@ -2950,7 +2961,7 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
     #[tokio::test]
     async fn postgres_relay_publish_retry_and_missing_id_db() {
         let Some(test_db) = TestDatabase::provision().await else {
-            eprintln!("skipping postgres_relay_publish_retry_and_missing_id_db: postgres unavailable");
+            skip_or_fail_without_db("postgres_relay_publish_retry_and_missing_id_db");
             return;
         };
 
