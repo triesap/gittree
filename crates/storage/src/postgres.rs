@@ -1649,6 +1649,15 @@ WHERE datname = $1
         .await;
     }
 
+    #[tokio::test]
+    async fn with_test_db_with_provision_runs_noop_function_when_database_available() {
+        with_test_db_with_provision_runs_noop_function_with_policy(
+            TestDatabase::provision().await,
+            require_db_tests(),
+        )
+        .await;
+    }
+
     async fn with_test_db_with_provision_runs_closure_with_policy(
         provisioned: Option<TestDatabase>,
         require_db: bool,
@@ -1673,7 +1682,22 @@ WHERE datname = $1
         assert!(!require_db || invoked.load(Ordering::SeqCst));
     }
 
-    async fn noop_test_db(_: TestDatabase) {}
+    async fn with_test_db_with_provision_runs_noop_function_with_policy(
+        provisioned: Option<TestDatabase>,
+        require_db: bool,
+    ) {
+        with_test_db_with_provision(
+            "with_test_db_with_provision_runs_noop_function_when_database_available",
+            provisioned,
+            require_db,
+            noop_test_db,
+        )
+        .await;
+    }
+
+    async fn noop_test_db(test_db: TestDatabase) {
+        test_db.cleanup().await;
+    }
 
     #[tokio::test]
     async fn test_database_cleanup_returns_early_for_invalid_base_url() {

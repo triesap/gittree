@@ -101,8 +101,9 @@ impl<R> CachedRepositories<R> {
             let oldest = map
                 .iter()
                 .min_by_key(|(_, entry)| entry.stored_at)
-                .map(|(key, _)| key.clone())
-                .expect("cache map non-empty when eviction needed");
+                .expect("cache map non-empty when eviction needed")
+                .0
+                .clone();
             map.remove(&oldest);
         }
     }
@@ -112,18 +113,24 @@ fn cache_read<'a, T>(
     lock: &'a RwLock<T>,
     message: &'static str,
 ) -> Result<RwLockReadGuard<'a, T>, StorageError> {
-    lock.read().map_err(|_| StorageError::Internal {
-        message: message.to_string(),
-    })
+    match lock.read() {
+        Ok(guard) => Ok(guard),
+        Err(_) => Err(StorageError::Internal {
+            message: message.to_string(),
+        }),
+    }
 }
 
 fn cache_write<'a, T>(
     lock: &'a RwLock<T>,
     message: &'static str,
 ) -> Result<RwLockWriteGuard<'a, T>, StorageError> {
-    lock.write().map_err(|_| StorageError::Internal {
-        message: message.to_string(),
-    })
+    match lock.write() {
+        Ok(guard) => Ok(guard),
+        Err(_) => Err(StorageError::Internal {
+            message: message.to_string(),
+        }),
+    }
 }
 
 #[async_trait]
