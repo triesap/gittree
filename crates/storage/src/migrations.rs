@@ -219,7 +219,7 @@ mod tests {
     use super::Migration;
     use super::MigrationRunner;
     use super::core_migrations;
-    use crate::test_support::skip_or_fail_without_db;
+    use crate::test_support::{require_db_tests, skip_or_fail_without_db_with_policy};
     use crate::StorageError;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::collections::HashSet;
@@ -353,8 +353,24 @@ mod tests {
 
     #[tokio::test]
     async fn runner_run_is_idempotent_on_database() {
-        let Some((pool, database_name, base_url)) = provision_database().await else {
-            skip_or_fail_without_db("runner_run_is_idempotent_on_database");
+        runner_run_is_idempotent_on_database_with_provision(
+            provision_database().await,
+            require_db_tests(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn runner_run_is_idempotent_skips_without_database_when_not_required() {
+        runner_run_is_idempotent_on_database_with_provision(None, false).await;
+    }
+
+    async fn runner_run_is_idempotent_on_database_with_provision(
+        provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        let Some((pool, database_name, base_url)) = provisioned else {
+            skip_or_fail_without_db_with_policy("runner_run_is_idempotent_on_database", require_db);
             return;
         };
         let runner = MigrationRunner::new(core_migrations()).expect("runner");
@@ -394,6 +410,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_database_returns_when_admin_pool_connect_fails() {
+        cleanup_database("postgres://gittree:gittree@127.0.0.1:1/gittree", "ignored").await;
+    }
+
+    #[test]
+    fn test_database_base_url_prefers_explicit_value() {
+        assert_eq!(
+            test_database_base_url_from_value(Some("postgres://custom".to_string())),
+            "postgres://custom".to_string()
+        );
+        assert_eq!(
+            test_database_base_url_from_value(None),
+            DEFAULT_TEST_DATABASE_URL.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_database_returns_false_when_query_fails() {
+        let options = PgConnectOptions::from_str("postgres://gittree:gittree@127.0.0.1:1/postgres")
+            .expect("connect options");
+        let pool = PgPoolOptions::new().max_connections(1).connect_lazy_with(options);
+        assert!(!create_database(&pool, "gittree_migrations_test").await);
+    }
+
+    #[tokio::test]
     async fn provision_database_executes_and_returns_option() {
         if let Some((pool, database_name, base_url)) = provision_database().await {
             pool.close().await;
@@ -401,11 +442,19 @@ mod tests {
         }
     }
 
+    fn test_database_base_url_from_value(value: Option<String>) -> String {
+        match value {
+            Some(url) => url,
+            None => DEFAULT_TEST_DATABASE_URL.to_string(),
+        }
+    }
+
+    fn test_database_base_url() -> String {
+        test_database_base_url_from_value(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok())
+    }
+
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
-        let base_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL") {
-            Ok(value) => value,
-            Err(_) => DEFAULT_TEST_DATABASE_URL.to_string(),
-        };
+        let base_url = test_database_base_url();
         let mut admin_options = PgConnectOptions::from_str(&base_url).ok()?;
         admin_options = admin_options.database("postgres");
         let admin_pool = PgPoolOptions::new()
@@ -415,16 +464,9 @@ mod tests {
             .ok()?;
 
         let database_name = unique_database_name();
-        let create_database = format!("CREATE DATABASE \"{database_name}\"");
-        if sqlx::query(&create_database)
-            .execute(&admin_pool)
+        create_database(&admin_pool, &database_name)
             .await
-            .is_err()
-        {
-            admin_pool.close().await;
-            return None;
-        }
-        admin_pool.close().await;
+            .then_some(())?;
 
         let mut test_options = PgConnectOptions::from_str(&base_url).ok()?;
         test_options = test_options.database(&database_name);
@@ -465,6 +507,20 @@ WHERE datname = $1
         let drop_database = format!("DROP DATABASE IF EXISTS \"{database_name}\"");
         let _ = sqlx::query(&drop_database).execute(&admin_pool).await;
         admin_pool.close().await;
+    }
+
+    async fn create_database(admin_pool: &sqlx::PgPool, database_name: &str) -> bool {
+        let create_database = format!("CREATE DATABASE \"{database_name}\"");
+        if sqlx::query(&create_database)
+            .execute(admin_pool)
+            .await
+            .is_err()
+        {
+            admin_pool.close().await;
+            return false;
+        }
+        admin_pool.close().await;
+        true
     }
 
     fn unique_database_name() -> String {
