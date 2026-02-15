@@ -7,7 +7,7 @@ use crate::{
     AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
     RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishJob,
     RelayPublishRequest, RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord,
-    RepoMappingRecord, RepoStateRecord, TagRecord, StorageError,
+    RepoMappingRecord, RepoStateRecord, StorageError, TagRecord,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
@@ -719,7 +719,10 @@ ON CONFLICT (id) DO UPDATE SET
         Ok(())
     }
 
-    async fn tenant_by_id(&self, tenant_id: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
+    async fn tenant_by_id(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<RelayTenantRecord>, StorageError> {
         let row = sqlx::query(
             r#"
 SELECT id,
@@ -831,10 +834,7 @@ fn relay_tenant_from_row(row: sqlx::postgres::PgRow) -> Result<RelayTenantRecord
 
 #[async_trait]
 impl RelayMembershipRepository for PostgresRepositories {
-    async fn upsert_membership(
-        &self,
-        record: RelayMembershipRecord,
-    ) -> Result<(), StorageError> {
+    async fn upsert_membership(&self, record: RelayMembershipRecord) -> Result<(), StorageError> {
         sqlx::query(
             r#"
 INSERT INTO relay_membership (tenant_id, pubkey, role, status, created_at, updated_at)
@@ -966,11 +966,7 @@ LIMIT 1
         Ok(row.map(relay_invite_from_row).transpose()?)
     }
 
-    async fn delete_invite(
-        &self,
-        tenant_id: &str,
-        invite_code: &str,
-    ) -> Result<(), StorageError> {
+    async fn delete_invite(&self, tenant_id: &str, invite_code: &str) -> Result<(), StorageError> {
         sqlx::query(
             r#"
 DELETE FROM relay_invite
@@ -1207,7 +1203,10 @@ WHERE tenant_id = $1 AND id = $2
 
 #[async_trait]
 impl RelayPublishRepository for PostgresRepositories {
-    async fn enqueue_relay_publish(&self, request: RelayPublishRequest) -> Result<(), StorageError> {
+    async fn enqueue_relay_publish(
+        &self,
+        request: RelayPublishRequest,
+    ) -> Result<(), StorageError> {
         let entry = request.decode()?;
         let tags = match serde_json::to_value(&entry.tags) {
             Ok(tags) => tags,
@@ -1422,11 +1421,12 @@ mod tests {
         RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord,
         RepoStateRecord, StorageError, TagRecord,
     };
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::PgPool;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::future::Future;
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
@@ -1451,7 +1451,10 @@ mod tests {
 
             let database_name = unique_database_name();
             let create_database = format!("CREATE DATABASE \"{database_name}\"");
-            sqlx::query(&create_database).execute(&admin_pool).await.ok()?;
+            sqlx::query(&create_database)
+                .execute(&admin_pool)
+                .await
+                .ok()?;
             admin_pool.close().await;
 
             let mut test_options = PgConnectOptions::from_str(&base_url).ok()?;
@@ -1543,8 +1546,7 @@ WHERE datname = $1
         provisioned: Option<TestDatabase>,
         require_db: bool,
         run: F,
-    )
-    where
+    ) where
         F: FnOnce(TestDatabase) -> Fut,
         Fut: Future<Output = ()>,
     {
@@ -1570,9 +1572,8 @@ WHERE datname = $1
     }
 
     fn unreachable_repositories() -> PostgresRepositories {
-        let options =
-            PgConnectOptions::from_str("postgres://gittree:gittree@127.0.0.1:1/gittree")
-                .expect("connect options");
+        let options = PgConnectOptions::from_str("postgres://gittree:gittree@127.0.0.1:1/gittree")
+            .expect("connect options");
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .min_connections(0)
@@ -1637,6 +1638,41 @@ WHERE datname = $1
     #[tokio::test]
     async fn with_test_db_with_provision_skips_without_database_when_not_required() {
         with_test_db_with_provision("sample_test", None, false, |_| async {}).await;
+    }
+
+    #[tokio::test]
+    async fn with_test_db_with_provision_runs_closure_when_database_available() {
+        with_test_db_with_provision_runs_closure_with_policy(
+            TestDatabase::provision().await,
+            require_db_tests(),
+        )
+        .await;
+    }
+
+    async fn with_test_db_with_provision_runs_closure_with_policy(
+        provisioned: Option<TestDatabase>,
+        require_db: bool,
+    ) {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&invoked);
+        with_test_db_with_provision(
+            "with_test_db_with_provision_runs_closure_when_database_available",
+            provisioned,
+            require_db,
+            move |test_db| {
+                let observed = Arc::clone(&observed);
+                async move {
+                    observed.store(true, Ordering::SeqCst);
+                    assert!(!test_db.database_name.is_empty());
+                    test_db.cleanup().await;
+                }
+            },
+        )
+        .await;
+
+        if require_db || invoked.load(Ordering::SeqCst) {
+            assert!(invoked.load(Ordering::SeqCst));
+        }
     }
 
     #[tokio::test]
@@ -1899,22 +1935,11 @@ WHERE datname = $1
                 .await
                 .expect_err("tenant by host"),
         );
-        assert_db_error(
-            repositories
-                .list_tenants()
-                .await
-                .expect_err("list tenants"),
-        );
+        assert_db_error(repositories.list_tenants().await.expect_err("list tenants"));
 
-        let membership = RelayMembershipRecord::new(
-            "tenant-1",
-            &"77".repeat(32),
-            "member",
-            "active",
-            110,
-            110,
-        )
-        .expect("membership");
+        let membership =
+            RelayMembershipRecord::new("tenant-1", &"77".repeat(32), "member", "active", 110, 110)
+                .expect("membership");
         assert_db_error(
             repositories
                 .upsert_membership(membership.clone())
@@ -2060,38 +2085,41 @@ WHERE datname = $1
 
     #[tokio::test]
     async fn postgres_repo_mapping_round_trip_db() {
-        with_test_db("postgres_repo_mapping_round_trip_db", |test_db| async move {
-            let repositories = test_db.repositories();
-            let record = RepoMappingRecord {
-                forgejo_owner: "alice".to_string(),
-                forgejo_repo: "demo".to_string(),
-                pubkey: vec![0x11; 32],
-                identifier: "demo".to_string(),
-            };
+        with_test_db(
+            "postgres_repo_mapping_round_trip_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let record = RepoMappingRecord {
+                    forgejo_owner: "alice".to_string(),
+                    forgejo_repo: "demo".to_string(),
+                    pubkey: vec![0x11; 32],
+                    identifier: "demo".to_string(),
+                };
 
-            repositories
-                .upsert_mapping(record.clone())
-                .await
-                .expect("upsert");
+                repositories
+                    .upsert_mapping(record.clone())
+                    .await
+                    .expect("upsert");
 
-            let by_forgejo = repositories
-                .mapping_by_forgejo("alice", "demo")
-                .await
-                .expect("mapping by forgejo")
-                .expect("record");
-            assert_eq!(by_forgejo, record);
+                let by_forgejo = repositories
+                    .mapping_by_forgejo("alice", "demo")
+                    .await
+                    .expect("mapping by forgejo")
+                    .expect("record");
+                assert_eq!(by_forgejo, record);
 
-            let by_repo = repositories
-                .mapping_by_repo(&record.pubkey, "demo")
-                .await
-                .expect("mapping by repo")
-                .expect("record");
-            assert_eq!(by_repo, record);
+                let by_repo = repositories
+                    .mapping_by_repo(&record.pubkey, "demo")
+                    .await
+                    .expect("mapping by repo")
+                    .expect("record");
+                assert_eq!(by_repo, record);
 
-            let mappings = repositories.list_mappings().await.expect("list mappings");
-            assert_eq!(mappings.len(), 1);
-            test_db.cleanup().await;
-        })
+                let mappings = repositories.list_mappings().await.expect("list mappings");
+                assert_eq!(mappings.len(), 1);
+                test_db.cleanup().await;
+            },
+        )
         .await;
     }
 
@@ -2171,7 +2199,13 @@ WHERE datname = $1
                         .expect("tenant by host")
                         .is_none()
                 );
-                assert!(repositories.list_tenants().await.expect("list tenants").is_empty());
+                assert!(
+                    repositories
+                        .list_tenants()
+                        .await
+                        .expect("list tenants")
+                        .is_empty()
+                );
                 assert!(
                     repositories
                         .membership_by_pubkey("missing", &[0x33; 32])
@@ -2250,123 +2284,124 @@ WHERE datname = $1
                 let repositories = test_db.repositories();
                 let pubkey = vec![0x51; 32];
 
-        let announcement_old = RepoAnnouncementRecord {
-            event_id: vec![0x41; 32],
-            pubkey: pubkey.clone(),
-            identifier: "repo".to_string(),
-            name: Some("repo-old".to_string()),
-            description: Some("description".to_string()),
-            root_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
-            clone_urls: vec!["https://git.example/repo.git".to_string()],
-            web_urls: vec!["https://git.example/repo".to_string()],
-            relays: vec!["wss://relay.example".to_string()],
-            blossoms: vec!["https://blossom.example".to_string()],
-            hashtags: vec!["nostr".to_string()],
-            maintainers: vec!["aa".repeat(32)],
-            created_at: 10,
-        };
-        let mut announcement_new = announcement_old.clone();
-        announcement_new.event_id = vec![0x42; 32];
-        announcement_new.name = Some("repo-new".to_string());
-        announcement_new.created_at = 20;
+                let announcement_old = RepoAnnouncementRecord {
+                    event_id: vec![0x41; 32],
+                    pubkey: pubkey.clone(),
+                    identifier: "repo".to_string(),
+                    name: Some("repo-old".to_string()),
+                    description: Some("description".to_string()),
+                    root_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+                    clone_urls: vec!["https://git.example/repo.git".to_string()],
+                    web_urls: vec!["https://git.example/repo".to_string()],
+                    relays: vec!["wss://relay.example".to_string()],
+                    blossoms: vec!["https://blossom.example".to_string()],
+                    hashtags: vec!["nostr".to_string()],
+                    maintainers: vec!["aa".repeat(32)],
+                    created_at: 10,
+                };
+                let mut announcement_new = announcement_old.clone();
+                announcement_new.event_id = vec![0x42; 32];
+                announcement_new.name = Some("repo-new".to_string());
+                announcement_new.created_at = 20;
 
-        repositories
-            .insert_announcement(announcement_old)
-            .await
-            .expect("insert old announcement");
-        repositories
-            .insert_announcement(announcement_new.clone())
-            .await
-            .expect("insert new announcement");
+                repositories
+                    .insert_announcement(announcement_old)
+                    .await
+                    .expect("insert old announcement");
+                repositories
+                    .insert_announcement(announcement_new.clone())
+                    .await
+                    .expect("insert new announcement");
 
-        let listed = repositories
-            .list_announcements(&pubkey, "repo")
-            .await
-            .expect("list announcements");
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].event_id, announcement_new.event_id);
-        assert_eq!(listed[0].name.as_deref(), Some("repo-new"));
+                let listed = repositories
+                    .list_announcements(&pubkey, "repo")
+                    .await
+                    .expect("list announcements");
+                assert_eq!(listed.len(), 2);
+                assert_eq!(listed[0].event_id, announcement_new.event_id);
+                assert_eq!(listed[0].name.as_deref(), Some("repo-new"));
 
-        let latest = repositories
-            .latest_announcement(&pubkey, "repo")
-            .await
-            .expect("latest announcement")
-            .expect("announcement");
-        assert_eq!(latest.event_id, announcement_new.event_id);
+                let latest = repositories
+                    .latest_announcement(&pubkey, "repo")
+                    .await
+                    .expect("latest announcement")
+                    .expect("announcement");
+                assert_eq!(latest.event_id, announcement_new.event_id);
 
-        let state_old = RepoStateRecord {
-            event_id: vec![0x43; 32],
-            pubkey: pubkey.clone(),
-            identifier: "repo".to_string(),
-            created_at: 11,
-            state_json: "{\"HEAD\":\"ref: refs/heads/main\"}".to_string(),
-        };
-        let mut state_new = state_old.clone();
-        state_new.event_id = vec![0x44; 32];
-        state_new.created_at = 21;
-        state_new.state_json =
-            "{\"HEAD\":\"ref: refs/heads/main\",\"refs/heads/main\":\"0123\"}".to_string();
+                let state_old = RepoStateRecord {
+                    event_id: vec![0x43; 32],
+                    pubkey: pubkey.clone(),
+                    identifier: "repo".to_string(),
+                    created_at: 11,
+                    state_json: "{\"HEAD\":\"ref: refs/heads/main\"}".to_string(),
+                };
+                let mut state_new = state_old.clone();
+                state_new.event_id = vec![0x44; 32];
+                state_new.created_at = 21;
+                state_new.state_json =
+                    "{\"HEAD\":\"ref: refs/heads/main\",\"refs/heads/main\":\"0123\"}".to_string();
 
-        repositories
-            .insert_state(state_old)
-            .await
-            .expect("insert old state");
-        repositories
-            .insert_state(state_new.clone())
-            .await
-            .expect("insert new state");
+                repositories
+                    .insert_state(state_old)
+                    .await
+                    .expect("insert old state");
+                repositories
+                    .insert_state(state_new.clone())
+                    .await
+                    .expect("insert new state");
 
-        let latest_state = repositories
-            .latest_state(&pubkey, "repo")
-            .await
-            .expect("latest state")
-            .expect("state");
-        assert_eq!(latest_state.event_id, state_new.event_id);
-        assert!(latest_state.state_json.contains("\"refs/heads/main\""));
+                let latest_state = repositories
+                    .latest_state(&pubkey, "repo")
+                    .await
+                    .expect("latest state")
+                    .expect("state");
+                assert_eq!(latest_state.event_id, state_new.event_id);
+                assert!(latest_state.state_json.contains("\"refs/heads/main\""));
 
-        let compatibility_old = RelayCompatibilityRecord {
-            relay_url: "wss://relay.example".to_string(),
-            compatible: false,
-            supported_capabilities: vec!["nip-01".to_string()],
-            missing_required: vec!["nip-34".to_string()],
-            missing_optional: vec!["nip-11".to_string()],
-            report_json: "{\"relay_url\":\"wss://relay.example\"}".to_string(),
-            nip11_url: Some("https://relay.example".to_string()),
-            nip11_available: true,
-            active_probe_ok: Some(false),
-            active_probe_error: Some("timeout".to_string()),
-            checked_at: 100,
-        };
-        repositories
-            .upsert_relay_compatibility(compatibility_old)
-            .await
-            .expect("upsert old compatibility");
+                let compatibility_old = RelayCompatibilityRecord {
+                    relay_url: "wss://relay.example".to_string(),
+                    compatible: false,
+                    supported_capabilities: vec!["nip-01".to_string()],
+                    missing_required: vec!["nip-34".to_string()],
+                    missing_optional: vec!["nip-11".to_string()],
+                    report_json: "{\"relay_url\":\"wss://relay.example\"}".to_string(),
+                    nip11_url: Some("https://relay.example".to_string()),
+                    nip11_available: true,
+                    active_probe_ok: Some(false),
+                    active_probe_error: Some("timeout".to_string()),
+                    checked_at: 100,
+                };
+                repositories
+                    .upsert_relay_compatibility(compatibility_old)
+                    .await
+                    .expect("upsert old compatibility");
 
-        let mut compatibility_new = RelayCompatibilityRecord {
-            relay_url: "wss://relay.example".to_string(),
-            compatible: true,
-            supported_capabilities: vec!["nip-01".to_string(), "nip-34".to_string()],
-            missing_required: Vec::new(),
-            missing_optional: vec!["nip-11".to_string()],
-            report_json: "{\"relay_url\":\"wss://relay.example\",\"compatible\":true}".to_string(),
-            nip11_url: Some("https://relay.example".to_string()),
-            nip11_available: true,
-            active_probe_ok: Some(true),
-            active_probe_error: None,
-            checked_at: 200,
-        };
-        repositories
-            .upsert_relay_compatibility(compatibility_new.clone())
-            .await
-            .expect("upsert new compatibility");
+                let mut compatibility_new = RelayCompatibilityRecord {
+                    relay_url: "wss://relay.example".to_string(),
+                    compatible: true,
+                    supported_capabilities: vec!["nip-01".to_string(), "nip-34".to_string()],
+                    missing_required: Vec::new(),
+                    missing_optional: vec!["nip-11".to_string()],
+                    report_json: "{\"relay_url\":\"wss://relay.example\",\"compatible\":true}"
+                        .to_string(),
+                    nip11_url: Some("https://relay.example".to_string()),
+                    nip11_available: true,
+                    active_probe_ok: Some(true),
+                    active_probe_error: None,
+                    checked_at: 200,
+                };
+                repositories
+                    .upsert_relay_compatibility(compatibility_new.clone())
+                    .await
+                    .expect("upsert new compatibility");
 
-        let stored_compatibility = repositories
-            .relay_compatibility("wss://relay.example")
-            .await
-            .expect("relay compatibility")
-            .expect("compatibility");
-        compatibility_new.report_json = stored_compatibility.report_json.clone();
-        assert_eq!(stored_compatibility, compatibility_new);
+                let stored_compatibility = repositories
+                    .relay_compatibility("wss://relay.example")
+                    .await
+                    .expect("relay compatibility")
+                    .expect("compatibility");
+                compatibility_new.report_json = stored_compatibility.report_json.clone();
+                assert_eq!(stored_compatibility, compatibility_new);
 
                 test_db.cleanup().await;
             },
@@ -2376,496 +2411,514 @@ WHERE datname = $1
 
     #[tokio::test]
     async fn postgres_account_and_profile_round_trip_db() {
-        with_test_db("postgres_account_and_profile_round_trip_db", |test_db| async move {
-            let repositories = test_db.repositories();
-            let pubkey_hex = "22".repeat(32);
-            let account = AccountRecord::new(&pubkey_hex, "alice").expect("account");
-            repositories
-                .upsert_account(account.clone())
-                .await
-                .expect("upsert account");
+        with_test_db(
+            "postgres_account_and_profile_round_trip_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let pubkey_hex = "22".repeat(32);
+                let account = AccountRecord::new(&pubkey_hex, "alice").expect("account");
+                repositories
+                    .upsert_account(account.clone())
+                    .await
+                    .expect("upsert account");
 
-        let by_pubkey = repositories
-            .account_by_pubkey(&account.pubkey)
-            .await
-            .expect("account by pubkey")
-            .expect("account");
-        assert_eq!(by_pubkey.forgejo_username, "alice");
+                let by_pubkey = repositories
+                    .account_by_pubkey(&account.pubkey)
+                    .await
+                    .expect("account by pubkey")
+                    .expect("account");
+                assert_eq!(by_pubkey.forgejo_username, "alice");
 
-        let by_username = repositories
-            .account_by_username("alice")
-            .await
-            .expect("account by username")
-            .expect("account");
-        assert_eq!(by_username.pubkey, account.pubkey);
+                let by_username = repositories
+                    .account_by_username("alice")
+                    .await
+                    .expect("account by username")
+                    .expect("account");
+                assert_eq!(by_username.pubkey, account.pubkey);
 
-        let profile = ProfileRecord::new(
-            &pubkey_hex,
-            Some("Alice".to_string()),
-            Some("bio".to_string()),
-            None,
-            None,
-            None,
-            ProfileVisibility::Private,
-            100,
-            100,
+                let profile = ProfileRecord::new(
+                    &pubkey_hex,
+                    Some("Alice".to_string()),
+                    Some("bio".to_string()),
+                    None,
+                    None,
+                    None,
+                    ProfileVisibility::Private,
+                    100,
+                    100,
+                )
+                .expect("profile");
+                repositories
+                    .upsert_profile(profile)
+                    .await
+                    .expect("upsert profile");
+
+                let stored_profile = repositories
+                    .profile_by_pubkey(&account.pubkey)
+                    .await
+                    .expect("profile by pubkey")
+                    .expect("profile");
+                assert_eq!(stored_profile.display_name.as_deref(), Some("Alice"));
+                assert_eq!(stored_profile.visibility, ProfileVisibility::Private);
+                test_db.cleanup().await;
+            },
         )
-        .expect("profile");
-        repositories
-            .upsert_profile(profile)
-            .await
-            .expect("upsert profile");
-
-        let stored_profile = repositories
-            .profile_by_pubkey(&account.pubkey)
-            .await
-            .expect("profile by pubkey")
-            .expect("profile");
-        assert_eq!(stored_profile.display_name.as_deref(), Some("Alice"));
-        assert_eq!(stored_profile.visibility, ProfileVisibility::Private);
-            test_db.cleanup().await;
-        })
         .await;
     }
 
     #[tokio::test]
     async fn postgres_relay_publish_round_trip_db() {
-        with_test_db("postgres_relay_publish_round_trip_db", |test_db| async move {
-            let repositories = test_db.repositories();
-            let request = RelayPublishRequest {
-                relay_url: "wss://relay.local".to_string(),
-                event_id: "33".repeat(32),
-                pubkey: "44".repeat(32),
-                created_at: 123,
-                kind: 30617,
-                tags: vec![vec!["d".to_string(), "demo".to_string()]],
-                content: String::new(),
-                sig: "55".repeat(64),
-                forgejo_owner: "alice".to_string(),
-                forgejo_repo: "demo".to_string(),
-                identifier: "demo".to_string(),
-            };
+        with_test_db(
+            "postgres_relay_publish_round_trip_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let request = RelayPublishRequest {
+                    relay_url: "wss://relay.local".to_string(),
+                    event_id: "33".repeat(32),
+                    pubkey: "44".repeat(32),
+                    created_at: 123,
+                    kind: 30617,
+                    tags: vec![vec!["d".to_string(), "demo".to_string()]],
+                    content: String::new(),
+                    sig: "55".repeat(64),
+                    forgejo_owner: "alice".to_string(),
+                    forgejo_repo: "demo".to_string(),
+                    identifier: "demo".to_string(),
+                };
 
-            repositories
-                .enqueue_relay_publish(request)
-                .await
-                .expect("enqueue");
+                repositories
+                    .enqueue_relay_publish(request)
+                    .await
+                    .expect("enqueue");
 
-        let pending_before = repositories
-            .pending_relay_publishes(&[0x44; 32], "demo", 30617)
-            .await
-            .expect("pending");
-        assert_eq!(pending_before, 1);
+                let pending_before = repositories
+                    .pending_relay_publishes(&[0x44; 32], "demo", 30617)
+                    .await
+                    .expect("pending");
+                assert_eq!(pending_before, 1);
 
-        let now = time::OffsetDateTime::now_utc();
-        let job = repositories
-            .claim_relay_publish(now)
-            .await
-            .expect("claim")
-            .expect("job");
-        assert_eq!(job.forgejo_owner, "alice");
-        assert_eq!(job.forgejo_repo, "demo");
-        repositories
-            .mark_relay_publish_succeeded(job.id)
-            .await
-            .expect("mark succeeded");
+                let now = time::OffsetDateTime::now_utc();
+                let job = repositories
+                    .claim_relay_publish(now)
+                    .await
+                    .expect("claim")
+                    .expect("job");
+                assert_eq!(job.forgejo_owner, "alice");
+                assert_eq!(job.forgejo_repo, "demo");
+                repositories
+                    .mark_relay_publish_succeeded(job.id)
+                    .await
+                    .expect("mark succeeded");
 
-        let pending_after = repositories
-            .pending_relay_publishes(&[0x44; 32], "demo", 30617)
-            .await
-            .expect("pending");
-        assert_eq!(pending_after, 0);
-            test_db.cleanup().await;
-        })
+                let pending_after = repositories
+                    .pending_relay_publishes(&[0x44; 32], "demo", 30617)
+                    .await
+                    .expect("pending");
+                assert_eq!(pending_after, 0);
+                test_db.cleanup().await;
+            },
+        )
         .await;
     }
 
     #[tokio::test]
     async fn postgres_tenant_membership_invite_round_trip_db() {
-        with_test_db("postgres_tenant_membership_invite_round_trip_db", |test_db| async move {
-            let repositories = test_db.repositories();
-            let tenant = RelayTenantRecord::new(
-                "tenant-1",
-                "relay.tenant.local",
-                &"66".repeat(32),
-                vec![1, 2, 3, 4],
-                vec![5, 6, 7, 8],
-                "local",
-                Some("Tenant 1".to_string()),
-                Some("tenant description".to_string()),
-                Some("https://example.com/icon.png".to_string()),
-                Some("https://example.com/banner.png".to_string()),
-                Some("ops@example.com".to_string()),
-                true,
-                false,
-                false,
-                100,
-                100,
-            )
-            .expect("tenant");
-            repositories
-                .upsert_tenant(tenant.clone())
-                .await
-                .expect("upsert tenant");
+        with_test_db(
+            "postgres_tenant_membership_invite_round_trip_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let tenant = RelayTenantRecord::new(
+                    "tenant-1",
+                    "relay.tenant.local",
+                    &"66".repeat(32),
+                    vec![1, 2, 3, 4],
+                    vec![5, 6, 7, 8],
+                    "local",
+                    Some("Tenant 1".to_string()),
+                    Some("tenant description".to_string()),
+                    Some("https://example.com/icon.png".to_string()),
+                    Some("https://example.com/banner.png".to_string()),
+                    Some("ops@example.com".to_string()),
+                    true,
+                    false,
+                    false,
+                    100,
+                    100,
+                )
+                .expect("tenant");
+                repositories
+                    .upsert_tenant(tenant.clone())
+                    .await
+                    .expect("upsert tenant");
 
-        let by_id = repositories
-            .tenant_by_id("tenant-1")
-            .await
-            .expect("tenant by id")
-            .expect("tenant");
-        assert_eq!(by_id.host, "relay.tenant.local");
+                let by_id = repositories
+                    .tenant_by_id("tenant-1")
+                    .await
+                    .expect("tenant by id")
+                    .expect("tenant");
+                assert_eq!(by_id.host, "relay.tenant.local");
 
-        let by_host = repositories
-            .tenant_by_host("relay.tenant.local")
-            .await
-            .expect("tenant by host")
-            .expect("tenant");
-        assert_eq!(by_host.id, "tenant-1");
+                let by_host = repositories
+                    .tenant_by_host("relay.tenant.local")
+                    .await
+                    .expect("tenant by host")
+                    .expect("tenant");
+                assert_eq!(by_host.id, "tenant-1");
 
-        let tenants = repositories.list_tenants().await.expect("list tenants");
-        assert_eq!(tenants.len(), 1);
+                let tenants = repositories.list_tenants().await.expect("list tenants");
+                assert_eq!(tenants.len(), 1);
 
-        let membership = RelayMembershipRecord::new(
-            "tenant-1",
-            &"77".repeat(32),
-            "member",
-            "active",
-            110,
-            110,
+                let membership = RelayMembershipRecord::new(
+                    "tenant-1",
+                    &"77".repeat(32),
+                    "member",
+                    "active",
+                    110,
+                    110,
+                )
+                .expect("membership");
+                repositories
+                    .upsert_membership(membership.clone())
+                    .await
+                    .expect("upsert membership");
+
+                let by_pubkey = repositories
+                    .membership_by_pubkey("tenant-1", &membership.pubkey)
+                    .await
+                    .expect("membership by pubkey")
+                    .expect("membership");
+                assert_eq!(by_pubkey.role, "member");
+
+                let memberships = repositories
+                    .list_memberships("tenant-1")
+                    .await
+                    .expect("list memberships");
+                assert_eq!(memberships.len(), 1);
+
+                let removed = repositories
+                    .remove_membership("tenant-1", &membership.pubkey)
+                    .await
+                    .expect("remove membership");
+                assert!(removed);
+                let removed_again = repositories
+                    .remove_membership("tenant-1", &membership.pubkey)
+                    .await
+                    .expect("remove membership second");
+                assert!(!removed_again);
+
+                let invite = RelayInviteRecord::new(
+                    "tenant-1",
+                    "invite-1",
+                    "member",
+                    &"88".repeat(32),
+                    Some(&"99".repeat(32)),
+                    Some(500),
+                    120,
+                )
+                .expect("invite");
+                repositories
+                    .insert_invite(invite.clone())
+                    .await
+                    .expect("insert invite");
+
+                let invite_lookup = repositories
+                    .invite_by_code("tenant-1", "invite-1")
+                    .await
+                    .expect("invite by code")
+                    .expect("invite");
+                assert_eq!(invite_lookup.role, "member");
+
+                repositories
+                    .delete_invite("tenant-1", "invite-1")
+                    .await
+                    .expect("delete invite");
+                let invite_missing = repositories
+                    .invite_by_code("tenant-1", "invite-1")
+                    .await
+                    .expect("invite by code");
+                assert!(invite_missing.is_none());
+
+                test_db.cleanup().await;
+            },
         )
-        .expect("membership");
-        repositories
-            .upsert_membership(membership.clone())
-            .await
-            .expect("upsert membership");
-
-        let by_pubkey = repositories
-            .membership_by_pubkey("tenant-1", &membership.pubkey)
-            .await
-            .expect("membership by pubkey")
-            .expect("membership");
-        assert_eq!(by_pubkey.role, "member");
-
-        let memberships = repositories
-            .list_memberships("tenant-1")
-            .await
-            .expect("list memberships");
-        assert_eq!(memberships.len(), 1);
-
-        let removed = repositories
-            .remove_membership("tenant-1", &membership.pubkey)
-            .await
-            .expect("remove membership");
-        assert!(removed);
-        let removed_again = repositories
-            .remove_membership("tenant-1", &membership.pubkey)
-            .await
-            .expect("remove membership second");
-        assert!(!removed_again);
-
-        let invite = RelayInviteRecord::new(
-            "tenant-1",
-            "invite-1",
-            "member",
-            &"88".repeat(32),
-            Some(&"99".repeat(32)),
-            Some(500),
-            120,
-        )
-        .expect("invite");
-        repositories
-            .insert_invite(invite.clone())
-            .await
-            .expect("insert invite");
-
-        let invite_lookup = repositories
-            .invite_by_code("tenant-1", "invite-1")
-            .await
-            .expect("invite by code")
-            .expect("invite");
-        assert_eq!(invite_lookup.role, "member");
-
-        repositories
-            .delete_invite("tenant-1", "invite-1")
-            .await
-            .expect("delete invite");
-        let invite_missing = repositories
-            .invite_by_code("tenant-1", "invite-1")
-            .await
-            .expect("invite by code");
-        assert!(invite_missing.is_none());
-
-            test_db.cleanup().await;
-        })
         .await;
     }
 
     #[tokio::test]
     async fn postgres_event_repository_round_trip_db() {
-        with_test_db("postgres_event_repository_round_trip_db", |test_db| async move {
-            let repositories = test_db.repositories();
-            let event_a = EventRecord::new(
-                "tenant-1",
-                &"aa".repeat(32),
-                &"bb".repeat(32),
-                200,
-                1,
-                "event-a",
-                &"cc".repeat(64),
-                vec![
-                    vec!["e".to_string(), "1".to_string()],
-                    vec!["p".to_string(), "2".to_string()],
-                ],
-            )
-            .expect("event a");
-        let event_b = EventRecord::new(
-            "tenant-1",
-            &"dd".repeat(32),
-            &"bb".repeat(32),
-            300,
-            2,
-            "event-b",
-            &"ee".repeat(64),
-            vec![vec!["e".to_string(), "1".to_string()]],
+        with_test_db(
+            "postgres_event_repository_round_trip_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let event_a = EventRecord::new(
+                    "tenant-1",
+                    &"aa".repeat(32),
+                    &"bb".repeat(32),
+                    200,
+                    1,
+                    "event-a",
+                    &"cc".repeat(64),
+                    vec![
+                        vec!["e".to_string(), "1".to_string()],
+                        vec!["p".to_string(), "2".to_string()],
+                    ],
+                )
+                .expect("event a");
+                let event_b = EventRecord::new(
+                    "tenant-1",
+                    &"dd".repeat(32),
+                    &"bb".repeat(32),
+                    300,
+                    2,
+                    "event-b",
+                    &"ee".repeat(64),
+                    vec![vec!["e".to_string(), "1".to_string()]],
+                )
+                .expect("event b");
+
+                repositories
+                    .insert_event(event_a.clone())
+                    .await
+                    .expect("insert a");
+                repositories
+                    .insert_event(event_b.clone())
+                    .await
+                    .expect("insert b");
+
+                let fetched = repositories
+                    .get_event("tenant-1", &event_a.id)
+                    .await
+                    .expect("get event")
+                    .expect("event");
+                assert_eq!(fetched.content, "event-a");
+                assert_eq!(fetched.tags.len(), 2);
+
+                let by_tenant = repositories
+                    .query_events(&EventQuery::for_tenant("tenant-1"))
+                    .await
+                    .expect("query tenant");
+                assert_eq!(by_tenant.len(), 2);
+                assert_eq!(by_tenant[0].created_at, 300);
+
+                let by_id = repositories
+                    .query_events(&EventQuery::for_ids(vec!["aa".repeat(32)]))
+                    .await
+                    .expect("query ids");
+                assert_eq!(by_id.len(), 1);
+                assert_eq!(by_id[0].content, "event-a");
+
+                let by_author = repositories
+                    .query_events(&EventQuery::for_authors(vec!["bb".repeat(32)]))
+                    .await
+                    .expect("query authors");
+                assert_eq!(by_author.len(), 2);
+
+                let by_kind = repositories
+                    .query_events(&EventQuery::for_kinds(vec![2]))
+                    .await
+                    .expect("query kinds");
+                assert_eq!(by_kind.len(), 1);
+                assert_eq!(by_kind[0].content, "event-b");
+
+                let by_tag = repositories
+                    .query_events(&EventQuery::for_tag("e", vec!["1".to_string()]))
+                    .await
+                    .expect("query tags");
+                assert_eq!(by_tag.len(), 2);
+
+                let mut by_time = EventQuery::for_tenant("tenant-1");
+                by_time.since = Some(250);
+                by_time.until = Some(350);
+                let by_time = repositories
+                    .query_events(&by_time)
+                    .await
+                    .expect("query by time");
+                assert_eq!(by_time.len(), 1);
+                assert_eq!(by_time[0].content, "event-b");
+
+                let mut by_two_tags = EventQuery::for_tenant("tenant-1");
+                by_two_tags.tags.push(TagRecord::new("e", "1"));
+                by_two_tags.tags.push(TagRecord::new("p", "2"));
+                let by_two_tags = repositories
+                    .query_events(&by_two_tags)
+                    .await
+                    .expect("query two tags");
+                assert_eq!(by_two_tags.len(), 1);
+                assert_eq!(by_two_tags[0].content, "event-a");
+
+                let mut invalid_author_query = EventQuery::for_tenant("tenant-1");
+                invalid_author_query.authors.push("not-hex".to_string());
+                let invalid_author_err = repositories
+                    .query_events(&invalid_author_query)
+                    .await
+                    .expect_err("invalid author");
+                assert!(matches!(
+                    invalid_author_err,
+                    StorageError::InvalidHex {
+                        field: "authors",
+                        ..
+                    }
+                ));
+
+                let mut limited_query = EventQuery::for_tenant("tenant-1");
+                limited_query.limit = Some(1);
+                limited_query.tags.push(TagRecord::new("p", "2"));
+                let limited = repositories
+                    .query_events(&limited_query)
+                    .await
+                    .expect("query limited");
+                assert_eq!(limited.len(), 1);
+                assert_eq!(limited[0].content, "event-a");
+
+                let deleted = repositories
+                    .delete_event("tenant-1", &event_a.id)
+                    .await
+                    .expect("delete event");
+                assert!(deleted);
+                let deleted_again = repositories
+                    .delete_event("tenant-1", &event_a.id)
+                    .await
+                    .expect("delete event again");
+                assert!(!deleted_again);
+
+                let missing = repositories
+                    .get_event("tenant-1", &event_a.id)
+                    .await
+                    .expect("get event");
+                assert!(missing.is_none());
+
+                test_db.cleanup().await;
+            },
         )
-        .expect("event b");
-
-        repositories
-            .insert_event(event_a.clone())
-            .await
-            .expect("insert a");
-        repositories
-            .insert_event(event_b.clone())
-            .await
-            .expect("insert b");
-
-        let fetched = repositories
-            .get_event("tenant-1", &event_a.id)
-            .await
-            .expect("get event")
-            .expect("event");
-        assert_eq!(fetched.content, "event-a");
-        assert_eq!(fetched.tags.len(), 2);
-
-        let by_tenant = repositories
-            .query_events(&EventQuery::for_tenant("tenant-1"))
-            .await
-            .expect("query tenant");
-        assert_eq!(by_tenant.len(), 2);
-        assert_eq!(by_tenant[0].created_at, 300);
-
-        let by_id = repositories
-            .query_events(&EventQuery::for_ids(vec!["aa".repeat(32)]))
-            .await
-            .expect("query ids");
-        assert_eq!(by_id.len(), 1);
-        assert_eq!(by_id[0].content, "event-a");
-
-        let by_author = repositories
-            .query_events(&EventQuery::for_authors(vec!["bb".repeat(32)]))
-            .await
-            .expect("query authors");
-        assert_eq!(by_author.len(), 2);
-
-        let by_kind = repositories
-            .query_events(&EventQuery::for_kinds(vec![2]))
-            .await
-            .expect("query kinds");
-        assert_eq!(by_kind.len(), 1);
-        assert_eq!(by_kind[0].content, "event-b");
-
-        let by_tag = repositories
-            .query_events(&EventQuery::for_tag("e", vec!["1".to_string()]))
-            .await
-            .expect("query tags");
-        assert_eq!(by_tag.len(), 2);
-
-        let mut by_time = EventQuery::for_tenant("tenant-1");
-        by_time.since = Some(250);
-        by_time.until = Some(350);
-        let by_time = repositories
-            .query_events(&by_time)
-            .await
-            .expect("query by time");
-        assert_eq!(by_time.len(), 1);
-        assert_eq!(by_time[0].content, "event-b");
-
-        let mut by_two_tags = EventQuery::for_tenant("tenant-1");
-        by_two_tags.tags.push(TagRecord::new("e", "1"));
-        by_two_tags.tags.push(TagRecord::new("p", "2"));
-        let by_two_tags = repositories
-            .query_events(&by_two_tags)
-            .await
-            .expect("query two tags");
-        assert_eq!(by_two_tags.len(), 1);
-        assert_eq!(by_two_tags[0].content, "event-a");
-
-        let mut invalid_author_query = EventQuery::for_tenant("tenant-1");
-        invalid_author_query.authors.push("not-hex".to_string());
-        let invalid_author_err = repositories
-            .query_events(&invalid_author_query)
-            .await
-            .expect_err("invalid author");
-        assert!(matches!(
-            invalid_author_err,
-            StorageError::InvalidHex {
-                field: "authors",
-                ..
-            }
-        ));
-
-        let mut limited_query = EventQuery::for_tenant("tenant-1");
-        limited_query.limit = Some(1);
-        limited_query.tags.push(TagRecord::new("p", "2"));
-        let limited = repositories
-            .query_events(&limited_query)
-            .await
-            .expect("query limited");
-        assert_eq!(limited.len(), 1);
-        assert_eq!(limited[0].content, "event-a");
-
-        let deleted = repositories
-            .delete_event("tenant-1", &event_a.id)
-            .await
-            .expect("delete event");
-        assert!(deleted);
-        let deleted_again = repositories
-            .delete_event("tenant-1", &event_a.id)
-            .await
-            .expect("delete event again");
-        assert!(!deleted_again);
-
-        let missing = repositories
-            .get_event("tenant-1", &event_a.id)
-            .await
-            .expect("get event");
-        assert!(missing.is_none());
-
-            test_db.cleanup().await;
-        })
         .await;
     }
 
     #[tokio::test]
     async fn postgres_upserts_replace_existing_rows_db() {
-        with_test_db("postgres_upserts_replace_existing_rows_db", |test_db| async move {
-            let repositories = test_db.repositories();
+        with_test_db(
+            "postgres_upserts_replace_existing_rows_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
 
-        let first_mapping = RepoMappingRecord {
-            forgejo_owner: "alice".to_string(),
-            forgejo_repo: "demo".to_string(),
-            pubkey: vec![0x11; 32],
-            identifier: "demo".to_string(),
-        };
-        repositories
-            .upsert_mapping(first_mapping.clone())
-            .await
-            .expect("insert mapping");
+                let first_mapping = RepoMappingRecord {
+                    forgejo_owner: "alice".to_string(),
+                    forgejo_repo: "demo".to_string(),
+                    pubkey: vec![0x11; 32],
+                    identifier: "demo".to_string(),
+                };
+                repositories
+                    .upsert_mapping(first_mapping.clone())
+                    .await
+                    .expect("insert mapping");
 
-        let updated_mapping = RepoMappingRecord {
-            forgejo_owner: "alice".to_string(),
-            forgejo_repo: "demo".to_string(),
-            pubkey: vec![0x22; 32],
-            identifier: "demo-v2".to_string(),
-        };
-        repositories
-            .upsert_mapping(updated_mapping.clone())
-            .await
-            .expect("update mapping");
-        let by_forgejo = repositories
-            .mapping_by_forgejo("alice", "demo")
-            .await
-            .expect("mapping by forgejo")
-            .expect("mapping");
-        assert_eq!(by_forgejo, updated_mapping);
-        let by_repo = repositories
-            .mapping_by_repo(&updated_mapping.pubkey, "demo-v2")
-            .await
-            .expect("mapping by repo")
-            .expect("mapping");
-        assert_eq!(by_repo, updated_mapping);
-        let mappings = repositories.list_mappings().await.expect("list mappings");
-        assert_eq!(mappings, vec![updated_mapping.clone()]);
+                let updated_mapping = RepoMappingRecord {
+                    forgejo_owner: "alice".to_string(),
+                    forgejo_repo: "demo".to_string(),
+                    pubkey: vec![0x22; 32],
+                    identifier: "demo-v2".to_string(),
+                };
+                repositories
+                    .upsert_mapping(updated_mapping.clone())
+                    .await
+                    .expect("update mapping");
+                let by_forgejo = repositories
+                    .mapping_by_forgejo("alice", "demo")
+                    .await
+                    .expect("mapping by forgejo")
+                    .expect("mapping");
+                assert_eq!(by_forgejo, updated_mapping);
+                let by_repo = repositories
+                    .mapping_by_repo(&updated_mapping.pubkey, "demo-v2")
+                    .await
+                    .expect("mapping by repo")
+                    .expect("mapping");
+                assert_eq!(by_repo, updated_mapping);
+                let mappings = repositories.list_mappings().await.expect("list mappings");
+                assert_eq!(mappings, vec![updated_mapping.clone()]);
 
-        let account = AccountRecord::new(&"33".repeat(32), "alice").expect("account");
-        repositories
-            .upsert_account(account.clone())
-            .await
-            .expect("insert account");
-        let updated_account = AccountRecord::new(&"33".repeat(32), "alice_2").expect("account");
-        repositories
-            .upsert_account(updated_account.clone())
-            .await
-            .expect("update account");
-        assert!(
-            repositories
-                .account_by_username("alice")
-                .await
-                .expect("account by username")
-                .is_none()
-        );
-        let by_username = repositories
-            .account_by_username("alice_2")
-            .await
-            .expect("account by username")
-            .expect("account");
-        assert_eq!(by_username, updated_account);
-        let by_pubkey = repositories
-            .account_by_pubkey(&updated_account.pubkey)
-            .await
-            .expect("account by pubkey")
-            .expect("account");
-        assert_eq!(by_pubkey, updated_account);
+                let account = AccountRecord::new(&"33".repeat(32), "alice").expect("account");
+                repositories
+                    .upsert_account(account.clone())
+                    .await
+                    .expect("insert account");
+                let updated_account =
+                    AccountRecord::new(&"33".repeat(32), "alice_2").expect("account");
+                repositories
+                    .upsert_account(updated_account.clone())
+                    .await
+                    .expect("update account");
+                assert!(
+                    repositories
+                        .account_by_username("alice")
+                        .await
+                        .expect("account by username")
+                        .is_none()
+                );
+                let by_username = repositories
+                    .account_by_username("alice_2")
+                    .await
+                    .expect("account by username")
+                    .expect("account");
+                assert_eq!(by_username, updated_account);
+                let by_pubkey = repositories
+                    .account_by_pubkey(&updated_account.pubkey)
+                    .await
+                    .expect("account by pubkey")
+                    .expect("account");
+                assert_eq!(by_pubkey, updated_account);
 
-        let profile = ProfileRecord::new(
-            &"33".repeat(32),
-            Some("Alice".to_string()),
-            Some("bio-1".to_string()),
-            None,
-            None,
-            None,
-            ProfileVisibility::Public,
-            1,
-            1,
+                let profile = ProfileRecord::new(
+                    &"33".repeat(32),
+                    Some("Alice".to_string()),
+                    Some("bio-1".to_string()),
+                    None,
+                    None,
+                    None,
+                    ProfileVisibility::Public,
+                    1,
+                    1,
+                )
+                .expect("profile");
+                repositories
+                    .upsert_profile(profile)
+                    .await
+                    .expect("insert profile");
+                let updated_profile = ProfileRecord::new(
+                    &"33".repeat(32),
+                    Some("Alice 2".to_string()),
+                    Some("bio-2".to_string()),
+                    Some("https://example.com/avatar.png".to_string()),
+                    Some("https://example.com".to_string()),
+                    Some("earth".to_string()),
+                    ProfileVisibility::Private,
+                    1,
+                    2,
+                )
+                .expect("profile");
+                repositories
+                    .upsert_profile(updated_profile.clone())
+                    .await
+                    .expect("update profile");
+                let stored_profile = repositories
+                    .profile_by_pubkey(&updated_profile.pubkey)
+                    .await
+                    .expect("profile by pubkey")
+                    .expect("profile");
+                assert_eq!(stored_profile, updated_profile);
+
+                test_db.cleanup().await;
+            },
         )
-        .expect("profile");
-        repositories
-            .upsert_profile(profile)
-            .await
-            .expect("insert profile");
-        let updated_profile = ProfileRecord::new(
-            &"33".repeat(32),
-            Some("Alice 2".to_string()),
-            Some("bio-2".to_string()),
-            Some("https://example.com/avatar.png".to_string()),
-            Some("https://example.com".to_string()),
-            Some("earth".to_string()),
-            ProfileVisibility::Private,
-            1,
-            2,
-        )
-        .expect("profile");
-        repositories
-            .upsert_profile(updated_profile.clone())
-            .await
-            .expect("update profile");
-        let stored_profile = repositories
-            .profile_by_pubkey(&updated_profile.pubkey)
-            .await
-            .expect("profile by pubkey")
-            .expect("profile");
-        assert_eq!(stored_profile, updated_profile);
-
-            test_db.cleanup().await;
-        })
         .await;
     }
 
     #[tokio::test]
     async fn postgres_decoder_helpers_report_row_errors_db() {
-        with_test_db("postgres_decoder_helpers_report_row_errors_db", |test_db| async move {
-            let bad_tenant_row = sqlx::query(
-            r#"
+        with_test_db(
+            "postgres_decoder_helpers_report_row_errors_db",
+            |test_db| async move {
+                let bad_tenant_row = sqlx::query(
+                    r#"
 SELECT
     1::integer AS id,
     'relay.example'::text AS host,
@@ -2884,14 +2937,16 @@ SELECT
     10::bigint AS created_at,
     11::bigint AS updated_at
 "#,
-        )
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("bad tenant row");
-        assert_db_error(relay_tenant_from_row(bad_tenant_row).expect_err("tenant row decode"));
+                )
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("bad tenant row");
+                assert_db_error(
+                    relay_tenant_from_row(bad_tenant_row).expect_err("tenant row decode"),
+                );
 
-        let bad_membership_row = sqlx::query(
-            r#"
+                let bad_membership_row = sqlx::query(
+                    r#"
 SELECT
     'tenant-1'::text AS tenant_id,
     E'\\x04'::bytea AS pubkey,
@@ -2900,16 +2955,17 @@ SELECT
     10::bigint AS created_at,
     11::bigint AS updated_at
 "#,
-        )
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("bad membership row");
-        assert_db_error(
-            relay_membership_from_row(bad_membership_row).expect_err("membership row decode"),
-        );
+                )
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("bad membership row");
+                assert_db_error(
+                    relay_membership_from_row(bad_membership_row)
+                        .expect_err("membership row decode"),
+                );
 
-        let bad_invite_row = sqlx::query(
-            r#"
+                let bad_invite_row = sqlx::query(
+                    r#"
 SELECT
     'tenant-1'::text AS tenant_id,
     7::integer AS invite_code,
@@ -2919,14 +2975,17 @@ SELECT
     NULL::bigint AS expires_at,
     12::bigint AS created_at
 "#,
-        )
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("bad invite row");
-        assert_db_error(relay_invite_from_row(bad_invite_row).expect_err("invite row decode"));
+                )
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("bad invite row");
+                assert_db_error(
+                    relay_invite_from_row(bad_invite_row).expect_err("invite row decode"),
+                );
 
-            test_db.cleanup().await;
-        })
+                test_db.cleanup().await;
+            },
+        )
         .await;
     }
 
@@ -2936,7 +2995,7 @@ SELECT
             "postgres_relay_publish_claim_reports_invalid_tags_db",
             |test_db| async move {
                 sqlx::query(
-            r#"
+                    r#"
 INSERT INTO relay_publish_outbox (
     relay_url,
     event_id,
@@ -2955,22 +3014,22 @@ INSERT INTO relay_publish_outbox (
 )
 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
 "#,
-        )
-        .bind("wss://relay.example")
-        .bind(vec![0x88_u8; 32])
-        .bind(vec![0x99_u8; 32])
-        .bind(123_i64)
-        .bind(30617_i32)
-        .bind("{\"bad\":\"shape\"}")
-        .bind("content")
-        .bind(vec![0xaa_u8; 64])
-        .bind("alice")
-        .bind("demo")
-        .bind("demo")
-        .bind(RelayPublishStatus::Pending.as_str())
-        .execute(&test_db.pool)
-        .await
-        .expect("insert outbox row");
+                )
+                .bind("wss://relay.example")
+                .bind(vec![0x88_u8; 32])
+                .bind(vec![0x99_u8; 32])
+                .bind(123_i64)
+                .bind(30617_i32)
+                .bind("{\"bad\":\"shape\"}")
+                .bind("content")
+                .bind(vec![0xaa_u8; 64])
+                .bind("alice")
+                .bind("demo")
+                .bind("demo")
+                .bind(RelayPublishStatus::Pending.as_str())
+                .execute(&test_db.pool)
+                .await
+                .expect("insert outbox row");
 
                 let repositories = test_db.repositories();
                 let claim_at = time::OffsetDateTime::now_utc() + time::Duration::minutes(1);
@@ -2978,7 +3037,10 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
                     .claim_relay_publish(claim_at)
                     .await
                     .expect_err("claim should fail for invalid tags json");
-                assert!(matches!(err, StorageError::Serialization { field: "tags", .. }));
+                assert!(matches!(
+                    err,
+                    StorageError::Serialization { field: "tags", .. }
+                ));
 
                 test_db.cleanup().await;
             },
@@ -2988,75 +3050,81 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
 
     #[tokio::test]
     async fn postgres_relay_publish_retry_and_missing_id_db() {
-        with_test_db("postgres_relay_publish_retry_and_missing_id_db", |test_db| async move {
-            let repositories = test_db.repositories();
-            let request = RelayPublishRequest {
-                relay_url: "wss://relay.local".to_string(),
-                event_id: "33".repeat(32),
-                pubkey: "44".repeat(32),
-                created_at: 123,
-                kind: 30617,
-                tags: vec![vec!["d".to_string(), "demo".to_string()]],
-                content: String::new(),
-                sig: "55".repeat(64),
-                forgejo_owner: "alice".to_string(),
-                forgejo_repo: "demo".to_string(),
-                identifier: "demo".to_string(),
-            };
-            repositories
-                .enqueue_relay_publish(request)
-                .await
-                .expect("enqueue");
+        with_test_db(
+            "postgres_relay_publish_retry_and_missing_id_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let request = RelayPublishRequest {
+                    relay_url: "wss://relay.local".to_string(),
+                    event_id: "33".repeat(32),
+                    pubkey: "44".repeat(32),
+                    created_at: 123,
+                    kind: 30617,
+                    tags: vec![vec!["d".to_string(), "demo".to_string()]],
+                    content: String::new(),
+                    sig: "55".repeat(64),
+                    forgejo_owner: "alice".to_string(),
+                    forgejo_repo: "demo".to_string(),
+                    identifier: "demo".to_string(),
+                };
+                repositories
+                    .enqueue_relay_publish(request)
+                    .await
+                    .expect("enqueue");
 
-        // Add a cushion so the test does not race db-side `now()` assignment under heavy load.
-        let now = time::OffsetDateTime::now_utc() + time::Duration::minutes(1);
-        let claimed = repositories
-            .claim_relay_publish(now)
-            .await
-            .expect("claim")
-            .expect("job");
-        let retry_at = now + time::Duration::minutes(5);
-        repositories
-            .mark_relay_publish_failed(claimed.id, "network timeout", retry_at)
-            .await
-            .expect("mark failed");
+                // Add a cushion so the test does not race db-side `now()` assignment under heavy load.
+                let now = time::OffsetDateTime::now_utc() + time::Duration::minutes(1);
+                let claimed = repositories
+                    .claim_relay_publish(now)
+                    .await
+                    .expect("claim")
+                    .expect("job");
+                let retry_at = now + time::Duration::minutes(5);
+                repositories
+                    .mark_relay_publish_failed(claimed.id, "network timeout", retry_at)
+                    .await
+                    .expect("mark failed");
 
-        let none_before_retry = repositories
-            .claim_relay_publish(now + time::Duration::minutes(1))
-            .await
-            .expect("claim before retry");
-        assert!(none_before_retry.is_none());
+                let none_before_retry = repositories
+                    .claim_relay_publish(now + time::Duration::minutes(1))
+                    .await
+                    .expect("claim before retry");
+                assert!(none_before_retry.is_none());
 
-        let claimed_retry = repositories
-            .claim_relay_publish(now + time::Duration::minutes(6))
-            .await
-            .expect("claim after retry")
-            .expect("retry job");
-        assert!(claimed_retry.attempt_count >= 2);
+                let claimed_retry = repositories
+                    .claim_relay_publish(now + time::Duration::minutes(6))
+                    .await
+                    .expect("claim after retry")
+                    .expect("retry job");
+                assert!(claimed_retry.attempt_count >= 2);
 
-        repositories
-            .mark_relay_publish_succeeded(claimed_retry.id)
-            .await
-            .expect("mark succeeded");
+                repositories
+                    .mark_relay_publish_succeeded(claimed_retry.id)
+                    .await
+                    .expect("mark succeeded");
 
-        let missing_mark_success = repositories
-            .mark_relay_publish_succeeded(999_999)
-            .await
-            .expect_err("missing success id");
-        assert!(matches!(missing_mark_success, StorageError::Internal { .. }));
+                let missing_mark_success = repositories
+                    .mark_relay_publish_succeeded(999_999)
+                    .await
+                    .expect_err("missing success id");
+                assert!(matches!(
+                    missing_mark_success,
+                    StorageError::Internal { .. }
+                ));
 
-        let missing_mark_failed = repositories
-            .mark_relay_publish_failed(
-                999_998,
-                "missing",
-                now + time::Duration::minutes(10),
-            )
-            .await
-            .expect_err("missing failed id");
-        assert!(matches!(missing_mark_failed, StorageError::Internal { .. }));
+                let missing_mark_failed = repositories
+                    .mark_relay_publish_failed(
+                        999_998,
+                        "missing",
+                        now + time::Duration::minutes(10),
+                    )
+                    .await
+                    .expect_err("missing failed id");
+                assert!(matches!(missing_mark_failed, StorageError::Internal { .. }));
 
-            test_db.cleanup().await;
-        })
+                test_db.cleanup().await;
+            },
+        )
         .await;
     }
 }
