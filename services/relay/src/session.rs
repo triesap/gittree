@@ -1310,18 +1310,9 @@ fn membership_response(event_id: &str, accepted: bool, message: String) -> Vec<S
 }
 
 fn sign_event(event: &mut crate::NostrEvent, signer: &TenantSigner) -> Result<(), String> {
-    event.id = match event.compute_id() {
-        Ok(id) => id,
-        Err(err) => return Err(err.to_string()),
-    };
-    let id_bytes = match hex::decode(&event.id) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err("invalid event id".to_string()),
-    };
-    let msg = match Message::from_digest_slice(&id_bytes) {
-        Ok(msg) => msg,
-        Err(err) => return Err(err.to_string()),
-    };
+    event.id = event.compute_id().map_err(|err| err.to_string())?;
+    let id_bytes = hex::decode(&event.id).map_err(|_| "invalid event id".to_string())?;
+    let msg = Message::from_digest_slice(&id_bytes).map_err(|err| err.to_string())?;
     let secp = Secp256k1::new();
     let keypair = Keypair::from_secret_key(&secp, &signer.secret_key);
     let sig = secp.sign_schnorr(&msg, &keypair);
