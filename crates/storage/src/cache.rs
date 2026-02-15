@@ -154,8 +154,10 @@ where
         }
         drop(lists);
 
-        let mut latest =
-            cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
+        let mut latest = cache_write(
+            &self.cache.latest_announcements,
+            "announcement cache poisoned",
+        )?;
         let should_update = match latest.get(&key) {
             Some(entry) if self.is_fresh(entry) && entry.value.created_at > record.created_at => {
                 false
@@ -195,8 +197,7 @@ where
             }
         };
         if stale {
-            let mut lists =
-                cache_write(&self.cache.announcements, "announcement cache poisoned")?;
+            let mut lists = cache_write(&self.cache.announcements, "announcement cache poisoned")?;
             lists.remove(&key);
         }
         if let Some(cached) = cached {
@@ -217,8 +218,10 @@ where
         self.evict_if_needed(&mut lists);
         drop(lists);
 
-        let mut latest =
-            cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
+        let mut latest = cache_write(
+            &self.cache.latest_announcements,
+            "announcement cache poisoned",
+        )?;
         if records.is_empty() {
             latest.remove(&key);
         } else if let Some(record) = records
@@ -250,8 +253,10 @@ where
 
         let key = Self::key(pubkey, identifier);
         let (cached, stale) = {
-            let latest =
-                cache_read(&self.cache.latest_announcements, "announcement cache poisoned")?;
+            let latest = cache_read(
+                &self.cache.latest_announcements,
+                "announcement cache poisoned",
+            )?;
             match latest.get(&key) {
                 Some(entry) if self.is_fresh(entry) => (Some(entry.value.clone()), false),
                 Some(_) => (None, true),
@@ -259,8 +264,10 @@ where
             }
         };
         if stale {
-            let mut latest =
-                cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
+            let mut latest = cache_write(
+                &self.cache.latest_announcements,
+                "announcement cache poisoned",
+            )?;
             latest.remove(&key);
         }
         if let Some(cached) = cached {
@@ -270,8 +277,10 @@ where
         let record = self.inner.latest_announcement(pubkey, identifier).await?;
         if let Some(record) = record.clone() {
             let now = Instant::now();
-            let mut latest =
-                cache_write(&self.cache.latest_announcements, "announcement cache poisoned")?;
+            let mut latest = cache_write(
+                &self.cache.latest_announcements,
+                "announcement cache poisoned",
+            )?;
             latest.insert(
                 key,
                 CacheEntry {
@@ -381,8 +390,10 @@ where
             .await?;
         let key = record.relay_url.clone();
         let now = Instant::now();
-        let mut entries =
-            cache_write(&self.cache.relay_compatibility, "relay compatibility cache poisoned")?;
+        let mut entries = cache_write(
+            &self.cache.relay_compatibility,
+            "relay compatibility cache poisoned",
+        )?;
         entries.insert(
             key,
             CacheEntry {
@@ -875,12 +886,12 @@ mod tests {
 
         poison_lock(&lock);
 
-        let err = super::cache_read(&lock, "cache poisoned")
-            .expect_err("poisoned read lock must fail");
+        let err =
+            super::cache_read(&lock, "cache poisoned").expect_err("poisoned read lock must fail");
         assert_internal_message(err, "cache poisoned");
 
-        let err = super::cache_write(&lock, "cache poisoned")
-            .expect_err("poisoned write lock must fail");
+        let err =
+            super::cache_write(&lock, "cache poisoned").expect_err("poisoned write lock must fail");
         assert_internal_message(err, "cache poisoned");
     }
 
@@ -1252,6 +1263,143 @@ mod tests {
         assert!(cached.is_fresh(&fresh));
     }
 
+    fn exercise_helper_instantiations<R>(cached: &CachedRepositories<Arc<R>>) {
+        let announcement = RepoAnnouncementRecord::new(
+            &hex_32(0x11),
+            &hex_32(0x22),
+            10,
+            &sample_announcement("repo"),
+        )
+        .expect("announcement");
+        let state = RepoStateRecord::new(&hex_32(0x33), &hex_32(0x44), 10, &sample_state("repo"))
+            .expect("state");
+        let relay_compat = sample_relay_compatibility("wss://relay.example");
+
+        let now = Instant::now();
+
+        let mut announcements: HashMap<String, CacheEntry<RepoAnnouncementRecord>> = HashMap::new();
+        announcements.insert(
+            "old".to_string(),
+            CacheEntry {
+                value: announcement.clone(),
+                stored_at: now - Duration::from_secs(2),
+            },
+        );
+        announcements.insert(
+            "new".to_string(),
+            CacheEntry {
+                value: announcement.clone(),
+                stored_at: now,
+            },
+        );
+        cached.evict_if_needed(&mut announcements);
+        assert_eq!(announcements.len(), 1);
+
+        let mut states: HashMap<String, CacheEntry<RepoStateRecord>> = HashMap::new();
+        states.insert(
+            "old".to_string(),
+            CacheEntry {
+                value: state.clone(),
+                stored_at: now - Duration::from_secs(2),
+            },
+        );
+        states.insert(
+            "new".to_string(),
+            CacheEntry {
+                value: state.clone(),
+                stored_at: now,
+            },
+        );
+        cached.evict_if_needed(&mut states);
+        assert_eq!(states.len(), 1);
+
+        let mut compat: HashMap<String, CacheEntry<RelayCompatibilityRecord>> = HashMap::new();
+        compat.insert(
+            "old".to_string(),
+            CacheEntry {
+                value: relay_compat.clone(),
+                stored_at: now - Duration::from_secs(2),
+            },
+        );
+        compat.insert(
+            "new".to_string(),
+            CacheEntry {
+                value: relay_compat.clone(),
+                stored_at: now,
+            },
+        );
+        cached.evict_if_needed(&mut compat);
+        assert_eq!(compat.len(), 1);
+
+        let mut list_map: HashMap<String, CacheEntry<Vec<RepoAnnouncementRecord>>> = HashMap::new();
+        list_map.insert(
+            "old".to_string(),
+            CacheEntry {
+                value: vec![announcement.clone()],
+                stored_at: now - Duration::from_secs(2),
+            },
+        );
+        list_map.insert(
+            "new".to_string(),
+            CacheEntry {
+                value: vec![announcement.clone()],
+                stored_at: now,
+            },
+        );
+        cached.evict_if_needed(&mut list_map);
+        assert_eq!(list_map.len(), 1);
+
+        let mut integer_map: HashMap<String, CacheEntry<i64>> = HashMap::new();
+        integer_map.insert(
+            "old".to_string(),
+            CacheEntry {
+                value: 1,
+                stored_at: now - Duration::from_secs(2),
+            },
+        );
+        integer_map.insert(
+            "new".to_string(),
+            CacheEntry {
+                value: 2,
+                stored_at: now,
+            },
+        );
+        cached.evict_if_needed(&mut integer_map);
+        assert_eq!(integer_map.len(), 1);
+
+        assert!(cached.is_fresh(&CacheEntry {
+            value: announcement.clone(),
+            stored_at: now,
+        }));
+        assert!(cached.is_fresh(&CacheEntry {
+            value: state,
+            stored_at: now,
+        }));
+        assert!(cached.is_fresh(&CacheEntry {
+            value: relay_compat,
+            stored_at: now,
+        }));
+        assert!(cached.is_fresh(&CacheEntry {
+            value: vec![announcement],
+            stored_at: now,
+        }));
+    }
+
+    #[test]
+    fn cache_helpers_cover_generic_instantiations_for_backing_repos() {
+        let counting = CachedRepositories::with_config(
+            Arc::new(CountingRepo::new()),
+            CacheConfig::new(Some(Duration::from_secs(1)), 1),
+        );
+        exercise_helper_instantiations(&counting);
+
+        let poison = CachedRepositories::with_config(
+            Arc::new(PoisonRepo::default()),
+            CacheConfig::new(Some(Duration::from_secs(1)), 1),
+        );
+        exercise_helper_instantiations(&poison);
+    }
+
     #[tokio::test]
     async fn cache_reports_poisoned_announcement_cache() {
         let inner = Arc::new(CountingRepo::new());
@@ -1349,7 +1497,10 @@ mod tests {
         poison_lock(&states.states);
         let insert_state_err = states.insert_state(state.clone()).await.unwrap_err();
         assert_internal_message(insert_state_err, "state store poisoned");
-        let latest_state_err = states.latest_state(&state.pubkey, "repo").await.unwrap_err();
+        let latest_state_err = states
+            .latest_state(&state.pubkey, "repo")
+            .await
+            .unwrap_err();
         assert_internal_message(latest_state_err, "state store poisoned");
 
         let relay = Arc::new(CountingRepo::new());
