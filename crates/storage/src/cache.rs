@@ -890,6 +890,8 @@ mod tests {
         let lock = RwLock::new(1u8);
         let _guard = super::cache_read(&lock, "ok").expect("read lock ok");
         drop(_guard);
+        let _write_guard = super::cache_write(&lock, "ok").expect("write lock ok");
+        drop(_write_guard);
 
         poison_lock(&lock);
 
@@ -1409,6 +1411,28 @@ mod tests {
 
     #[test]
     fn cache_helpers_cover_integer_evict_for_counting_repo() {
+        let evict_i64: fn(
+            &CachedRepositories<Arc<CountingRepo>>,
+            &mut HashMap<String, CacheEntry<i64>>,
+        ) = CachedRepositories::<Arc<CountingRepo>>::evict_if_needed::<String, i64>;
+        let fresh_i64: fn(&CachedRepositories<Arc<CountingRepo>>, &CacheEntry<i64>) -> bool =
+            CachedRepositories::<Arc<CountingRepo>>::is_fresh::<i64>;
+
+        let cached_zero = CachedRepositories::with_config(
+            Arc::new(CountingRepo::new()),
+            CacheConfig::new(Some(Duration::from_secs(1)), 0),
+        );
+        let mut zero_map: HashMap<String, CacheEntry<i64>> = HashMap::new();
+        zero_map.insert(
+            "k".to_string(),
+            CacheEntry {
+                value: 1,
+                stored_at: Instant::now(),
+            },
+        );
+        evict_i64(&cached_zero, &mut zero_map);
+        assert!(zero_map.is_empty());
+
         let cached = CachedRepositories::with_config(
             Arc::new(CountingRepo::new()),
             CacheConfig::new(Some(Duration::from_secs(1)), 1),
@@ -1429,8 +1453,12 @@ mod tests {
                 stored_at: now,
             },
         );
-        cached.evict_if_needed(&mut map);
+        evict_i64(&cached, &mut map);
         assert_eq!(map.len(), 1);
+        assert!(fresh_i64(&cached, &CacheEntry {
+            value: 2_i64,
+            stored_at: now,
+        }));
     }
 
     #[test]
@@ -1440,6 +1468,16 @@ mod tests {
         let guard = super::cache_read(&lock, "announcement cache poisoned")
             .expect("read lock for announcement cache map");
         assert!(guard.is_empty());
+    }
+
+    #[test]
+    fn cache_helpers_cover_cache_read_error_with_announcement_map_type() {
+        let lock: RwLock<HashMap<String, CacheEntry<RepoAnnouncementRecord>>> =
+            RwLock::new(HashMap::new());
+        poison_lock(&lock);
+        let err = super::cache_read(&lock, "announcement cache poisoned")
+            .expect_err("poisoned announcement cache read lock must fail");
+        assert_internal_message(err, "announcement cache poisoned");
     }
 
     #[tokio::test]
