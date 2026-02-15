@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use gittree_storage::{
     PostgresRepositories, RelayMembershipRecord, RelayMembershipRepository, RelayTenantRecord,
     RelayTenantRepository, StorageError,
@@ -64,7 +64,10 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
 }
 
 async fn serve_inner(config: RelayConfig) -> Result<(), RelayError> {
-    serve_inner_with_shutdown(config, shutdown_signal()).await
+    serve_inner_with_shutdown(config, async {
+        await_shutdown_signal(tokio::signal::ctrl_c()).await;
+    })
+    .await
 }
 
 async fn serve_inner_with_shutdown<F>(config: RelayConfig, shutdown: F) -> Result<(), RelayError>
@@ -243,10 +246,6 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-async fn shutdown_signal() {
-    await_shutdown_signal(tokio::signal::ctrl_c()).await;
-}
-
 async fn await_shutdown_signal<S>(signal: S)
 where
     S: std::future::Future<Output = Result<(), std::io::Error>>,
@@ -273,6 +272,27 @@ fn classify_inbound_message(msg: Option<Result<Message, axum::Error>>) -> Inboun
 
 fn classify_outbound_message(outbound: Option<String>) -> Option<Message> {
     outbound.map(Message::Text)
+}
+
+async fn handle_inbound_action(
+    in_tx: &mpsc::Sender<String>,
+    action: InboundSocketAction,
+) -> bool {
+    match action {
+        InboundSocketAction::Forward(text) => in_tx.send(text).await.is_ok(),
+        InboundSocketAction::Continue => true,
+        InboundSocketAction::Break => false,
+    }
+}
+
+async fn handle_outbound_message<S>(sender: &mut S, outbound: Option<String>) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    let Some(outbound) = classify_outbound_message(outbound) else {
+        return false;
+    };
+    sender.send(outbound).await.is_ok()
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: TenantContext) {
@@ -321,17 +341,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     .with_membership_requirements(read_membership_required, write_membership_required)
     .with_relay_url(relay_url);
 
-    if let Some(record) = tenant.tenant.as_ref() {
+    if let (Some(record), Some(membership)) = (tenant.tenant.as_ref(), membership.as_ref()) {
         session =
             session.with_relay_signer(record.relay_pubkey.clone(), record.relay_secret.clone());
-        if let Some(membership) = membership.as_ref() {
-            let _ = seed_owner_membership(
-                membership,
-                &tenant.tenant_id,
-                &record.relay_pubkey,
-            )
-            .await;
-        }
+        let _ = seed_owner_membership(
+            membership,
+            &tenant.tenant_id,
+            &record.relay_pubkey,
+        )
+        .await;
     }
 
     let session = session.with_metrics(state.metrics.clone());
@@ -341,22 +359,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     loop {
         tokio::select! {
             msg = receiver.next() => {
-                match classify_inbound_message(msg) {
-                    InboundSocketAction::Forward(text) => {
-                        if in_tx.send(text).await.is_err() {
-                            break;
-                        }
-                    }
-                    InboundSocketAction::Continue => {}
-                    InboundSocketAction::Break => break,
+                let action = classify_inbound_message(msg);
+                if !handle_inbound_action(&in_tx, action).await {
+                    return;
                 }
             }
             outbound = out_rx.recv() => {
-                let Some(outbound) = classify_outbound_message(outbound) else {
-                    break;
-                };
-                if sender.send(outbound).await.is_err() {
-                    break;
+                if !handle_outbound_message(&mut sender, outbound).await {
+                    return;
                 }
             }
         }
@@ -395,7 +405,7 @@ async fn seed_owner_membership(
 mod tests {
     use super::{
         accepts_nostr_json, bind_listener, build_router, build_state, extract_host, handle_socket,
-        nip11_response, relay_url_from_host, resolve_tenant, seed_owner_membership, shutdown_signal,
+        nip11_response, relay_url_from_host, resolve_tenant, seed_owner_membership,
     };
     use crate::{
         MemoryStore, NostrEvent, Policy, RelayConfig, RelayError, RelayMetrics,
@@ -414,10 +424,13 @@ mod tests {
     };
     use secp256k1::{Keypair, Secp256k1, SecretKey};
     use serde_json::json;
+    use std::pin::Pin;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
     use tokio::time::timeout;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -637,6 +650,44 @@ mod tests {
             1,
         )
         .expect("tenant")
+    }
+
+    struct ScriptedSink {
+        fail_send: bool,
+        sent: Vec<Message>,
+    }
+
+    impl futures_util::Sink<Message> for ScriptedSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            if self.fail_send {
+                return Err(std::io::Error::other("sink send failed"));
+            }
+            self.get_mut().sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
     }
 
     #[tokio::test]
@@ -1093,6 +1144,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_inbound_action_covers_forward_continue_break_and_send_failure() {
+        let (in_tx, mut in_rx) = mpsc::channel(1);
+        assert!(super::handle_inbound_action(
+            &in_tx,
+            super::InboundSocketAction::Forward("req".to_string()),
+        )
+        .await);
+        assert_eq!(in_rx.recv().await.as_deref(), Some("req"));
+
+        assert!(super::handle_inbound_action(
+            &in_tx,
+            super::InboundSocketAction::Continue,
+        )
+        .await);
+        assert!(!super::handle_inbound_action(&in_tx, super::InboundSocketAction::Break).await);
+
+        drop(in_rx);
+        assert!(!super::handle_inbound_action(
+            &in_tx,
+            super::InboundSocketAction::Forward("dropped".to_string()),
+        )
+        .await);
+    }
+
+    #[tokio::test]
+    async fn handle_outbound_message_covers_none_send_and_send_failure_paths() {
+        let mut ok_sink = ScriptedSink {
+            fail_send: false,
+            sent: Vec::new(),
+        };
+        assert!(!super::handle_outbound_message(&mut ok_sink, None).await);
+        assert!(super::handle_outbound_message(&mut ok_sink, Some("frame".to_string())).await);
+        assert!(matches!(ok_sink.sent.first(), Some(Message::Text(payload)) if payload == "frame"));
+
+        let mut fail_sink = ScriptedSink {
+            fail_send: true,
+            sent: Vec::new(),
+        };
+        assert!(!super::handle_outbound_message(&mut fail_sink, Some("frame".to_string())).await);
+    }
+
+    #[tokio::test]
     async fn postgres_tenant_repository_impl_paths_are_exercised() {
         let repos = unreachable_repos();
         let _store = super::TenantRepository::tenant_store(&*repos, "tenant-a");
@@ -1332,7 +1425,9 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_signal_future_can_start_and_be_aborted() {
-        let task = tokio::spawn(shutdown_signal());
+        let task = tokio::spawn(async {
+            super::await_shutdown_signal(tokio::signal::ctrl_c()).await;
+        });
         tokio::time::sleep(Duration::from_millis(10)).await;
         task.abort();
     }
@@ -1411,7 +1506,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
-        let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            super::await_shutdown_signal(tokio::signal::ctrl_c()).await;
+        });
         let result = tokio::time::timeout(Duration::from_millis(20), super::run_server(server)).await;
         assert!(result.is_err(), "run_server should still be pending without a shutdown signal");
     }
