@@ -254,6 +254,27 @@ where
     let _ = signal.await;
 }
 
+enum InboundSocketAction {
+    Forward(String),
+    Continue,
+    Break,
+}
+
+fn classify_inbound_message(msg: Option<Result<Message, axum::Error>>) -> InboundSocketAction {
+    let Some(msg) = msg else {
+        return InboundSocketAction::Break;
+    };
+    match msg {
+        Ok(Message::Text(text)) => InboundSocketAction::Forward(text.to_string()),
+        Ok(Message::Close(_)) | Err(_) => InboundSocketAction::Break,
+        Ok(_) => InboundSocketAction::Continue,
+    }
+}
+
+fn classify_outbound_message(outbound: Option<String>) -> Option<Message> {
+    outbound.map(Message::Text)
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: TenantContext) {
     let _ = (&tenant.tenant_id, &tenant.tenant);
     let (mut sender, mut receiver) = socket.split();
@@ -320,25 +341,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     loop {
         tokio::select! {
             msg = receiver.next() => {
-                let Some(msg) = msg else {
-                    break;
-                };
-                match msg {
-                    Ok(Message::Text(text)) => {
+                match classify_inbound_message(msg) {
+                    InboundSocketAction::Forward(text) => {
                         if in_tx.send(text).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Message::Close(_)) => break,
-                    Ok(_) => {}
-                    Err(_) => break,
+                    InboundSocketAction::Continue => {}
+                    InboundSocketAction::Break => break,
                 }
             }
             outbound = out_rx.recv() => {
-                let Some(outbound) = outbound else {
+                let Some(outbound) = classify_outbound_message(outbound) else {
                     break;
                 };
-                if sender.send(Message::Text(outbound)).await.is_err() {
+                if sender.send(outbound).await.is_err() {
                     break;
                 }
             }
@@ -385,7 +402,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use axum::Router;
-    use axum::extract::ws::WebSocketUpgrade;
+    use axum::extract::ws::{Message, WebSocketUpgrade};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
@@ -1033,6 +1050,46 @@ mod tests {
         assert_eq!(relay_url_from_host("relay.local"), "wss://relay.local");
         assert_eq!(relay_url_from_host("ws://relay.local"), "ws://relay.local");
         assert_eq!(relay_url_from_host("wss://relay.local"), "wss://relay.local");
+    }
+
+    #[test]
+    fn classify_inbound_message_covers_all_branches() {
+        assert!(matches!(
+            super::classify_inbound_message(None),
+            super::InboundSocketAction::Break
+        ));
+        assert!(matches!(
+            super::classify_inbound_message(Some(Ok(Message::Close(None)))),
+            super::InboundSocketAction::Break
+        ));
+        assert!(matches!(
+            super::classify_inbound_message(Some(Ok(Message::Binary(vec![0, 1].into())))),
+            super::InboundSocketAction::Continue
+        ));
+
+        let forwarded = super::classify_inbound_message(Some(Ok(Message::Text("req".into()))));
+        assert!(matches!(
+            forwarded,
+            super::InboundSocketAction::Forward(ref text) if text == "req"
+        ));
+
+        let err = axum::Error::new(std::io::Error::other("ws read failed"));
+        assert!(matches!(
+            super::classify_inbound_message(Some(Err(err))),
+            super::InboundSocketAction::Break
+        ));
+    }
+
+    #[test]
+    fn classify_outbound_message_maps_text_and_none() {
+        assert!(matches!(
+            super::classify_outbound_message(None),
+            None
+        ));
+
+        let mapped = super::classify_outbound_message(Some("frame".to_string()))
+            .expect("message");
+        assert!(matches!(mapped, Message::Text(ref payload) if payload == "frame"));
     }
 
     #[tokio::test]
