@@ -1055,6 +1055,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn assert_internal_message_panics_for_non_internal_errors() {
+        let result = std::panic::catch_unwind(|| {
+            assert_internal_message(
+                StorageError::InvalidField {
+                    field: "tenant_id",
+                    value: "empty".to_string(),
+                },
+                "unused",
+            );
+        });
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn in_memory_lists_announcements() {
         let store = InMemoryRepositories::new();
@@ -1523,6 +1537,68 @@ mod tests {
             .expect("query");
 
         assert_eq!(results, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_event_repo_rejects_invalid_authors_kinds_and_tag_filters() {
+        let store = InMemoryRepositories::new();
+        let event_id = "aa".repeat(32);
+        let author = "bb".repeat(32);
+        let mut record = event_record(&event_id, &author, 5);
+        record.kind = 30000;
+        record.tags = vec![
+            TagRecord {
+                name: "d".to_string(),
+                value: "repo".to_string(),
+            },
+            TagRecord {
+                name: "e".to_string(),
+                value: "tag".to_string(),
+            },
+        ];
+        store.insert_event(record).await.expect("insert");
+
+        let invalid_author = store
+            .query_events(&EventQuery {
+                authors: vec!["not-hex".to_string()],
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query invalid author");
+        assert!(invalid_author.is_empty());
+
+        let kind_mismatch = store
+            .query_events(&EventQuery {
+                kinds: vec![1],
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query kind mismatch");
+        assert!(kind_mismatch.is_empty());
+
+        let missing_tag_name = store
+            .query_events(&EventQuery {
+                tags: vec![TagRecord {
+                    name: "p".to_string(),
+                    value: "alice".to_string(),
+                }],
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query missing tag name");
+        assert!(missing_tag_name.is_empty());
+
+        let missing_tag_value = store
+            .query_events(&EventQuery {
+                tags: vec![TagRecord {
+                    name: "d".to_string(),
+                    value: "other".to_string(),
+                }],
+                ..EventQuery::default()
+            })
+            .await
+            .expect("query missing tag value");
+        assert!(missing_tag_value.is_empty());
     }
 
     #[tokio::test]
