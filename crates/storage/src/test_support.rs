@@ -9,10 +9,6 @@ pub(crate) fn skip_or_fail_without_db_with_policy(test_name: &str, require_db: b
     eprintln!("skipping {test_name}: postgres unavailable");
 }
 
-pub(crate) fn skip_or_fail_without_db(test_name: &str) {
-    skip_or_fail_without_db_with_policy(test_name, require_db_tests());
-}
-
 fn require_db_tests_from_value(value: Option<&str>) -> bool {
     value == Some("1")
 }

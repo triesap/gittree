@@ -1415,7 +1415,7 @@ mod tests {
         RelayCompatibilityRepository, RelayMembershipRepository, RelayPublishRepository,
         RelayTenantRepository, RepoMappingRepository, StateRepository,
     };
-    use crate::test_support::skip_or_fail_without_db;
+    use crate::test_support::{require_db_tests, skip_or_fail_without_db_with_policy};
     use crate::{
         AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
         RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishRequest,
@@ -1529,8 +1529,27 @@ WHERE datname = $1
         F: FnOnce(TestDatabase) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let Some(test_db) = TestDatabase::provision().await else {
-            skip_or_fail_without_db(test_name);
+        with_test_db_with_provision(
+            test_name,
+            TestDatabase::provision().await,
+            require_db_tests(),
+            run,
+        )
+        .await;
+    }
+
+    async fn with_test_db_with_provision<F, Fut>(
+        test_name: &str,
+        provisioned: Option<TestDatabase>,
+        require_db: bool,
+        run: F,
+    )
+    where
+        F: FnOnce(TestDatabase) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let Some(test_db) = provisioned else {
+            skip_or_fail_without_db_with_policy(test_name, require_db);
             return;
         };
         run(test_db).await;
@@ -1601,6 +1620,23 @@ WHERE datname = $1
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_database_base_url_from_value_prefers_explicit_value() {
+        assert_eq!(
+            test_database_base_url_from_value(Some("postgres://custom".to_string())),
+            "postgres://custom".to_string()
+        );
+        assert_eq!(
+            test_database_base_url_from_value(None),
+            DEFAULT_TEST_DATABASE_URL.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn with_test_db_with_provision_skips_without_database_when_not_required() {
+        with_test_db_with_provision("sample_test", None, false, |_| async {}).await;
     }
 
     #[tokio::test]
