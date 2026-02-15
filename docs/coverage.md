@@ -74,3 +74,29 @@ Override the ignore regex directly:
 ```
 COV_IGNORE_FILENAME_REGEX='.*/src/bin/experimental_.*\\.rs$' ./scripts/coverage-gate.sh
 ```
+
+### Strict storage mode
+
+Run the storage crate with stricter defaults:
+
+```
+COV_PACKAGES="gittree-storage" COV_STRICT_STORAGE=1 ./scripts/coverage-gate.sh
+```
+
+This path delegates to `scripts/coverage-gate-storage.sh`, which enforces:
+- storage function coverage: `100%`
+- storage line coverage: `100%`
+- storage uncovered lines: `0`
+
+If Docker is unavailable and `GITTREE_STORAGE_TEST_DATABASE_URL` is unset, coverage
+scripts fall back to:
+
+```
+postgres://gittree:gittree@127.0.0.1:5432/gittree
+```
+
+Override with:
+
+```
+COV_STORAGE_DATABASE_URL="postgres://..." ./scripts/coverage-gate-storage.sh
+```
