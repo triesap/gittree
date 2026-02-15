@@ -53,9 +53,7 @@ impl<S: EventStore> SessionDriver<S> {
         mut broadcast_rx: broadcast::Receiver<crate::NostrEvent>,
     ) {
         for message in self.session.initial_messages() {
-            if outbound.send(encode_response(message)).await.is_err() {
-                return;
-            }
+            if outbound.send(encode_response(message)).await.is_err() { return; }
         }
         loop {
             tokio::select! {

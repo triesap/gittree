@@ -499,12 +499,12 @@ mod tests {
         let mut event = sample_event();
         event.pubkey = String::new();
 
-        let decision = client.decide(&event).await;
-        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
-        if let AdmissionDecision::Reject { reason } = decision {
-            assert!(reason.contains("admission unavailable"));
-            assert!(reason.contains("invalid request"));
-        }
+        assert!(matches!(
+            client.decide(&event).await,
+            AdmissionDecision::Reject { ref reason }
+                if reason.contains("admission unavailable")
+                    && reason.contains("invalid request")
+        ));
 
         let calls = client.transport.calls.lock().expect("calls lock");
         assert!(calls.is_empty());
