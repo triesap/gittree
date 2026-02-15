@@ -22,6 +22,29 @@ else
   )
 fi
 
+needs_storage_db=0
+for pkg in "${packages[@]}"; do
+  if [[ "${pkg}" == "gittree-storage" ]]; then
+    needs_storage_db=1
+    break
+  fi
+done
+
+if [[ "${COV_STRICT_STORAGE:-0}" == "1" && "${needs_storage_db}" == "1" ]]; then
+  ./scripts/coverage-gate-storage.sh
+  original_packages=("${packages[@]}")
+  packages=()
+  for pkg in "${original_packages[@]}"; do
+    if [[ "${pkg}" != "gittree-storage" ]]; then
+      packages+=("${pkg}")
+    fi
+  done
+  if [[ "${#packages[@]}" -eq 0 ]]; then
+    echo "coverage gate passed"
+    exit 0
+  fi
+fi
+
 args=()
 for pkg in "${packages[@]}"; do
   args+=("-p" "$pkg")
