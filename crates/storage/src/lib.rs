@@ -17,6 +17,8 @@ pub mod repositories;
 pub mod relay_compat;
 pub mod relay_membership;
 pub mod relay_tenant;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use cache::{CacheConfig, CachedRepositories};
 pub use account::AccountRecord;
