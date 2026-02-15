@@ -1400,6 +1400,41 @@ mod tests {
         exercise_helper_instantiations(&poison);
     }
 
+    #[test]
+    fn cache_helpers_cover_integer_evict_for_counting_repo() {
+        let cached = CachedRepositories::with_config(
+            Arc::new(CountingRepo::new()),
+            CacheConfig::new(Some(Duration::from_secs(1)), 1),
+        );
+        let now = Instant::now();
+        let mut map: HashMap<String, CacheEntry<i64>> = HashMap::new();
+        map.insert(
+            "old".to_string(),
+            CacheEntry {
+                value: 1,
+                stored_at: now - Duration::from_secs(2),
+            },
+        );
+        map.insert(
+            "new".to_string(),
+            CacheEntry {
+                value: 2,
+                stored_at: now,
+            },
+        );
+        cached.evict_if_needed(&mut map);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn cache_helpers_cover_cache_read_with_announcement_map_type() {
+        let lock: RwLock<HashMap<String, CacheEntry<RepoAnnouncementRecord>>> =
+            RwLock::new(HashMap::new());
+        let guard = super::cache_read(&lock, "announcement cache poisoned")
+            .expect("read lock for announcement cache map");
+        assert!(guard.is_empty());
+    }
+
     #[tokio::test]
     async fn cache_reports_poisoned_announcement_cache() {
         let inner = Arc::new(CountingRepo::new());

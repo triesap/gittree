@@ -1637,7 +1637,7 @@ WHERE datname = $1
 
     #[tokio::test]
     async fn with_test_db_with_provision_skips_without_database_when_not_required() {
-        with_test_db_with_provision("sample_test", None, false, |_| async {}).await;
+        with_test_db_with_provision("sample_test", None, false, noop_test_db).await;
     }
 
     #[tokio::test]
@@ -1670,10 +1670,10 @@ WHERE datname = $1
         )
         .await;
 
-        if require_db || invoked.load(Ordering::SeqCst) {
-            assert!(invoked.load(Ordering::SeqCst));
-        }
+        assert!(!require_db || invoked.load(Ordering::SeqCst));
     }
+
+    async fn noop_test_db(_: TestDatabase) {}
 
     #[tokio::test]
     async fn test_database_cleanup_returns_early_for_invalid_base_url() {

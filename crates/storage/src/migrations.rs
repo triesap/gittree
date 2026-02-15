@@ -490,10 +490,12 @@ mod tests {
 
     #[tokio::test]
     async fn provision_database_executes_and_returns_option() {
-        if let Some((pool, database_name, base_url)) = provision_database().await {
-            pool.close().await;
-            cleanup_database(&base_url, &database_name).await;
-        }
+        provision_database_executes_and_returns_option_with_value(provision_database().await).await;
+    }
+
+    #[tokio::test]
+    async fn provision_database_executes_and_returns_option_handles_none() {
+        provision_database_executes_and_returns_option_with_value(None).await;
     }
 
     fn test_database_base_url_from_value(value: Option<String>) -> String {
@@ -530,6 +532,15 @@ mod tests {
             .await
             .ok()?;
         Some((pool, database_name, base_url))
+    }
+
+    async fn provision_database_executes_and_returns_option_with_value(
+        provisioned: Option<(sqlx::PgPool, String, String)>,
+    ) {
+        if let Some((pool, database_name, base_url)) = provisioned {
+            pool.close().await;
+            cleanup_database(&base_url, &database_name).await;
+        }
     }
 
     async fn cleanup_database(base_url: &str, database_name: &str) {
