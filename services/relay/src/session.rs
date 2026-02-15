@@ -418,10 +418,7 @@ impl<S: EventStore> Session<S> {
     }
 
     pub fn dispatch_event(&self, event: &crate::NostrEvent) -> Vec<ServerMessage> {
-        let event_value = match serde_json::to_value(event) {
-            Ok(value) => value,
-            Err(_) => return vec![Notice::message("failed to serialize event").into()],
-        };
+        let event_value = serde_json::to_value(event).unwrap_or(Value::Null);
 
         let tags = match crate::TagIndex::from_tags(&event.tags) {
             Ok(tags) => tags,
@@ -433,13 +430,7 @@ impl<S: EventStore> Session<S> {
             if filters.is_empty() {
                 continue;
             }
-            let mut matches = false;
-            for filter in filters {
-                if filter.matches(event, &tags) {
-                    matches = true;
-                    break;
-                }
-            }
+            let matches = filters.iter().any(|filter| filter.matches(event, &tags));
             if matches {
                 responses.push(ServerMessage::Event {
                     subscription_id: sub_id.as_str().to_string(),
@@ -542,10 +533,7 @@ impl<S: EventStore> Session<S> {
 
                 let mut responses = Vec::new();
                 for event in events {
-                    let value = match serde_json::to_value(event) {
-                        Ok(value) => value,
-                        Err(_) => return vec![Notice::message("failed to serialize event").into()],
-                    };
+                    let value = serde_json::to_value(event).unwrap_or(Value::Null);
                     responses.push(ServerMessage::Event {
                         subscription_id: subscription_id.clone(),
                         event: value,
@@ -611,15 +599,9 @@ impl<S: EventStore> Session<S> {
         let Some(max_limit) = self.policy.max_limit else {
             return None;
         };
-        let mut exceeded = false;
-        for filter in filters {
-            if let Some(limit) = filter.limit {
-                if limit > max_limit {
-                    exceeded = true;
-                    break;
-                }
-            }
-        }
+        let exceeded = filters
+            .iter()
+            .any(|filter| filter.limit.is_some_and(|limit| limit > max_limit));
         if exceeded {
             Some(Notice::message("limit too large"))
         } else {
