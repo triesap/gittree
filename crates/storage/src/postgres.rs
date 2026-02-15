@@ -1564,6 +1564,31 @@ WHERE datname = $1
         ));
     }
 
+    #[test]
+    fn offset_datetime_helpers_round_trip_unix_timestamps() {
+        let timestamp = PostgresRepositories::to_offset_datetime(1_704_067_200).expect("timestamp");
+        assert_eq!(
+            PostgresRepositories::from_offset_datetime(timestamp),
+            1_704_067_200
+        );
+    }
+
+    #[test]
+    fn decode_hex_reports_field_name_on_invalid_input() {
+        let bytes = PostgresRepositories::decode_hex("authors", &"11".repeat(32))
+            .expect("valid hex should decode");
+        assert_eq!(bytes.len(), 32);
+
+        let err = PostgresRepositories::decode_hex("authors", "not-hex").unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "authors",
+                ..
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn test_database_cleanup_returns_early_for_invalid_base_url() {
         let pool = PgPoolOptions::new()
