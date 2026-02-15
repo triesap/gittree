@@ -46,6 +46,9 @@ else
 fi
 
 if [[ "${needs_storage_db}" == "1" ]]; then
+  if ! command -v docker >/dev/null 2>&1 && [[ -z "${GITTREE_STORAGE_TEST_DATABASE_URL:-}" ]]; then
+    export GITTREE_STORAGE_TEST_DATABASE_URL="${COV_STORAGE_DATABASE_URL:-postgres://gittree:gittree@127.0.0.1:5432/gittree}"
+  fi
   ./scripts/with-test-postgres.sh "${cov_cmd[@]}"
 else
   "${cov_cmd[@]}"
