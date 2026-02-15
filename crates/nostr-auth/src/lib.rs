@@ -195,14 +195,15 @@ fn build_event_id(event: &Nip98Event) -> Result<String, Nip98Error> {
         event.tags,
         event.content
     ]);
-    let serialized = match serde_json::to_string(&payload) {
-        Ok(value) => value,
-        Err(err) => return Err(Nip98Error::InvalidEventEncoding(err.to_string())),
-    };
+    let serialized = serialize_event_payload(&payload)?;
     let mut hasher = sha2::Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
     Ok(hex::encode(digest))
+}
+
+fn serialize_event_payload<T: serde::Serialize>(payload: &T) -> Result<String, Nip98Error> {
+    serde_json::to_string(payload).map_err(|err| Nip98Error::InvalidEventEncoding(err.to_string()))
 }
 
 fn verify_signature(event: &Nip98Event) -> Result<(), Nip98Error> {
@@ -237,7 +238,11 @@ fn verify_signature(event: &Nip98Event) -> Result<(), Nip98Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Nip98Error, Nip98Event, Nip98Request, NIP98_KIND, validate_nip98, verify_signature};
+    use super::{
+        Nip98Error, Nip98Event, Nip98Request, NIP98_KIND, serialize_event_payload, validate_nip98,
+        verify_signature,
+    };
+    use serde::ser::{Serialize, Serializer};
     use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey, Message};
     use sha2::Digest;
 
@@ -449,6 +454,23 @@ mod tests {
     }
 
     #[test]
+    fn accepts_matching_payload_hash() {
+        let payload_hash = "11".repeat(32);
+        let (event, _) =
+            build_event("https://gittr.ee/v1/signup", "POST", NOW, Some(&payload_hash));
+        let request = Nip98Request {
+            method: "POST",
+            url: "https://gittr.ee/v1/signup",
+            payload_sha256: Some(payload_hash.as_str()),
+            now: NOW,
+            max_skew_seconds: 60,
+        };
+
+        let auth = validate_nip98(&event, &request).expect("matching payload should validate");
+        assert_eq!(auth.pubkey, event.pubkey);
+    }
+
+    #[test]
     fn rejects_time_skew() {
         let (event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW - 1000, None);
         let request = Nip98Request {
@@ -582,9 +604,25 @@ mod tests {
     }
 
     #[test]
+    fn verify_signature_rejects_invalid_signature_length() {
+        let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
+        event.sig = "11".repeat(63);
+        let err = verify_signature(&event).unwrap_err();
+        assert!(matches!(err, Nip98Error::InvalidSignatureEncoding));
+    }
+
+    #[test]
     fn verify_signature_rejects_invalid_event_id_encoding() {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.id = "zz".to_string();
+        let err = verify_signature(&event).unwrap_err();
+        assert!(matches!(err, Nip98Error::InvalidEventIdEncoding));
+    }
+
+    #[test]
+    fn verify_signature_rejects_invalid_event_id_length() {
+        let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
+        event.id = "11".repeat(31);
         let err = verify_signature(&event).unwrap_err();
         assert!(matches!(err, Nip98Error::InvalidEventIdEncoding));
     }
@@ -595,5 +633,33 @@ mod tests {
         event.pubkey = "zz".to_string();
         let err = verify_signature(&event).unwrap_err();
         assert!(matches!(err, Nip98Error::InvalidPublicKey));
+    }
+
+    #[test]
+    fn verify_signature_rejects_invalid_public_key_length() {
+        let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
+        event.pubkey = "11".repeat(31);
+        let err = verify_signature(&event).unwrap_err();
+        assert!(matches!(err, Nip98Error::InvalidPublicKey));
+    }
+
+    struct FailingSerialize;
+
+    impl Serialize for FailingSerialize {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(serde::ser::Error::custom(format!(
+                "{}",
+                serializer.is_human_readable()
+            )))
+        }
+    }
+
+    #[test]
+    fn serialize_event_payload_maps_serialization_failures() {
+        let err = serialize_event_payload(&FailingSerialize).expect_err("serialization must fail");
+        assert!(matches!(err, Nip98Error::InvalidEventEncoding(_)));
     }
 }
