@@ -72,7 +72,9 @@ impl MigrationRunner {
             if migration.version <= current {
                 continue;
             }
-            sqlx::raw_sql(migration.sql).execute(&mut *connection).await?;
+            sqlx::raw_sql(migration.sql)
+                .execute(&mut *connection)
+                .await?;
             sqlx::query("INSERT INTO migrations (serial_number) VALUES ($1)")
                 .bind(migration.version)
                 .execute(&mut *connection)
@@ -219,8 +221,8 @@ mod tests {
     use super::Migration;
     use super::MigrationRunner;
     use super::core_migrations;
-    use crate::test_support::{require_db_tests, skip_or_fail_without_db_with_policy};
     use crate::StorageError;
+    use crate::test_support::{require_db_tests, skip_or_fail_without_db_with_policy};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::collections::HashSet;
     use std::str::FromStr;
@@ -339,7 +341,11 @@ mod tests {
             },
         ];
         let runner = MigrationRunner::new(migrations).expect("runner");
-        let versions: Vec<i64> = runner.migrations().iter().map(|item| item.version).collect();
+        let versions: Vec<i64> = runner
+            .migrations()
+            .iter()
+            .map(|item| item.version)
+            .collect();
         assert_eq!(versions, vec![1, 2, 3]);
         assert_eq!(runner.latest_version(), 3);
     }
@@ -363,6 +369,20 @@ mod tests {
     #[tokio::test]
     async fn runner_run_is_idempotent_skips_without_database_when_not_required() {
         runner_run_is_idempotent_on_database_with_provision(None, false).await;
+    }
+
+    #[tokio::test]
+    async fn runner_run_with_empty_migrations_returns_current_version_on_database() {
+        runner_run_with_empty_migrations_returns_current_with_provision(
+            provision_database().await,
+            require_db_tests(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn runner_run_with_empty_migrations_skips_without_database_when_not_required() {
+        runner_run_with_empty_migrations_returns_current_with_provision(None, false).await;
     }
 
     async fn runner_run_is_idempotent_on_database_with_provision(
@@ -389,6 +409,38 @@ mod tests {
         drop(connection);
         pool.close().await;
 
+        cleanup_database(&base_url, &database_name).await;
+    }
+
+    async fn runner_run_with_empty_migrations_returns_current_with_provision(
+        provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        let Some((pool, database_name, base_url)) = provisioned else {
+            skip_or_fail_without_db_with_policy(
+                "runner_run_with_empty_migrations_returns_current_version_on_database",
+                require_db,
+            );
+            return;
+        };
+
+        let mut connection = pool.acquire().await.expect("connection");
+        sqlx::query("CREATE TABLE IF NOT EXISTS migrations (serial_number BIGINT PRIMARY KEY)")
+            .execute(&mut *connection)
+            .await
+            .expect("create migrations table");
+        sqlx::query("INSERT INTO migrations (serial_number) VALUES ($1)")
+            .bind(7_i64)
+            .execute(&mut *connection)
+            .await
+            .expect("seed migration row");
+
+        let runner = MigrationRunner::new(Vec::new()).expect("runner");
+        let applied = runner.run(&mut *connection).await.expect("run");
+        assert_eq!(applied, 7);
+
+        drop(connection);
+        pool.close().await;
         cleanup_database(&base_url, &database_name).await;
     }
 
@@ -430,7 +482,9 @@ mod tests {
     async fn create_database_returns_false_when_query_fails() {
         let options = PgConnectOptions::from_str("postgres://gittree:gittree@127.0.0.1:1/postgres")
             .expect("connect options");
-        let pool = PgPoolOptions::new().max_connections(1).connect_lazy_with(options);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options);
         assert!(!create_database(&pool, "gittree_migrations_test").await);
     }
 
