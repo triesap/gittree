@@ -316,6 +316,31 @@ mod tests {
     }
 
     #[test]
+    fn runner_sorts_versions_before_exposing_migrations() {
+        let migrations = vec![
+            Migration {
+                version: 3,
+                description: "third",
+                sql: "SELECT 3",
+            },
+            Migration {
+                version: 1,
+                description: "first",
+                sql: "SELECT 1",
+            },
+            Migration {
+                version: 2,
+                description: "second",
+                sql: "SELECT 2",
+            },
+        ];
+        let runner = MigrationRunner::new(migrations).expect("runner");
+        let versions: Vec<i64> = runner.migrations().iter().map(|item| item.version).collect();
+        assert_eq!(versions, vec![1, 2, 3]);
+        assert_eq!(runner.latest_version(), 3);
+    }
+
+    #[test]
     fn latest_version_for_empty_runner_is_zero() {
         let runner = MigrationRunner::new(Vec::new()).expect("runner");
         assert_eq!(runner.latest_version(), 0);
