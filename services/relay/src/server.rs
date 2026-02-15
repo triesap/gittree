@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures_util::{Sink, SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use gittree_storage::{
     PostgresRepositories, RelayMembershipRecord, RelayMembershipRepository, RelayTenantRecord,
     RelayTenantRepository, StorageError,
@@ -64,10 +64,7 @@ pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
 }
 
 async fn serve_inner(config: RelayConfig) -> Result<(), RelayError> {
-    serve_inner_with_shutdown(config, async {
-        await_shutdown_signal(tokio::signal::ctrl_c()).await;
-    })
-    .await
+    serve_inner_with_shutdown(config, await_shutdown_signal(tokio::signal::ctrl_c())).await
 }
 
 async fn serve_inner_with_shutdown<F>(config: RelayConfig, shutdown: F) -> Result<(), RelayError>
@@ -295,6 +292,26 @@ where
     sender.send(outbound).await.is_ok()
 }
 
+async fn pump_socket_io<R, S>(
+    receiver: &mut R,
+    sender: &mut S,
+    in_tx: &mpsc::Sender<String>,
+    out_rx: &mut mpsc::Receiver<String>,
+) where
+    R: Stream<Item = Result<Message, axum::Error>> + Unpin,
+    S: Sink<Message> + Unpin,
+{
+    while tokio::select! {
+            msg = receiver.next() => {
+                let action = classify_inbound_message(msg);
+                handle_inbound_action(in_tx, action).await
+            }
+            outbound = out_rx.recv() => {
+                handle_outbound_message(sender, outbound).await
+            }
+        } {}
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: TenantContext) {
     let _ = (&tenant.tenant_id, &tenant.tenant);
     let (mut sender, mut receiver) = socket.split();
@@ -356,21 +373,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     let driver = SessionDriver::new(session);
     tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
 
-    loop {
-        tokio::select! {
-            msg = receiver.next() => {
-                let action = classify_inbound_message(msg);
-                if !handle_inbound_action(&in_tx, action).await {
-                    return;
-                }
-            }
-            outbound = out_rx.recv() => {
-                if !handle_outbound_message(&mut sender, outbound).await {
-                    return;
-                }
-            }
-        }
-    }
+    pump_socket_io(&mut receiver, &mut sender, &in_tx, &mut out_rx).await
 }
 
 async fn seed_owner_membership(
@@ -1177,12 +1180,30 @@ mod tests {
         assert!(!super::handle_outbound_message(&mut ok_sink, None).await);
         assert!(super::handle_outbound_message(&mut ok_sink, Some("frame".to_string())).await);
         assert!(matches!(ok_sink.sent.first(), Some(Message::Text(payload)) if payload == "frame"));
+        ok_sink.close().await.expect("close sink");
 
         let mut fail_sink = ScriptedSink {
             fail_send: true,
             sent: Vec::new(),
         };
         assert!(!super::handle_outbound_message(&mut fail_sink, Some("frame".to_string())).await);
+    }
+
+    #[tokio::test]
+    async fn pump_socket_io_processes_forwarded_frame_then_exits_on_close() {
+        let mut receiver = futures_util::stream::iter(vec![
+            Ok::<Message, axum::Error>(Message::Text("req".to_string())),
+            Ok::<Message, axum::Error>(Message::Close(None)),
+        ]);
+        let mut sink = ScriptedSink {
+            fail_send: false,
+            sent: Vec::new(),
+        };
+        let (in_tx, mut in_rx) = mpsc::channel(2);
+        let (_out_tx, mut out_rx) = mpsc::channel(1);
+
+        super::pump_socket_io(&mut receiver, &mut sink, &in_tx, &mut out_rx).await;
+        assert_eq!(in_rx.recv().await.as_deref(), Some("req"));
     }
 
     #[tokio::test]
@@ -1425,9 +1446,9 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_signal_future_can_start_and_be_aborted() {
-        let task = tokio::spawn(async {
-            super::await_shutdown_signal(tokio::signal::ctrl_c()).await;
-        });
+        let task = tokio::spawn(
+            super::await_shutdown_signal(std::future::pending::<Result<(), std::io::Error>>()),
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
         task.abort();
     }
@@ -1506,9 +1527,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
-        let server = axum::serve(listener, app).with_graceful_shutdown(async {
-            super::await_shutdown_signal(tokio::signal::ctrl_c()).await;
-        });
+        let server =
+            axum::serve(listener, app).with_graceful_shutdown(async { std::future::pending::<()>().await });
         let result = tokio::time::timeout(Duration::from_millis(20), super::run_server(server)).await;
         assert!(result.is_err(), "run_server should still be pending without a shutdown signal");
     }
