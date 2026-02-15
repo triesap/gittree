@@ -500,7 +500,9 @@ where
                 }
             }
         }
-        if let Some(eose_sub_id) = parse_eose_message(&msg)? {
+        // parse_event_message above already returns a protocol error for malformed JSON text.
+        // At this point, eose parsing failures can be treated as "no eose marker".
+        if let Some(eose_sub_id) = parse_eose_message(&msg).ok().flatten() {
             if eose_sub_id == sub_id {
                 return Err(RelayAdapterError::Protocol(
                     "probe event not found".to_string(),
