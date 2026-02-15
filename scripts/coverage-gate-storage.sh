@@ -13,8 +13,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-max_uncovered_lines="${COV_STORAGE_MAX_UNCOVERED_LINES:-1}"
-min_line_pct="${COV_STORAGE_MIN_LINE_PCT:-99.98}"
+max_uncovered_lines="${COV_STORAGE_MAX_UNCOVERED_LINES:-0}"
+min_line_pct="${COV_STORAGE_MIN_LINE_PCT:-100}"
 min_region_pct="${COV_STORAGE_MIN_REGION_PCT:-99}"
 
 if ! command -v docker >/dev/null 2>&1 && [[ -z "${GITTREE_STORAGE_TEST_DATABASE_URL:-}" ]]; then
