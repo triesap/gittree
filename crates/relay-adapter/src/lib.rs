@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
 use gittree_core::{RepoAnnouncement, RelayInfoDocument};
 use rand::rngs::OsRng;
-use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{All, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -107,13 +107,43 @@ impl SignedNostrEvent {
         content: String,
         secret_key: &SecretKey,
     ) -> Result<Self, RelayAdapterError> {
+        Self::signed_with(
+            created_at,
+            kind,
+            tags,
+            content,
+            secret_key,
+            build_event_id,
+            sign_event_id,
+        )
+    }
+
+    fn signed_with<FBuildEventId, FSignEventId>(
+        created_at: i64,
+        kind: u32,
+        tags: Vec<Vec<String>>,
+        content: String,
+        secret_key: &SecretKey,
+        build_event_id_fn: FBuildEventId,
+        sign_event_id_fn: FSignEventId,
+    ) -> Result<Self, RelayAdapterError>
+    where
+        FBuildEventId: FnOnce(
+            &str,
+            i64,
+            u32,
+            &[Vec<String>],
+            &str,
+        ) -> Result<String, RelayAdapterError>,
+        FSignEventId: FnOnce(&Secp256k1<All>, &Keypair, &str) -> Result<String, RelayAdapterError>,
+    {
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, secret_key);
         let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
         let pubkey_hex = hex::encode(pubkey.serialize());
 
-        let event_id = build_event_id(&pubkey_hex, created_at, kind, &tags, &content)?;
-        let sig = sign_event_id(&secp, &keypair, &event_id)?;
+        let event_id = build_event_id_fn(&pubkey_hex, created_at, kind, &tags, &content)?;
+        let sig = sign_event_id_fn(&secp, &keypair, &event_id)?;
 
         Ok(Self {
             id: event_id,
@@ -760,6 +790,42 @@ mod tests {
     }
 
     #[test]
+    fn signed_event_propagates_build_event_id_error() {
+        let secret_key = SecretKey::from_slice(&[9u8; 32]).expect("secret");
+        let err = SignedNostrEvent::signed_with(
+            123,
+            30617,
+            Vec::new(),
+            String::new(),
+            &secret_key,
+            |_pubkey_hex, _created_at, _kind, _tags, _content| {
+                Err(RelayAdapterError::Protocol("build failed".to_string()))
+            },
+            sign_event_id,
+        )
+        .expect_err("build error");
+        assert!(matches!(err, RelayAdapterError::Protocol(message) if message == "build failed"));
+    }
+
+    #[test]
+    fn signed_event_propagates_sign_event_id_error() {
+        let secret_key = SecretKey::from_slice(&[10u8; 32]).expect("secret");
+        let err = SignedNostrEvent::signed_with(
+            123,
+            30617,
+            Vec::new(),
+            String::new(),
+            &secret_key,
+            |_pubkey_hex, _created_at, _kind, _tags, _content| Ok("11".repeat(32)),
+            |_secp, _keypair, _event_id| {
+                Err(RelayAdapterError::Protocol("sign failed".to_string()))
+            },
+        )
+        .expect_err("sign error");
+        assert!(matches!(err, RelayAdapterError::Protocol(message) if message == "sign failed"));
+    }
+
+    #[test]
     fn signed_event_rejects_invalid_announcement() {
         let secret_key = SecretKey::from_slice(&[7u8; 32]).expect("secret");
         let mut announcement = sample_announcement();
@@ -1138,6 +1204,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_for_ok_reports_protocol_error_for_invalid_json() {
+        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text("{".to_string()),
+        )]);
+        let err = wait_for_ok(&mut stream, "evt", Duration::from_secs(1))
+            .await
+            .expect_err("invalid json");
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    }
+
+    #[tokio::test]
     async fn wait_for_ok_reports_closed_stream() {
         let mut empty = stream::iter(Vec::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>::new());
         let err = wait_for_ok(&mut empty, "evt", Duration::from_secs(1))
@@ -1232,6 +1309,17 @@ mod tests {
         wait_for_event(&mut stream, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect("matching event should be found after missing id");
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_reports_protocol_error_for_invalid_json() {
+        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+            WsMessage::Text("{".to_string()),
+        )]);
+        let err = wait_for_event(&mut stream, "sub-1", "evt-1", Duration::from_secs(1))
+            .await
+            .expect_err("invalid json");
+        assert!(matches!(err, RelayAdapterError::Protocol(_)));
     }
 
     #[tokio::test]
