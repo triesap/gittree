@@ -254,6 +254,14 @@ where
     }
 }
 
+async fn serve_inner(bind: &str, router: Router) -> Result<(), AuthError> {
+    let listener = match tokio::net::TcpListener::bind(bind).await {
+        Ok(listener) => listener,
+        Err(err) => return Err(AuthError::Serve(err.to_string())),
+    };
+    run_server(axum::serve(listener, router)).await
+}
+
 pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
     let _observability = init_observability()?;
     let repositories = Arc::new(build_repositories(&config)?);
@@ -271,11 +279,7 @@ pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
         profiles: repositories,
     };
     let router = build_router(state);
-    let listener = match tokio::net::TcpListener::bind(&bind).await {
-        Ok(listener) => listener,
-        Err(err) => return Err(AuthError::Serve(err.to_string())),
-    };
-    run_server(axum::serve(listener, router)).await
+    serve_inner(&bind, router).await
 }
 
 fn build_router(state: AuthAppState) -> Router {
@@ -607,13 +611,10 @@ fn username_from_pubkey(pubkey: &str) -> Result<String, AuthHttpError> {
 }
 
 fn parse_pubkey_bytes(pubkey: &str) -> Result<Vec<u8>, AuthHttpError> {
-    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+    if pubkey.len() != 64 {
         return Err(AuthHttpError::BadRequest("invalid pubkey".to_string()));
     }
-    match hex::decode(pubkey) {
-        Ok(bytes) => Ok(bytes),
-        Err(_) => Err(AuthHttpError::BadRequest("invalid pubkey".to_string())),
-    }
+    hex::decode(pubkey).map_err(|_| AuthHttpError::BadRequest("invalid pubkey".to_string()))
 }
 
 fn profile_input_error(err: StorageError) -> AuthHttpError {
@@ -1282,6 +1283,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_returns_storage_error_for_invalid_pool_config() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 1,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        assert!(serve(config).await.is_err());
+    }
+
+    #[tokio::test]
     async fn run_server_returns_ok_when_server_future_is_ok() {
         super::run_server(async { Ok::<(), &'static str>(()) })
             .await
@@ -1294,6 +1317,19 @@ mod tests {
             .await
             .expect_err("serve error");
         assert!(matches!(err, AuthError::Serve(message) if message == "boom"));
+    }
+
+    #[tokio::test]
+    async fn serve_returns_serve_error_for_invalid_bind() {
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let router = build_router(state);
+        let err = serve_inner("not-a-socket", router)
+            .await
+            .expect_err("bind error");
+        assert!(
+            matches!(err, AuthError::Serve(_)),
+            "expected serve error, got: {err:?}"
+        );
     }
 
 
@@ -1638,6 +1674,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_nostr_auth_rejects_invalid_event_json() {
+        let mut headers = HeaderMap::new();
+        let token = BASE64_STANDARD.encode(br#"{"invalid":"event"}"#);
+        headers.insert(
+            AUTH_HEADER,
+            format!("Nostr {token}").parse().expect("auth"),
+        );
+        let err = parse_nostr_auth(&headers).unwrap_err();
+        assert!(matches!(err, AuthHttpError::Unauthorized(_)));
+    }
+
+    #[test]
     fn payload_hash_handles_empty_and_non_empty_bodies() {
         assert!(payload_hash(&Bytes::new()).is_none());
         let digest = payload_hash(&Bytes::from_static(b"hello")).expect("digest");
@@ -1763,12 +1811,40 @@ mod tests {
         assert_eq!(stored, created);
     }
 
+    #[tokio::test]
+    async fn ensure_profile_returns_internal_when_lookup_fails() {
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository {
+            lookup_error: Some("lookup failed".to_string()),
+            ..ScriptedProfileRepository::default()
+        });
+        let pubkey = "ac".repeat(32);
+        let err = ensure_profile(&profiles, &pubkey, "gt_test", 300)
+            .await
+            .expect_err("lookup error");
+        assert!(matches!(err, AuthHttpError::Internal(message) if message.contains("lookup failed")));
+    }
+
+    #[tokio::test]
+    async fn ensure_profile_returns_internal_when_upsert_fails() {
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository {
+            upsert_error: Some("upsert failed".to_string()),
+            ..ScriptedProfileRepository::default()
+        });
+        let pubkey = "ad".repeat(32);
+        let err = ensure_profile(&profiles, &pubkey, "gt_test", 300)
+            .await
+            .expect_err("upsert error");
+        assert!(matches!(err, AuthHttpError::Internal(message) if message.contains("upsert failed")));
+    }
+
     #[test]
     fn username_and_pubkey_parsing_reject_invalid_values() {
         let username_err = username_from_pubkey("bad").unwrap_err();
         assert!(matches!(username_err, AuthHttpError::BadRequest(_)));
         let pubkey_err = parse_pubkey_bytes("bad").unwrap_err();
         assert!(matches!(pubkey_err, AuthHttpError::BadRequest(_)));
+        let decode_err = parse_pubkey_bytes(&"gg".repeat(32)).unwrap_err();
+        assert!(matches!(decode_err, AuthHttpError::BadRequest(_)));
     }
 
     #[test]
