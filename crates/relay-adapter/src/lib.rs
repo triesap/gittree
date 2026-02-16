@@ -436,6 +436,22 @@ fn unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+fn transport_probe_ok_timeout(_: tokio::time::error::Elapsed) -> RelayAdapterError {
+    RelayAdapterError::Transport("probe ok timeout".to_string())
+}
+
+fn transport_probe_event_timeout(_: tokio::time::error::Elapsed) -> RelayAdapterError {
+    RelayAdapterError::Transport("probe event timeout".to_string())
+}
+
+fn transport_relay_closed() -> RelayAdapterError {
+    RelayAdapterError::Transport("relay closed".to_string())
+}
+
+fn transport_ws_error(err: tokio_tungstenite::tungstenite::Error) -> RelayAdapterError {
+    RelayAdapterError::Transport(err.to_string())
+}
+
 async fn wait_for_ok<S>(
     read: &mut S,
     event_id: &str,
@@ -452,9 +468,9 @@ where
         }
         let msg = timeout(remaining, read.next())
             .await
-            .map_err(|_| RelayAdapterError::Transport("probe ok timeout".to_string()))?
-            .ok_or_else(|| RelayAdapterError::Transport("relay closed".to_string()))?
-            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+            .map_err(transport_probe_ok_timeout)?
+            .ok_or_else(transport_relay_closed)?
+            .map_err(transport_ws_error)?;
         if let Some((ok_id, ok, reason)) = parse_ok_message(&msg)? {
             if ok_id != event_id {
                 continue;
@@ -464,7 +480,7 @@ where
             }
             return Err(RelayAdapterError::Protocol(format!(
                 "event rejected: {}",
-                reason.unwrap_or_else(|| "unknown".to_string())
+                reason.unwrap_or("unknown".to_string())
             )));
         }
     }
@@ -487,9 +503,9 @@ where
         }
         let msg = timeout(remaining, read.next())
             .await
-            .map_err(|_| RelayAdapterError::Transport("probe event timeout".to_string()))?
-            .ok_or_else(|| RelayAdapterError::Transport("relay closed".to_string()))?
-            .map_err(|err| RelayAdapterError::Transport(err.to_string()))?;
+            .map_err(transport_probe_event_timeout)?
+            .ok_or_else(transport_relay_closed)?
+            .map_err(transport_ws_error)?;
         if let Some((event_sub_id, event)) = parse_event_message(&msg)? {
             if event_sub_id != sub_id {
                 continue;
