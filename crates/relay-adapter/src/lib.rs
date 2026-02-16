@@ -15,6 +15,8 @@ use url::Url;
 const DEFAULT_ADAPTER_TIMEOUT_SECS: u64 = 5;
 const PROBE_SUB_PREFIX: &str = "gittree-probe";
 type WsStream = dyn Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Send + Unpin;
+type BuildEventIdFn = fn(&str, i64, u32, &[Vec<String>], &str) -> Result<String, RelayAdapterError>;
+type SignEventIdFn = fn(&Secp256k1<All>, &Keypair, &str) -> Result<String, RelayAdapterError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayAdapterConfig {
@@ -119,25 +121,15 @@ impl SignedNostrEvent {
         )
     }
 
-    fn signed_with<FBuildEventId, FSignEventId>(
+    fn signed_with(
         created_at: i64,
         kind: u32,
         tags: Vec<Vec<String>>,
         content: String,
         secret_key: &SecretKey,
-        build_event_id_fn: FBuildEventId,
-        sign_event_id_fn: FSignEventId,
-    ) -> Result<Self, RelayAdapterError>
-    where
-        FBuildEventId: FnOnce(
-            &str,
-            i64,
-            u32,
-            &[Vec<String>],
-            &str,
-        ) -> Result<String, RelayAdapterError>,
-        FSignEventId: FnOnce(&Secp256k1<All>, &Keypair, &str) -> Result<String, RelayAdapterError>,
-    {
+        build_event_id_fn: BuildEventIdFn,
+        sign_event_id_fn: SignEventIdFn,
+    ) -> Result<Self, RelayAdapterError> {
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, secret_key);
         let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
@@ -281,21 +273,12 @@ impl WebsocketRelayAdapter {
     }
 }
 
-async fn map_transport<E, Fut>(operation: Fut) -> Result<(), RelayAdapterError>
-where
-    E: std::fmt::Display,
-    Fut: std::future::IntoFuture<Output = Result<(), E>>,
-{
-    match operation.into_future().await {
+fn map_transport(
+    operation: Result<(), tokio_tungstenite::tungstenite::Error>,
+) -> Result<(), RelayAdapterError> {
+    match operation {
         Ok(()) => Ok(()),
         Err(err) => Err(RelayAdapterError::Transport(err.to_string())),
-    }
-}
-
-fn to_protocol_json<T: Serialize>(value: &T) -> Result<String, RelayAdapterError> {
-    match serde_json::to_string(value) {
-        Ok(serialized) => Ok(serialized),
-        Err(err) => Err(RelayAdapterError::Protocol(err.to_string())),
     }
 }
 
@@ -315,16 +298,16 @@ impl RelayAdapter for WebsocketRelayAdapter {
 
         let secret_key = self.load_secret_key()?;
         let event = build_probe_event(&self.config.relay_url, &secret_key)?;
-        let event_json = to_protocol_json(&event)?;
+        let event_json = json!(event).to_string();
         let event_message = format!("[\"EVENT\",{event_json}]");
-        map_transport(write.send(WsMessage::Text(event_message))).await?;
+        map_transport(write.send(WsMessage::Text(event_message)).await)?;
 
         wait_for_ok(&mut read, &event.id, self.config.timeout).await?;
 
         let sub_id = format!("{PROBE_SUB_PREFIX}-{}", &event.id[..8]);
         let filter = json!({"ids":[event.id]});
         let req_message = format!("[\"REQ\",\"{sub_id}\",{filter}]");
-        map_transport(write.send(WsMessage::Text(req_message))).await?;
+        map_transport(write.send(WsMessage::Text(req_message)).await)?;
 
         wait_for_event(&mut read, &sub_id, &event.id, self.config.timeout).await?;
         let close_message = format!("[\"CLOSE\",\"{sub_id}\"]");
@@ -339,9 +322,9 @@ impl RelayAdapter for WebsocketRelayAdapter {
             Err(err) => return Err(RelayAdapterError::Transport(err.to_string())),
         };
         let (mut write, mut read) = stream.split();
-        let event_json = to_protocol_json(event)?;
+        let event_json = json!(event).to_string();
         let event_message = format!("[\"EVENT\",{event_json}]");
-        map_transport(write.send(WsMessage::Text(event_message))).await?;
+        map_transport(write.send(WsMessage::Text(event_message)).await)?;
         wait_for_ok(&mut read, &event.id, self.config.timeout).await?;
         Ok(())
     }
@@ -612,6 +595,22 @@ mod tests {
         }
     }
 
+    fn assert_invalid_config_error(err: &RelayAdapterError) {
+        assert!(err.to_string().starts_with("invalid config:"));
+    }
+
+    fn assert_protocol_error(err: &RelayAdapterError) {
+        assert!(err.to_string().starts_with("protocol error:"));
+    }
+
+    fn assert_transport_error(err: &RelayAdapterError) {
+        assert!(err.to_string().starts_with("transport error:"));
+    }
+
+    fn assert_unsupported_error(err: &RelayAdapterError) {
+        assert!(err.to_string().starts_with("unsupported:"));
+    }
+
     #[test]
     fn signed_event_from_announcement_uses_default_timestamp() {
         let announcement = sample_announcement();
@@ -621,47 +620,26 @@ mod tests {
             SignedNostrEvent::from_announcement(&announcement, &secret_key).expect("event");
 
         assert_eq!(event.kind, gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT.0);
-        assert!(event.created_at > 0, "created at");
-        assert!(!event.id.is_empty(), "event id");
-        assert!(!event.sig.is_empty(), "signature");
-    }
-
-    #[tokio::test]
-    async fn map_transport_maps_ok_result() {
-        super::map_transport::<&'static str, _>(async { Ok::<(), &'static str>(()) })
-            .await
-            .expect("ok");
-    }
-
-    #[tokio::test]
-    async fn map_transport_maps_error_result() {
-        let err = super::map_transport::<&'static str, _>(async {
-            Err::<(), &'static str>("boom")
-        })
-        .await
-        .expect_err("error");
-        assert!(matches!(
-            &err,
-            RelayAdapterError::Transport(message) if message.contains("boom")
-        ));
+        assert!(event.created_at > 0);
+        assert!(!event.id.is_empty());
+        assert!(!event.sig.is_empty());
     }
 
     #[test]
-    fn to_protocol_json_maps_serialization_errors() {
-        #[derive(Debug)]
-        struct AlwaysFail;
+    fn map_transport_maps_ok_result() {
+        super::map_transport(Ok::<(), tokio_tungstenite::tungstenite::Error>(())).expect("ok");
+    }
 
-        impl serde::Serialize for AlwaysFail {
-            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                Err(serde::ser::Error::custom("boom"))
-            }
-        }
-
-        let err = super::to_protocol_json(&AlwaysFail).expect_err("serialize");
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+    #[test]
+    fn map_transport_maps_error_result() {
+        let err = super::map_transport(Err::<(), tokio_tungstenite::tungstenite::Error>(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+        ))
+        .expect_err("error");
+        assert!(matches!(
+            &err,
+            RelayAdapterError::Transport(message) if message.contains("Connection closed")
+        ));
     }
 
     #[test]
@@ -691,13 +669,13 @@ mod tests {
     #[test]
     fn normalize_ws_url_rejects_unsupported_scheme() {
         let err = normalize_ws_url("ftp://relay.example").unwrap_err();
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+        assert_invalid_config_error(&err);
     }
 
     #[test]
     fn normalize_ws_url_rejects_invalid_input() {
         let err = normalize_ws_url("not a url").unwrap_err();
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+        assert_invalid_config_error(&err);
     }
 
     #[test]
@@ -726,14 +704,8 @@ mod tests {
     async fn nostr_rs_adapter_methods_return_unsupported() {
         let adapter = super::NostrRsRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
         assert_eq!(adapter.relay_url(), "wss://relay.example");
-        assert!(matches!(
-            adapter.relay_info().await.unwrap_err(),
-            RelayAdapterError::Unsupported(_)
-        ));
-        assert!(matches!(
-            adapter.probe_write_read().await.unwrap_err(),
-            RelayAdapterError::Unsupported(_)
-        ));
+        assert_unsupported_error(&adapter.relay_info().await.unwrap_err());
+        assert_unsupported_error(&adapter.probe_write_read().await.unwrap_err());
         let event = SignedNostrEvent {
             id: "evt".to_string(),
             pubkey: "pub".to_string(),
@@ -743,24 +715,15 @@ mod tests {
             content: String::new(),
             sig: "sig".to_string(),
         };
-        assert!(matches!(
-            adapter.publish_event(&event).await.unwrap_err(),
-            RelayAdapterError::Unsupported(_)
-        ));
+        assert_unsupported_error(&adapter.publish_event(&event).await.unwrap_err());
     }
 
     #[tokio::test]
     async fn webhook_adapter_methods_return_unsupported() {
         let adapter = super::WebhookRelayAdapter::new(RelayAdapterConfig::new("https://relay.example"));
         assert_eq!(adapter.relay_url(), "https://relay.example");
-        assert!(matches!(
-            adapter.relay_info().await.unwrap_err(),
-            RelayAdapterError::Unsupported(_)
-        ));
-        assert!(matches!(
-            adapter.probe_write_read().await.unwrap_err(),
-            RelayAdapterError::Unsupported(_)
-        ));
+        assert_unsupported_error(&adapter.relay_info().await.unwrap_err());
+        assert_unsupported_error(&adapter.probe_write_read().await.unwrap_err());
         let event = SignedNostrEvent {
             id: "evt".to_string(),
             pubkey: "pub".to_string(),
@@ -770,17 +733,14 @@ mod tests {
             content: String::new(),
             sig: "sig".to_string(),
         };
-        assert!(matches!(
-            adapter.publish_event(&event).await.unwrap_err(),
-            RelayAdapterError::Unsupported(_)
-        ));
+        assert_unsupported_error(&adapter.publish_event(&event).await.unwrap_err());
     }
 
     #[tokio::test]
     async fn websocket_adapter_rejects_invalid_url() {
         let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("ftp://relay.example"));
         let err = adapter.probe_write_read().await.unwrap_err();
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+        assert_invalid_config_error(&err);
     }
 
     #[test]
@@ -845,7 +805,7 @@ mod tests {
         announcement.clone.clear();
         let err = SignedNostrEvent::from_announcement_with_created_at(&announcement, &secret_key, 1)
             .unwrap_err();
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+        assert_invalid_config_error(&err);
     }
 
     #[test]
@@ -864,7 +824,7 @@ mod tests {
         let secp = Secp256k1::new();
         let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
         let err = sign_event_id(&secp, &keypair, "zz").unwrap_err();
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
     }
 
     #[test]
@@ -873,7 +833,7 @@ mod tests {
         let secp = Secp256k1::new();
         let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
         let err = sign_event_id(&secp, &keypair, "aa").unwrap_err();
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
     }
 
     #[test]
@@ -919,7 +879,7 @@ mod tests {
     fn parse_ok_message_rejects_invalid_json() {
         let message = WsMessage::Text("{".to_string());
         let err = parse_ok_message(&message).unwrap_err();
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
     }
 
     #[test]
@@ -951,7 +911,7 @@ mod tests {
     fn parse_event_message_rejects_invalid_json() {
         let message = WsMessage::Text("{".to_string());
         let err = parse_event_message(&message).unwrap_err();
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
     }
 
     #[test]
@@ -979,7 +939,7 @@ mod tests {
     fn parse_eose_message_rejects_invalid_json() {
         let message = WsMessage::Text("{".to_string());
         let err = parse_eose_message(&message).unwrap_err();
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
     }
 
     #[test]
@@ -988,7 +948,7 @@ mod tests {
             RelayAdapterConfig::new("wss://relay.example").with_secret_key("not-hex"),
         );
         let err = adapter.load_secret_key().unwrap_err();
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+        assert_invalid_config_error(&err);
     }
 
     #[test]
@@ -1008,7 +968,7 @@ mod tests {
                 .with_secret_key("00".repeat(32)),
         );
         let err = adapter.load_secret_key().expect_err("invalid secret");
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+        assert_invalid_config_error(&err);
     }
 
     #[test]
@@ -1031,14 +991,14 @@ mod tests {
             sig: "123".to_string(),
         };
         let err = adapter.publish_event(&event).await.unwrap_err();
-        assert!(matches!(err, RelayAdapterError::InvalidConfig(_)));
+        assert_invalid_config_error(&err);
     }
 
     #[tokio::test]
     async fn websocket_adapter_probe_and_publish_map_connect_errors() {
         let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new("ws://127.0.0.1:1"));
         let probe_err = adapter.probe_write_read().await.expect_err("connect error");
-        assert!(matches!(probe_err, RelayAdapterError::Transport(_)));
+        assert_transport_error(&probe_err);
 
         let event = SignedNostrEvent {
             id: "11".repeat(32),
@@ -1050,7 +1010,7 @@ mod tests {
             sig: "33".repeat(64),
         };
         let publish_err = adapter.publish_event(&event).await.expect_err("connect error");
-        assert!(matches!(publish_err, RelayAdapterError::Transport(_)));
+        assert_transport_error(&publish_err);
     }
 
     #[tokio::test]
@@ -1082,7 +1042,7 @@ mod tests {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                assert!(!event_id.is_empty(), "event id");
+                assert!(!event_id.is_empty());
 
                 // Send an unrelated OK first to exercise the ignore path, then a matching OK.
                 let wrong_ok = json!(["OK", "deadbeef", true, "ignored"]);
@@ -1111,7 +1071,7 @@ mod tests {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    assert!(!sub_id.is_empty(), "sub id");
+                    assert!(!sub_id.is_empty());
 
                     // Send an EVENT with the correct sub id but the wrong event id first.
                     let wrong_event = json!({ "id": "00".repeat(32) });
@@ -1171,7 +1131,7 @@ mod tests {
         let err = wait_for_ok(&mut rejected, "evt", Duration::from_secs(1))
             .await
             .expect_err("rejected");
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
 
         let mut rejected_unknown =
             stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
@@ -1224,7 +1184,7 @@ mod tests {
         let err = wait_for_ok(&mut stream, "evt", Duration::from_secs(1))
             .await
             .expect_err("invalid json");
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
     }
 
     #[tokio::test]
@@ -1233,7 +1193,7 @@ mod tests {
         let err = wait_for_ok(&mut empty, "evt", Duration::from_secs(1))
             .await
             .expect_err("closed");
-        assert!(matches!(err, RelayAdapterError::Transport(_)));
+        assert_transport_error(&err);
 
         let mut failed = stream::iter(vec![Err::<WsMessage, tokio_tungstenite::tungstenite::Error>(
             tokio_tungstenite::tungstenite::Error::ConnectionClosed,
@@ -1241,7 +1201,7 @@ mod tests {
         let err = wait_for_ok(&mut failed, "evt", Duration::from_secs(1))
             .await
             .expect_err("stream error");
-        assert!(matches!(err, RelayAdapterError::Transport(_)));
+        assert_transport_error(&err);
     }
 
     #[tokio::test]
@@ -1285,7 +1245,7 @@ mod tests {
         let err = wait_for_event(&mut eose, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect_err("missing event");
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert_protocol_error(&err);
     }
 
     #[tokio::test]
