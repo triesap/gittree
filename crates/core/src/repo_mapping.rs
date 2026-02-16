@@ -1,4 +1,4 @@
-use crate::nip34_common::{RepoAddress, is_hex_len};
+use crate::nip34_common::is_hex_len;
 use crate::{CoreError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +74,6 @@ impl RepoMapping {
             });
         }
         let forgejo = ForgejoRepo::new(forgejo_owner, forgejo_repo)?;
-        let _address = RepoAddress::new(pubkey.clone(), identifier.clone())?;
         Ok(Self {
             forgejo,
             pubkey,
@@ -86,6 +85,8 @@ impl RepoMapping {
 #[cfg(test)]
 mod tests {
     use super::{ForgejoRepo, RepoMapping};
+
+    const STATIC_PUBKEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
     #[test]
     fn forgejo_repo_parses_full_name() {
@@ -120,6 +121,13 @@ mod tests {
     }
 
     #[test]
+    fn forgejo_repo_rejects_owned_string_invalid_inputs() {
+        assert!(ForgejoRepo::new(" ".to_string(), "repo".to_string()).is_err());
+        assert!(ForgejoRepo::new("owner/path".to_string(), "repo".to_string()).is_err());
+        assert!(ForgejoRepo::new("owner".to_string(), "re po".to_string()).is_err());
+    }
+
+    #[test]
     fn repo_mapping_accepts_valid_fields() {
         let pubkey = "11".repeat(32);
         let mapping = RepoMapping::new("owner", "repo", pubkey.clone(), "repo")
@@ -146,6 +154,14 @@ mod tests {
     }
 
     #[test]
+    fn repo_mapping_accepts_all_str_inputs() {
+        let mapping = RepoMapping::new("owner", "repo", STATIC_PUBKEY, "repo").expect("mapping");
+        assert_eq!(mapping.pubkey, STATIC_PUBKEY);
+        assert_eq!(mapping.identifier, "repo");
+        assert_eq!(mapping.forgejo.full_name(), "owner/repo");
+    }
+
+    #[test]
     fn repo_mapping_rejects_invalid_pubkey() {
         assert!(RepoMapping::new("owner", "repo", "bad", "repo").is_err());
     }
@@ -157,8 +173,53 @@ mod tests {
     }
 
     #[test]
+    fn repo_mapping_rejects_whitespace_identifier() {
+        let pubkey = "11".repeat(32);
+        assert!(RepoMapping::new("owner", "repo", pubkey, "   ").is_err());
+    }
+
+    #[test]
     fn repo_mapping_rejects_invalid_forgejo_repo_fields() {
         let pubkey = "11".repeat(32);
         assert!(RepoMapping::new("owner/path", "repo", pubkey, "repo").is_err());
+    }
+
+    #[test]
+    fn repo_mapping_rejects_owned_string_missing_identifier() {
+        assert!(
+            RepoMapping::new(
+                "owner".to_string(),
+                "repo".to_string(),
+                STATIC_PUBKEY.to_string(),
+                "".to_string(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repo_mapping_rejects_owned_string_invalid_pubkey() {
+        assert!(
+            RepoMapping::new(
+                "owner".to_string(),
+                "repo".to_string(),
+                "bad".to_string(),
+                "repo".to_string(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repo_mapping_rejects_owned_string_invalid_forgejo_repo_fields() {
+        assert!(
+            RepoMapping::new(
+                "owner/path".to_string(),
+                "repo".to_string(),
+                STATIC_PUBKEY.to_string(),
+                "repo".to_string(),
+            )
+            .is_err()
+        );
     }
 }
