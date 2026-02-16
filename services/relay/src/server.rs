@@ -302,6 +302,7 @@ async fn pump_socket_io<R, S>(
     S: Sink<Message> + Unpin,
 {
     while tokio::select! {
+            biased;
             msg = receiver.next() => {
                 let action = classify_inbound_message(msg);
                 handle_inbound_action(in_tx, action).await
@@ -373,7 +374,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     let driver = SessionDriver::new(session);
     tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
 
-    pump_socket_io(&mut receiver, &mut sender, &in_tx, &mut out_rx).await
+    pump_socket_io(&mut receiver, &mut sender, &in_tx, &mut out_rx).await;
 }
 
 async fn seed_owner_membership(
