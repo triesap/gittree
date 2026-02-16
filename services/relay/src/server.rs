@@ -9,12 +9,15 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use gittree_storage::{
     PostgresRepositories, RelayMembershipRecord, RelayMembershipRepository, RelayTenantRecord,
     RelayTenantRepository, StorageError,
 };
+use std::future::Future;
 use std::future::IntoFuture;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -313,7 +316,32 @@ async fn pump_socket_io<R, S>(
         } {}
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: TenantContext) {
+type SocketReceiver = SplitStream<WebSocket>;
+type SocketSender = SplitSink<WebSocket, Message>;
+type SocketPumpFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+fn default_socket_pump<'a>(
+    receiver: &'a mut SocketReceiver,
+    sender: &'a mut SocketSender,
+    in_tx: &'a mpsc::Sender<String>,
+    out_rx: &'a mut mpsc::Receiver<String>,
+) -> SocketPumpFuture<'a> {
+    Box::pin(pump_socket_io(receiver, sender, in_tx, out_rx))
+}
+
+async fn handle_socket_with_pump<P>(
+    socket: WebSocket,
+    state: Arc<RelayState>,
+    tenant: TenantContext,
+    pump: P,
+) where
+    P: for<'a> FnOnce(
+        &'a mut SocketReceiver,
+        &'a mut SocketSender,
+        &'a mpsc::Sender<String>,
+        &'a mut mpsc::Receiver<String>,
+    ) -> SocketPumpFuture<'a>,
+{
     let _ = (&tenant.tenant_id, &tenant.tenant);
     let (mut sender, mut receiver) = socket.split();
     let (in_tx, in_rx) = mpsc::channel(128);
@@ -374,7 +402,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, tenant: Tenant
     let driver = SessionDriver::new(session);
     tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
 
-    pump_socket_io(&mut receiver, &mut sender, &in_tx, &mut out_rx).await;
+    pump(&mut receiver, &mut sender, &in_tx, &mut out_rx).await;
+}
+
+fn handle_socket(
+    socket: WebSocket,
+    state: Arc<RelayState>,
+    tenant: TenantContext,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    handle_socket_with_pump(socket, state, tenant, default_socket_pump)
 }
 
 async fn seed_owner_membership(
@@ -409,7 +445,8 @@ async fn seed_owner_membership(
 mod tests {
     use super::{
         accepts_nostr_json, bind_listener, build_router, build_state, extract_host, handle_socket,
-        nip11_response, relay_url_from_host, resolve_tenant, seed_owner_membership,
+        handle_socket_with_pump, nip11_response, relay_url_from_host, resolve_tenant,
+        seed_owner_membership,
     };
     use crate::{
         MemoryStore, NostrEvent, Policy, RelayConfig, RelayError, RelayMetrics,
@@ -654,6 +691,15 @@ mod tests {
             1,
         )
         .expect("tenant")
+    }
+
+    fn no_op_socket_pump<'a>(
+        _receiver: &'a mut super::SocketReceiver,
+        _sender: &'a mut super::SocketSender,
+        _in_tx: &'a mpsc::Sender<String>,
+        _out_rx: &'a mut mpsc::Receiver<String>,
+    ) -> super::SocketPumpFuture<'a> {
+        Box::pin(async {})
     }
 
     struct ScriptedSink {
@@ -990,6 +1036,49 @@ mod tests {
             .await
             .expect("send req");
         socket.send(WsMessage::Close(None)).await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn handle_socket_with_injected_pump_returns_after_upgrade() {
+        let state = Arc::new(super::RelayState {
+            config: sample_config(),
+            policy: Policy::default(),
+            store: Arc::new(MemoryStore::new()),
+            repos: None,
+            admission: None,
+            broadcast: tokio::sync::broadcast::channel(8).0,
+            metrics: Arc::new(RelayMetrics::new()),
+        });
+        let tenant_context = super::TenantContext {
+            tenant_id: "default".to_string(),
+            store: Arc::new(MemoryStore::new()),
+            tenant: None,
+        };
+        let (done_tx, mut done_rx) = tokio::sync::broadcast::channel(1);
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let state = state.clone();
+                let tenant = tenant_context.clone();
+                let done_tx = done_tx.clone();
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        handle_socket_with_pump(socket, state, tenant, no_op_socket_pump).await;
+                        let _ = done_tx.send(());
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let url = format!("ws://{addr}/");
+        let (_socket, _) = connect_async(url).await.expect("connect");
+        timeout(Duration::from_secs(2), done_rx.recv())
+            .await
+            .expect("completion timeout")
+            .expect("completion signal");
     }
 
     #[test]
