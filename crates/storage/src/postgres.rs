@@ -1432,9 +1432,14 @@ mod tests {
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    enum TestIsolation {
+        Database(String),
+        Schema(String),
+    }
+
     struct TestDatabase {
         base_url: String,
-        database_name: String,
+        isolation: TestIsolation,
         pool: PgPool,
     }
 
@@ -1447,16 +1452,26 @@ mod tests {
                 .max_connections(1)
                 .connect_with(admin_options)
                 .await
-                .ok()?;
+                .ok();
 
-            let database_name = unique_database_name();
-            let create_database = format!("CREATE DATABASE \"{database_name}\"");
-            sqlx::query(&create_database)
-                .execute(&admin_pool)
-                .await
-                .ok()?;
-            admin_pool.close().await;
+            if let Some(admin_pool) = admin_pool {
+                let database_name = unique_database_name();
+                let create_database = format!("CREATE DATABASE \"{database_name}\"");
+                let create_database_ok = sqlx::query(&create_database)
+                    .execute(&admin_pool)
+                    .await
+                    .is_ok();
+                admin_pool.close().await;
 
+                if create_database_ok {
+                    return Self::provision_with_database(base_url, database_name).await;
+                }
+            }
+
+            Self::provision_with_schema(base_url).await
+        }
+
+        async fn provision_with_database(base_url: String, database_name: String) -> Option<Self> {
             let mut test_options = PgConnectOptions::from_str(&base_url).ok()?;
             test_options = test_options.database(&database_name);
             let pool = PgPoolOptions::new()
@@ -1465,16 +1480,45 @@ mod tests {
                 .await
                 .ok()?;
 
-            let runner = MigrationRunner::new(core_migrations()).ok()?;
-            let mut connection = pool.acquire().await.ok()?;
-            runner.run(&mut *connection).await.ok()?;
-            drop(connection);
+            run_migrations(&pool).await?;
 
             Some(Self {
                 base_url,
-                database_name,
+                isolation: TestIsolation::Database(database_name),
                 pool,
             })
+        }
+
+        async fn provision_with_schema(base_url: String) -> Option<Self> {
+            let schema_name = unique_schema_name();
+            let test_options = PgConnectOptions::from_str(&base_url).ok()?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .min_connections(1)
+                .connect_with(test_options)
+                .await
+                .ok()?;
+
+            let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema_name);
+            sqlx::query(&create_schema).execute(&pool).await.ok()?;
+
+            let set_search_path = format!("SET search_path TO \"{}\"", schema_name);
+            sqlx::query(&set_search_path).execute(&pool).await.ok()?;
+
+            run_migrations(&pool).await?;
+
+            Some(Self {
+                base_url,
+                isolation: TestIsolation::Schema(schema_name),
+                pool,
+            })
+        }
+
+        fn scope_name(&self) -> &str {
+            match &self.isolation {
+                TestIsolation::Database(name) => name,
+                TestIsolation::Schema(name) => name,
+            }
         }
 
         fn repositories(&self) -> PostgresRepositories {
@@ -1488,30 +1532,45 @@ mod tests {
         async fn try_cleanup(self) -> Option<()> {
             self.pool.close().await;
 
-            let mut admin_options = PgConnectOptions::from_str(&self.base_url).ok()?;
-            admin_options = admin_options.database("postgres");
+            match self.isolation {
+                TestIsolation::Database(database_name) => {
+                    let mut admin_options = PgConnectOptions::from_str(&self.base_url).ok()?;
+                    admin_options = admin_options.database("postgres");
+                    let admin_pool = PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect_with(admin_options)
+                        .await
+                        .ok()?;
 
-            let admin_pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_with(admin_options)
-                .await
-                .ok()?;
-
-            let _ = sqlx::query(
-                r#"
+                    let _ = sqlx::query(
+                        r#"
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity
 WHERE datname = $1
   AND pid <> pg_backend_pid()
 "#,
-            )
-            .bind(&self.database_name)
-            .execute(&admin_pool)
-            .await;
+                    )
+                    .bind(&database_name)
+                    .execute(&admin_pool)
+                    .await;
 
-            let drop_database = format!("DROP DATABASE IF EXISTS \"{}\"", self.database_name);
-            let _ = sqlx::query(&drop_database).execute(&admin_pool).await;
-            admin_pool.close().await;
+                    let drop_database = format!("DROP DATABASE IF EXISTS \"{}\"", database_name);
+                    let _ = sqlx::query(&drop_database).execute(&admin_pool).await;
+                    admin_pool.close().await;
+                }
+                TestIsolation::Schema(schema_name) => {
+                    let admin_options = PgConnectOptions::from_str(&self.base_url).ok()?;
+                    let admin_pool = PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect_with(admin_options)
+                        .await
+                        .ok()?;
+                    let drop_schema = format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name);
+                    let _ = sqlx::query(&drop_schema).execute(&admin_pool).await;
+                    admin_pool.close().await;
+                }
+            }
+
             Some(())
         }
     }
@@ -1557,6 +1616,14 @@ WHERE datname = $1
         run(test_db).await;
     }
 
+    async fn run_migrations(pool: &PgPool) -> Option<()> {
+        let runner = MigrationRunner::new(core_migrations()).ok()?;
+        let mut connection = pool.acquire().await.ok()?;
+        runner.run(&mut *connection).await.ok()?;
+        drop(connection);
+        Some(())
+    }
+
     fn unique_database_name() -> String {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1565,6 +1632,20 @@ WHERE datname = $1
         let counter = TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed);
         format!(
             "gittree_storage_test_{}_{}_{}",
+            std::process::id(),
+            now,
+            counter
+        )
+    }
+
+    fn unique_schema_name() -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let counter = TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "gittree_storage_schema_{}_{}_{}",
             std::process::id(),
             now,
             counter
@@ -1721,7 +1802,7 @@ WHERE datname = $1
                 let observed = Arc::clone(&observed);
                 async move {
                     observed.store(true, Ordering::SeqCst);
-                    assert!(!test_db.database_name.is_empty());
+                    assert!(!test_db.scope_name().is_empty());
                     test_db.cleanup().await;
                 }
             },
@@ -1756,7 +1837,7 @@ WHERE datname = $1
             .expect("lazy pool");
         let harness = TestDatabase {
             base_url: "not-a-postgres-url".to_string(),
-            database_name: unique_database_name(),
+            isolation: TestIsolation::Database(unique_database_name()),
             pool,
         };
         harness.cleanup().await;
