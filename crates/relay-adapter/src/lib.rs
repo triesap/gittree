@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
 use gittree_core::{RepoAnnouncement, RelayInfoDocument};
 use rand::rngs::OsRng;
@@ -458,8 +458,19 @@ async fn wait_for_ok<S>(
     timeout_duration: Duration,
 ) -> Result<(), RelayAdapterError>
 where
-    S: StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    S: Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin + Send,
 {
+    wait_for_ok_dyn(read, event_id, timeout_duration).await
+}
+
+async fn wait_for_ok_dyn(
+    read: &mut (dyn Stream<
+            Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin
+           + Send),
+    event_id: &str,
+    timeout_duration: Duration,
+) -> Result<(), RelayAdapterError> {
     let deadline = Instant::now() + timeout_duration;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -493,8 +504,20 @@ async fn wait_for_event<S>(
     timeout_duration: Duration,
 ) -> Result<(), RelayAdapterError>
 where
-    S: StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    S: Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin + Send,
 {
+    wait_for_event_dyn(read, sub_id, event_id, timeout_duration).await
+}
+
+async fn wait_for_event_dyn(
+    read: &mut (dyn Stream<
+            Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin
+           + Send),
+    sub_id: &str,
+    event_id: &str,
+    timeout_duration: Duration,
+) -> Result<(), RelayAdapterError> {
     let deadline = Instant::now() + timeout_duration;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
