@@ -14,6 +14,7 @@ use url::Url;
 
 const DEFAULT_ADAPTER_TIMEOUT_SECS: u64 = 5;
 const PROBE_SUB_PREFIX: &str = "gittree-probe";
+type WsStream = dyn Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Send + Unpin;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayAdapterConfig {
@@ -452,22 +453,8 @@ fn transport_ws_error(err: tokio_tungstenite::tungstenite::Error) -> RelayAdapte
     RelayAdapterError::Transport(err.to_string())
 }
 
-async fn wait_for_ok<S>(
-    read: &mut S,
-    event_id: &str,
-    timeout_duration: Duration,
-) -> Result<(), RelayAdapterError>
-where
-    S: Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin + Send,
-{
-    wait_for_ok_dyn(read, event_id, timeout_duration).await
-}
-
-async fn wait_for_ok_dyn(
-    read: &mut (dyn Stream<
-            Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
-        > + Unpin
-           + Send),
+async fn wait_for_ok(
+    read: &mut WsStream,
     event_id: &str,
     timeout_duration: Duration,
 ) -> Result<(), RelayAdapterError> {
@@ -497,23 +484,8 @@ async fn wait_for_ok_dyn(
     }
 }
 
-async fn wait_for_event<S>(
-    read: &mut S,
-    sub_id: &str,
-    event_id: &str,
-    timeout_duration: Duration,
-) -> Result<(), RelayAdapterError>
-where
-    S: Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin + Send,
-{
-    wait_for_event_dyn(read, sub_id, event_id, timeout_duration).await
-}
-
-async fn wait_for_event_dyn(
-    read: &mut (dyn Stream<
-            Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
-        > + Unpin
-           + Send),
+async fn wait_for_event(
+    read: &mut WsStream,
     sub_id: &str,
     event_id: &str,
     timeout_duration: Duration,
@@ -1360,7 +1332,7 @@ mod tests {
         let err = wait_for_event(&mut stream, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect_err("invalid json");
-        assert!(matches!(err, RelayAdapterError::Protocol(_)));
+        assert!(err.to_string().starts_with("protocol error:"));
     }
 
     #[tokio::test]
@@ -1380,7 +1352,7 @@ mod tests {
         let err = wait_for_event(&mut failed, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect_err("stream error");
-        assert!(matches!(err, RelayAdapterError::Transport(_)));
+        assert!(err.to_string().starts_with("transport error:"));
 
         let mut pending = stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
         let timeout_err = wait_for_event(&mut pending, "sub-1", "evt-1", Duration::from_millis(20))
