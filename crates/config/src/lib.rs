@@ -1697,6 +1697,10 @@ secret_key = "22"
             err,
             ConfigError::InvalidRelayProbeConfig { field, .. } if field == "relay_probe.secret_key"
         ));
+
+        let parse_err = RelayProbeConfig::from_toml_str("relay_probe = [")
+            .expect_err("invalid toml should fail");
+        assert!(matches!(parse_err, ConfigError::TomlParse { .. }));
     }
 
     #[test]
@@ -1858,6 +1862,10 @@ max_content_len = 0
             err,
             ConfigError::InvalidRelayPolicyConfig { field, .. } if field == "relay_policy.max_content_len"
         ));
+
+        let parse_err = RelayPolicyConfig::from_toml_str("relay_policy = [")
+            .expect_err("invalid toml should fail");
+        assert!(matches!(parse_err, ConfigError::TomlParse { .. }));
     }
 
     #[test]
@@ -1956,6 +1964,19 @@ max_content_len = 0
     }
 
     #[test]
+    fn from_env_with_keys_uses_default_when_key_is_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_BIND_TEST1, "127.0.0.1:8999", || {
+            // SAFETY: test holds ENV_LOCK and helper restores previous values.
+            unsafe {
+                std::env::remove_var(ENV_RELAY_BIND_TEST1);
+            }
+            let config = GittreeConfig::from_env_with_keys(ENV_RELAY_BIND_TEST1);
+            assert_eq!(config.relay_bind, DEFAULT_RELAY_BIND);
+        });
+    }
+
+    #[test]
     fn from_env_validated_with_keys_accepts_valid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_BIND_TEST2, "127.0.0.1:8082", || {
@@ -1972,6 +1993,12 @@ max_content_len = 0
         let config =
             GittreeConfig::from_toml_str("relay_bind = \"127.0.0.1:9999\"").expect("parse config");
         assert_eq!(config.relay_bind, "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn toml_str_defaults_missing_relay_bind() {
+        let config = GittreeConfig::from_toml_str("").expect("default config");
+        assert_eq!(config.relay_bind, DEFAULT_RELAY_BIND);
     }
 
     #[test]
@@ -2500,6 +2527,10 @@ public_git_url = "http://localhost:8085"
         let config = RelayCompatibilityConfig::from_toml_str("").expect("compat default");
         assert_eq!(config.mode, RelayCompatibilityMode::Strict);
 
+        let parse_err = RelayCompatibilityConfig::from_toml_str("relay_compatibility = [")
+            .expect_err("invalid toml should fail");
+        assert!(matches!(parse_err, ConfigError::TomlParse { .. }));
+
         let invalid = RelayCompatibilityConfig::from_toml_str(
             r#"
 [relay_compatibility]
@@ -2950,6 +2981,14 @@ mode = "unknown"
         let default_false = super::env_bool_default_with("TEST_BOOL", false, &mut bool_none)
             .expect("missing bool uses default");
         assert!(!default_false);
+
+        let mut bool_invalid = |_name: &'static str| Some("invalid".to_string());
+        let invalid = super::env_bool_default_with("TEST_BOOL", false, &mut bool_invalid)
+            .expect_err("invalid bool should error");
+        assert!(matches!(
+            invalid,
+            ConfigError::InvalidConfig { field, value } if field == "TEST_BOOL" && value == "invalid"
+        ));
     }
 
     #[test]
