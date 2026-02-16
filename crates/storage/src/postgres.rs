@@ -19,168 +19,6 @@ pub struct PostgresRepositories {
     pool: PgPool,
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct DbTagRow {
-    name: String,
-    value: String,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DbRepoMappingRow {
-    forgejo_owner: String,
-    forgejo_repo: String,
-    pubkey: Vec<u8>,
-    identifier: String,
-}
-
-impl From<DbRepoMappingRow> for RepoMappingRecord {
-    fn from(row: DbRepoMappingRow) -> Self {
-        Self {
-            forgejo_owner: row.forgejo_owner,
-            forgejo_repo: row.forgejo_repo,
-            pubkey: row.pubkey,
-            identifier: row.identifier,
-        }
-    }
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DbAccountRow {
-    pubkey: Vec<u8>,
-    forgejo_username: String,
-}
-
-impl From<DbAccountRow> for AccountRecord {
-    fn from(row: DbAccountRow) -> Self {
-        Self {
-            pubkey: row.pubkey,
-            forgejo_username: row.forgejo_username,
-        }
-    }
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DbProfileRow {
-    pubkey: Vec<u8>,
-    display_name: Option<String>,
-    bio: Option<String>,
-    avatar_url: Option<String>,
-    website_url: Option<String>,
-    location: Option<String>,
-    visibility: String,
-    created_at: OffsetDateTime,
-    updated_at: OffsetDateTime,
-}
-
-fn profile_record_from_row(row: DbProfileRow) -> Result<ProfileRecord, StorageError> {
-    let visibility = ProfileVisibility::parse(&row.visibility)?;
-    Ok(ProfileRecord {
-        pubkey: row.pubkey,
-        display_name: row.display_name,
-        bio: row.bio,
-        avatar_url: row.avatar_url,
-        website_url: row.website_url,
-        location: row.location,
-        visibility,
-        created_at: PostgresRepositories::from_offset_datetime(row.created_at),
-        updated_at: PostgresRepositories::from_offset_datetime(row.updated_at),
-    })
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DbRelayTenantRow {
-    id: String,
-    host: String,
-    relay_pubkey: Vec<u8>,
-    relay_secret: Vec<u8>,
-    relay_secret_nonce: Vec<u8>,
-    relay_secret_kid: String,
-    name: Option<String>,
-    description: Option<String>,
-    icon: Option<String>,
-    banner: Option<String>,
-    contact: Option<String>,
-    auth_required: bool,
-    public_read: bool,
-    public_write: bool,
-    created_at: i64,
-    updated_at: i64,
-}
-
-fn relay_tenant_from_row(row: DbRelayTenantRow) -> RelayTenantRecord {
-    RelayTenantRecord {
-        id: row.id,
-        host: row.host,
-        relay_pubkey: row.relay_pubkey,
-        relay_secret: row.relay_secret,
-        relay_secret_nonce: row.relay_secret_nonce,
-        relay_secret_kid: row.relay_secret_kid,
-        name: row.name,
-        description: row.description,
-        icon: row.icon,
-        banner: row.banner,
-        contact: row.contact,
-        auth_required: row.auth_required,
-        public_read: row.public_read,
-        public_write: row.public_write,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DbRelayMembershipRow {
-    tenant_id: String,
-    pubkey: Vec<u8>,
-    role: String,
-    status: String,
-    created_at: i64,
-    updated_at: i64,
-}
-
-fn relay_membership_from_row(row: DbRelayMembershipRow) -> RelayMembershipRecord {
-    RelayMembershipRecord {
-        tenant_id: row.tenant_id,
-        pubkey: row.pubkey,
-        role: row.role,
-        status: row.status,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DbRelayInviteRow {
-    tenant_id: String,
-    invite_code: String,
-    role: String,
-    inviter_pubkey: Vec<u8>,
-    invitee_pubkey: Option<Vec<u8>>,
-    expires_at: Option<i64>,
-    created_at: i64,
-}
-
-fn relay_invite_from_row(row: DbRelayInviteRow) -> RelayInviteRecord {
-    RelayInviteRecord {
-        tenant_id: row.tenant_id,
-        invite_code: row.invite_code,
-        role: row.role,
-        inviter_pubkey: row.inviter_pubkey,
-        invitee_pubkey: row.invitee_pubkey,
-        expires_at: row.expires_at,
-        created_at: row.created_at,
-    }
-}
-
-fn parse_relay_publish_tags(
-    tags_value: serde_json::Value,
-) -> Result<Vec<Vec<String>>, StorageError> {
-    serde_json::from_value(tags_value).map_err(|source| StorageError::Serialization {
-        field: "tags",
-        source,
-    })
-}
-
 impl PostgresRepositories {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -209,7 +47,7 @@ impl PostgresRepositories {
         tenant_id: &str,
         event_id: &[u8],
     ) -> Result<Vec<TagRecord>, StorageError> {
-        let rows: Vec<DbTagRow> = sqlx::query_as(
+        let rows = sqlx::query(
             r#"
 SELECT name, value
 FROM nostr_tag
@@ -222,13 +60,14 @@ ORDER BY id ASC
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| TagRecord {
-                name: row.name,
-                value: row.value,
-            })
-            .collect())
+        let mut tags = Vec::with_capacity(rows.len());
+        for row in rows {
+            tags.push(TagRecord {
+                name: row.try_get("name")?,
+                value: row.try_get("value")?,
+            });
+        }
+        Ok(tags)
     }
 }
 
@@ -483,7 +322,7 @@ DO UPDATE SET
         owner: &str,
         repo: &str,
     ) -> Result<Option<RepoMappingRecord>, StorageError> {
-        let row: Option<DbRepoMappingRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT
     forgejo_owner,
@@ -499,7 +338,13 @@ LIMIT 1
         .bind(repo)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+
+        Ok(row.map(|row| RepoMappingRecord {
+            forgejo_owner: row.get("forgejo_owner"),
+            forgejo_repo: row.get("forgejo_repo"),
+            pubkey: row.get("pubkey"),
+            identifier: row.get("identifier"),
+        }))
     }
 
     async fn mapping_by_repo(
@@ -507,7 +352,7 @@ LIMIT 1
         pubkey: &[u8],
         identifier: &str,
     ) -> Result<Option<RepoMappingRecord>, StorageError> {
-        let row: Option<DbRepoMappingRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT
     forgejo_owner,
@@ -523,11 +368,17 @@ LIMIT 1
         .bind(identifier)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+
+        Ok(row.map(|row| RepoMappingRecord {
+            forgejo_owner: row.get("forgejo_owner"),
+            forgejo_repo: row.get("forgejo_repo"),
+            pubkey: row.get("pubkey"),
+            identifier: row.get("identifier"),
+        }))
     }
 
     async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
-        let rows: Vec<DbRepoMappingRow> = sqlx::query_as(
+        let rows = sqlx::query(
             r#"
 SELECT
     forgejo_owner,
@@ -540,7 +391,16 @@ ORDER BY forgejo_owner, forgejo_repo
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        let records = rows
+            .into_iter()
+            .map(|row| RepoMappingRecord {
+                forgejo_owner: row.get("forgejo_owner"),
+                forgejo_repo: row.get("forgejo_repo"),
+                pubkey: row.get("pubkey"),
+                identifier: row.get("identifier"),
+            })
+            .collect();
+        Ok(records)
     }
 }
 
@@ -566,7 +426,7 @@ DO UPDATE SET forgejo_username = EXCLUDED.forgejo_username
         &self,
         pubkey: &[u8],
     ) -> Result<Option<AccountRecord>, StorageError> {
-        let row: Option<DbAccountRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT pubkey, forgejo_username
 FROM gittree_account
@@ -577,14 +437,17 @@ LIMIT 1
         .bind(pubkey)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+        Ok(row.map(|row| AccountRecord {
+            pubkey: row.get("pubkey"),
+            forgejo_username: row.get("forgejo_username"),
+        }))
     }
 
     async fn account_by_username(
         &self,
         username: &str,
     ) -> Result<Option<AccountRecord>, StorageError> {
-        let row: Option<DbAccountRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT pubkey, forgejo_username
 FROM gittree_account
@@ -595,7 +458,10 @@ LIMIT 1
         .bind(username)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+        Ok(row.map(|row| AccountRecord {
+            pubkey: row.get("pubkey"),
+            forgejo_username: row.get("forgejo_username"),
+        }))
     }
 }
 
@@ -647,7 +513,7 @@ DO UPDATE SET
         &self,
         pubkey: &[u8],
     ) -> Result<Option<ProfileRecord>, StorageError> {
-        let row: Option<DbProfileRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT
     pubkey,
@@ -667,7 +533,25 @@ LIMIT 1
         .bind(pubkey)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(profile_record_from_row).transpose()
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let created_at: OffsetDateTime = row.get("created_at");
+        let updated_at: OffsetDateTime = row.get("updated_at");
+        let visibility: String = row.get("visibility");
+        let visibility = ProfileVisibility::parse(&visibility)?;
+        Ok(Some(ProfileRecord {
+            pubkey: row.get("pubkey"),
+            display_name: row.get("display_name"),
+            bio: row.get("bio"),
+            avatar_url: row.get("avatar_url"),
+            website_url: row.get("website_url"),
+            location: row.get("location"),
+            visibility,
+            created_at: Self::from_offset_datetime(created_at),
+            updated_at: Self::from_offset_datetime(updated_at),
+        }))
     }
 }
 
@@ -839,7 +723,7 @@ ON CONFLICT (id) DO UPDATE SET
         &self,
         tenant_id: &str,
     ) -> Result<Option<RelayTenantRecord>, StorageError> {
-        let row: Option<DbRelayTenantRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT id,
        host,
@@ -865,11 +749,11 @@ LIMIT 1
         .bind(tenant_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(relay_tenant_from_row))
+        Ok(row.map(relay_tenant_from_row).transpose()?)
     }
 
     async fn tenant_by_host(&self, host: &str) -> Result<Option<RelayTenantRecord>, StorageError> {
-        let row: Option<DbRelayTenantRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT id,
        host,
@@ -895,11 +779,11 @@ LIMIT 1
         .bind(host)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(relay_tenant_from_row))
+        Ok(row.map(relay_tenant_from_row).transpose()?)
     }
 
     async fn list_tenants(&self) -> Result<Vec<RelayTenantRecord>, StorageError> {
-        let rows: Vec<DbRelayTenantRow> = sqlx::query_as(
+        let rows = sqlx::query(
             r#"
 SELECT id,
        host,
@@ -923,8 +807,29 @@ ORDER BY host
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(relay_tenant_from_row).collect())
+        rows.into_iter().map(relay_tenant_from_row).collect()
     }
+}
+
+fn relay_tenant_from_row(row: sqlx::postgres::PgRow) -> Result<RelayTenantRecord, StorageError> {
+    Ok(RelayTenantRecord {
+        id: row.try_get("id")?,
+        host: row.try_get("host")?,
+        relay_pubkey: row.try_get("relay_pubkey")?,
+        relay_secret: row.try_get("relay_secret")?,
+        relay_secret_nonce: row.try_get("relay_secret_nonce")?,
+        relay_secret_kid: row.try_get("relay_secret_kid")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        icon: row.try_get("icon")?,
+        banner: row.try_get("banner")?,
+        contact: row.try_get("contact")?,
+        auth_required: row.try_get("auth_required")?,
+        public_read: row.try_get("public_read")?,
+        public_write: row.try_get("public_write")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
 }
 
 #[async_trait]
@@ -957,7 +862,7 @@ ON CONFLICT (tenant_id, pubkey) DO UPDATE SET
         tenant_id: &str,
         pubkey: &[u8],
     ) -> Result<Option<RelayMembershipRecord>, StorageError> {
-        let row: Option<DbRelayMembershipRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT tenant_id, pubkey, role, status, created_at, updated_at
 FROM relay_membership
@@ -969,14 +874,14 @@ LIMIT 1
         .bind(pubkey)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(relay_membership_from_row))
+        Ok(row.map(relay_membership_from_row).transpose()?)
     }
 
     async fn list_memberships(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<RelayMembershipRecord>, StorageError> {
-        let rows: Vec<DbRelayMembershipRow> = sqlx::query_as(
+        let rows = sqlx::query(
             r#"
 SELECT tenant_id, pubkey, role, status, created_at, updated_at
 FROM relay_membership
@@ -987,7 +892,7 @@ ORDER BY pubkey
         .bind(tenant_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(relay_membership_from_row).collect())
+        rows.into_iter().map(relay_membership_from_row).collect()
     }
 
     async fn remove_membership(
@@ -1040,7 +945,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
         tenant_id: &str,
         invite_code: &str,
     ) -> Result<Option<RelayInviteRecord>, StorageError> {
-        let row: Option<DbRelayInviteRow> = sqlx::query_as(
+        let row = sqlx::query(
             r#"
 SELECT tenant_id,
        invite_code,
@@ -1058,7 +963,7 @@ LIMIT 1
         .bind(invite_code)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(relay_invite_from_row))
+        Ok(row.map(relay_invite_from_row).transpose()?)
     }
 
     async fn delete_invite(&self, tenant_id: &str, invite_code: &str) -> Result<(), StorageError> {
@@ -1074,6 +979,31 @@ WHERE tenant_id = $1 AND invite_code = $2
         .await?;
         Ok(())
     }
+}
+
+fn relay_membership_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<RelayMembershipRecord, StorageError> {
+    Ok(RelayMembershipRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        pubkey: row.try_get("pubkey")?,
+        role: row.try_get("role")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn relay_invite_from_row(row: sqlx::postgres::PgRow) -> Result<RelayInviteRecord, StorageError> {
+    Ok(RelayInviteRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        invite_code: row.try_get("invite_code")?,
+        role: row.try_get("role")?,
+        inviter_pubkey: row.try_get("inviter_pubkey")?,
+        invitee_pubkey: row.try_get("invitee_pubkey")?,
+        expires_at: row.try_get("expires_at")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
 
 #[async_trait]
@@ -1371,7 +1301,11 @@ RETURNING id,
         };
 
         let tags_value: serde_json::Value = row.try_get("tags")?;
-        let tags = parse_relay_publish_tags(tags_value)?;
+        let tags: Vec<Vec<String>> =
+            serde_json::from_value(tags_value).map_err(|source| StorageError::Serialization {
+                field: "tags",
+                source,
+            })?;
         Ok(Some(RelayPublishJob {
             id: row.try_get("id")?,
             relay_url: row.try_get("relay_url")?,
@@ -1471,9 +1405,8 @@ WHERE pubkey = $1
 #[cfg(test)]
 mod tests {
     use super::{
-        DbAccountRow, DbProfileRow, DbRelayInviteRow, DbRelayMembershipRow, DbRelayTenantRow,
-        DbRepoMappingRow, PostgresRepositories, parse_relay_publish_tags, relay_invite_from_row,
-        relay_membership_from_row, relay_tenant_from_row,
+        PostgresRepositories, relay_invite_from_row, relay_membership_from_row,
+        relay_tenant_from_row,
     };
     use crate::migrations::{MigrationRunner, core_migrations};
     use crate::repositories::{
@@ -1495,7 +1428,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use time::OffsetDateTime;
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1689,138 +1621,6 @@ WHERE datname = $1
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn db_row_helpers_map_records() {
-        let mapping_row = DbRepoMappingRow {
-            forgejo_owner: "owner".to_string(),
-            forgejo_repo: "repo".to_string(),
-            pubkey: vec![0x11; 32],
-            identifier: "id".to_string(),
-        };
-        let mapping: RepoMappingRecord = mapping_row.into();
-        assert_eq!(mapping.forgejo_owner, "owner");
-        assert_eq!(mapping.forgejo_repo, "repo");
-        assert_eq!(mapping.pubkey, vec![0x11; 32]);
-        assert_eq!(mapping.identifier, "id");
-
-        let account_row = DbAccountRow {
-            pubkey: vec![0x22; 32],
-            forgejo_username: "alice".to_string(),
-        };
-        let account: AccountRecord = account_row.into();
-        assert_eq!(account.pubkey, vec![0x22; 32]);
-        assert_eq!(account.forgejo_username, "alice");
-
-        let profile_row = DbProfileRow {
-            pubkey: vec![0x33; 32],
-            display_name: Some("tree".to_string()),
-            bio: Some("bio".to_string()),
-            avatar_url: Some("https://example/avatar.png".to_string()),
-            website_url: Some("https://example".to_string()),
-            location: Some("earth".to_string()),
-            visibility: "public".to_string(),
-            created_at: OffsetDateTime::from_unix_timestamp(10).expect("created"),
-            updated_at: OffsetDateTime::from_unix_timestamp(20).expect("updated"),
-        };
-        let profile = super::profile_record_from_row(profile_row).expect("profile");
-        assert_eq!(profile.pubkey, vec![0x33; 32]);
-        assert_eq!(profile.visibility, ProfileVisibility::Public);
-        assert_eq!(profile.created_at, 10);
-        assert_eq!(profile.updated_at, 20);
-
-        let tenant = relay_tenant_from_row(DbRelayTenantRow {
-            id: "tenant".to_string(),
-            host: "relay.gittr.ee".to_string(),
-            relay_pubkey: vec![0x44; 32],
-            relay_secret: vec![1, 2],
-            relay_secret_nonce: vec![3, 4],
-            relay_secret_kid: "kid".to_string(),
-            name: Some("tenant".to_string()),
-            description: Some("desc".to_string()),
-            icon: Some("https://example/icon.png".to_string()),
-            banner: Some("https://example/banner.png".to_string()),
-            contact: Some("ops".to_string()),
-            auth_required: true,
-            public_read: false,
-            public_write: false,
-            created_at: 1,
-            updated_at: 2,
-        });
-        assert_eq!(tenant.id, "tenant");
-        assert_eq!(tenant.host, "relay.gittr.ee");
-
-        let membership = relay_membership_from_row(DbRelayMembershipRow {
-            tenant_id: "tenant".to_string(),
-            pubkey: vec![0x55; 32],
-            role: "member".to_string(),
-            status: "active".to_string(),
-            created_at: 3,
-            updated_at: 4,
-        });
-        assert_eq!(membership.role, "member");
-        assert_eq!(membership.status, "active");
-
-        let invite = relay_invite_from_row(DbRelayInviteRow {
-            tenant_id: "tenant".to_string(),
-            invite_code: "invite".to_string(),
-            role: "member".to_string(),
-            inviter_pubkey: vec![0x66; 32],
-            invitee_pubkey: Some(vec![0x77; 32]),
-            expires_at: Some(123),
-            created_at: 10,
-        });
-        assert_eq!(invite.invite_code, "invite");
-        assert_eq!(invite.expires_at, Some(123));
-    }
-
-    #[test]
-    fn profile_row_rejects_invalid_visibility() {
-        let profile_row = DbProfileRow {
-            pubkey: vec![0x33; 32],
-            display_name: None,
-            bio: None,
-            avatar_url: None,
-            website_url: None,
-            location: None,
-            visibility: "unknown".to_string(),
-            created_at: OffsetDateTime::from_unix_timestamp(10).expect("created"),
-            updated_at: OffsetDateTime::from_unix_timestamp(20).expect("updated"),
-        };
-        let err = super::profile_record_from_row(profile_row).expect_err("invalid visibility");
-        assert!(matches!(
-            err,
-            StorageError::InvalidField {
-                field: "visibility",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn parse_relay_publish_tags_reports_invalid_json_shape() {
-        let tags = parse_relay_publish_tags(serde_json::json!([["e", "1"], ["p", "2"]]))
-            .expect("valid tags");
-        assert_eq!(tags.len(), 2);
-
-        let err = parse_relay_publish_tags(serde_json::json!({"bad": true}))
-            .expect_err("invalid tags shape");
-        assert!(matches!(
-            err,
-            StorageError::Serialization { field: "tags", .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn fetch_tags_surfaces_database_errors_for_unreachable_pool() {
-        let repositories = unreachable_repositories();
-        assert_db_error(
-            repositories
-                .fetch_tags("tenant", &[0x01; 32])
-                .await
-                .expect_err("fetch tags"),
-        );
     }
 
     #[test]
@@ -3141,7 +2941,7 @@ WHERE datname = $1
         with_test_db(
             "postgres_decoder_helpers_report_row_errors_db",
             |test_db| async move {
-                let bad_tenant = sqlx::query_as::<_, DbRelayTenantRow>(
+                let bad_tenant_row = sqlx::query(
                     r#"
 SELECT
     1::integer AS id,
@@ -3164,13 +2964,12 @@ SELECT
                 )
                 .fetch_one(&test_db.pool)
                 .await
-                .expect_err("bad tenant row should fail");
-                assert!(matches!(
-                    bad_tenant,
-                    sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
-                ));
+                .expect("bad tenant row");
+                assert_db_error(
+                    relay_tenant_from_row(bad_tenant_row).expect_err("tenant row decode"),
+                );
 
-                let bad_membership = sqlx::query_as::<_, DbRelayMembershipRow>(
+                let bad_membership_row = sqlx::query(
                     r#"
 SELECT
     'tenant-1'::text AS tenant_id,
@@ -3183,13 +2982,13 @@ SELECT
                 )
                 .fetch_one(&test_db.pool)
                 .await
-                .expect_err("bad membership row should fail");
-                assert!(matches!(
-                    bad_membership,
-                    sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
-                ));
+                .expect("bad membership row");
+                assert_db_error(
+                    relay_membership_from_row(bad_membership_row)
+                        .expect_err("membership row decode"),
+                );
 
-                let bad_invite = sqlx::query_as::<_, DbRelayInviteRow>(
+                let bad_invite_row = sqlx::query(
                     r#"
 SELECT
     'tenant-1'::text AS tenant_id,
@@ -3203,11 +3002,10 @@ SELECT
                 )
                 .fetch_one(&test_db.pool)
                 .await
-                .expect_err("bad invite row should fail");
-                assert!(matches!(
-                    bad_invite,
-                    sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
-                ));
+                .expect("bad invite row");
+                assert_db_error(
+                    relay_invite_from_row(bad_invite_row).expect_err("invite row decode"),
+                );
 
                 test_db.cleanup().await;
             },
