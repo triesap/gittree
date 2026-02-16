@@ -57,7 +57,6 @@ mod tests {
     use std::process;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::sync::{Arc, Mutex};
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -102,6 +101,10 @@ mod tests {
         path
     }
 
+    async fn unexpected_serve(_config: RelayConfig) -> Result<(), RelayError> {
+        Err(RelayError::Serve("unexpected serve invocation".to_string()))
+    }
+
     #[tokio::test]
     async fn run_with_help_flag_returns_ok() {
         let result = run_with_args(["gittree-relay", "--help"]).await;
@@ -110,15 +113,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_help_flag_does_not_invoke_serve_handler() {
-        let called = Arc::new(AtomicBool::new(false));
-        let called_flag = called.clone();
-        let result = run_with_args_and_serve(["gittree-relay", "--help"], move |_config| {
-            called_flag.store(true, Ordering::SeqCst);
-            async { Ok(()) }
-        })
-        .await;
+        let result = run_with_args_and_serve(["gittree-relay", "--help"], unexpected_serve).await;
         assert!(result.is_ok());
-        assert!(!called.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -181,17 +177,10 @@ bind = "127.0.0.1:9123"
         let _guard = ENV_LOCK.lock().expect("env lock");
         let previous = clear_env_var_for_test("GITTREE_STORAGE_READ_URL");
 
-        let called = Arc::new(AtomicBool::new(false));
-        let called_flag = called.clone();
-        let result = run_with_args_and_serve(["gittree-relay"], move |_config| {
-            called_flag.store(true, Ordering::SeqCst);
-            async { Ok(()) }
-        })
-        .await;
+        let result = run_with_args_and_serve(["gittree-relay"], unexpected_serve).await;
 
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
         assert!(matches!(result, Err(RelayError::Config(_))));
-        assert!(!called.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -231,13 +220,12 @@ bind = "127.0.0.1:9123"
             "postgres://user:pass@localhost:5432/gittree",
         );
 
-        let result = run_with_args_and_serve(["gittree-relay"], |_config| async {
-            Err(RelayError::Serve("boom".to_string()))
-        })
-        .await;
+        let result = run_with_args_and_serve(["gittree-relay"], unexpected_serve).await;
 
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
-        assert!(matches!(result, Err(RelayError::Serve(message)) if message == "boom"));
+        assert!(
+            matches!(result, Err(RelayError::Serve(message)) if message == "unexpected serve invocation")
+        );
     }
 
     #[test]

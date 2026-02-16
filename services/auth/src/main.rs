@@ -1,4 +1,5 @@
 use gittree_auth::{AuthError, AuthServiceConfig, serve};
+use std::future::Future;
 
 #[tokio::main]
 async fn main() {
@@ -10,17 +11,62 @@ async fn main() {
 }
 
 async fn run() -> Result<(), AuthError> {
-    let config = AuthServiceConfig::from_env().map_err(AuthError::Config)?;
-    serve(config).await
+    run_with(
+        || AuthServiceConfig::from_env().map_err(AuthError::Config),
+        serve,
+    )
+    .await
+}
+
+async fn run_with<FConfig, FServe, Fut>(
+    load_config: FConfig,
+    serve_fn: FServe,
+) -> Result<(), AuthError>
+where
+    FConfig: FnOnce() -> Result<AuthServiceConfig, AuthError>,
+    FServe: FnOnce(AuthServiceConfig) -> Fut,
+    Fut: Future<Output = Result<(), AuthError>>,
+{
+    let config = load_config()?;
+    serve_fn(config).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::run;
-    use gittree_auth::AuthError;
+    use super::{run, run_with};
+    use gittree_auth::{AuthConfigError, AuthError, AuthServiceConfig, StorageConfigError, serve};
+    use gittree_config::{AuthConfig as AuthSettings, ForgejoConfig};
+    use gittree_storage::StorageConfig;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn sample_config() -> AuthServiceConfig {
+        AuthServiceConfig {
+            bind: "127.0.0.1:9089".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: ForgejoConfig {
+                base_url: "http://localhost:3000".to_string(),
+                api_token: "token".to_string(),
+                owner: "gittree".to_string(),
+                webhook_url: "http://localhost:8090/".to_string(),
+                webhook_secret: "secret".to_string(),
+                repo_private: true,
+            },
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 5,
+                min_connections: 1,
+                idle_timeout_secs: Some(60),
+                max_lifetime_secs: Some(300),
+                application_name: Some("gittree-auth-test".to_string()),
+            },
+        }
+    }
 
     #[tokio::test]
     async fn run_reports_config_error_for_invalid_bind() {
@@ -39,5 +85,38 @@ mod tests {
             },
         }
         assert!(matches!(result, Err(AuthError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_injected_loader_maps_config_error() {
+        let result = run_with(
+            || Err(AuthError::Config(AuthConfigError::Storage(StorageConfigError::MissingEnv("TEST")))),
+            serve,
+        )
+        .await;
+        assert!(matches!(result, Err(AuthError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_injected_serve_runs_with_loaded_config() {
+        let result = run_with(
+            || Ok(sample_config()),
+            |config| async move {
+                assert_eq!(config.bind, "127.0.0.1:9089");
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_injected_serve_propagates_serve_error() {
+        let result = run_with(
+            || Ok(sample_config()),
+            |_config| async { Err(AuthError::Serve("boom".to_string())) },
+        )
+        .await;
+        assert!(matches!(result, Err(AuthError::Serve(message)) if message == "boom"));
     }
 }

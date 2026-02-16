@@ -1,4 +1,5 @@
 use gittree_control::{ControlConfig, ControlError, serve};
+use std::future::Future;
 
 #[tokio::main]
 async fn main() {
@@ -10,17 +11,64 @@ async fn main() {
 }
 
 async fn run() -> Result<(), ControlError> {
-    let config = ControlConfig::from_env().map_err(ControlError::Config)?;
-    serve(config).await
+    run_with(
+        || ControlConfig::from_env().map_err(ControlError::Config),
+        serve,
+    )
+    .await
+}
+
+async fn run_with<FConfig, FServe, Fut>(
+    load_config: FConfig,
+    serve_fn: FServe,
+) -> Result<(), ControlError>
+where
+    FConfig: FnOnce() -> Result<ControlConfig, ControlError>,
+    FServe: FnOnce(ControlConfig) -> Fut,
+    Fut: Future<Output = Result<(), ControlError>>,
+{
+    let config = load_config()?;
+    serve_fn(config).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::run;
-    use gittree_control::ControlError;
+    use super::{run, run_with};
+    use gittree_config::{ConfigError, ControlAuthConfig, ForgejoConfig};
+    use gittree_control::{ControlConfig, ControlConfigError, ControlError, serve};
+    use gittree_storage::StorageConfig;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn sample_config() -> ControlConfig {
+        ControlConfig {
+            bind: "127.0.0.1:8067".to_string(),
+            auth: ControlAuthConfig {
+                token: "token".to_string(),
+                admin_keys: vec!["11".repeat(32)],
+            },
+            forgejo: ForgejoConfig {
+                base_url: "http://localhost:3000".to_string(),
+                api_token: "token".to_string(),
+                owner: "gittree".to_string(),
+                webhook_url: "http://localhost:8090/".to_string(),
+                webhook_secret: "secret".to_string(),
+                repo_private: true,
+            },
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 5,
+                min_connections: 1,
+                idle_timeout_secs: Some(60),
+                max_lifetime_secs: Some(300),
+                application_name: Some("gittree-control-test".to_string()),
+            },
+            relay_urls: vec!["wss://relay.example".to_string()],
+            public_git_url: "http://localhost:3000".to_string(),
+        }
+    }
 
     #[tokio::test]
     async fn run_reports_config_error_for_invalid_bind() {
@@ -39,5 +87,42 @@ mod tests {
             },
         }
         assert!(matches!(result, Err(ControlError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_injected_loader_maps_config_error() {
+        let result = run_with(
+            || {
+                Err(ControlError::Config(ControlConfigError::Config(
+                    ConfigError::MissingEnv("GITTREE_CONTROL_TOKEN"),
+                )))
+            },
+            serve,
+        )
+        .await;
+        assert!(matches!(result, Err(ControlError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_injected_serve_runs_with_loaded_config() {
+        let result = run_with(
+            || Ok(sample_config()),
+            |config| async move {
+                assert_eq!(config.bind, "127.0.0.1:8067");
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_injected_serve_propagates_serve_error() {
+        let result = run_with(
+            || Ok(sample_config()),
+            |_config| async { Err(ControlError::Serve("boom".to_string())) },
+        )
+        .await;
+        assert!(matches!(result, Err(ControlError::Serve(message)) if message == "boom"));
     }
 }
