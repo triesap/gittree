@@ -31,15 +31,7 @@ pub fn normalize_grasp_server_url(input: &str) -> Result<String> {
     }
 
     let scheme = parsed.scheme();
-    let host = match parsed.host_str() {
-        Some(value) => value,
-        None => {
-            return Err(CoreError::InvalidField {
-                field: "grasp_url",
-                value: input.to_string(),
-            });
-        }
-    };
+    let host = parsed.host_str().unwrap_or_default();
     let port = match parsed.port() {
         Some(value) => format!(":{value}"),
         None => String::new(),
