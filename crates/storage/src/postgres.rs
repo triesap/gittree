@@ -1623,6 +1623,55 @@ WHERE datname = $1
         ));
     }
 
+    #[tokio::test]
+    async fn fetch_tags_surfaces_database_errors_for_unreachable_pool() {
+        let repositories = unreachable_repositories();
+        assert_db_error(
+            repositories
+                .fetch_tags("tenant-1", &[0x01; 32])
+                .await
+                .expect_err("fetch tags"),
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_tags_returns_inserted_tags_in_order_db() {
+        with_test_db(
+            "fetch_tags_returns_inserted_tags_in_order_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let event = EventRecord::new(
+                    "tenant-1",
+                    &"aa".repeat(32),
+                    &"bb".repeat(32),
+                    200,
+                    1,
+                    "event-a",
+                    &"cc".repeat(64),
+                    vec![
+                        vec!["z".to_string(), "1".to_string()],
+                        vec!["a".to_string(), "2".to_string()],
+                    ],
+                )
+                .expect("event");
+
+                repositories
+                    .insert_event(event.clone())
+                    .await
+                    .expect("insert event");
+
+                let tags = repositories
+                    .fetch_tags("tenant-1", &event.id)
+                    .await
+                    .expect("fetch tags");
+                assert_eq!(tags, event.tags);
+
+                test_db.cleanup().await;
+            },
+        )
+        .await;
+    }
+
     #[test]
     fn test_database_base_url_from_value_prefers_explicit_value() {
         assert_eq!(
