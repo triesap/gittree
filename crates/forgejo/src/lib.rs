@@ -1015,13 +1015,9 @@ mod tests {
     fn client_new_rejects_empty_api_token() {
         let mut config = test_config();
         config.api_token = "   ".to_string();
-        let err = match ForgejoClient::new(config) {
-            Ok(_) => panic!("empty token should fail"),
-            Err(err) => err,
-        };
         assert!(matches!(
-            err,
-            ForgejoError::Request(message) if message.contains("must not be empty")
+            ForgejoClient::new(config),
+            Err(ForgejoError::Request(message)) if message.contains("must not be empty")
         ));
     }
 
@@ -1033,13 +1029,9 @@ mod tests {
 
     #[test]
     fn reqwest_transport_new_rejects_empty_token() {
-        let err = match ReqwestTransport::new("") {
-            Ok(_) => panic!("empty token should fail"),
-            Err(err) => err,
-        };
         assert!(matches!(
-            err,
-            ForgejoError::Request(message) if message.contains("must not be empty")
+            ReqwestTransport::new(""),
+            Err(ForgejoError::Request(message)) if message.contains("must not be empty")
         ));
     }
 
