@@ -77,25 +77,32 @@ async fn serve_with_observability(
 }
 
 async fn serve_inner(config: RelayConfig) -> Result<(), RelayError> {
-    serve_inner_with_shutdown(config, await_shutdown_signal(tokio::signal::ctrl_c())).await
+    serve_inner_with_shutdown(
+        config,
+        Box::pin(await_shutdown_signal(tokio::signal::ctrl_c())),
+    )
+    .await
 }
 
-async fn serve_inner_with_shutdown<F>(config: RelayConfig, shutdown: F) -> Result<(), RelayError>
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
+async fn serve_inner_with_shutdown(
+    config: RelayConfig,
+    shutdown: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+) -> Result<(), RelayError> {
     let state = build_state(config.clone())?;
     let router = build_router(Arc::new(state));
     let listener = bind_listener(&config.bind).await?;
-    run_server(axum::serve(listener, router).with_graceful_shutdown(shutdown)).await
+    run_server(Box::pin(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .into_future(),
+    ))
+    .await
 }
 
-async fn run_server<E, S>(server: S) -> Result<(), RelayError>
-where
-    E: std::fmt::Display,
-    S: IntoFuture<Output = Result<(), E>>,
-{
-    match server.into_future().await {
+async fn run_server(
+    server: Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>,
+) -> Result<(), RelayError> {
+    match server.await {
         Ok(()) => Ok(()),
         Err(err) => Err(RelayError::Serve(err.to_string())),
     }
@@ -1644,14 +1651,14 @@ mod tests {
     async fn serve_inner_with_shutdown_returns_ok_for_ephemeral_bind() {
         let mut config = sample_config();
         config.bind = "127.0.0.1:0".to_string();
-        super::serve_inner_with_shutdown(config, async {})
+        super::serve_inner_with_shutdown(config, Box::pin(async {}))
             .await
             .expect("serve");
     }
 
     #[tokio::test]
     async fn run_server_returns_ok_when_future_is_ok() {
-        super::run_server::<std::io::Error, _>(async { Ok(()) })
+        super::run_server(Box::pin(async { Ok(()) }))
             .await
             .expect("ok");
     }
@@ -1664,7 +1671,9 @@ mod tests {
             .await
             .expect("listener");
         let server = axum::serve(listener, app).with_graceful_shutdown(async {});
-        super::run_server(server).await.expect("graceful shutdown");
+        super::run_server(Box::pin(server.into_future()))
+            .await
+            .expect("graceful shutdown");
     }
 
     #[tokio::test]
@@ -1675,14 +1684,17 @@ mod tests {
             .await
             .expect("listener");
         let server = axum::serve(listener, app).with_graceful_shutdown(std::future::pending());
-        let result =
-            tokio::time::timeout(Duration::from_millis(20), super::run_server(server)).await;
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            super::run_server(Box::pin(server.into_future())),
+        )
+        .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn run_server_maps_error_to_serve() {
-        let err = super::run_server(async { Err(std::io::Error::other("boom")) })
+        let err = super::run_server(Box::pin(async { Err(std::io::Error::other("boom")) }))
             .await
             .expect_err("error");
         assert!(matches!(err, RelayError::Serve(message) if message.contains("boom")));
@@ -1724,7 +1736,7 @@ mod tests {
     async fn serve_inner_with_shutdown_returns_storage_error_when_state_build_fails() {
         let mut config = sample_config();
         config.storage.max_connections = 0;
-        let err = super::serve_inner_with_shutdown(config, std::future::ready(()))
+        let err = super::serve_inner_with_shutdown(config, Box::pin(std::future::ready(())))
             .await
             .expect_err("invalid storage");
         assert!(err.to_string().contains("relay storage error"));
