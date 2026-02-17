@@ -4280,6 +4280,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_arc_store_exercises_core_message_paths() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-arc-core";
+
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x77; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+
+        let mut session = Session::with_policy_and_auth(store, Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+            .with_membership_requirements(true, true)
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            )
+            .with_relay_url(Some("wss://relay.example".to_string()));
+
+        let initial = session.initial_messages();
+        assert_eq!(initial.len(), 1);
+        assert_auth(&initial[0]);
+
+        let raw_invalid = session.handle_raw("not-json").await;
+        assert_eq!(raw_invalid.len(), 1);
+        assert_notice(&raw_invalid[0]);
+
+        let req_before_auth = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-pre-auth".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert_eq!(req_before_auth.len(), 1);
+        assert_eq!(
+            closed_reason(&req_before_auth[0]),
+            super::AUTH_REQUIRED_REASON
+        );
+
+        let bad_auth = session
+            .handle_message(ClientMessage::Auth(json!({"kind": 1})))
+            .await;
+        assert_eq!(bad_auth.len(), 1);
+        assert!(matches!(
+            bad_auth.first(),
+            Some(
+                ServerMessage::Notice { .. }
+                    | ServerMessage::Ok {
+                        accepted: false,
+                        ..
+                    }
+            )
+        ));
+
+        authenticate_session(&mut session).await;
+        let auth_pubkey_hex = session
+            .authenticated_pubkey()
+            .expect("authenticated pubkey")
+            .to_string();
+        let auth_pubkey = hex::decode(&auth_pubkey_hex).expect("auth pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: auth_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+
+        let req = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-sub".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(req.iter().any(|message| matches!(
+            message,
+            ServerMessage::Eose { subscription_id } if subscription_id == "arc-sub"
+        )));
+
+        let count = session
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(matches!(
+            count.first(),
+            Some(ServerMessage::Count {
+                subscription_id,
+                ..
+            }) if subscription_id == "arc-count"
+        ));
+
+        let membership_virtual = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-virtual".to_string(),
+                filters: vec![json!({
+                    "kinds": [super::NIP43_MEMBERSHIP_KIND, super::NIP43_INVITE_KIND]
+                })],
+            })
+            .await;
+        assert!(
+            membership_virtual
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Event { .. }))
+        );
+
+        let valid_event = session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-core-valid")).expect("event json"),
+            ))
+            .await;
+        assert!(matches!(
+            valid_event.first(),
+            Some(ServerMessage::Ok { accepted: true, .. })
+        ));
+
+        let auth_kind_event = signed_event_with_tags(
+            "arc-core-auth-kind",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), "wrong".to_string()],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+        );
+        let auth_kind = session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(auth_kind_event).expect("event json"),
+            ))
+            .await;
+        assert_eq!(auth_kind.len(), 1);
+        assert_ok_rejected(&auth_kind[0]);
+
+        let mut invalid_tags_event = signed_event("arc-core-invalid-tags");
+        invalid_tags_event.tags = vec![Vec::new()];
+        let dispatch_invalid = session.dispatch_event(&invalid_tags_event);
+        assert_eq!(dispatch_invalid.len(), 1);
+        assert_notice(&dispatch_invalid[0]);
+
+        let close = session
+            .handle_message(ClientMessage::Close {
+                subscription_id: "arc-sub".to_string(),
+            })
+            .await;
+        assert!(close.is_empty());
+    }
+
+    #[tokio::test]
     async fn req_generates_invite_claim_when_member() {
         let membership = Arc::new(InMemoryRepositories::new());
         let tenant_id = "tenant-1";
