@@ -433,7 +433,10 @@ fn collect_tag_values(tags: &[Vec<String>], name: &str) -> Vec<String> {
 
 fn parse_address(value: &str) -> Option<ReplaceableKey> {
     let mut parts = value.split(':');
-    let kind_part = parts.next()?;
+    let kind_part = match parts.next() {
+        Some(part) if !part.is_empty() => part,
+        _ => return None,
+    };
     let kind = match kind_part.parse::<u32>() {
         Ok(kind) => kind,
         Err(_) => return None,
@@ -1660,6 +1663,7 @@ mod tests {
         assert_eq!(collect_tag_values(&tags, "z"), Vec::<String>::new());
 
         assert!(parse_address("bad").is_none());
+        assert!(parse_address("").is_none());
         assert!(parse_address("not-a-kind:pubkey:demo").is_none());
         assert!(parse_address("30023").is_none());
         let parsed_without_identifier = parse_address("30023:pubkey").expect("address");
