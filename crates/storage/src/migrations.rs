@@ -14,6 +14,46 @@ pub struct MigrationRunner {
     migrations: Vec<Migration>,
 }
 
+trait MigrationBackend {
+    async fn ensure_migrations_table(&mut self) -> Result<(), StorageError>;
+    async fn current_version(&mut self) -> Result<i64, StorageError>;
+    async fn execute_sql(&mut self, sql: &'static str) -> Result<(), StorageError>;
+    async fn record_version(&mut self, version: i64) -> Result<(), StorageError>;
+}
+
+struct PgMigrationBackend<'a> {
+    connection: &'a mut PgConnection,
+}
+
+impl<'a> MigrationBackend for PgMigrationBackend<'a> {
+    async fn ensure_migrations_table(&mut self) -> Result<(), StorageError> {
+        sqlx::query("CREATE TABLE IF NOT EXISTS migrations (serial_number BIGINT PRIMARY KEY)")
+            .execute(&mut *self.connection)
+            .await?;
+        Ok(())
+    }
+
+    async fn current_version(&mut self) -> Result<i64, StorageError> {
+        let version: Option<i64> = sqlx::query_scalar("SELECT max(serial_number) FROM migrations")
+            .fetch_one(&mut *self.connection)
+            .await?;
+        Ok(version.unwrap_or(0))
+    }
+
+    async fn execute_sql(&mut self, sql: &'static str) -> Result<(), StorageError> {
+        sqlx::raw_sql(sql).execute(&mut *self.connection).await?;
+        Ok(())
+    }
+
+    async fn record_version(&mut self, version: i64) -> Result<(), StorageError> {
+        sqlx::query("INSERT INTO migrations (serial_number) VALUES ($1)")
+            .bind(version)
+            .execute(&mut *self.connection)
+            .await?;
+        Ok(())
+    }
+}
+
 pub fn core_migrations() -> Vec<Migration> {
     vec![
         migration_repo_init(),
@@ -64,40 +104,29 @@ impl MigrationRunner {
     }
 
     pub async fn run(&self, connection: &mut PgConnection) -> Result<i64, StorageError> {
-        ensure_migrations_table(connection).await?;
-        let current = current_version(connection).await?;
+        let mut backend = PgMigrationBackend { connection };
+        self.run_with_backend(&mut backend).await
+    }
+
+    async fn run_with_backend<B: MigrationBackend>(
+        &self,
+        backend: &mut B,
+    ) -> Result<i64, StorageError> {
+        backend.ensure_migrations_table().await?;
+        let current = backend.current_version().await?;
         let mut applied = current;
 
         for migration in &self.migrations {
             if migration.version <= current {
                 continue;
             }
-            sqlx::raw_sql(migration.sql)
-                .execute(&mut *connection)
-                .await?;
-            sqlx::query("INSERT INTO migrations (serial_number) VALUES ($1)")
-                .bind(migration.version)
-                .execute(&mut *connection)
-                .await?;
+            backend.execute_sql(migration.sql).await?;
+            backend.record_version(migration.version).await?;
             applied = migration.version;
         }
 
         Ok(applied)
     }
-}
-
-async fn ensure_migrations_table(connection: &mut PgConnection) -> Result<(), StorageError> {
-    sqlx::query("CREATE TABLE IF NOT EXISTS migrations (serial_number BIGINT PRIMARY KEY)")
-        .execute(&mut *connection)
-        .await?;
-    Ok(())
-}
-
-async fn current_version(connection: &mut PgConnection) -> Result<i64, StorageError> {
-    let version: Option<i64> = sqlx::query_scalar("SELECT max(serial_number) FROM migrations")
-        .fetch_one(&mut *connection)
-        .await?;
-    Ok(version.unwrap_or(0))
 }
 
 fn migration_repo_init() -> Migration {
@@ -219,6 +248,7 @@ fn migration_relay_membership() -> Migration {
 #[cfg(test)]
 mod tests {
     use super::Migration;
+    use super::MigrationBackend;
     use super::MigrationRunner;
     use super::core_migrations;
     use crate::StorageError;
@@ -231,6 +261,63 @@ mod tests {
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Debug, Default)]
+    struct ScriptedMigrationBackend {
+        current_version: i64,
+        ensure_calls: usize,
+        current_calls: usize,
+        execute_calls: usize,
+        record_calls: usize,
+        fail_ensure: bool,
+        fail_current: bool,
+        fail_execute_call: Option<usize>,
+        fail_record_call: Option<usize>,
+        executed_sql: Vec<&'static str>,
+        recorded_versions: Vec<i64>,
+    }
+
+    impl MigrationBackend for ScriptedMigrationBackend {
+        async fn ensure_migrations_table(&mut self) -> Result<(), StorageError> {
+            self.ensure_calls += 1;
+            if self.fail_ensure {
+                return Err(migration_error("ensure failed"));
+            }
+            Ok(())
+        }
+
+        async fn current_version(&mut self) -> Result<i64, StorageError> {
+            self.current_calls += 1;
+            if self.fail_current {
+                return Err(migration_error("current version failed"));
+            }
+            Ok(self.current_version)
+        }
+
+        async fn execute_sql(&mut self, sql: &'static str) -> Result<(), StorageError> {
+            self.execute_calls += 1;
+            if self.fail_execute_call == Some(self.execute_calls) {
+                return Err(migration_error("execute failed"));
+            }
+            self.executed_sql.push(sql);
+            Ok(())
+        }
+
+        async fn record_version(&mut self, version: i64) -> Result<(), StorageError> {
+            self.record_calls += 1;
+            if self.fail_record_call == Some(self.record_calls) {
+                return Err(migration_error("record failed"));
+            }
+            self.recorded_versions.push(version);
+            Ok(())
+        }
+    }
+
+    fn migration_error(message: &str) -> StorageError {
+        StorageError::Migration {
+            message: message.to_string(),
+        }
+    }
 
     #[test]
     fn runner_orders_migrations() {
@@ -355,6 +442,124 @@ mod tests {
         let runner = MigrationRunner::new(Vec::new()).expect("runner");
         assert_eq!(runner.latest_version(), 0);
         assert!(runner.migrations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn runner_run_with_backend_applies_only_new_migrations() {
+        let migrations = vec![
+            Migration {
+                version: 1,
+                description: "first",
+                sql: "SELECT 1",
+            },
+            Migration {
+                version: 2,
+                description: "second",
+                sql: "SELECT 2",
+            },
+            Migration {
+                version: 3,
+                description: "third",
+                sql: "SELECT 3",
+            },
+        ];
+        let runner = MigrationRunner::new(migrations).expect("runner");
+        let mut backend = ScriptedMigrationBackend {
+            current_version: 1,
+            ..Default::default()
+        };
+
+        let applied = runner
+            .run_with_backend(&mut backend)
+            .await
+            .expect("run backend");
+        assert_eq!(applied, 3);
+        assert_eq!(backend.ensure_calls, 1);
+        assert_eq!(backend.current_calls, 1);
+        assert_eq!(backend.execute_calls, 2);
+        assert_eq!(backend.record_calls, 2);
+        assert_eq!(backend.executed_sql, vec!["SELECT 2", "SELECT 3"]);
+        assert_eq!(backend.recorded_versions, vec![2, 3]);
+    }
+
+    #[tokio::test]
+    async fn runner_run_with_backend_returns_current_when_nothing_to_apply() {
+        let migrations = vec![
+            Migration {
+                version: 1,
+                description: "first",
+                sql: "SELECT 1",
+            },
+            Migration {
+                version: 2,
+                description: "second",
+                sql: "SELECT 2",
+            },
+        ];
+        let runner = MigrationRunner::new(migrations).expect("runner");
+        let mut backend = ScriptedMigrationBackend {
+            current_version: 3,
+            ..Default::default()
+        };
+
+        let applied = runner
+            .run_with_backend(&mut backend)
+            .await
+            .expect("run backend");
+        assert_eq!(applied, 3);
+        assert!(backend.executed_sql.is_empty());
+        assert!(backend.recorded_versions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runner_run_with_backend_propagates_backend_errors() {
+        let migrations = vec![Migration {
+            version: 1,
+            description: "first",
+            sql: "SELECT 1",
+        }];
+        let runner = MigrationRunner::new(migrations).expect("runner");
+
+        let mut ensure_fail = ScriptedMigrationBackend {
+            fail_ensure: true,
+            ..Default::default()
+        };
+        let err = runner
+            .run_with_backend(&mut ensure_fail)
+            .await
+            .expect_err("ensure failure");
+        assert!(matches!(err, StorageError::Migration { .. }));
+
+        let mut current_fail = ScriptedMigrationBackend {
+            fail_current: true,
+            ..Default::default()
+        };
+        let err = runner
+            .run_with_backend(&mut current_fail)
+            .await
+            .expect_err("current failure");
+        assert!(matches!(err, StorageError::Migration { .. }));
+
+        let mut execute_fail = ScriptedMigrationBackend {
+            fail_execute_call: Some(1),
+            ..Default::default()
+        };
+        let err = runner
+            .run_with_backend(&mut execute_fail)
+            .await
+            .expect_err("execute failure");
+        assert!(matches!(err, StorageError::Migration { .. }));
+        assert!(execute_fail.recorded_versions.is_empty());
+
+        let mut record_fail = ScriptedMigrationBackend {
+            fail_record_call: Some(1),
+            ..Default::default()
+        };
+        let err = runner
+            .run_with_backend(&mut record_fail)
+            .await
+            .expect_err("record failure");
+        assert!(matches!(err, StorageError::Migration { .. }));
     }
 
     #[tokio::test]
