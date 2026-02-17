@@ -323,25 +323,19 @@ async fn handle_inbound_action(in_tx: &mpsc::Sender<String>, action: InboundSock
     }
 }
 
-async fn handle_outbound_message<S>(sender: &mut S, outbound: Option<String>) -> bool
-where
-    S: Sink<Message> + Unpin,
-{
+async fn handle_outbound_message(sender: &mut DynSocketSender, outbound: Option<String>) -> bool {
     let Some(outbound) = classify_outbound_message(outbound) else {
         return false;
     };
     sender.send(outbound).await.is_ok()
 }
 
-async fn pump_socket_io<R, S>(
-    receiver: &mut R,
-    sender: &mut S,
+async fn pump_socket_io(
+    receiver: &mut DynSocketReceiver,
+    sender: &mut DynSocketSender,
     in_tx: &mpsc::Sender<String>,
     out_rx: &mut mpsc::Receiver<String>,
-) where
-    R: Stream<Item = Result<Message, axum::Error>> + Unpin,
-    S: Sink<Message> + Unpin,
-{
+) {
     while tokio::select! {
         biased;
         msg = receiver.next() => {
@@ -356,6 +350,8 @@ async fn pump_socket_io<R, S>(
 
 type SocketReceiver = SplitStream<WebSocket>;
 type SocketSender = SplitSink<WebSocket, Message>;
+type DynSocketReceiver = dyn Stream<Item = Result<Message, axum::Error>> + Unpin + Send;
+type DynSocketSender = dyn Sink<Message, Error = axum::Error> + Unpin + Send;
 type SocketPumpFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 type SocketPump = for<'a> fn(
     &'a mut SocketReceiver,
@@ -370,6 +366,8 @@ fn default_socket_pump<'a>(
     in_tx: &'a mpsc::Sender<String>,
     out_rx: &'a mut mpsc::Receiver<String>,
 ) -> SocketPumpFuture<'a> {
+    let receiver: &'a mut DynSocketReceiver = receiver;
+    let sender: &'a mut DynSocketSender = sender;
     Box::pin(pump_socket_io(receiver, sender, in_tx, out_rx))
 }
 
@@ -735,7 +733,7 @@ mod tests {
     }
 
     impl futures_util::Sink<Message> for ScriptedSink {
-        type Error = std::io::Error;
+        type Error = axum::Error;
 
         fn poll_ready(
             self: Pin<&mut Self>,
@@ -746,7 +744,7 @@ mod tests {
 
         fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
             if self.fail_send {
-                return Err(std::io::Error::other("sink send failed"));
+                return Err(axum::Error::new(std::io::Error::other("sink send failed")));
             }
             self.get_mut().sent.push(item);
             Ok(())
