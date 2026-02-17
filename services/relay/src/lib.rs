@@ -820,6 +820,56 @@ bind = "127.0.0.1:9010"
     }
 
     #[test]
+    fn config_reports_invalid_min_connections_and_max_lifetime_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "bad", || {
+                    let err = RelayConfig::from_env().expect_err("invalid min connections");
+                    assert!(matches!(
+                        err,
+                        RelayConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: ENV_STORAGE_MIN_CONNECTIONS,
+                            ..
+                        })
+                    ));
+                });
+                with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "bad", || {
+                    let err = RelayConfig::from_env().expect_err("invalid max lifetime");
+                    assert!(matches!(
+                        err,
+                        RelayConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: ENV_STORAGE_MAX_LIFETIME_SECS,
+                            ..
+                        })
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_from_toml_file_reports_config_error_for_missing_path() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                let mut path = std::env::temp_dir();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                path.push(format!("missing-relay-config-{now}.toml"));
+                let err = RelayConfig::from_toml_file(&path).expect_err("missing path");
+                assert!(matches!(err, RelayConfigError::Config(_)));
+            },
+        );
+    }
+
+    #[test]
     fn config_reports_invalid_policy_settings() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(

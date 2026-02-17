@@ -197,12 +197,12 @@ pub struct HttpAdmissionTransport {
 }
 
 impl HttpAdmissionTransport {
-    pub fn new(timeout: Duration) -> Result<Self, AdmissionHookError> {
+    pub fn new(timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(|err| AdmissionHookError::Transport(err.to_string()))?;
-        Ok(Self { client })
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { client }
     }
 }
 
@@ -242,9 +242,9 @@ pub struct AdmissionHookClient<T: AdmissionTransport> {
 }
 
 impl AdmissionHookClient<HttpAdmissionTransport> {
-    pub fn new_http(config: AdmissionHookConfig) -> Result<Self, AdmissionHookError> {
-        let transport = HttpAdmissionTransport::new(config.timeout)?;
-        Ok(Self { config, transport })
+    pub fn new_http(config: AdmissionHookConfig) -> Self {
+        let transport = HttpAdmissionTransport::new(config.timeout);
+        Self { config, transport }
     }
 }
 
@@ -630,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_transport_maps_connection_errors() {
-        let transport = HttpAdmissionTransport::new(Duration::from_millis(50)).expect("transport");
+        let transport = HttpAdmissionTransport::new(Duration::from_millis(50));
         let err = transport
             .send("http://127.0.0.1:1/decide", &sample_request_payload())
             .await
@@ -641,7 +641,7 @@ mod tests {
     #[tokio::test]
     async fn http_transport_maps_non_success_statuses() {
         let endpoint = spawn_error_server(StatusCode::FORBIDDEN, "denied").await;
-        let transport = HttpAdmissionTransport::new(Duration::from_secs(1)).expect("transport");
+        let transport = HttpAdmissionTransport::new(Duration::from_secs(1));
         let err = transport
             .send(&endpoint, &sample_request_payload())
             .await
@@ -658,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn http_transport_maps_decode_errors() {
         let endpoint = spawn_error_server(StatusCode::OK, "not-json").await;
-        let transport = HttpAdmissionTransport::new(Duration::from_secs(1)).expect("transport");
+        let transport = HttpAdmissionTransport::new(Duration::from_secs(1));
         let err = transport
             .send(&endpoint, &sample_request_payload())
             .await
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn http_transport_new_accepts_zero_timeout() {
-        let transport = HttpAdmissionTransport::new(Duration::from_secs(0)).expect("transport");
+        let transport = HttpAdmissionTransport::new(Duration::from_secs(0));
         let _ = transport;
     }
 
@@ -679,7 +679,7 @@ mod tests {
             Duration::from_secs(0),
             AdmissionFallback::Reject,
         );
-        let client = AdmissionHookClient::new_http(config).expect("client");
+        let client = AdmissionHookClient::new_http(config);
         let _ = client;
     }
 
@@ -688,7 +688,7 @@ mod tests {
         let endpoint = spawn_accept_server().await;
         let config =
             AdmissionHookConfig::new(endpoint, Duration::from_secs(1), AdmissionFallback::Reject);
-        let client = AdmissionHookClient::new_http(config).expect("client");
+        let client = AdmissionHookClient::new_http(config);
         let decision = client.decide(&sample_event()).await;
         assert!(matches!(decision, AdmissionDecision::Accept));
     }
@@ -718,7 +718,7 @@ mod tests {
         let endpoint = spawn_accept_server().await;
         let config =
             AdmissionHookConfig::new(endpoint, Duration::from_secs(1), AdmissionFallback::Reject);
-        let client = AdmissionHookClient::new_http(config).expect("client");
+        let client = AdmissionHookClient::new_http(config);
         let decision = decide_via_trait(&client, &sample_event()).await;
         assert!(matches!(decision, AdmissionDecision::Accept));
     }

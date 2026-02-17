@@ -107,9 +107,9 @@ fn build_state(config: RelayConfig) -> Result<RelayState, RelayError> {
     let policy = Policy::from_config(&config.policy);
     let metrics = Arc::new(RelayMetrics::new());
     let admission = match &config.admission {
-        Some(config) => Some(Arc::new(
-            AdmissionHookClient::new_http(config.clone()).map_err(RelayError::Admission)?,
-        ) as Arc<dyn AdmissionDecider>),
+        Some(config) => {
+            Some(Arc::new(AdmissionHookClient::new_http(config.clone())) as Arc<dyn AdmissionDecider>)
+        }
         None => None,
     };
     Ok(RelayState {
