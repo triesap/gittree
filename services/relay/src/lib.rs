@@ -401,7 +401,9 @@ mod tests {
     use super::ENV_ADMISSION_TIMEOUT_SECS;
     use super::ENV_ADMISSION_URL;
     use super::ENV_STORAGE_APP_NAME;
+    use super::ENV_STORAGE_MAX_LIFETIME_SECS;
     use super::ENV_STORAGE_MAX_CONNECTIONS;
+    use super::ENV_STORAGE_MIN_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
     use super::ObservabilityError;
     use super::Policy;
@@ -694,6 +696,27 @@ mod tests {
     }
 
     #[test]
+    fn repository_builder_rejects_invalid_pool_settings() {
+        let config = RelayConfig {
+            bind: "0.0.0.0:8080".to_string(),
+            storage: gittree_storage::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 0,
+                min_connections: 0,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: Some("gittree".to_string()),
+            },
+            policy: RelayPolicyConfig::default(),
+            admission: None,
+        };
+
+        let err = build_repositories(&config).expect_err("invalid pool settings");
+        assert!(matches!(err, RelayError::Storage(_)));
+    }
+
+    #[test]
     fn observability_init_returns_registry() {
         let result = init_observability();
         let init_ok = matches!(&result, Ok(handle) if handle.prometheus_registry().is_some());
@@ -704,6 +727,15 @@ mod tests {
             ))
         );
         assert!(init_ok || already_initialized);
+    }
+
+    #[test]
+    fn observability_init_reports_invalid_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_JSON", "definitely-not-bool", || {
+            let err = init_observability().expect_err("invalid observability env");
+            assert!(matches!(err, RelayError::ObservabilityConfig(_)));
+        });
     }
 
     #[test]
@@ -779,6 +811,78 @@ bind = "127.0.0.1:9010"
                             err,
                             RelayConfigError::Storage(StorageConfigError::InvalidConfig(_))
                         ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_reports_invalid_policy_settings() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", || {
+                    let err = RelayConfig::from_env().expect_err("invalid policy");
+                    assert!(matches!(err, RelayConfigError::Config(_)));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_from_toml_file_reports_storage_policy_and_admission_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let path = write_temp_services_config(
+            r#"
+[services.relay]
+bind = "127.0.0.1:9010"
+"#,
+        );
+
+        without_env_var(ENV_STORAGE_READ_URL, || {
+            let err = RelayConfig::from_toml_file(&path).expect_err("missing storage env");
+            assert!(matches!(
+                err,
+                RelayConfigError::Storage(StorageConfigError::MissingEnv(_))
+            ));
+        });
+
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", || {
+                    let err = RelayConfig::from_toml_file(&path).expect_err("invalid policy");
+                    assert!(matches!(err, RelayConfigError::Config(_)));
+                });
+                with_env_var(ENV_ADMISSION_URL, " ", || {
+                    let err = RelayConfig::from_toml_file(&path).expect_err("invalid admission");
+                    assert!(matches!(
+                        err,
+                        RelayConfigError::Admission(AdmissionConfigError::InvalidEndpoint(_))
+                    ));
+                });
+            },
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn config_parses_min_connections_and_lifetimes_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "3", || {
+                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "42", || {
+                        let config = RelayConfig::from_env().expect("config");
+                        assert_eq!(config.storage.min_connections, 3);
+                        assert_eq!(config.storage.max_lifetime_secs, Some(42));
                     });
                 });
             },
