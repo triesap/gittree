@@ -391,17 +391,9 @@ impl<S: EventStore> Session<S> {
             return Err(AUTH_REQUIRED_REASON.to_string());
         };
 
-        let pubkey_bytes = match hex::decode(pubkey) {
-            Ok(bytes) => bytes,
-            Err(_) => return Err(format!("{RESTRICTED_PREFIX} invalid pubkey")),
-        };
-        let member = match membership
-            .membership_by_pubkey(tenant_id, &pubkey_bytes)
-            .await
-        {
-            Ok(member) => member,
-            Err(err) => return Err(err.to_string()),
-        };
+        let pubkey_bytes = decode_pubkey_hex(pubkey)?;
+        let member =
+            membership_by_pubkey_bytes(membership.as_ref(), tenant_id, &pubkey_bytes).await?;
         let Some(member) = member else {
             return Err(format!("{RESTRICTED_PREFIX} membership required"));
         };
@@ -906,16 +898,16 @@ impl<S: EventStore> Session<S> {
                 }
             }
 
-            let existing = match membership
-                .membership_by_pubkey(tenant_id, &pubkey_bytes)
-                .await
-            {
-                Ok(record) => record,
-                Err(err) => {
-                    self.record_event("rejected");
-                    return Some(vec![Notice::message(err.to_string()).into()]);
-                }
-            };
+            let existing =
+                match membership_by_pubkey_bytes(membership.as_ref(), tenant_id, &pubkey_bytes)
+                    .await
+                {
+                    Ok(record) => record,
+                    Err(err) => {
+                        self.record_event("rejected");
+                        return Some(vec![Notice::message(err).into()]);
+                    }
+                };
 
             let already_active = existing
                 .as_ref()
@@ -956,16 +948,16 @@ impl<S: EventStore> Session<S> {
                 format!("{INFO_PREFIX} welcome to the relay."),
             ))
         } else {
-            let existing = match membership
-                .membership_by_pubkey(tenant_id, &pubkey_bytes)
-                .await
-            {
-                Ok(record) => record,
-                Err(err) => {
-                    self.record_event("rejected");
-                    return Some(vec![Notice::message(err.to_string()).into()]);
-                }
-            };
+            let existing =
+                match membership_by_pubkey_bytes(membership.as_ref(), tenant_id, &pubkey_bytes)
+                    .await
+                {
+                    Ok(record) => record,
+                    Err(err) => {
+                        self.record_event("rejected");
+                        return Some(vec![Notice::message(err).into()]);
+                    }
+                };
 
             let Some(record) = existing else {
                 self.record_event("rejected");
@@ -1065,17 +1057,9 @@ impl<S: EventStore> Session<S> {
             return Err(AUTH_REQUIRED_REASON.to_string());
         };
 
-        let pubkey_bytes = match hex::decode(pubkey) {
-            Ok(bytes) => bytes,
-            Err(_) => return Err(format!("{RESTRICTED_PREFIX} invalid pubkey")),
-        };
-        let member = match membership
-            .membership_by_pubkey(tenant_id, &pubkey_bytes)
-            .await
-        {
-            Ok(member) => member,
-            Err(err) => return Err(err.to_string()),
-        };
+        let pubkey_bytes = decode_pubkey_hex(pubkey)?;
+        let member =
+            membership_by_pubkey_bytes(membership.as_ref(), tenant_id, &pubkey_bytes).await?;
         let Some(member) = member else {
             return Err(format!("{RESTRICTED_PREFIX} membership required"));
         };
@@ -1218,10 +1202,7 @@ impl<S: EventStore> Session<S> {
             }
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = unix_now_secs();
         let skew = (now - event.created_at).abs();
         if skew > AUTH_MAX_SKEW_SECS {
             return vec![ServerMessage::Ok {
@@ -1253,6 +1234,28 @@ fn generate_challenge() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+fn decode_pubkey_hex(pubkey: &str) -> Result<Vec<u8>, String> {
+    hex::decode(pubkey).map_err(|_| format!("{RESTRICTED_PREFIX} invalid pubkey"))
+}
+
+async fn membership_by_pubkey_bytes(
+    membership: &(dyn RelayMembershipRepository + Send + Sync),
+    tenant_id: &str,
+    pubkey: &[u8],
+) -> Result<Option<RelayMembershipRecord>, String> {
+    membership
+        .membership_by_pubkey(tenant_id, pubkey)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn find_tag_value(tags: &[Vec<String>], name: &str) -> Option<String> {
@@ -1660,7 +1663,10 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert_eq!(closed_reason(&auth_response[0]), super::AUTH_REQUIRED_REASON);
+        assert_eq!(
+            closed_reason(&auth_response[0]),
+            super::AUTH_REQUIRED_REASON
+        );
 
         let membership = Arc::new(InMemoryRepositories::new());
         let mut membership_required =
@@ -1674,9 +1680,7 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert!(
-            closed_reason(&membership_response[0]).starts_with(super::RESTRICTED_PREFIX)
-        );
+        assert!(closed_reason(&membership_response[0]).starts_with(super::RESTRICTED_PREFIX));
 
         let mut parse_session = Session::new(MemoryStore::new());
         let parse_response = parse_session
@@ -1890,7 +1894,8 @@ mod tests {
             retention_max_age_seconds: Some(5),
             ..Policy::default()
         };
-        let session = Session::with_policy(scripted_store_dyn(ScriptedStore::query_error()), policy);
+        let session =
+            Session::with_policy(scripted_store_dyn(ScriptedStore::query_error()), policy);
         let err = session
             .apply_retention(100)
             .await
@@ -3409,12 +3414,13 @@ mod tests {
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
         let (pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
-        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
-            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
-            .with_relay_signer(
-                pubkey.serialize().to_vec(),
-                secret_key.secret_bytes().to_vec(),
-            );
+        let mut session =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+                .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+                .with_relay_signer(
+                    pubkey.serialize().to_vec(),
+                    secret_key.secret_bytes().to_vec(),
+                );
         authenticate_session(&mut session).await;
         let authenticated_pubkey = session
             .authenticated_pubkey()
@@ -4143,10 +4149,8 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
         let membership = Arc::new(InMemoryRepositories::new());
         let tenant_id = "tenant-arc";
-        let mut session = Session::new(store).with_membership(
-            Some(tenant_id.to_string()),
-            Some(membership.clone()),
-        );
+        let mut session = Session::new(store)
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
 
         let _ = session
             .handle_message(ClientMessage::Req {
@@ -4155,9 +4159,11 @@ mod tests {
             })
             .await;
         let dispatch_responses = session.dispatch_event(&signed_event("arc-dispatch-hit"));
-        assert!(dispatch_responses
-            .iter()
-            .any(|response| matches!(response, ServerMessage::Event { .. })));
+        assert!(
+            dispatch_responses
+                .iter()
+                .any(|response| matches!(response, ServerMessage::Event { .. }))
+        );
 
         let member_pubkey_hex = signed_event("arc-member").pubkey;
         let member_pubkey = hex::decode(&member_pubkey_hex).expect("pubkey");
@@ -4202,6 +4208,73 @@ mod tests {
             .expect("membership response");
         assert!(matches!(
             join_responses.first(),
+            Some(ServerMessage::Ok { accepted: true, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_arc_store_executes_auth_invite_and_leave_paths() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-arc-auth";
+
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x66; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+
+        let member_pubkey_hex = signed_event("arc-member-auth").pubkey;
+        let member_pubkey = hex::decode(&member_pubkey_hex).expect("member pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: member_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+
+        let mut session = Session::with_policy_and_auth(store, Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+            .with_membership_requirements(true, true)
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            )
+            .with_relay_url(Some("wss://relay.example".to_string()));
+
+        authenticate_session(&mut session).await;
+        session
+            .require_membership()
+            .await
+            .expect("membership required");
+
+        let invite_responses = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-invite".to_string(),
+                filters: vec![json!({"kinds": [super::NIP43_INVITE_KIND]})],
+            })
+            .await;
+        assert!(
+            invite_responses
+                .iter()
+                .any(|response| matches!(response, ServerMessage::Event { .. }))
+        );
+
+        let leave_event = signed_event_with_tags(
+            "arc-leave",
+            super::NIP43_LEAVE_KIND,
+            vec![vec!["-".to_string()]],
+        );
+        let leave_responses = session
+            .handle_membership_event(&leave_event, 30)
+            .await
+            .expect("leave response");
+        assert!(matches!(
+            leave_responses.first(),
             Some(ServerMessage::Ok { accepted: true, .. })
         ));
     }
@@ -4325,12 +4398,13 @@ mod tests {
             .await
             .expect("membership insert");
 
-        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
-            .with_membership(Some(tenant_id.to_string()), Some(membership))
-            .with_relay_signer(
-                relay_pubkey.serialize().to_vec(),
-                relay_secret.secret_bytes().to_vec(),
-            );
+        let mut session =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+                .with_membership(Some(tenant_id.to_string()), Some(membership))
+                .with_relay_signer(
+                    relay_pubkey.serialize().to_vec(),
+                    relay_secret.secret_bytes().to_vec(),
+                );
         authenticate_session(&mut session).await;
 
         let filters = vec![crate::Filter {
@@ -4388,12 +4462,13 @@ mod tests {
             .await
             .expect("membership insert");
 
-        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
-            .with_membership(Some(tenant_id.to_string()), Some(membership))
-            .with_relay_signer(
-                relay_pubkey.serialize().to_vec(),
-                relay_secret.secret_bytes().to_vec(),
-            );
+        let mut session =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+                .with_membership(Some(tenant_id.to_string()), Some(membership))
+                .with_relay_signer(
+                    relay_pubkey.serialize().to_vec(),
+                    relay_secret.secret_bytes().to_vec(),
+                );
         authenticate_session(&mut session).await;
 
         let filters = vec![crate::Filter {
