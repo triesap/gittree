@@ -79,7 +79,7 @@ async fn serve_with_observability(
 async fn serve_inner(config: RelayConfig) -> Result<(), RelayError> {
     serve_inner_with_shutdown(
         config,
-        Box::pin(await_shutdown_signal(tokio::signal::ctrl_c())),
+        Box::pin(await_shutdown_signal(Box::pin(tokio::signal::ctrl_c()))),
     )
     .await
 }
@@ -263,10 +263,9 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-async fn await_shutdown_signal<S>(signal: S)
-where
-    S: std::future::Future<Output = Result<(), std::io::Error>>,
-{
+async fn await_shutdown_signal(
+    signal: Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>,
+) {
     let _ = signal.await;
 }
 
@@ -358,6 +357,12 @@ async fn pump_socket_io<R, S>(
 type SocketReceiver = SplitStream<WebSocket>;
 type SocketSender = SplitSink<WebSocket, Message>;
 type SocketPumpFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+type SocketPump = for<'a> fn(
+    &'a mut SocketReceiver,
+    &'a mut SocketSender,
+    &'a mpsc::Sender<String>,
+    &'a mut mpsc::Receiver<String>,
+) -> SocketPumpFuture<'a>;
 
 fn default_socket_pump<'a>(
     receiver: &'a mut SocketReceiver,
@@ -368,19 +373,12 @@ fn default_socket_pump<'a>(
     Box::pin(pump_socket_io(receiver, sender, in_tx, out_rx))
 }
 
-async fn handle_socket_with_pump<P>(
+async fn handle_socket_with_pump(
     socket: WebSocket,
     state: Arc<RelayState>,
     tenant: TenantContext,
-    pump: P,
-) where
-    P: for<'a> FnOnce(
-        &'a mut SocketReceiver,
-        &'a mut SocketSender,
-        &'a mpsc::Sender<String>,
-        &'a mut mpsc::Receiver<String>,
-    ) -> SocketPumpFuture<'a>,
-{
+    pump: SocketPump,
+) {
     let _ = (&tenant.tenant_id, &tenant.tenant);
     let (mut sender, mut receiver) = socket.split();
     let (in_tx, in_rx) = mpsc::channel(128);
@@ -1576,19 +1574,19 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_signal_future_can_start_and_be_aborted() {
-        let task = tokio::spawn(super::await_shutdown_signal(std::future::pending::<
-            Result<(), std::io::Error>,
-        >()));
+        let task = tokio::spawn(super::await_shutdown_signal(Box::pin(
+            std::future::pending::<Result<(), std::io::Error>>(),
+        )));
         tokio::time::sleep(Duration::from_millis(10)).await;
         task.abort();
     }
 
     #[tokio::test]
     async fn await_shutdown_signal_handles_ready_results() {
-        super::await_shutdown_signal(async { Ok(()) }).await;
-        super::await_shutdown_signal(async {
+        super::await_shutdown_signal(Box::pin(async { Ok(()) })).await;
+        super::await_shutdown_signal(Box::pin(async {
             Err(std::io::Error::other("ignored in shutdown helper"))
-        })
+        }))
         .await;
     }
 
