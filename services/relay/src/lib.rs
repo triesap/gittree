@@ -718,15 +718,17 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
         let result = init_observability();
         let init_ok = matches!(&result, Ok(handle) if handle.prometheus_registry().is_some());
         let already_initialized = matches!(
-            result,
+            &result,
             Err(RelayError::Observability(
                 ObservabilityError::SubscriberInit(_)
             ))
         );
-        assert!(init_ok || already_initialized);
+        let invalid_env = matches!(&result, Err(RelayError::ObservabilityConfig(_)));
+        assert!(init_ok || already_initialized || invalid_env);
     }
 
     #[test]

@@ -339,9 +339,10 @@ async fn apply_delete_repo<R: EventRepository>(
         query.tenant_id = Some(tenant_id.to_string());
         query.kinds = vec![key.kind];
         query.authors = vec![key.pubkey.clone()];
-        if let Some(identifier) = key.identifier {
-            query.tags = vec![TagRecord::new("d", identifier)];
-        }
+        query.tags = key
+            .identifier
+            .map(|identifier| vec![TagRecord::new("d", identifier)])
+            .unwrap_or_default();
         let records = repo.query_events(&query).await.map_err(map_repo_err)?;
         for record in records {
             if record.created_at <= event.created_at {
@@ -399,7 +400,10 @@ fn replaceable_key(event: &NostrEvent) -> Option<ReplaceableKey> {
         });
     }
     if is_parameterized_replaceable_kind(event.kind) {
-        let identifier = collect_tag_values(&event.tags, "d").into_iter().next()?;
+        let identifiers = collect_tag_values(&event.tags, "d");
+        let Some(identifier) = identifiers.into_iter().next() else {
+            return None;
+        };
         return Some(ReplaceableKey {
             kind: event.kind,
             pubkey: event.pubkey.clone(),
@@ -429,8 +433,15 @@ fn collect_tag_values(tags: &[Vec<String>], name: &str) -> Vec<String> {
 
 fn parse_address(value: &str) -> Option<ReplaceableKey> {
     let mut parts = value.split(':');
-    let kind = parts.next()?.parse::<u32>().ok()?;
-    let pubkey = parts.next()?.to_string();
+    let kind_part = parts.next()?;
+    let kind = match kind_part.parse::<u32>() {
+        Ok(kind) => kind,
+        Err(_) => return None,
+    };
+    let pubkey = match parts.next() {
+        Some(pubkey) => pubkey.to_string(),
+        None => return None,
+    };
     let identifier = parts.next().map(|part| part.to_string());
     Some(ReplaceableKey {
         kind,
@@ -569,7 +580,7 @@ mod tests {
         StorageConfig, StorageError, TagRecord,
     };
     use serde_json::json;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[derive(Debug, Clone)]
@@ -579,6 +590,11 @@ mod tests {
         fail_delete: bool,
         fail_query: bool,
         query_results: Vec<EventRecord>,
+    }
+
+    #[derive(Default)]
+    struct CaptureQueryRepo {
+        queries: Mutex<Vec<EventQuery>>,
     }
 
     impl ScriptedEventRepo {
@@ -711,6 +727,37 @@ mod tests {
                 return Ok(vec![delete_target_record()]);
             }
             Ok(self.query_results.clone())
+        }
+    }
+
+    #[async_trait]
+    impl EventRepository for CaptureQueryRepo {
+        async fn insert_event(&self, _record: EventRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn get_event(
+            &self,
+            _tenant_id: &str,
+            _event_id: &[u8],
+        ) -> Result<Option<EventRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn delete_event(
+            &self,
+            _tenant_id: &str,
+            _event_id: &[u8],
+        ) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
+        async fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, StorageError> {
+            self.queries
+                .lock()
+                .expect("queries lock")
+                .push(query.clone());
+            Ok(Vec::new())
         }
     }
 
@@ -1513,6 +1560,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_delete_repo_sets_identifier_tag_in_address_query() {
+        let repo = CaptureQueryRepo::default();
+        let mut delete = sample_event(&"8e".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 5;
+        delete.tags = vec![vec![
+            "a".to_string(),
+            format!("30023:{}:demo", delete.pubkey),
+        ]];
+
+        apply_delete_repo(&repo, "default", &delete)
+            .await
+            .expect("address query should be built");
+
+        let queries = repo.queries.lock().expect("queries lock");
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].tags, vec![TagRecord::new("d", "demo")]);
+    }
+
+    #[tokio::test]
+    async fn capture_query_repo_methods_return_default_values() {
+        let repo = CaptureQueryRepo::default();
+        repo.insert_event(delete_target_record())
+            .await
+            .expect("insert");
+        let event = repo
+            .get_event("default", &[0xAA; 4])
+            .await
+            .expect("get");
+        assert!(event.is_none());
+        let deleted = repo
+            .delete_event("default", &[0xAA; 4])
+            .await
+            .expect("delete");
+        assert!(!deleted);
+        let queried = repo
+            .query_events(&EventQuery::default())
+            .await
+            .expect("query");
+        assert!(queried.is_empty());
+    }
+
+    #[tokio::test]
     async fn apply_replaceable_repo_returns_duplicate_when_existing_is_newer() {
         let mut existing = sample_event(&"87".repeat(32));
         existing.kind = 0;
@@ -1583,5 +1674,12 @@ mod tests {
         parameterized.tags = vec![vec!["d".to_string(), "demo".to_string()]];
         let key = replaceable_key(&parameterized).expect("replaceable key");
         assert_eq!(key.identifier.as_deref(), Some("demo"));
+        let mut parameterized_missing_d = sample_event("parameterized-missing");
+        parameterized_missing_d.kind = 30023;
+        assert!(replaceable_key(&parameterized_missing_d).is_none());
+
+        assert!(parse_address(":pubkey:demo").is_none());
+        let parsed_extra = parse_address("30023:pubkey:demo:extra").expect("address");
+        assert_eq!(parsed_extra.identifier.as_deref(), Some("demo"));
     }
 }

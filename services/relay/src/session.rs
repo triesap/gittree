@@ -3213,6 +3213,109 @@ mod tests {
         assert_eq!(member_tags, 1);
     }
 
+    #[test]
+    fn sign_event_populates_id_and_signature() {
+        let secret_key = SecretKey::from_slice(&[0x66; 32]).expect("secret");
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
+        let signer = super::TenantSigner {
+            pubkey: hex::encode(pubkey.serialize()),
+            secret_key,
+        };
+        let mut event = NostrEvent {
+            id: "placeholder".to_string(),
+            pubkey: signer.pubkey.clone(),
+            created_at: 1,
+            kind: super::NIP43_MEMBERSHIP_KIND,
+            tags: vec![vec!["-".to_string()]],
+            content: String::new(),
+            sig: String::new(),
+        };
+
+        super::sign_event(&mut event, &signer).expect("sign event");
+        assert_eq!(event.id.len(), 64);
+        assert_eq!(event.sig.len(), 128);
+    }
+
+    #[tokio::test]
+    async fn build_membership_list_event_returns_signed_event_when_configured() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(&"77".repeat(32)).expect("pubkey"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+
+        let secret_key = SecretKey::from_slice(&[0x67; 32]).expect("secret");
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
+        let session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(membership))
+            .with_relay_signer(
+                pubkey.serialize().to_vec(),
+                secret_key.secret_bytes().to_vec(),
+            );
+
+        let event = session
+            .build_membership_list_event(10)
+            .await
+            .expect("membership list")
+            .expect("membership list event");
+        assert_eq!(event.kind, super::NIP43_MEMBERSHIP_KIND);
+        assert_eq!(event.id.len(), 64);
+        assert_eq!(event.sig.len(), 128);
+    }
+
+    #[tokio::test]
+    async fn build_invite_event_returns_signed_event_for_active_member() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+        let secret_key = SecretKey::from_slice(&[0x68; 32]).expect("secret");
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+            .with_relay_signer(
+                pubkey.serialize().to_vec(),
+                secret_key.secret_bytes().to_vec(),
+            );
+        authenticate_session(&mut session).await;
+        let authenticated_pubkey = session
+            .authenticated_pubkey()
+            .expect("authenticated pubkey")
+            .to_string();
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(&authenticated_pubkey).expect("pubkey"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+
+        let event = session.build_invite_event(10).await.expect("invite");
+        assert_eq!(event.kind, super::NIP43_INVITE_KIND);
+        assert_eq!(event.id.len(), 64);
+        assert_eq!(event.sig.len(), 128);
+        assert!(event.tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("claim")
+                && tag.get(1).is_some_and(|value| !value.is_empty())
+        }));
+    }
+
     #[tokio::test]
     async fn req_membership_required_surfaces_repository_failure() {
         let membership = Arc::new(ScriptedMembership::new("membership_by_pubkey"));
