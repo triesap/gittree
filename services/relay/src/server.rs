@@ -65,7 +65,14 @@ impl TenantRepository for PostgresRepositories {
 }
 
 pub async fn serve(config: RelayConfig) -> Result<(), RelayError> {
-    let _observability = crate::init_observability()?;
+    serve_with_observability(config, || crate::init_observability().map(|_| ())).await
+}
+
+async fn serve_with_observability<F>(config: RelayConfig, init_observability: F) -> Result<(), RelayError>
+where
+    F: FnOnce() -> Result<(), RelayError>,
+{
+    init_observability()?;
     serve_inner(config).await
 }
 
@@ -1605,8 +1612,22 @@ mod tests {
     async fn serve_returns_serve_error_for_invalid_bind_address() {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
-        let err = super::serve(config).await.expect_err("invalid bind");
-        assert!(matches!(err, RelayError::Serve(_) | RelayError::Observability(_)));
+        let err = super::serve_with_observability(config, || Ok(()))
+            .await
+            .expect_err("invalid bind");
+        assert!(matches!(err, RelayError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_with_observability_returns_setup_error() {
+        let mut config = sample_config();
+        config.bind = "127.0.0.1:0".to_string();
+        let err = super::serve_with_observability(config, || {
+            Err(RelayError::Serve("setup failed".to_string()))
+        })
+        .await
+        .expect_err("expected setup error");
+        assert!(matches!(err, RelayError::Serve(message) if message == "setup failed"));
     }
 
     #[tokio::test]
@@ -1615,7 +1636,7 @@ mod tests {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
         let err = super::serve(config).await.expect_err("expected serve error");
-        assert!(matches!(err, RelayError::Observability(_) | RelayError::Serve(_)));
+        assert!(matches!(err, RelayError::Observability(_)));
     }
 
     #[tokio::test]
