@@ -1446,6 +1446,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_delete_repo_maps_get_event_errors() {
+        let repo = ScriptedEventRepo::get_error();
+        let mut delete = sample_event(&"8a".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 5;
+        delete.tags = vec![vec!["e".to_string(), "11".repeat(32)]];
+
+        let err = apply_delete_repo(&repo, "default", &delete)
+            .await
+            .expect_err("get errors should map to backend errors");
+        assert!(matches!(err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
     async fn apply_delete_repo_deletes_matching_e_target() {
         let repo = ScriptedEventRepo::with_query_results(vec![delete_target_record()]);
         let mut delete = sample_event(&"88".repeat(32));
@@ -1474,6 +1489,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_delete_repo_applies_address_identifier_filter() {
+        let mut target = sample_event(&"8b".repeat(32));
+        target.kind = 30023;
+        target.pubkey = "aa".repeat(32);
+        target.created_at = 1;
+        target.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        let target_record = event_to_record(&target, "default").expect("target record");
+        let repo = ScriptedEventRepo::with_query_results(vec![target_record]);
+
+        let mut delete = sample_event(&"8c".repeat(32));
+        delete.kind = 5;
+        delete.pubkey = "aa".repeat(32);
+        delete.created_at = 5;
+        delete.tags = vec![vec![
+            "a".to_string(),
+            format!("30023:{}:demo", delete.pubkey),
+        ]];
+
+        apply_delete_repo(&repo, "default", &delete)
+            .await
+            .expect("matching address should be processed");
+    }
+
+    #[tokio::test]
     async fn apply_replaceable_repo_returns_duplicate_when_existing_is_newer() {
         let mut existing = sample_event(&"87".repeat(32));
         existing.kind = 0;
@@ -1491,6 +1530,20 @@ mod tests {
             .await
             .expect("apply");
         assert!(duplicate);
+    }
+
+    #[tokio::test]
+    async fn apply_replaceable_repo_maps_delete_errors() {
+        let repo = ScriptedEventRepo::delete_error();
+        let mut incoming = sample_event(&"8d".repeat(32));
+        incoming.kind = 0;
+        incoming.pubkey = "aa".repeat(32);
+        incoming.created_at = 5;
+        let key = replaceable_key(&incoming).expect("replaceable key");
+        let err = apply_replaceable_repo(&repo, "default", &incoming, &key)
+            .await
+            .expect_err("delete failure should map to backend error");
+        assert!(matches!(err, StoreError::Backend(_)));
     }
 
     #[test]
@@ -1517,9 +1570,18 @@ mod tests {
 
         assert!(parse_address("bad").is_none());
         assert!(parse_address("not-a-kind:pubkey:demo").is_none());
+        assert!(parse_address("30023").is_none());
+        let parsed_without_identifier = parse_address("30023:pubkey").expect("address");
+        assert_eq!(parsed_without_identifier.identifier, None);
         let parsed = parse_address("30023:pubkey:demo").expect("address");
         assert_eq!(parsed.kind, 30023);
         assert_eq!(parsed.pubkey, "pubkey");
         assert_eq!(parsed.identifier.as_deref(), Some("demo"));
+
+        let mut parameterized = sample_event("parameterized");
+        parameterized.kind = 30023;
+        parameterized.tags = vec![vec!["d".to_string(), "demo".to_string()]];
+        let key = replaceable_key(&parameterized).expect("replaceable key");
+        assert_eq!(key.identifier.as_deref(), Some("demo"));
     }
 }
