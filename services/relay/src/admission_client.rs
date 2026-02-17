@@ -194,15 +194,13 @@ pub trait AdmissionDecider: Send + Sync {
 
 pub struct HttpAdmissionTransport {
     client: reqwest::Client,
+    timeout: Duration,
 }
 
 impl HttpAdmissionTransport {
     pub fn new(timeout: Duration) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        let client = reqwest::Client::new();
+        Self { client, timeout }
     }
 }
 
@@ -216,6 +214,7 @@ impl AdmissionTransport for HttpAdmissionTransport {
         let response = self
             .client
             .post(endpoint)
+            .timeout(self.timeout)
             .json(request)
             .send()
             .await
@@ -443,12 +442,10 @@ mod tests {
         let client = AdmissionHookClient::new(config, transport);
         let event = sample_event();
 
-        let decision = client.decide(&event).await;
-        let reason = match decision {
-            AdmissionDecision::Reject { reason } => reason,
-            _ => String::new(),
-        };
-        assert!(reason.contains("admission unavailable"));
+        assert!(matches!(
+            client.decide(&event).await,
+            AdmissionDecision::Reject { ref reason } if reason.contains("admission unavailable")
+        ));
     }
 
     #[tokio::test]
@@ -474,10 +471,9 @@ mod tests {
         let client = AdmissionHookClient::new(config, transport);
         let event = sample_event();
 
-        let decision = client.decide(&event).await;
-        let filters = match decision {
+        let filters = match client.decide(&event).await {
             AdmissionDecision::RequiresRelatedEvents { filters } => filters,
-            _ => Vec::new(),
+            decision => panic!("expected requires_related_events decision, got {decision:?}"),
         };
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].authors, vec!["pub".to_string()]);
@@ -650,7 +646,7 @@ mod tests {
             .unwrap_err();
         let message = match err {
             AdmissionHookError::Transport(message) => message,
-            _ => String::new(),
+            error => panic!("expected transport error, got {error:?}"),
         };
         assert!(message.contains("admission error 403 Forbidden"));
         assert!(message.contains("denied"));
