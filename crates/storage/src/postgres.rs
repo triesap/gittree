@@ -1685,11 +1685,36 @@ WHERE datname = $1
         test_database_base_url_from_value(explicit.or(write_url).or(read_url))
     }
 
+    fn dotenv_value(key: &str) -> Option<String> {
+        let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.env")
+            .canonicalize()
+            .ok()?;
+        let content = std::fs::read_to_string(env_path).ok()?;
+        for raw_line in content.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (name, value) = line.split_once('=')?;
+            if name.trim() != key {
+                continue;
+            }
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            return Some(value.to_string());
+        }
+        None
+    }
+
     fn test_database_base_url() -> String {
         test_database_base_url_from_candidates(
             std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok(),
-            std::env::var("GITTREE_STORAGE_WRITE_URL").ok(),
-            std::env::var("GITTREE_STORAGE_READ_URL").ok(),
+            std::env::var("GITTREE_STORAGE_WRITE_URL")
+                .ok()
+                .or_else(|| dotenv_value("GITTREE_STORAGE_WRITE_URL")),
+            std::env::var("GITTREE_STORAGE_READ_URL")
+                .ok()
+                .or_else(|| dotenv_value("GITTREE_STORAGE_READ_URL")),
         )
     }
 
@@ -1921,6 +1946,11 @@ WHERE datname = $1
             test_database_base_url_from_candidates(None, None, Some("postgres://read".to_string())),
             "postgres://read".to_string()
         );
+    }
+
+    #[test]
+    fn dotenv_value_returns_none_for_unknown_keys() {
+        assert!(dotenv_value("__GITTREE_STORAGE_TEST_UNKNOWN__").is_none());
     }
 
     #[tokio::test]
