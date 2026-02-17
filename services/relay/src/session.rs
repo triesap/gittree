@@ -1367,12 +1367,154 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    fn assert_notice(message: &ServerMessage) {
+        assert!(matches!(message, ServerMessage::Notice { .. }));
+    }
+
+    fn assert_event(message: &ServerMessage) {
+        assert!(matches!(message, ServerMessage::Event { .. }));
+    }
+
+    fn assert_eose(message: &ServerMessage) {
+        assert!(matches!(message, ServerMessage::Eose { .. }));
+    }
+
+    fn assert_auth(message: &ServerMessage) {
+        assert!(matches!(message, ServerMessage::Auth { .. }));
+    }
+
+    fn assert_count(message: &ServerMessage, expected: u64) {
+        assert!(matches!(
+            message,
+            ServerMessage::Count { count, .. } if *count == expected
+        ));
+    }
+
+    fn assert_ok_rejected(message: &ServerMessage) {
+        assert!(matches!(
+            message,
+            ServerMessage::Ok {
+                accepted: false,
+                ..
+            }
+        ));
+    }
+
+    fn assert_ok_rejected_with_non_empty_message(message: &ServerMessage) {
+        assert!(matches!(
+            message,
+            ServerMessage::Ok {
+                accepted: false,
+                message,
+                ..
+            } if !message.is_empty()
+        ));
+    }
+
+    fn closed_reason(message: &ServerMessage) -> &str {
+        match message {
+            ServerMessage::Closed { message, .. } => message.as_str(),
+            other => panic!("expected closed message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assertion_helpers_accept_expected_variants() {
+        assert_notice(&ServerMessage::Notice {
+            message: "notice".to_string(),
+        });
+        assert_event(&ServerMessage::Event {
+            subscription_id: "sub".to_string(),
+            event: json!({}),
+        });
+        assert_eose(&ServerMessage::Eose {
+            subscription_id: "sub".to_string(),
+        });
+        assert_auth(&ServerMessage::Auth {
+            challenge: "challenge".to_string(),
+        });
+        assert_count(
+            &ServerMessage::Count {
+                subscription_id: "sub".to_string(),
+                count: 2,
+            },
+            2,
+        );
+        assert_eq!(
+            closed_reason(&ServerMessage::Closed {
+                subscription_id: "sub".to_string(),
+                message: "closed".to_string(),
+            }),
+            "closed"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_wrong_variant() {
+        assert_notice(&ServerMessage::Eose {
+            subscription_id: "sub".to_string(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_wrong_event_variant() {
+        assert_event(&ServerMessage::Notice {
+            message: "notice".to_string(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_wrong_eose_variant() {
+        assert_eose(&ServerMessage::Notice {
+            message: "notice".to_string(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_wrong_auth_variant() {
+        assert_auth(&ServerMessage::Notice {
+            message: "notice".to_string(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_non_rejected_ok() {
+        assert_ok_rejected(&ServerMessage::Ok {
+            event_id: "id".to_string(),
+            accepted: true,
+            message: "saved".to_string(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_empty_rejected_message() {
+        assert_ok_rejected_with_non_empty_message(&ServerMessage::Ok {
+            event_id: "id".to_string(),
+            accepted: false,
+            message: String::new(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn closed_reason_panics_on_non_closed_variant() {
+        let _ = closed_reason(&ServerMessage::Notice {
+            message: "notice".to_string(),
+        });
+    }
+
     #[tokio::test]
     async fn handle_raw_reports_invalid_messages() {
         let mut session = Session::new(MemoryStore::new());
         let responses = session.handle_raw("{\"bad\":true}").await;
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert_notice(&responses[0]);
     }
 
     #[tokio::test]
@@ -1425,8 +1567,8 @@ mod tests {
             .await;
 
         assert_eq!(responses.len(), 2);
-        assert!(matches!(responses[0], ServerMessage::Event { .. }));
-        assert!(matches!(responses[1], ServerMessage::Eose { .. }));
+        assert_event(&responses[0]);
+        assert_eose(&responses[1]);
         assert!(
             session
                 .registry()
@@ -1443,7 +1585,7 @@ mod tests {
                 filters: vec![json!({"ids": "not-an-array"})],
             })
             .await;
-        assert!(matches!(parse_response[0], ServerMessage::Notice { .. }));
+        assert_notice(&parse_response[0]);
 
         let mut query_session = Session::new(ScriptedStore::query_error());
         let query_response = query_session
@@ -1452,7 +1594,7 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert!(matches!(query_response[0], ServerMessage::Notice { .. }));
+        assert_notice(&query_response[0]);
     }
 
     #[tokio::test]
@@ -1478,10 +1620,7 @@ mod tests {
             .await;
 
         assert_eq!(responses.len(), 1);
-        assert!(matches!(
-            responses[0],
-            ServerMessage::Count { count: 1, .. }
-        ));
+        assert_count(&responses[0], 1);
     }
 
     #[tokio::test]
@@ -1505,7 +1644,7 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert!(matches!(rate_response[0], ServerMessage::Notice { .. }));
+        assert_notice(&rate_response[0]);
 
         let mut auth_required = Session::with_broadcast(
             MemoryStore::new(),
@@ -1521,10 +1660,7 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert!(matches!(
-            auth_response[0],
-            ServerMessage::Closed { ref message, .. } if message == super::AUTH_REQUIRED_REASON
-        ));
+        assert_eq!(closed_reason(&auth_response[0]), super::AUTH_REQUIRED_REASON);
 
         let membership = Arc::new(InMemoryRepositories::new());
         let mut membership_required =
@@ -1538,10 +1674,9 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert!(matches!(
-            membership_response[0],
-            ServerMessage::Closed { ref message, .. } if message.starts_with(super::RESTRICTED_PREFIX)
-        ));
+        assert!(
+            closed_reason(&membership_response[0]).starts_with(super::RESTRICTED_PREFIX)
+        );
 
         let mut parse_session = Session::new(MemoryStore::new());
         let parse_response = parse_session
@@ -1550,7 +1685,7 @@ mod tests {
                 filters: vec![json!({"ids": "not-an-array"})],
             })
             .await;
-        assert!(matches!(parse_response[0], ServerMessage::Notice { .. }));
+        assert_notice(&parse_response[0]);
 
         let mut query_session = Session::new(ScriptedStore::query_error());
         let query_response = query_session
@@ -1559,7 +1694,7 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert!(matches!(query_response[0], ServerMessage::Notice { .. }));
+        assert_notice(&query_response[0]);
     }
 
     #[tokio::test]
@@ -1585,7 +1720,7 @@ mod tests {
             .await;
 
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert_notice(&responses[0]);
         assert!(
             session
                 .registry()
@@ -1615,7 +1750,7 @@ mod tests {
             .await;
 
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert_notice(&responses[0]);
         assert!(
             !session
                 .registry()
@@ -1640,7 +1775,7 @@ mod tests {
             .await;
 
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert_notice(&responses[0]);
     }
 
     #[tokio::test]
@@ -1666,7 +1801,7 @@ mod tests {
             .await;
 
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert_notice(&responses[0]);
     }
 
     #[tokio::test]
@@ -1685,7 +1820,7 @@ mod tests {
         let responses = session.handle_message(ClientMessage::Event(second)).await;
 
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert_notice(&responses[0]);
     }
 
     #[tokio::test]
@@ -1795,7 +1930,7 @@ mod tests {
         let challenge = session.auth_challenge().expect("challenge");
         assert!(!challenge.is_empty());
         let messages = session.initial_messages();
-        assert!(matches!(messages[0], ServerMessage::Auth { .. }));
+        assert_auth(&messages[0]);
     }
 
     #[test]
@@ -2145,14 +2280,7 @@ mod tests {
                 serde_json::to_value(event).expect("auth event"),
             ))
             .await;
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok {
-                accepted: false,
-                ref message,
-                ..
-            } if !message.is_empty()
-        ));
+        assert_ok_rejected_with_non_empty_message(&response[0]);
     }
 
     #[tokio::test]
@@ -2275,7 +2403,7 @@ mod tests {
         let response = session
             .handle_message(ClientMessage::Auth(json!({"not": "an auth event"})))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
 
         let challenge = session.auth_challenge().expect("challenge");
         let now = SystemTime::now()
@@ -2357,13 +2485,7 @@ mod tests {
         let response = session
             .handle_message(ClientMessage::Event(serde_json::to_value(event).unwrap()))
             .await;
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok {
-                accepted: false,
-                ..
-            }
-        ));
+        assert_ok_rejected(&response[0]);
     }
 
     #[tokio::test]
@@ -2394,7 +2516,7 @@ mod tests {
         let invalid_payload = invalid_payload_session
             .handle_message(ClientMessage::Event(json!({"not": "an event"})))
             .await;
-        assert!(matches!(invalid_payload[0], ServerMessage::Notice { .. }));
+        assert_notice(&invalid_payload[0]);
 
         let mut policy_session = Session::with_policy(
             MemoryStore::new(),
@@ -2454,7 +2576,7 @@ mod tests {
                 serde_json::to_value(signed_event("insert-fail")).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
     }
 
     #[tokio::test]
@@ -2881,7 +3003,7 @@ mod tests {
                 serde_json::to_value(join_event).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
 
         let delete_error = Arc::new(ScriptedMembership::new("delete_invite"));
         let valid_invite = RelayInviteRecord::new(
@@ -2913,7 +3035,7 @@ mod tests {
                 serde_json::to_value(join_event).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
     }
 
     #[tokio::test]
@@ -2955,7 +3077,7 @@ mod tests {
                 serde_json::to_value(join_event.clone()).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
 
         let upsert_error = Arc::new(ScriptedMembership::new("upsert_membership"));
         upsert_error
@@ -2980,7 +3102,7 @@ mod tests {
                 serde_json::to_value(join_event).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
     }
 
     #[tokio::test]
@@ -3046,7 +3168,7 @@ mod tests {
                 serde_json::to_value(leave_event.clone()).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
 
         let upsert_error = Arc::new(ScriptedMembership::new("upsert_membership"));
         upsert_error
@@ -3068,7 +3190,7 @@ mod tests {
                 serde_json::to_value(leave_event).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
     }
 
     #[tokio::test]
@@ -3819,20 +3941,20 @@ mod tests {
         let mut no_membership = Session::new(MemoryStore::new());
         let response = no_membership.handle_message(req.clone()).await;
         assert_eq!(response.len(), 1);
-        assert!(matches!(response[0], ServerMessage::Eose { .. }));
+        assert_eose(&response[0]);
 
         let membership = Arc::new(InMemoryRepositories::new());
         let mut no_tenant =
             Session::new(MemoryStore::new()).with_membership(None, Some(membership.clone()));
         let response = no_tenant.handle_message(req.clone()).await;
         assert_eq!(response.len(), 1);
-        assert!(matches!(response[0], ServerMessage::Eose { .. }));
+        assert_eose(&response[0]);
 
         let mut no_signer = Session::new(MemoryStore::new())
             .with_membership(Some("tenant-1".to_string()), Some(membership));
         let response = no_signer.handle_message(req).await;
         assert_eq!(response.len(), 1);
-        assert!(matches!(response[0], ServerMessage::Eose { .. }));
+        assert_eose(&response[0]);
     }
 
     #[tokio::test]
@@ -3880,7 +4002,7 @@ mod tests {
                 serde_json::to_value(signed_event("needs-related-error")).expect("event"),
             ))
             .await;
-        assert!(matches!(response[0], ServerMessage::Notice { .. }));
+        assert_notice(&response[0]);
     }
 
     #[test]
@@ -3990,10 +4112,8 @@ mod tests {
         assert!(session.is_authenticated());
         assert_eq!(session.authenticated_pubkey(), Some(pubkey.as_str()));
         let auth_responses = session.handle_auth(json!({"bad": true})).await;
-        assert!(matches!(
-            auth_responses.first(),
-            Some(ServerMessage::Notice { .. })
-        ));
+        let first = auth_responses.first().expect("auth notice");
+        assert_notice(first);
 
         session.apply_retention(10).await.expect("retention");
         let mut policy = Policy::default();
@@ -4087,8 +4207,7 @@ mod tests {
             .and_then(|tags| tags.as_array())
             .expect("tags");
         let claim = tags.iter().find_map(|tag| {
-            let tag = tag.as_array()?;
-            if tag.first().and_then(|value| value.as_str()) == Some("claim") {
+            if tag.get(0).and_then(|value| value.as_str()) == Some("claim") {
                 tag.get(1).and_then(|value| value.as_str())
             } else {
                 None
@@ -4164,6 +4283,58 @@ mod tests {
                 .iter()
                 .any(|event| event.kind == super::NIP43_INVITE_KIND)
         );
+    }
+
+    #[tokio::test]
+    async fn virtual_events_skip_membership_and_invite_when_filters_do_not_match() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x46; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+
+        let auth_event = signed_event_with_tags(
+            "auth-member-mismatch",
+            super::AUTH_KIND,
+            vec![vec!["challenge".to_string(), "placeholder".to_string()]],
+        );
+        let member_pubkey = hex::decode(&auth_event.pubkey).expect("member pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: member_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        authenticate_session(&mut session).await;
+
+        let filters = vec![crate::Filter {
+            ids: Vec::new(),
+            authors: vec!["22".repeat(32)],
+            kinds: vec![super::NIP43_MEMBERSHIP_KIND, super::NIP43_INVITE_KIND],
+            since: None,
+            until: None,
+            limit: None,
+            tags: std::collections::BTreeMap::new(),
+        }];
+        let events = session
+            .virtual_events(&filters, 10)
+            .await
+            .expect("virtual events");
+        assert!(events.is_empty());
     }
 
     #[tokio::test]
@@ -4288,13 +4459,7 @@ mod tests {
             .handle_message(ClientMessage::Event(serde_json::to_value(event).unwrap()))
             .await;
         assert_eq!(response.len(), 1);
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok {
-                accepted: false,
-                ..
-            }
-        ));
+        assert_ok_rejected(&response[0]);
     }
 
     #[tokio::test]
@@ -4360,7 +4525,22 @@ mod tests {
         let event = signed_event("seed");
         let responses = session.dispatch_event(&event);
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Event { .. }));
+        assert_event(&responses[0]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_does_not_emit_for_non_matching_filters() {
+        let store = MemoryStore::new();
+        let mut session = Session::new(store);
+        session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"kinds": [999_999]})],
+            })
+            .await;
+
+        let responses = session.dispatch_event(&signed_event("seed-no-match"));
+        assert!(responses.is_empty());
     }
 
     #[tokio::test]
@@ -4392,7 +4572,7 @@ mod tests {
         event.tags = vec![Vec::new()];
         let responses = session.dispatch_event(&event);
         assert_eq!(responses.len(), 1);
-        assert!(matches!(responses[0], ServerMessage::Notice { .. }));
+        assert_notice(&responses[0]);
     }
 
     #[tokio::test]

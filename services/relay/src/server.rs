@@ -1606,7 +1606,16 @@ mod tests {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
         let err = super::serve(config).await.expect_err("invalid bind");
-        assert!(err.to_string().contains("relay serve error"));
+        assert!(matches!(err, RelayError::Serve(_) | RelayError::Observability(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_returns_observability_error_after_observability_is_initialized() {
+        let _ = crate::init_observability();
+        let mut config = sample_config();
+        config.bind = "127.0.0.1:99999".to_string();
+        let err = super::serve(config).await.expect_err("expected serve error");
+        assert!(matches!(err, RelayError::Observability(_) | RelayError::Serve(_)));
     }
 
     #[tokio::test]

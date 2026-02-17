@@ -452,6 +452,7 @@ mod tests {
     async fn client_maps_requires_related_filters() {
         let mut tags = BTreeMap::new();
         tags.insert("e".to_string(), vec!["event".to_string()]);
+        let expected_tags = tags.clone();
         let filter = AdmissionFilter {
             ids: vec!["event".to_string()],
             kinds: vec![1],
@@ -471,14 +472,19 @@ mod tests {
         let client = AdmissionHookClient::new(config, transport);
         let event = sample_event();
 
-        let filters = match client.decide(&event).await {
-            AdmissionDecision::RequiresRelatedEvents { filters } => filters,
-            decision => panic!("expected requires_related_events decision, got {decision:?}"),
-        };
-        assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].authors, vec!["pub".to_string()]);
-        assert_eq!(filters[0].ids, vec!["event".to_string()]);
-        assert_eq!(filters[0].limit, Some(1));
+        let decision = client.decide(&event).await;
+        assert_eq!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![EventFilter {
+                    ids: vec!["event".to_string()],
+                    kinds: vec![1],
+                    authors: vec!["pub".to_string()],
+                    tags: expected_tags,
+                    limit: Some(1),
+                }],
+            }
+        );
     }
 
     #[tokio::test]
@@ -633,7 +639,8 @@ mod tests {
             .send("http://127.0.0.1:1/decide", &sample_request_payload())
             .await
             .unwrap_err();
-        assert!(matches!(err, AdmissionHookError::Transport(message) if !message.is_empty()));
+        let message = err.to_string();
+        assert!(message.contains("transport error"));
     }
 
     #[tokio::test]
@@ -644,10 +651,7 @@ mod tests {
             .send(&endpoint, &sample_request_payload())
             .await
             .unwrap_err();
-        let message = match err {
-            AdmissionHookError::Transport(message) => message,
-            error => panic!("expected transport error, got {error:?}"),
-        };
+        let message = err.to_string();
         assert!(message.contains("admission error 403 Forbidden"));
         assert!(message.contains("denied"));
     }
@@ -660,7 +664,8 @@ mod tests {
             .send(&endpoint, &sample_request_payload())
             .await
             .unwrap_err();
-        assert!(matches!(err, AdmissionHookError::Decode(message) if !message.is_empty()));
+        let message = err.to_string();
+        assert!(message.contains("decode error"));
     }
 
     #[test]

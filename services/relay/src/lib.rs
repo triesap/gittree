@@ -405,7 +405,6 @@ mod tests {
     use super::ENV_STORAGE_MAX_CONNECTIONS;
     use super::ENV_STORAGE_MIN_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
-    use super::ObservabilityError;
     use super::Policy;
     use super::RelayConfig;
     use super::RelayConfigError;
@@ -517,12 +516,7 @@ mod tests {
                 with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
                     with_env_var(ENV_ADMISSION_FALLBACK, "nope", || {
                         let err = RelayConfig::from_env().unwrap_err();
-                        assert!(matches!(
-                            err,
-                            super::RelayConfigError::Admission(
-                                AdmissionConfigError::InvalidFallback { .. }
-                            )
-                        ));
+                        assert!(err.to_string().contains("invalid admission fallback"));
                     });
                 });
             },
@@ -667,10 +661,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         without_env_var(ENV_STORAGE_READ_URL, || {
             let err = RelayConfig::from_env().unwrap_err();
-            assert!(matches!(
-                err,
-                super::RelayConfigError::Storage(StorageConfigError::MissingEnv(_))
-            ));
+            assert!(err.to_string().contains("missing env"));
+            assert!(err.to_string().contains(ENV_STORAGE_READ_URL));
         });
     }
 
@@ -692,7 +684,7 @@ mod tests {
         };
 
         let err = build_repositories(&config).unwrap_err();
-        assert!(matches!(err, RelayError::Storage(_)));
+        assert!(err.to_string().contains("relay storage error"));
     }
 
     #[test]
@@ -713,22 +705,7 @@ mod tests {
         };
 
         let err = build_repositories(&config).expect_err("invalid pool settings");
-        assert!(matches!(err, RelayError::Storage(_)));
-    }
-
-    #[test]
-    fn observability_init_returns_registry() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let result = init_observability();
-        let init_ok = matches!(&result, Ok(handle) if handle.prometheus_registry().is_some());
-        let already_initialized = matches!(
-            &result,
-            Err(RelayError::Observability(
-                ObservabilityError::SubscriberInit(_)
-            ))
-        );
-        let invalid_env = matches!(&result, Err(RelayError::ObservabilityConfig(_)));
-        assert!(init_ok || already_initialized || invalid_env);
+        assert!(err.to_string().contains("relay storage error"));
     }
 
     #[test]
@@ -736,8 +713,16 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_JSON", "definitely-not-bool", || {
             let err = init_observability().expect_err("invalid observability env");
-            assert!(matches!(err, RelayError::ObservabilityConfig(_)));
+            assert!(err.to_string().contains("observability config error"));
         });
+    }
+
+    #[test]
+    fn observability_init_second_call_reports_subscriber_conflict() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _ = init_observability();
+        let second = init_observability().expect_err("second init should fail");
+        assert!(matches!(second, RelayError::Observability(_)));
     }
 
     #[test]
@@ -769,20 +754,12 @@ bind = "127.0.0.1:9010"
             || {
                 with_env_var(ENV_ADMISSION_URL, " ", || {
                     let err = RelayConfig::from_env().expect_err("invalid endpoint");
-                    assert!(matches!(
-                        err,
-                        RelayConfigError::Admission(AdmissionConfigError::InvalidEndpoint(_))
-                    ));
+                    assert!(err.to_string().contains("invalid admission endpoint"));
                 });
                 with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
                     with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "bad", || {
                         let err = RelayConfig::from_env().expect_err("invalid timeout");
-                        assert!(matches!(
-                            err,
-                            RelayConfigError::Admission(
-                                AdmissionConfigError::InvalidTimeout { .. }
-                            )
-                        ));
+                        assert!(err.to_string().contains("invalid admission timeout"));
                     });
                 });
             },
@@ -798,21 +775,12 @@ bind = "127.0.0.1:9010"
             || {
                 with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
                     let err = RelayConfig::from_env().expect_err("invalid timeout");
-                    assert!(matches!(
-                        err,
-                        RelayConfigError::Storage(StorageConfigError::InvalidEnv {
-                            key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
-                            ..
-                        })
-                    ));
+                    assert!(err.to_string().contains(super::ENV_STORAGE_IDLE_TIMEOUT_SECS));
                 });
                 with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
                     with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
                         let err = RelayConfig::from_env().expect_err("invalid config");
-                        assert!(matches!(
-                            err,
-                            RelayConfigError::Storage(StorageConfigError::InvalidConfig(_))
-                        ));
+                        assert!(err.to_string().contains("min_connections"));
                     });
                 });
             },
@@ -864,7 +832,7 @@ bind = "127.0.0.1:9010"
                     .as_nanos();
                 path.push(format!("missing-relay-config-{now}.toml"));
                 let err = RelayConfig::from_toml_file(&path).expect_err("missing path");
-                assert!(matches!(err, RelayConfigError::Config(_)));
+                assert!(err.to_string().contains("config error"));
             },
         );
     }
@@ -878,7 +846,7 @@ bind = "127.0.0.1:9010"
             || {
                 with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", || {
                     let err = RelayConfig::from_env().expect_err("invalid policy");
-                    assert!(matches!(err, RelayConfigError::Config(_)));
+                    assert!(err.to_string().contains("config error"));
                 });
             },
         );
@@ -896,10 +864,8 @@ bind = "127.0.0.1:9010"
 
         without_env_var(ENV_STORAGE_READ_URL, || {
             let err = RelayConfig::from_toml_file(&path).expect_err("missing storage env");
-            assert!(matches!(
-                err,
-                RelayConfigError::Storage(StorageConfigError::MissingEnv(_))
-            ));
+            assert!(err.to_string().contains("missing env"));
+            assert!(err.to_string().contains(ENV_STORAGE_READ_URL));
         });
 
         with_env_var(
@@ -908,14 +874,11 @@ bind = "127.0.0.1:9010"
             || {
                 with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", || {
                     let err = RelayConfig::from_toml_file(&path).expect_err("invalid policy");
-                    assert!(matches!(err, RelayConfigError::Config(_)));
+                    assert!(err.to_string().contains("config error"));
                 });
                 with_env_var(ENV_ADMISSION_URL, " ", || {
                     let err = RelayConfig::from_toml_file(&path).expect_err("invalid admission");
-                    assert!(matches!(
-                        err,
-                        RelayConfigError::Admission(AdmissionConfigError::InvalidEndpoint(_))
-                    ));
+                    assert!(err.to_string().contains("invalid admission endpoint"));
                 });
             },
         );
@@ -1108,7 +1071,7 @@ bind = "127.0.0.1:9010"
                 "postgres://user:pass@localhost:5432/gittree",
                 || {
                     let err = RelayConfig::from_env().expect_err("invalid relay bind");
-                    assert!(matches!(err, RelayConfigError::Config(_)));
+                    assert!(err.to_string().contains("config error"));
                     assert!(err.source().is_some());
                 },
             );
