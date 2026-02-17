@@ -722,7 +722,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let _ = init_observability();
         let second = init_observability().expect_err("second init should fail");
-        assert!(matches!(second, RelayError::Observability(_)));
+        assert!(second.to_string().contains("relay observability error"));
     }
 
     #[test]

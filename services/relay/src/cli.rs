@@ -14,6 +14,11 @@ impl RelayCli {
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
     {
+        let args = args.into_iter().map(Into::into).collect();
+        Self::parse_os(args)
+    }
+
+    fn parse_os(args: Vec<OsString>) -> Result<Self, RelayCliError> {
         let mut config_path = None;
         let mut bind = None;
         let mut help = false;
@@ -21,7 +26,6 @@ impl RelayCli {
         let _ = iter.next();
 
         while let Some(arg) = iter.next() {
-            let arg: OsString = arg.into();
             let value = arg.to_string_lossy();
 
             match value.as_ref() {
@@ -30,11 +34,11 @@ impl RelayCli {
                 }
                 "-c" | "--config" => {
                     let next = iter.next().ok_or(RelayCliError::MissingValue("--config"))?;
-                    config_path = Some(PathBuf::from(next.into()));
+                    config_path = Some(PathBuf::from(next));
                 }
                 "-b" | "--bind" => {
                     let next = iter.next().ok_or(RelayCliError::MissingValue("--bind"))?;
-                    bind = Some(next.into().to_string_lossy().to_string());
+                    bind = Some(next.to_string_lossy().to_string());
                 }
                 _ if value.starts_with("--config=") => {
                     let path = value.trim_start_matches("--config=");

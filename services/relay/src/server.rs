@@ -1615,7 +1615,7 @@ mod tests {
         let err = super::serve_with_observability(config, || Ok(()))
             .await
             .expect_err("invalid bind");
-        assert!(matches!(err, RelayError::Serve(_)));
+        assert!(err.to_string().contains("relay serve error"));
     }
 
     #[tokio::test]
@@ -1636,7 +1636,7 @@ mod tests {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
         let err = super::serve(config).await.expect_err("expected serve error");
-        assert!(matches!(err, RelayError::Observability(_)));
+        assert!(err.to_string().contains("relay observability error"));
     }
 
     #[tokio::test]
