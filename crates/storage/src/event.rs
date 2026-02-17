@@ -91,7 +91,7 @@ impl EventRecord {
         pubkey: &str,
         created_at: i64,
         kind: u32,
-        content: impl Into<String>,
+        content: String,
         sig: &str,
         tags: Vec<Vec<String>>,
     ) -> Result<Self, StorageError> {
@@ -108,7 +108,7 @@ impl EventRecord {
             pubkey: decode_hex("pubkey", pubkey, HEX_32_LEN)?,
             created_at,
             kind,
-            content: content.into(),
+            content,
             sig: decode_hex("sig", sig, HEX_64_LEN)?,
             tags,
         })
@@ -146,14 +146,11 @@ fn flatten_tags(tags: &[Vec<String>]) -> Result<Vec<TagRecord>, StorageError> {
     Ok(records)
 }
 
+#[rustfmt::skip]
 fn decode_hex(field: &'static str, value: &str, expected_len: usize) -> Result<Vec<u8>, StorageError> {
     if value.len() != expected_len {
-        return Err(StorageError::InvalidHex {
-            field,
-            value: value.to_string(),
-        });
+        return Err(StorageError::InvalidHex { field, value: value.to_string() });
     }
-
     hex::decode(value).map_err(|_| StorageError::InvalidHex {
         field,
         value: value.to_string(),
@@ -162,8 +159,8 @@ fn decode_hex(field: &'static str, value: &str, expected_len: usize) -> Result<V
 
 #[cfg(test)]
 mod tests {
-    use super::EventRecord;
     use super::EventQuery;
+    use super::EventRecord;
     use super::TagRecord;
     use crate::StorageError;
 
@@ -183,7 +180,7 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec!["e".to_string(), "abc".to_string()]],
         )
@@ -205,7 +202,7 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec![]],
         )
@@ -222,7 +219,7 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec!["e".to_string(), "abc".to_string()]],
         )
@@ -244,7 +241,7 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec!["".to_string(), "abc".to_string()]],
         )
@@ -260,7 +257,7 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec!["e".to_string(), "".to_string()]],
         )
@@ -279,15 +276,12 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec!["e".to_string(), "abc".to_string()]],
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::InvalidHex { field: "id", .. }
-        ));
+        assert!(matches!(err, StorageError::InvalidHex { field: "id", .. }));
 
         let err = EventRecord::new(
             "default",
@@ -295,7 +289,7 @@ mod tests {
             "22",
             12,
             1,
-            "content",
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec!["e".to_string(), "abc".to_string()]],
         )
@@ -314,15 +308,12 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             "33",
             vec![vec!["e".to_string(), "abc".to_string()]],
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::InvalidHex { field: "sig", .. }
-        ));
+        assert!(matches!(err, StorageError::InvalidHex { field: "sig", .. }));
     }
 
     #[test]
@@ -334,14 +325,31 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
+            &hex_64(0x33),
+            vec![vec!["e".to_string(), "abc".to_string()]],
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidHex { field: "id", .. }));
+
+        let bad_pubkey = format!("{}z", "2".repeat(63));
+        let err = EventRecord::new(
+            "default",
+            &hex_32(0x11),
+            &bad_pubkey,
+            12,
+            1,
+            "content".to_string(),
             &hex_64(0x33),
             vec![vec!["e".to_string(), "abc".to_string()]],
         )
         .unwrap_err();
         assert!(matches!(
             err,
-            StorageError::InvalidHex { field: "id", .. }
+            StorageError::InvalidHex {
+                field: "pubkey",
+                ..
+            }
         ));
 
         let bad_sig = format!("{}z", "3".repeat(127));
@@ -351,15 +359,12 @@ mod tests {
             &hex_32(0x22),
             12,
             1,
-            "content",
+            "content".to_string(),
             &bad_sig,
             vec![vec!["e".to_string(), "abc".to_string()]],
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::InvalidHex { field: "sig", .. }
-        ));
+        assert!(matches!(err, StorageError::InvalidHex { field: "sig", .. }));
     }
 
     #[test]
@@ -407,10 +412,7 @@ mod tests {
 
         let query = EventQuery::for_tag("e", vec!["one".to_string(), "two".to_string()]);
         assert_eq!(query.tags.len(), 2);
-        assert!(query
-            .tags
-            .iter()
-            .all(|tag| tag.name == "e"));
+        assert!(query.tags.iter().all(|tag| tag.name == "e"));
 
         let query = EventQuery::for_tenant("default");
         assert_eq!(query.tenant_id, Some("default".to_string()));

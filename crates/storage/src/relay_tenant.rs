@@ -197,48 +197,52 @@ mod tests {
 
     #[test]
     fn tenant_record_rejects_empty_host() {
-        assert!(RelayTenantRecord::new(
-            "tenant",
-            " ",
-            &"11".repeat(32),
-            vec![1],
-            vec![2],
-            "v1",
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            false,
-            false,
-            1,
-            1,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                " ",
+                &"11".repeat(32),
+                vec![1],
+                vec![2],
+                "v1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn tenant_record_rejects_invalid_pubkey() {
-        assert!(RelayTenantRecord::new(
-            "tenant",
-            "org.relay",
-            "bad",
-            vec![1],
-            vec![2],
-            "v1",
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            false,
-            false,
-            1,
-            1,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                "bad",
+                vec![1],
+                vec![2],
+                "v1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -273,25 +277,27 @@ mod tests {
 
     #[test]
     fn tenant_record_rejects_empty_tenant_id() {
-        assert!(RelayTenantRecord::new(
-            " ",
-            "org.relay",
-            &"11".repeat(32),
-            vec![1],
-            vec![2],
-            "v1",
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            false,
-            false,
-            1,
-            1,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                " ",
+                "org.relay",
+                &"11".repeat(32),
+                vec![1],
+                vec![2],
+                "v1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -323,117 +329,127 @@ mod tests {
 
     #[test]
     fn tenant_record_rejects_empty_relay_secret() {
-        assert!(RelayTenantRecord::new(
-            "tenant",
-            "org.relay",
-            &"11".repeat(32),
-            Vec::new(),
-            vec![2],
-            "v1",
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            false,
-            false,
-            1,
-            1,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                &"11".repeat(32),
+                Vec::new(),
+                vec![2],
+                "v1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn tenant_record_rejects_empty_relay_secret_nonce() {
-        assert!(RelayTenantRecord::new(
-            "tenant",
-            "org.relay",
-            &"11".repeat(32),
-            vec![1],
-            Vec::new(),
-            "v1",
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            false,
-            false,
-            1,
-            1,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                &"11".repeat(32),
+                vec![1],
+                Vec::new(),
+                "v1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn tenant_record_rejects_empty_relay_secret_kid() {
-        assert!(RelayTenantRecord::new(
-            "tenant",
-            "org.relay",
-            &"11".repeat(32),
-            vec![1],
-            vec![2],
-            " ",
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            false,
-            false,
-            1,
-            1,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                &"11".repeat(32),
+                vec![1],
+                vec![2],
+                " ",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn tenant_record_rejects_updated_before_created() {
-        assert!(RelayTenantRecord::new(
-            "tenant",
-            "org.relay",
-            &"11".repeat(32),
-            vec![1],
-            vec![2],
-            "v1",
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            false,
-            false,
-            10,
-            9,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                &"11".repeat(32),
+                vec![1],
+                vec![2],
+                "v1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                false,
+                false,
+                10,
+                9,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn tenant_record_rejects_invalid_icon_scheme() {
-        assert!(RelayTenantRecord::new(
-            "tenant",
-            "org.relay",
-            &"11".repeat(32),
-            vec![1],
-            vec![2],
-            "v1",
-            None,
-            None,
-            Some("ftp://example.com/icon.png".to_string()),
-            None,
-            None,
-            true,
-            false,
-            false,
-            1,
-            1,
-        )
-        .is_err());
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                &"11".repeat(32),
+                vec![1],
+                vec![2],
+                "v1",
+                None,
+                None,
+                Some("ftp://example.com/icon.png".to_string()),
+                None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]

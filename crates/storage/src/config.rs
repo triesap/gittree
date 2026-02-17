@@ -1,7 +1,7 @@
 use crate::error::StorageError;
+use sqlx::Postgres;
 use sqlx::pool::PoolOptions;
 use sqlx::postgres::PgConnectOptions;
-use sqlx::Postgres;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -213,9 +213,9 @@ mod tests {
 
     #[test]
     fn to_json_field_maps_serialization_error_with_field_name() {
+        use serde::Serialize;
         use serde::ser::Error as _;
         use serde::ser::Serializer;
-        use serde::Serialize;
 
         struct AlwaysFail;
 
@@ -301,11 +301,14 @@ mod tests {
                 ),
             ]),
         };
-        let err = RepoStateRecord::new(&hex_32(0x11), &"gg".repeat(32), 0, &valid_state)
-            .unwrap_err();
+        let err =
+            RepoStateRecord::new(&hex_32(0x11), &"gg".repeat(32), 0, &valid_state).unwrap_err();
         assert!(matches!(
             err,
-            StorageError::InvalidHex { field: "pubkey", .. }
+            StorageError::InvalidHex {
+                field: "pubkey",
+                ..
+            }
         ));
     }
 

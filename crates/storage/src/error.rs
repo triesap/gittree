@@ -88,9 +88,11 @@ mod tests {
             value: "bad".to_string(),
             source: sqlx::Error::PoolTimedOut,
         };
-        assert!(invalid_conn
-            .to_string()
-            .contains("invalid connection string bad"));
+        assert!(
+            invalid_conn
+                .to_string()
+                .contains("invalid connection string bad")
+        );
         assert!(invalid_conn.source().is_some());
 
         let invalid_pool = StorageError::InvalidPoolConfig {

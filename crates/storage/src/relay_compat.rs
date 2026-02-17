@@ -101,9 +101,8 @@ mod tests {
             missing_optional: vec![RelayCapability::Nip11],
         };
 
-        let record =
-            RelayCompatibilityRecord::new(&report, 123, &RelayProbeMetadata::default())
-                .expect("record");
+        let record = RelayCompatibilityRecord::new(&report, 123, &RelayProbeMetadata::default())
+            .expect("record");
         assert_eq!(record.relay_url, report.relay_url);
         assert!(record.compatible);
         assert_eq!(record.supported_capabilities, vec!["nip-01", "nip-34"]);
@@ -120,9 +119,8 @@ mod tests {
             missing_optional: Vec::new(),
         };
 
-        let record =
-            RelayCompatibilityRecord::new(&report, 0, &RelayProbeMetadata::default())
-                .expect("record");
+        let record = RelayCompatibilityRecord::new(&report, 0, &RelayProbeMetadata::default())
+            .expect("record");
         let parsed = record.report().expect("report");
         assert_eq!(parsed, report);
     }
@@ -234,9 +232,9 @@ mod tests {
 
     #[test]
     fn to_json_maps_serialization_error_with_field_name() {
+        use serde::Serialize;
         use serde::ser::Error as _;
         use serde::ser::Serializer;
-        use serde::Serialize;
 
         struct AlwaysFail;
 

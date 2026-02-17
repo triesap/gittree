@@ -47,13 +47,7 @@ mod tests {
 
     #[test]
     fn mapping_record_maps_fields() {
-        let mapping = RepoMapping::new(
-            "owner",
-            "repo",
-            "11".repeat(32),
-            "repo",
-        )
-        .expect("mapping");
+        let mapping = RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
         assert_eq!(record.forgejo_owner, "owner");
         assert_eq!(record.forgejo_repo, "repo");
@@ -64,31 +58,24 @@ mod tests {
 
     #[test]
     fn mapping_record_rejects_invalid_pubkey() {
-        let mut mapping = RepoMapping::new(
-            "owner",
-            "repo",
-            "11".repeat(32),
-            "repo",
-        )
-        .expect("mapping");
+        let mut mapping =
+            RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
         mapping.pubkey = "bad".to_string();
         assert!(RepoMappingRecord::new(&mapping).is_err());
     }
 
     #[test]
     fn mapping_record_rejects_non_hex_pubkey_with_expected_length() {
-        let mut mapping = RepoMapping::new(
-            "owner",
-            "repo",
-            "11".repeat(32),
-            "repo",
-        )
-        .expect("mapping");
+        let mut mapping =
+            RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
         mapping.pubkey = "zz".repeat(32);
         let err = RepoMappingRecord::new(&mapping).expect_err("non-hex must fail");
         assert!(matches!(
             err,
-            crate::StorageError::InvalidHex { field: "pubkey", .. }
+            crate::StorageError::InvalidHex {
+                field: "pubkey",
+                ..
+            }
         ));
     }
 }

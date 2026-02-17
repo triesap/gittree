@@ -1018,7 +1018,7 @@ mod tests {
             pubkey,
             created_at,
             1,
-            "content",
+            "content".to_string(),
             &format!("{pubkey}{pubkey}"),
             vec![vec!["e".to_string(), "tag".to_string()]],
         )
@@ -1293,7 +1293,7 @@ mod tests {
                 .invite_by_code(&tenant.id, "code-1")
                 .await
                 .expect("lookup")
-            .is_none()
+                .is_none()
         );
     }
 
@@ -1302,8 +1302,14 @@ mod tests {
         let store = InMemoryRepositories::new();
         let tenant_a = sample_tenant("relay-a.local");
         let tenant_b = sample_tenant("relay-b.local");
-        store.upsert_tenant(tenant_a.clone()).await.expect("tenant a");
-        store.upsert_tenant(tenant_b.clone()).await.expect("tenant b");
+        store
+            .upsert_tenant(tenant_a.clone())
+            .await
+            .expect("tenant a");
+        store
+            .upsert_tenant(tenant_b.clone())
+            .await
+            .expect("tenant b");
 
         let member = sample_membership(&tenant_a.id, 0x70);
         store
@@ -1497,7 +1503,10 @@ mod tests {
         let mut tenant_b = event_record(&"cc".repeat(32), &author, 1);
         tenant_b.tenant_id = "tenant-b".to_string();
 
-        store.insert_event(tenant_a.clone()).await.expect("insert tenant a");
+        store
+            .insert_event(tenant_a.clone())
+            .await
+            .expect("insert tenant a");
         store.insert_event(tenant_b).await.expect("insert tenant b");
 
         let query = EventQuery {
@@ -1523,8 +1532,14 @@ mod tests {
         let mut newer = event_record(&"dd".repeat(32), &author, 11);
         newer.tenant_id = "tenant-a".to_string();
 
-        store.insert_event(second.clone()).await.expect("insert second");
-        store.insert_event(first.clone()).await.expect("insert first");
+        store
+            .insert_event(second.clone())
+            .await
+            .expect("insert second");
+        store
+            .insert_event(first.clone())
+            .await
+            .expect("insert first");
         store.insert_event(newer).await.expect("insert newer");
 
         let results = store

@@ -1482,10 +1482,13 @@ mod tests {
         );
         evict_i64(&cached, &mut map);
         assert_eq!(map.len(), 1);
-        assert!(fresh_i64(&cached, &CacheEntry {
-            value: 2_i64,
-            stored_at: now,
-        }));
+        assert!(fresh_i64(
+            &cached,
+            &CacheEntry {
+                value: 2_i64,
+                stored_at: now,
+            }
+        ));
     }
 
     #[test]

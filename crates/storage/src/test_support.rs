@@ -1,5 +1,9 @@
 pub(crate) fn require_db_tests() -> bool {
-    require_db_tests_from_value(std::env::var("GITTREE_STORAGE_REQUIRE_DB_TESTS").ok().as_deref())
+    require_db_tests_from_value(
+        std::env::var("GITTREE_STORAGE_REQUIRE_DB_TESTS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 pub(crate) fn skip_or_fail_without_db_with_policy(test_name: &str, require_db: bool) {

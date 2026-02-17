@@ -1425,25 +1425,39 @@ mod tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::future::Future;
     use std::str::FromStr;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
+    const UNREACHABLE_TEST_DATABASE_URL: &str =
+        "postgres://gittree:gittree@127.0.0.1:1/gittree?connect_timeout=1";
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static ROLE_ADMIN_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn db_debug_enabled_from(require_db: bool, debug_flag: Option<&str>) -> bool {
+        require_db || matches!(debug_flag, Some("1"))
+    }
 
     fn db_debug_enabled() -> bool {
-        require_db_tests()
-            || matches!(
-                std::env::var("GITTREE_STORAGE_DEBUG_DB").ok().as_deref(),
-                Some("1")
-            )
+        db_debug_enabled_from(
+            require_db_tests(),
+            std::env::var("GITTREE_STORAGE_DEBUG_DB").ok().as_deref(),
+        )
+    }
+
+    fn debug_db_with(enabled: bool, message: impl AsRef<str>) {
+        if enabled {
+            eprintln!("storage-db: {}", message.as_ref());
+        }
     }
 
     fn debug_db(message: impl AsRef<str>) {
-        if db_debug_enabled() {
-            eprintln!("storage-db: {}", message.as_ref());
-        }
+        debug_db_with(db_debug_enabled(), message);
+    }
+
+    fn role_admin_mutex() -> &'static Mutex<()> {
+        ROLE_ADMIN_MUTEX.get_or_init(|| Mutex::new(()))
     }
 
     enum TestIsolation {
@@ -1459,16 +1473,21 @@ mod tests {
 
     impl TestDatabase {
         async fn provision() -> Option<Self> {
-            let base_url = test_database_base_url();
+            Self::provision_from_base_url(test_database_base_url()).await
+        }
+
+        async fn provision_from_base_url(base_url: String) -> Option<Self> {
             let mut admin_options = PgConnectOptions::from_str(&base_url).ok()?;
             admin_options = admin_options.database("postgres");
             let admin_pool = PgPoolOptions::new()
                 .max_connections(1)
+                .acquire_timeout(Duration::from_secs(1))
                 .connect_with(admin_options)
                 .await
-                .map_err(|error| {
-                    debug_db(format!("failed admin connection to postgres database: {error}"));
-                    error
+                .inspect_err(|error| {
+                    debug_db(format!(
+                        "failed admin connection to postgres database: {error}"
+                    ));
                 })
                 .ok();
 
@@ -1478,11 +1497,10 @@ mod tests {
                 let create_database_ok = sqlx::query(&create_database)
                     .execute(&admin_pool)
                     .await
-                    .map_err(|error| {
+                    .inspect_err(|error| {
                         debug_db(format!(
                             "failed create database {database_name}, falling back to schema mode: {error}"
                         ));
-                        error
                     })
                     .is_ok();
                 admin_pool.close().await;
@@ -1491,7 +1509,8 @@ mod tests {
                     return Self::provision_with_database(base_url, database_name).await;
                 }
 
-                if let Some(test_db) = Self::provision_with_schema(base_url.clone(), Some("postgres")).await
+                if let Some(test_db) =
+                    Self::provision_with_schema(base_url.clone(), Some("postgres")).await
                 {
                     return Some(test_db);
                 }
@@ -1501,36 +1520,26 @@ mod tests {
         }
 
         async fn provision_with_database(base_url: String, database_name: String) -> Option<Self> {
-            let mut test_options = match PgConnectOptions::from_str(&base_url) {
-                Ok(options) => options,
-                Err(error) => {
+            let mut test_options = PgConnectOptions::from_str(&base_url)
+                .inspect_err(|error| {
                     debug_db(format!(
                         "invalid storage test database url while provisioning database mode: {error}"
                     ));
-                    return None;
-                }
-            };
+                })
+                .ok()?;
             test_options = test_options.database(&database_name);
-            let pool = match PgPoolOptions::new()
+            let pool = PgPoolOptions::new()
                 .max_connections(5)
+                .acquire_timeout(Duration::from_secs(1))
                 .connect_with(test_options)
                 .await
-            {
-                Ok(pool) => pool,
-                Err(error) => {
+                .inspect_err(|error| {
                     debug_db(format!(
                         "failed connect to isolated database {database_name}: {error}"
                     ));
-                    return None;
-                }
-            };
-
-            if run_migrations(&pool).await.is_none() {
-                debug_db(format!(
-                    "failed migrations in isolated database {database_name}"
-                ));
-                return None;
-            }
+                })
+                .ok()?;
+            run_migrations(&pool).await?;
 
             Some(Self {
                 base_url,
@@ -1544,56 +1553,36 @@ mod tests {
             database_override: Option<&str>,
         ) -> Option<Self> {
             let schema_name = unique_schema_name();
-            let mut test_options = match PgConnectOptions::from_str(&base_url) {
-                Ok(options) => options,
-                Err(error) => {
+            let mut test_options = PgConnectOptions::from_str(&base_url)
+                .inspect_err(|error| {
                     debug_db(format!(
                         "invalid storage test database url while provisioning schema mode: {error}"
                     ));
-                    return None;
-                }
-            };
+                })
+                .ok()?;
             let database = database_override
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| database_name_from_url(&base_url));
             test_options = test_options.database(&database);
-            let pool = match PgPoolOptions::new()
+            let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .min_connections(1)
+                .acquire_timeout(Duration::from_secs(1))
                 .connect_with(test_options)
                 .await
-            {
-                Ok(pool) => pool,
-                Err(error) => {
+                .inspect_err(|error| {
                     debug_db(format!(
                         "failed connect for schema mode on database {database}: {error}"
                     ));
-                    return None;
-                }
-            };
+                })
+                .ok()?;
 
             let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema_name);
-            if let Err(error) = sqlx::query(&create_schema).execute(&pool).await {
-                debug_db(format!(
-                    "failed create schema {schema_name} in database {database}: {error}"
-                ));
-                return None;
-            }
+            sqlx::query(&create_schema).execute(&pool).await.ok()?;
 
             let set_search_path = format!("SET search_path TO \"{}\"", schema_name);
-            if let Err(error) = sqlx::query(&set_search_path).execute(&pool).await {
-                debug_db(format!(
-                    "failed set search_path for schema {schema_name} in database {database}: {error}"
-                ));
-                return None;
-            }
-
-            if run_migrations(&pool).await.is_none() {
-                debug_db(format!(
-                    "failed migrations for schema {schema_name} in database {database}"
-                ));
-                return None;
-            }
+            sqlx::query(&set_search_path).execute(&pool).await.ok()?;
+            run_migrations(&pool).await?;
 
             Some(Self {
                 base_url,
@@ -1629,6 +1618,7 @@ mod tests {
                     admin_options = admin_options.database("postgres");
                     let admin_pool = PgPoolOptions::new()
                         .max_connections(1)
+                        .acquire_timeout(Duration::from_secs(1))
                         .connect_with(admin_options)
                         .await
                         .ok()?;
@@ -1657,6 +1647,7 @@ WHERE datname = $1
                     admin_options = admin_options.database(&database);
                     let admin_pool = PgPoolOptions::new()
                         .max_connections(1)
+                        .acquire_timeout(Duration::from_secs(1))
                         .connect_with(admin_options)
                         .await
                         .ok()?;
@@ -1749,24 +1740,15 @@ WHERE datname = $1
     }
 
     async fn run_migrations(pool: &PgPool) -> Option<()> {
-        let runner = match MigrationRunner::new(core_migrations()) {
-            Ok(runner) => runner,
-            Err(error) => {
-                debug_db(format!("failed to construct migration runner: {error}"));
-                return None;
-            }
-        };
-        let mut connection = match pool.acquire().await {
-            Ok(connection) => connection,
-            Err(error) => {
+        let runner = MigrationRunner::new(core_migrations()).ok()?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .inspect_err(|error| {
                 debug_db(format!("failed to acquire migration connection: {error}"));
-                return None;
-            }
-        };
-        if let Err(error) = runner.run(&mut *connection).await {
-            debug_db(format!("failed running migrations: {error}"));
-            return None;
-        }
+            })
+            .ok()?;
+        runner.run(&mut *connection).await.ok()?;
         drop(connection);
         Some(())
     }
@@ -1809,6 +1791,27 @@ WHERE datname = $1
             now,
             counter
         )
+    }
+
+    fn rewrite_database_url(
+        url: &str,
+        username: &str,
+        password: &str,
+        database: &str,
+    ) -> Option<String> {
+        let (_, remainder) = url.split_once("://")?;
+        let authority_and_path = remainder
+            .split_once('@')
+            .map(|(_, tail)| tail)
+            .unwrap_or(remainder);
+        let (authority, path_and_query) = authority_and_path.split_once('/')?;
+        let query = path_and_query.split_once('?').map(|(_, query)| query);
+        let mut rebuilt = format!("postgres://{username}:{password}@{authority}/{database}");
+        if let Some(query) = query {
+            rebuilt.push('?');
+            rebuilt.push_str(query);
+        }
+        Some(rebuilt)
     }
 
     fn unreachable_repositories() -> PostgresRepositories {
@@ -1886,7 +1889,7 @@ WHERE datname = $1
                     &"bb".repeat(32),
                     200,
                     1,
-                    "event-a",
+                    "event-a".to_string(),
                     &"cc".repeat(64),
                     vec![
                         vec!["z".to_string(), "1".to_string()],
@@ -1951,6 +1954,264 @@ WHERE datname = $1
     #[test]
     fn dotenv_value_returns_none_for_unknown_keys() {
         assert!(dotenv_value("__GITTREE_STORAGE_TEST_UNKNOWN__").is_none());
+    }
+
+    #[test]
+    fn db_debug_enabled_from_honors_require_and_debug_flag() {
+        assert!(!db_debug_enabled_from(false, None));
+        assert!(!db_debug_enabled_from(false, Some("0")));
+        assert!(db_debug_enabled_from(true, None));
+        assert!(db_debug_enabled_from(false, Some("1")));
+    }
+
+    #[test]
+    fn debug_db_with_covers_enabled_and_disabled_paths() {
+        debug_db_with(false, "disabled");
+        debug_db_with(true, "enabled");
+    }
+
+    #[test]
+    fn database_name_from_url_handles_missing_and_query_paths() {
+        assert_eq!(
+            database_name_from_url("postgres://gittree:gittree@127.0.0.1"),
+            "postgres".to_string()
+        );
+        assert_eq!(
+            database_name_from_url("postgres://gittree:gittree@127.0.0.1/"),
+            "postgres".to_string()
+        );
+        assert_eq!(
+            database_name_from_url("postgres://gittree:gittree@127.0.0.1/gittree?sslmode=disable"),
+            "gittree".to_string()
+        );
+    }
+
+    #[test]
+    fn rewrite_database_url_rewrites_credentials_and_database() {
+        let rewritten = rewrite_database_url(
+            "postgres://gittree:gittree@127.0.0.1:5432/gittree?sslmode=disable",
+            "reader",
+            "secret",
+            "postgres",
+        )
+        .expect("rewritten");
+        assert_eq!(
+            rewritten,
+            "postgres://reader:secret@127.0.0.1:5432/postgres?sslmode=disable"
+        );
+        assert!(rewrite_database_url("not-a-url", "reader", "secret", "postgres").is_none());
+    }
+
+    #[test]
+    fn unique_schema_name_is_prefixed_and_varies() {
+        let first = unique_schema_name();
+        let second = unique_schema_name();
+        assert!(first.starts_with("gittree_storage_schema_"));
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn scope_name_returns_schema_name_for_schema_isolation() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(UNREACHABLE_TEST_DATABASE_URL)
+            .expect("lazy pool");
+        let harness = TestDatabase {
+            base_url: UNREACHABLE_TEST_DATABASE_URL.to_string(),
+            isolation: TestIsolation::Schema {
+                database: "postgres".to_string(),
+                name: "scope_schema".to_string(),
+            },
+            pool,
+        };
+        assert_eq!(harness.scope_name(), "scope_schema");
+    }
+
+    #[tokio::test]
+    async fn provision_from_base_url_returns_none_when_admin_connection_fails() {
+        let provisioned =
+            TestDatabase::provision_from_base_url(UNREACHABLE_TEST_DATABASE_URL.to_string()).await;
+        assert!(provisioned.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_with_database_returns_none_for_invalid_url() {
+        let provisioned = TestDatabase::provision_with_database(
+            "not-a-url".to_string(),
+            "gittree_storage_invalid".to_string(),
+        )
+        .await;
+        assert!(provisioned.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_with_database_returns_none_for_unreachable_database() {
+        let provisioned = TestDatabase::provision_with_database(
+            UNREACHABLE_TEST_DATABASE_URL.to_string(),
+            "gittree_storage_unreachable".to_string(),
+        )
+        .await;
+        assert!(provisioned.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_with_schema_returns_none_for_unreachable_database() {
+        let provisioned = TestDatabase::provision_with_schema(
+            UNREACHABLE_TEST_DATABASE_URL.to_string(),
+            Some("gittree"),
+        )
+        .await;
+        assert!(provisioned.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_with_schema_returns_none_for_invalid_url() {
+        let provisioned =
+            TestDatabase::provision_with_schema("not-a-url".to_string(), Some("gittree")).await;
+        assert!(provisioned.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_with_schema_round_trip_and_cleanup_db() {
+        with_test_db_with_provision(
+            "provision_with_schema_round_trip_and_cleanup_db",
+            TestDatabase::provision_with_schema(test_database_base_url(), None).await,
+            require_db_tests(),
+            |test_db| async move {
+                assert!(matches!(&test_db.isolation, TestIsolation::Schema { .. }));
+                let repositories = test_db.repositories();
+                let mappings = repositories.list_mappings().await.expect("list mappings");
+                assert!(mappings.is_empty());
+                test_db.cleanup().await;
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn provision_from_base_url_falls_back_to_schema_when_create_database_fails() {
+        with_test_db(
+            "provision_from_base_url_falls_back_to_schema_when_create_database_fails",
+            |bootstrap_db| async move {
+                let _role_guard = role_admin_mutex().lock().expect("role admin lock");
+                let base_url = test_database_base_url();
+                let mut admin_options =
+                    PgConnectOptions::from_str(&base_url).expect("base options");
+                admin_options = admin_options.database("postgres");
+                let admin_pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(Duration::from_secs(1))
+                    .connect_with(admin_options)
+                    .await
+                    .expect("admin pool");
+
+                let suffix = TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let role = format!("gittree_nocreatedb_{suffix}");
+                let password = format!("pw{suffix}");
+                sqlx::query(&format!(
+                    "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOCREATEDB"
+                ))
+                .execute(&admin_pool)
+                .await
+                .expect("create role");
+                sqlx::query(&format!(
+                    "GRANT CONNECT, CREATE ON DATABASE postgres TO \"{role}\""
+                ))
+                .execute(&admin_pool)
+                .await
+                .expect("grant role");
+
+                let role_url = rewrite_database_url(&base_url, &role, &password, "postgres")
+                    .expect("rewrite url");
+                let provisioned = TestDatabase::provision_from_base_url(role_url)
+                    .await
+                    .expect("schema fallback provision");
+                assert!(matches!(
+                    &provisioned.isolation,
+                    TestIsolation::Schema { .. }
+                ));
+                provisioned.cleanup().await;
+
+                sqlx::query(&format!(
+                    "REVOKE CONNECT, CREATE ON DATABASE postgres FROM \"{role}\""
+                ))
+                .execute(&admin_pool)
+                .await
+                .expect("revoke role grants");
+                sqlx::query(&format!("DROP ROLE IF EXISTS \"{role}\""))
+                    .execute(&admin_pool)
+                    .await
+                    .expect("drop role");
+                admin_pool.close().await;
+                bootstrap_db.cleanup().await;
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn provision_from_base_url_continues_when_first_schema_fallback_is_unavailable() {
+        with_test_db(
+            "provision_from_base_url_continues_when_first_schema_fallback_is_unavailable",
+            |bootstrap_db| async move {
+                let _role_guard = role_admin_mutex().lock().expect("role admin lock");
+                let base_url = test_database_base_url();
+                let mut admin_options =
+                    PgConnectOptions::from_str(&base_url).expect("base options");
+                admin_options = admin_options.database("postgres");
+                let admin_pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(Duration::from_secs(1))
+                    .connect_with(admin_options)
+                    .await
+                    .expect("admin pool");
+
+                let suffix = TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let role = format!("gittree_nocreate_schema_{suffix}");
+                let password = format!("pw{suffix}");
+                sqlx::query(&format!(
+                    "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOCREATEDB"
+                ))
+                .execute(&admin_pool)
+                .await
+                .expect("create role");
+                sqlx::query(&format!("GRANT CONNECT ON DATABASE postgres TO \"{role}\""))
+                    .execute(&admin_pool)
+                    .await
+                    .expect("grant role connect");
+
+                let role_url = rewrite_database_url(&base_url, &role, &password, "postgres")
+                    .expect("rewrite url");
+                let provisioned = TestDatabase::provision_from_base_url(role_url).await;
+                assert!(provisioned.is_none());
+
+                sqlx::query(&format!(
+                    "REVOKE CONNECT ON DATABASE postgres FROM \"{role}\""
+                ))
+                .execute(&admin_pool)
+                .await
+                .expect("revoke role connect");
+                sqlx::query(&format!("DROP ROLE IF EXISTS \"{role}\""))
+                    .execute(&admin_pool)
+                    .await
+                    .expect("drop role");
+                admin_pool.close().await;
+                bootstrap_db.cleanup().await;
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn run_migrations_returns_none_for_unreachable_pool() {
+        let options =
+            PgConnectOptions::from_str(UNREACHABLE_TEST_DATABASE_URL).expect("connect options");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy_with(options);
+        assert!(run_migrations(&pool).await.is_none());
     }
 
     #[tokio::test]
@@ -2342,7 +2603,7 @@ WHERE datname = $1
             &"bb".repeat(32),
             200,
             1,
-            "event-a",
+            "event-a".to_string(),
             &"cc".repeat(64),
             vec![vec!["e".to_string(), "1".to_string()]],
         )
@@ -2998,7 +3259,7 @@ WHERE datname = $1
                     &"bb".repeat(32),
                     200,
                     1,
-                    "event-a",
+                    "event-a".to_string(),
                     &"cc".repeat(64),
                     vec![
                         vec!["e".to_string(), "1".to_string()],
@@ -3012,7 +3273,7 @@ WHERE datname = $1
                     &"bb".repeat(32),
                     300,
                     2,
-                    "event-b",
+                    "event-b".to_string(),
                     &"ee".repeat(64),
                     vec![vec!["e".to_string(), "1".to_string()]],
                 )

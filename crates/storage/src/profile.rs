@@ -133,7 +133,7 @@ fn normalize_optional_url(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProfileRecord, ProfileVisibility, MAX_DISPLAY_NAME};
+    use super::{MAX_DISPLAY_NAME, ProfileRecord, ProfileVisibility};
     use crate::StorageError;
 
     #[test]
@@ -158,18 +158,20 @@ mod tests {
 
     #[test]
     fn profile_record_rejects_invalid_pubkey() {
-        assert!(ProfileRecord::new(
-            "bad",
-            None,
-            None,
-            None,
-            None,
-            None,
-            ProfileVisibility::Private,
-            10,
-            20,
-        )
-        .is_err());
+        assert!(
+            ProfileRecord::new(
+                "bad",
+                None,
+                None,
+                None,
+                None,
+                None,
+                ProfileVisibility::Private,
+                10,
+                20,
+            )
+            .is_err()
+        );
     }
 
     #[test]
