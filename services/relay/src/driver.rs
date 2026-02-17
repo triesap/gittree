@@ -275,6 +275,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_with_broadcast_emits_initial_auth_challenge_when_outbound_open() {
+        let session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
+        let driver = SessionDriver::new(session);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        drop(in_tx);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let (_broadcast_tx, broadcast_rx) = broadcast::channel(1);
+        let task = tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
+
+        let first = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("response");
+        let first: Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(first[0], Value::String("AUTH".to_string()));
+
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timeout")
+            .expect("task");
+    }
+
+    #[tokio::test]
     async fn run_with_broadcast_handles_lagged_then_closed_channel() {
         let session = Session::new(MemoryStore::new());
         let driver = SessionDriver::new(session);

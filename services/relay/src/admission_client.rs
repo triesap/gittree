@@ -666,6 +666,23 @@ mod tests {
         assert!(matches!(err, AdmissionHookError::Decode(_)));
     }
 
+    #[test]
+    fn http_transport_new_accepts_zero_timeout() {
+        let transport = HttpAdmissionTransport::new(Duration::from_secs(0)).expect("transport");
+        let _ = transport;
+    }
+
+    #[test]
+    fn new_http_client_accepts_zero_timeout() {
+        let config = AdmissionHookConfig::new(
+            "http://admission.local/decide",
+            Duration::from_secs(0),
+            AdmissionFallback::Reject,
+        );
+        let client = AdmissionHookClient::new_http(config).expect("client");
+        let _ = client;
+    }
+
     #[tokio::test]
     async fn new_http_client_constructs_transport_and_accepts() {
         let endpoint = spawn_accept_server().await;

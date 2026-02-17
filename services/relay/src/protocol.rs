@@ -243,6 +243,24 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_missing_required_fields_by_message_type() {
+        let err = decode_client_message(r#"["EVENT"]"#).unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("event"));
+
+        let err = decode_client_message(r#"["AUTH"]"#).unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("event"));
+
+        let err = decode_client_message(r#"["REQ"]"#).unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("subscription_id"));
+
+        let err = decode_client_message(r#"["CLOSE"]"#).unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("subscription_id"));
+
+        let err = decode_client_message(r#"["COUNT"]"#).unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("subscription_id"));
+    }
+
+    #[test]
     fn decode_rejects_non_array() {
         let input = r#"{"EVENT":{"id":"abc"}}"#;
         let err = decode_client_message(input).unwrap_err();

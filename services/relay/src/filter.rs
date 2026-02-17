@@ -225,6 +225,9 @@ mod tests {
         let err = Filter::from_json(&json!({"ids": [1]})).unwrap_err();
         assert_eq!(err, FilterError::InvalidField("ids".to_string()));
 
+        let err = Filter::from_json(&json!({"authors": [1]})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("authors".to_string()));
+
         let err = Filter::from_json(&json!({"kinds": "nope"})).unwrap_err();
         assert_eq!(err, FilterError::InvalidField("kinds".to_string()));
 
@@ -233,6 +236,9 @@ mod tests {
 
         let err = Filter::from_json(&json!({"since": "x"})).unwrap_err();
         assert_eq!(err, FilterError::InvalidField("since".to_string()));
+
+        let err = Filter::from_json(&json!({"until": "x"})).unwrap_err();
+        assert_eq!(err, FilterError::InvalidField("until".to_string()));
 
         let err = Filter::from_json(&json!({"limit": "x"})).unwrap_err();
         assert_eq!(err, FilterError::InvalidField("limit".to_string()));
