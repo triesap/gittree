@@ -1971,6 +1971,30 @@ WHERE datname = $1
     }
 
     #[test]
+    fn role_admin_mutex_returns_shared_instance() {
+        assert!(std::ptr::eq(role_admin_mutex(), role_admin_mutex()));
+    }
+
+    #[tokio::test]
+    async fn repositories_and_noop_helpers_cover_non_db_paths() {
+        let options =
+            PgConnectOptions::from_str(UNREACHABLE_TEST_DATABASE_URL).expect("connect options");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy_with(options);
+        let test_db = TestDatabase {
+            base_url: "not-a-postgres-url".to_string(),
+            isolation: TestIsolation::Database(unique_database_name()),
+            pool,
+        };
+
+        let _repositories = test_db.repositories();
+        noop_test_db(test_db).await;
+    }
+
+    #[test]
     fn database_name_from_url_handles_missing_and_query_paths() {
         assert_eq!(
             database_name_from_url("postgres://gittree:gittree@127.0.0.1"),
