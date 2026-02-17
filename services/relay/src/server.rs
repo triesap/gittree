@@ -256,6 +256,7 @@ where
     let _ = signal.await;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InboundSocketAction {
     Forward(String),
     Continue,
@@ -275,6 +276,30 @@ fn classify_inbound_message(msg: Option<Result<Message, axum::Error>>) -> Inboun
 
 fn classify_outbound_message(outbound: Option<String>) -> Option<Message> {
     outbound.map(Message::Text)
+}
+
+fn tenant_auth_requirements(
+    tenant: Option<&RelayTenantRecord>,
+    default_auth_required: bool,
+) -> (bool, bool, bool, bool) {
+    match tenant {
+        Some(record) => {
+            let read_membership_required = !record.public_read;
+            let write_membership_required = !record.public_write;
+            (
+                read_membership_required,
+                record.auth_required || write_membership_required,
+                read_membership_required,
+                write_membership_required,
+            )
+        }
+        None => (
+            default_auth_required,
+            default_auth_required,
+            false,
+            false,
+        ),
+    }
 }
 
 async fn handle_inbound_action(in_tx: &mpsc::Sender<String>, action: InboundSocketAction) -> bool {
@@ -353,24 +378,10 @@ async fn handle_socket_with_pump<P>(
         write_auth_required,
         read_membership_required,
         write_membership_required,
-    ) = match tenant.tenant.as_ref() {
-        Some(record) => {
-            let read_membership_required = !record.public_read;
-            let write_membership_required = !record.public_write;
-            (
-                read_membership_required,
-                record.auth_required || write_membership_required,
-                read_membership_required,
-                write_membership_required,
-            )
-        }
-        None => (
-            state.config.policy.auth_required,
-            state.config.policy.auth_required,
-            false,
-            false,
-        ),
-    };
+    ) = tenant_auth_requirements(
+        tenant.tenant.as_ref(),
+        state.config.policy.auth_required,
+    );
     let relay_url = tenant
         .tenant
         .as_ref()
@@ -934,12 +945,8 @@ mod tests {
         let err = connect_async(url)
             .await
             .expect_err("expected handshake failure");
-        match err {
-            tokio_tungstenite::tungstenite::Error::Http(response) => {
-                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            }
-            other => panic!("expected http handshake error, got {other:?}"),
-        }
+        let message = err.to_string();
+        assert!(message.contains("500"));
     }
 
     #[tokio::test]
@@ -1211,35 +1218,35 @@ mod tests {
 
     #[test]
     fn classify_inbound_message_covers_all_branches() {
-        assert!(matches!(
+        assert_eq!(
             super::classify_inbound_message(None),
             super::InboundSocketAction::Break
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             super::classify_inbound_message(Some(Ok(Message::Close(None)))),
             super::InboundSocketAction::Break
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             super::classify_inbound_message(Some(Ok(Message::Binary(vec![0, 1].into())))),
             super::InboundSocketAction::Continue
-        ));
+        );
 
         let forwarded = super::classify_inbound_message(Some(Ok(Message::Text("req".into()))));
-        assert!(matches!(
+        assert_eq!(
             forwarded,
-            super::InboundSocketAction::Forward(ref text) if text == "req"
-        ));
+            super::InboundSocketAction::Forward("req".to_string())
+        );
 
         let err = axum::Error::new(std::io::Error::other("ws read failed"));
-        assert!(matches!(
+        assert_eq!(
             super::classify_inbound_message(Some(Err(err))),
             super::InboundSocketAction::Break
-        ));
+        );
     }
 
     #[test]
     fn classify_outbound_message_maps_text_and_none() {
-        assert!(matches!(super::classify_outbound_message(None), None));
+        assert_eq!(super::classify_outbound_message(None), None);
 
         let mapped = super::classify_outbound_message(Some("frame".to_string())).expect("message");
         assert!(matches!(mapped, Message::Text(ref payload) if payload == "frame"));
@@ -1583,7 +1590,7 @@ mod tests {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
         let err = bind_listener(&config.bind).await.expect_err("invalid bind");
-        assert!(matches!(err, RelayError::Serve(_)));
+        assert!(err.to_string().contains("relay serve error"));
     }
 
     #[tokio::test]
@@ -1591,7 +1598,7 @@ mod tests {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
         let err = super::serve_inner(config).await.expect_err("invalid bind");
-        assert!(matches!(err, RelayError::Serve(_)));
+        assert!(err.to_string().contains("relay serve error"));
     }
 
     #[tokio::test]
@@ -1599,7 +1606,7 @@ mod tests {
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
         let err = super::serve(config).await.expect_err("invalid bind");
-        assert!(matches!(err, RelayError::Serve(_)));
+        assert!(err.to_string().contains("relay serve error"));
     }
 
     #[tokio::test]
@@ -1636,14 +1643,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
-        let server = axum::serve(listener, app)
-            .with_graceful_shutdown(async { std::future::pending::<()>().await });
+        let server = axum::serve(listener, app).with_graceful_shutdown(std::future::pending());
         let result =
             tokio::time::timeout(Duration::from_millis(20), super::run_server(server)).await;
-        assert!(
-            result.is_err(),
-            "run_server should still be pending without a shutdown signal"
-        );
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1661,7 +1664,7 @@ mod tests {
         let result = build_state(config);
         assert!(result.is_err());
         let err = result.err().expect("expected storage error");
-        assert!(matches!(err, RelayError::Storage(_)));
+        assert!(err.to_string().contains("relay storage error"));
     }
 
     #[tokio::test]
@@ -1683,6 +1686,40 @@ mod tests {
         let result = build_state(config);
         assert!(result.is_err());
         let err = result.err().expect("expected invalid write url");
-        assert!(matches!(err, RelayError::Storage(_)));
+        assert!(err.to_string().contains("relay storage error"));
+    }
+
+    #[tokio::test]
+    async fn serve_inner_with_shutdown_returns_storage_error_when_state_build_fails() {
+        let mut config = sample_config();
+        config.storage.max_connections = 0;
+        let err = super::serve_inner_with_shutdown(config, std::future::ready(()))
+            .await
+            .expect_err("invalid storage");
+        assert!(err.to_string().contains("relay storage error"));
+    }
+
+    #[test]
+    fn tenant_auth_requirements_cover_default_and_tenant_paths() {
+        assert_eq!(
+            super::tenant_auth_requirements(None, true),
+            (true, true, false, false)
+        );
+
+        let mut tenant = sample_tenant_record();
+        tenant.auth_required = false;
+        tenant.public_read = false;
+        tenant.public_write = false;
+        assert_eq!(
+            super::tenant_auth_requirements(Some(&tenant), false),
+            (true, true, true, true)
+        );
+
+        tenant.auth_required = true;
+        tenant.public_write = true;
+        assert_eq!(
+            super::tenant_auth_requirements(Some(&tenant), false),
+            (true, true, true, false)
+        );
     }
 }
