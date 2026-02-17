@@ -1750,6 +1750,46 @@ mod tests {
         session.apply_retention(100).await.expect("retention");
     }
 
+    #[tokio::test]
+    async fn retention_surfaces_store_query_errors() {
+        let policy = Policy {
+            retention_max_age_seconds: Some(5),
+            ..Policy::default()
+        };
+        let session = Session::with_policy(ScriptedStore::query_error(), policy);
+        let err = session
+            .apply_retention(100)
+            .await
+            .expect_err("query errors should fail retention");
+        assert!(matches!(err, StoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn retention_surfaces_store_delete_errors() {
+        let store = ScriptedStore::delete_error();
+        let old = NostrEvent {
+            id: "old-delete-error".to_string(),
+            pubkey: "aa".repeat(32),
+            created_at: 10,
+            kind: 1,
+            tags: Vec::new(),
+            content: String::new(),
+            sig: "00".repeat(64),
+        };
+        store.insert(old).await.expect("insert");
+
+        let policy = Policy {
+            retention_max_age_seconds: Some(5),
+            ..Policy::default()
+        };
+        let session = Session::with_policy(store, policy);
+        let err = session
+            .apply_retention(100)
+            .await
+            .expect_err("delete errors should fail retention");
+        assert!(matches!(err, StoreError::Backend(_)));
+    }
+
     #[test]
     fn auth_challenge_emitted_when_required() {
         let session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true);
@@ -1905,6 +1945,7 @@ mod tests {
     enum ScriptedStoreMode {
         QueryError,
         InsertError,
+        DeleteError,
     }
 
     struct ScriptedStore {
@@ -1926,6 +1967,13 @@ mod tests {
                 inner: MemoryStore::new(),
             }
         }
+
+        fn delete_error() -> Self {
+            Self {
+                mode: ScriptedStoreMode::DeleteError,
+                inner: MemoryStore::new(),
+            }
+        }
     }
 
     #[async_trait]
@@ -1942,6 +1990,9 @@ mod tests {
         }
 
         async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+            if matches!(self.mode, ScriptedStoreMode::DeleteError) {
+                return Err(StoreError::Backend("delete failure".to_string()));
+            }
             self.inner.delete(id).await
         }
 
@@ -2001,7 +2052,7 @@ mod tests {
         event
     }
 
-    async fn authenticate_session(session: &mut Session<MemoryStore>) {
+    async fn authenticate_session<Store: EventStore>(session: &mut Session<Store>) {
         let challenge = session.auth_challenge().expect("challenge");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3948,6 +3999,69 @@ mod tests {
             .await
             .expect("invite lookup");
         assert!(invite.is_some());
+    }
+
+    #[tokio::test]
+    async fn virtual_events_include_membership_and_invite_when_filters_match() {
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-1";
+
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x45; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+
+        let auth_event = signed_event_with_tags(
+            "auth-member",
+            super::AUTH_KIND,
+            vec![vec!["challenge".to_string(), "placeholder".to_string()]],
+        );
+        let member_pubkey = hex::decode(&auth_event.pubkey).expect("member pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: member_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+
+        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        authenticate_session(&mut session).await;
+
+        let filters = vec![crate::Filter {
+            ids: Vec::new(),
+            authors: Vec::new(),
+            kinds: vec![super::NIP43_MEMBERSHIP_KIND, super::NIP43_INVITE_KIND],
+            since: None,
+            until: None,
+            limit: None,
+            tags: std::collections::BTreeMap::new(),
+        }];
+        let events = session
+            .virtual_events(&filters, 10)
+            .await
+            .expect("virtual events");
+
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == super::NIP43_MEMBERSHIP_KIND)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == super::NIP43_INVITE_KIND)
+        );
     }
 
     #[tokio::test]
