@@ -303,8 +303,8 @@ impl<R: EventRepository> EventStore for RepositoryStore<R> {
     }
 }
 
-async fn apply_delete_repo<R: EventRepository>(
-    repo: &R,
+async fn apply_delete_repo(
+    repo: &dyn EventRepository,
     tenant_id: &str,
     event: &NostrEvent,
 ) -> Result<(), StoreError> {
@@ -356,8 +356,8 @@ async fn apply_delete_repo<R: EventRepository>(
     Ok(())
 }
 
-async fn apply_replaceable_repo<R: EventRepository>(
-    repo: &R,
+async fn apply_replaceable_repo(
+    repo: &dyn EventRepository,
     tenant_id: &str,
     event: &NostrEvent,
     key: &ReplaceableKey,
