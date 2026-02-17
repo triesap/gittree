@@ -424,36 +424,58 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
-        let previous = std::env::var_os(key);
-        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
-        unsafe {
-            std::env::set_var(key, value);
+    struct EnvRestore {
+        key: String,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests run single-threaded in this crate; we restore the previous value on drop.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
         }
-        f();
-        match previous {
-            Some(old) => unsafe {
-                std::env::set_var(key, old);
-            },
-            None => unsafe {
+
+        fn clear(key: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests run single-threaded in this crate; we restore the previous value on drop.
+            unsafe {
                 std::env::remove_var(key);
-            },
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
         }
     }
 
-    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
-        let previous = std::env::var_os(key);
-        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
-        unsafe {
-            std::env::remove_var(key);
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(old) => unsafe {
+                    std::env::set_var(&self.key, old);
+                },
+                None => unsafe {
+                    std::env::remove_var(&self.key);
+                },
+            }
         }
+    }
+
+    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+        let _restore = EnvRestore::set(key, value);
         f();
-        match previous {
-            Some(old) => unsafe {
-                std::env::set_var(key, old);
-            },
-            None => {}
-        }
+    }
+
+    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
+        let _restore = EnvRestore::clear(key);
+        f();
     }
 
     fn write_temp_services_config(contents: &str) -> PathBuf {
