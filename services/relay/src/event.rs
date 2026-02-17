@@ -16,7 +16,6 @@ pub struct NostrEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventError {
-    Canonicalization,
     InvalidId,
     InvalidSignature,
     InvalidPubkey,
@@ -25,7 +24,6 @@ pub enum EventError {
 impl std::fmt::Display for EventError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EventError::Canonicalization => write!(f, "failed to canonicalize event"),
             EventError::InvalidId => write!(f, "event id mismatch"),
             EventError::InvalidSignature => write!(f, "invalid event signature"),
             EventError::InvalidPubkey => write!(f, "invalid event pubkey"),
@@ -36,7 +34,7 @@ impl std::fmt::Display for EventError {
 impl std::error::Error for EventError {}
 
 impl NostrEvent {
-    pub fn canonical_json(&self) -> Result<String, EventError> {
+    pub fn canonical_json(&self) -> String {
         let payload = json!([
             0,
             self.pubkey,
@@ -45,18 +43,18 @@ impl NostrEvent {
             self.tags,
             self.content
         ]);
-        serde_json::to_string(&payload).map_err(|_| EventError::Canonicalization)
+        payload.to_string()
     }
 
-    pub fn compute_id(&self) -> Result<String, EventError> {
-        let canonical = self.canonical_json()?;
-        let digest = Sha256::digest(canonical.as_bytes());
-        Ok(hex::encode(digest))
+    pub fn compute_id(&self) -> String {
+        let canonical = self.canonical_json();
+        let digest: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
+        hex::encode(digest)
     }
 
     pub fn verify(&self) -> Result<(), EventError> {
-        let canonical = self.canonical_json()?;
-        let digest = Sha256::digest(canonical.as_bytes());
+        let canonical = self.canonical_json();
+        let digest: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
         let computed_id = hex::encode(digest);
 
         if self.id != computed_id {
@@ -67,8 +65,7 @@ impl NostrEvent {
             .map_err(|_| EventError::InvalidSignature)?;
         let pubkey = secp256k1::XOnlyPublicKey::from_str(&self.pubkey)
             .map_err(|_| EventError::InvalidPubkey)?;
-        let msg = secp256k1::Message::from_digest_slice(&digest)
-            .map_err(|_| EventError::InvalidSignature)?;
+        let msg = secp256k1::Message::from_digest(digest);
         let secp = secp256k1::Secp256k1::verification_only();
         secp.verify_schnorr(&sig, &msg, &pubkey)
             .map_err(|_| EventError::InvalidSignature)?;
@@ -100,7 +97,7 @@ mod tests {
     #[test]
     fn canonical_json_matches_expected() {
         let event = sample_event();
-        let canonical = event.canonical_json().expect("canonical");
+        let canonical = event.canonical_json();
         assert_eq!(
             canonical,
             r#"[0,"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",1,1,[["e","1"],["p","2"]],"hello"]"#
@@ -110,7 +107,7 @@ mod tests {
     #[test]
     fn compute_id_matches_expected() {
         let event = sample_event();
-        let id = event.compute_id().expect("id");
+        let id = event.compute_id();
         assert_eq!(
             id,
             "758cdd74b47b71b1a82bfe0e9ba72aa73eb553190945fe06c3379cbb1c4a4f7f"
@@ -126,7 +123,7 @@ mod tests {
 
         let mut event = sample_event();
         event.pubkey = hex::encode(pubkey.serialize());
-        event.id = event.compute_id().expect("id");
+        event.id = event.compute_id();
 
         let id_bytes = hex::decode(&event.id).expect("id bytes");
         let msg = secp256k1::Message::from_digest_slice(&id_bytes).expect("msg");
@@ -154,7 +151,7 @@ mod tests {
 
         let mut event = sample_event();
         event.pubkey = hex::encode(pubkey.serialize());
-        event.id = event.compute_id().expect("id");
+        event.id = event.compute_id();
         event.sig = "not-a-schnorr-signature".to_string();
 
         let err = event.verify().expect_err("invalid signature");
@@ -169,7 +166,7 @@ mod tests {
 
         let mut event = sample_event();
         event.pubkey = "g".repeat(64);
-        event.id = event.compute_id().expect("id");
+        event.id = event.compute_id();
 
         let id_bytes = hex::decode(&event.id).expect("id bytes");
         let msg = secp256k1::Message::from_digest_slice(&id_bytes).expect("msg");
@@ -182,10 +179,6 @@ mod tests {
 
     #[test]
     fn event_error_display_and_source_are_stable() {
-        assert_eq!(
-            EventError::Canonicalization.to_string(),
-            "failed to canonicalize event"
-        );
         assert_eq!(EventError::InvalidId.to_string(), "event id mismatch");
         assert_eq!(
             EventError::InvalidSignature.to_string(),

@@ -268,6 +268,18 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_invalid_json_and_missing_type() {
+        let err = decode_client_message("not-json").unwrap_err();
+        assert_eq!(err, ProtocolError::InvalidJson);
+
+        let err = decode_client_message("[]").unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("type"));
+
+        let err = decode_client_message("[1]").unwrap_err();
+        assert_eq!(err, ProtocolError::MissingField("type"));
+    }
+
+    #[test]
     fn encode_notice_message() {
         let message = ServerMessage::Notice {
             message: "hello".to_string(),

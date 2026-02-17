@@ -1315,7 +1315,7 @@ fn membership_response(event_id: &str, accepted: bool, message: String) -> Vec<S
 }
 
 fn sign_event(event: &mut crate::NostrEvent, signer: &TenantSigner) -> Result<(), String> {
-    event.id = event.compute_id().map_err(|err| err.to_string())?;
+    event.id = event.compute_id();
     let id_bytes = hex::decode(&event.id).map_err(|_| "invalid event id".to_string())?;
     let msg = Message::from_digest_slice(&id_bytes).map_err(|err| err.to_string())?;
     let secp = Secp256k1::new();
@@ -1993,7 +1993,7 @@ mod tests {
             content: String::new(),
             sig: String::new(),
         };
-        event.id = event.compute_id().expect("id");
+        event.id = event.compute_id();
         let id_bytes = hex::decode(&event.id).expect("id bytes");
         let msg = secp256k1::Message::from_digest_slice(&id_bytes).expect("msg");
         let sig = secp.sign_schnorr(&msg, &keypair);

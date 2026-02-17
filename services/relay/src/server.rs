@@ -655,7 +655,7 @@ mod tests {
             content: String::new(),
             sig: String::new(),
         };
-        event.id = event.compute_id().expect("id");
+        event.id = event.compute_id();
         let id_bytes = hex::decode(&event.id).expect("id bytes");
         let msg = secp256k1::Message::from_digest_slice(&id_bytes).expect("msg");
         let sig = secp.sign_schnorr(&msg, &keypair);
