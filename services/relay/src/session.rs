@@ -1587,7 +1587,7 @@ mod tests {
             .await;
         assert_notice(&parse_response[0]);
 
-        let mut query_session = Session::new(ScriptedStore::query_error());
+        let mut query_session = Session::new(scripted_store_dyn(ScriptedStore::query_error()));
         let query_response = query_session
             .handle_message(ClientMessage::Req {
                 subscription_id: "sub".to_string(),
@@ -1687,7 +1687,7 @@ mod tests {
             .await;
         assert_notice(&parse_response[0]);
 
-        let mut query_session = Session::new(ScriptedStore::query_error());
+        let mut query_session = Session::new(scripted_store_dyn(ScriptedStore::query_error()));
         let query_response = query_session
             .handle_message(ClientMessage::Count {
                 subscription_id: "sub".to_string(),
@@ -1890,7 +1890,7 @@ mod tests {
             retention_max_age_seconds: Some(5),
             ..Policy::default()
         };
-        let session = Session::with_policy(ScriptedStore::query_error(), policy);
+        let session = Session::with_policy(scripted_store_dyn(ScriptedStore::query_error()), policy);
         let err = session
             .apply_retention(100)
             .await
@@ -1900,7 +1900,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_surfaces_store_delete_errors() {
-        let store = ScriptedStore::delete_error();
+        let store = Arc::new(ScriptedStore::delete_error());
         let old = NostrEvent {
             id: "old-delete-error".to_string(),
             pubkey: "aa".repeat(32),
@@ -1916,7 +1916,8 @@ mod tests {
             retention_max_age_seconds: Some(5),
             ..Policy::default()
         };
-        let session = Session::with_policy(store, policy);
+        let session_store: Arc<dyn EventStore> = store;
+        let session = Session::with_policy(session_store, policy);
         let err = session
             .apply_retention(100)
             .await
@@ -2136,6 +2137,10 @@ mod tests {
             }
             self.inner.query(filters).await
         }
+    }
+
+    fn scripted_store_dyn(store: ScriptedStore) -> Arc<dyn EventStore> {
+        Arc::new(store)
     }
 
     #[tokio::test]
@@ -2570,7 +2575,7 @@ mod tests {
             } if message == super::AUTH_PUBKEY_MISMATCH_REASON
         ));
 
-        let mut insert_failure = Session::new(ScriptedStore::insert_error());
+        let mut insert_failure = Session::new(scripted_store_dyn(ScriptedStore::insert_error()));
         let response = insert_failure
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(signed_event("insert-fail")).expect("event"),
@@ -3995,8 +4000,10 @@ mod tests {
                 filters: vec![filter],
             },
         };
-        let mut session =
-            Session::with_admission(ScriptedStore::query_error(), Arc::new(admission));
+        let mut session = Session::with_admission(
+            scripted_store_dyn(ScriptedStore::query_error()),
+            Arc::new(admission),
+        );
         let response = session
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(signed_event("needs-related-error")).expect("event"),
