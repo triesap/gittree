@@ -87,13 +87,15 @@ impl<S: EventStore> SessionDriver<S> {
 }
 
 fn encode_response(message: ServerMessage) -> String {
-    encode_response_with(message, |payload| encode_server_message(payload))
+    encode_response_with(message, &mut |payload| {
+        encode_server_message(payload).map_err(|_| ())
+    })
 }
 
-fn encode_response_with<F, E>(message: ServerMessage, encode: F) -> String
-where
-    F: FnOnce(&ServerMessage) -> Result<String, E>,
-{
+fn encode_response_with(
+    message: ServerMessage,
+    encode: &mut dyn FnMut(&ServerMessage) -> Result<String, ()>,
+) -> String {
     match encode(&message) {
         Ok(serialized) => serialized,
         Err(_) => "[\"NOTICE\",\"failed to encode response\"]".to_string(),
@@ -105,6 +107,7 @@ mod tests {
     use super::SessionDriver;
     use crate::{EventStore, MemoryStore, NostrEvent, Policy, ServerMessage, Session};
     use serde_json::Value;
+    use std::sync::Arc;
     use tokio::sync::{broadcast, mpsc};
     use tokio::time::{Duration, timeout};
 
@@ -168,6 +171,22 @@ mod tests {
     #[tokio::test]
     async fn driver_rejects_oversized_messages() {
         let store = MemoryStore::new();
+        let policy = Policy {
+            max_message_bytes: Some(10),
+            ..Policy::default()
+        };
+        let session = Session::with_policy(store, policy);
+        let mut driver = SessionDriver::new(session);
+        let frames = driver.handle_text(r#"["REQ","sub",{}]"#).await;
+
+        let decoded = decode_frames(&frames);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0][0], Value::String("NOTICE".to_string()));
+    }
+
+    #[tokio::test]
+    async fn driver_rejects_oversized_messages_with_arc_event_store() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
         let policy = Policy {
             max_message_bytes: Some(10),
             ..Policy::default()
@@ -445,7 +464,7 @@ mod tests {
             ServerMessage::Notice {
                 message: "any".to_string(),
             },
-            |_| -> Result<String, ()> { Err(()) },
+            &mut |_| -> Result<String, ()> { Err(()) },
         );
         assert_eq!(encoded, "[\"NOTICE\",\"failed to encode response\"]");
     }
