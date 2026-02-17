@@ -1677,8 +1677,20 @@ WHERE datname = $1
         }
     }
 
+    fn test_database_base_url_from_candidates(
+        explicit: Option<String>,
+        write_url: Option<String>,
+        read_url: Option<String>,
+    ) -> String {
+        test_database_base_url_from_value(explicit.or(write_url).or(read_url))
+    }
+
     fn test_database_base_url() -> String {
-        test_database_base_url_from_value(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok())
+        test_database_base_url_from_candidates(
+            std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok(),
+            std::env::var("GITTREE_STORAGE_WRITE_URL").ok(),
+            std::env::var("GITTREE_STORAGE_READ_URL").ok(),
+        )
     }
 
     async fn with_test_db<F, Fut>(test_name: &str, run: F)
@@ -1884,6 +1896,30 @@ WHERE datname = $1
         assert_eq!(
             test_database_base_url_from_value(None),
             DEFAULT_TEST_DATABASE_URL.to_string()
+        );
+    }
+
+    #[test]
+    fn test_database_base_url_from_candidates_applies_precedence() {
+        assert_eq!(
+            test_database_base_url_from_candidates(
+                Some("postgres://explicit".to_string()),
+                Some("postgres://write".to_string()),
+                Some("postgres://read".to_string()),
+            ),
+            "postgres://explicit".to_string()
+        );
+        assert_eq!(
+            test_database_base_url_from_candidates(
+                None,
+                Some("postgres://write".to_string()),
+                Some("postgres://read".to_string()),
+            ),
+            "postgres://write".to_string()
+        );
+        assert_eq!(
+            test_database_base_url_from_candidates(None, None, Some("postgres://read".to_string())),
+            "postgres://read".to_string()
         );
     }
 
