@@ -86,7 +86,10 @@ mod tests {
             vec!["p".to_string(), "alice".to_string()],
         ];
         let index = TagIndex::from_tags(&tags).expect("index");
-        assert_eq!(index.values("e"), Some(&["1".to_string(), "2".to_string()][..]));
+        assert_eq!(
+            index.values("e"),
+            Some(&["1".to_string(), "2".to_string()][..])
+        );
         assert_eq!(index.values("p"), Some(&["alice".to_string()][..]));
         assert_eq!(index.values("missing"), None);
     }
@@ -98,7 +101,10 @@ mod tests {
             vec!["e".to_string(), "2".to_string()],
         ];
         let index = TagIndex::from_tags(&tags).expect("index");
-        assert_eq!(index.values("e"), Some(&["1".to_string(), "2".to_string()][..]));
+        assert_eq!(
+            index.values("e"),
+            Some(&["1".to_string(), "2".to_string()][..])
+        );
     }
 
     #[test]

@@ -55,8 +55,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 

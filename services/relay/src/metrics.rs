@@ -1,5 +1,5 @@
-use opentelemetry::metrics::Counter;
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::Counter;
 
 #[derive(Debug, Clone)]
 pub struct RelayMetrics {

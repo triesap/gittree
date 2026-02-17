@@ -37,7 +37,14 @@ impl std::error::Error for EventError {}
 
 impl NostrEvent {
     pub fn canonical_json(&self) -> Result<String, EventError> {
-        let payload = json!([0, self.pubkey, self.created_at, self.kind, self.tags, self.content]);
+        let payload = json!([
+            0,
+            self.pubkey,
+            self.created_at,
+            self.kind,
+            self.tags,
+            self.content
+        ]);
         serde_json::to_string(&payload).map_err(|_| EventError::Canonicalization)
     }
 
@@ -56,10 +63,8 @@ impl NostrEvent {
             return Err(EventError::InvalidId);
         }
 
-        let sig =
-            secp256k1::schnorr::Signature::from_str(&self.sig).map_err(|_| {
-                EventError::InvalidSignature
-            })?;
+        let sig = secp256k1::schnorr::Signature::from_str(&self.sig)
+            .map_err(|_| EventError::InvalidSignature)?;
         let pubkey = secp256k1::XOnlyPublicKey::from_str(&self.pubkey)
             .map_err(|_| EventError::InvalidPubkey)?;
         let msg = secp256k1::Message::from_digest_slice(&digest)
@@ -83,7 +88,10 @@ mod tests {
             pubkey: "f".repeat(64),
             created_at: 1,
             kind: 1,
-            tags: vec![vec!["e".to_string(), "1".to_string()], vec!["p".to_string(), "2".to_string()]],
+            tags: vec![
+                vec!["e".to_string(), "1".to_string()],
+                vec!["p".to_string(), "2".to_string()],
+            ],
             content: "hello".to_string(),
             sig: String::new(),
         }
@@ -183,7 +191,10 @@ mod tests {
             EventError::InvalidSignature.to_string(),
             "invalid event signature"
         );
-        assert_eq!(EventError::InvalidPubkey.to_string(), "invalid event pubkey");
+        assert_eq!(
+            EventError::InvalidPubkey.to_string(),
+            "invalid event pubkey"
+        );
         assert!(EventError::InvalidId.source().is_none());
     }
 }

@@ -562,16 +562,15 @@ mod tests {
         apply_delete_repo, apply_replaceable_repo, collect_tag_values, event_to_record,
         exact_hex_filters, parse_address, replaceable_key,
     };
-    use async_trait::async_trait;
     use crate::NostrEvent;
+    use async_trait::async_trait;
     use gittree_storage::{
-        EventQuery, EventRecord, EventRepository, InMemoryRepositories,
-        PostgresRepositories, StorageConfig, StorageError,
-        TagRecord,
+        EventQuery, EventRecord, EventRepository, InMemoryRepositories, PostgresRepositories,
+        StorageConfig, StorageError, TagRecord,
     };
     use serde_json::json;
-    use std::time::Duration;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[derive(Debug, Clone)]
     struct ScriptedEventRepo {
@@ -641,7 +640,7 @@ mod tests {
             &"aa".repeat(32),
             0,
             1,
-            "",
+            "".to_string(),
             &"00".repeat(64),
             Vec::new(),
         )
@@ -699,7 +698,10 @@ mod tests {
             Ok(false)
         }
 
-        async fn query_events(&self, _query: &EventQuery) -> Result<Vec<EventRecord>, StorageError> {
+        async fn query_events(
+            &self,
+            _query: &EventQuery,
+        ) -> Result<Vec<EventRecord>, StorageError> {
             if self.fail_query {
                 return Err(StorageError::Internal {
                     message: "query failure".to_string(),
@@ -949,10 +951,7 @@ mod tests {
         delete_address.kind = 5;
         delete_address.pubkey = "bb".repeat(32);
         delete_address.created_at = 20;
-        delete_address.tags = vec![vec![
-            "a".to_string(),
-            format!("30023:{target_pubkey}:demo"),
-        ]];
+        delete_address.tags = vec![vec!["a".to_string(), format!("30023:{target_pubkey}:demo")]];
         store
             .insert(delete_address)
             .await
@@ -976,10 +975,7 @@ mod tests {
         delete.tags = vec![
             vec!["e".to_string(), "missing-event".to_string()],
             vec!["a".to_string(), "bad-address".to_string()],
-            vec![
-                "a".to_string(),
-                format!("30023:{}:demo", delete.pubkey),
-            ],
+            vec!["a".to_string(), format!("30023:{}:demo", delete.pubkey)],
         ];
         store.insert(delete.clone()).await.expect("insert delete");
         assert!(store.get(&delete.id).await.expect("get delete").is_some());
@@ -994,7 +990,9 @@ mod tests {
         delete.created_at = 10;
         let address = format!("30023:{}:demo", delete.pubkey);
         let key = parse_address(&address).expect("address");
-        state.replaceable.insert(key.clone(), "missing-id".to_string());
+        state
+            .replaceable
+            .insert(key.clone(), "missing-id".to_string());
         delete.tags = vec![vec!["a".to_string(), address]];
 
         state.apply_delete(&delete);
@@ -1397,7 +1395,8 @@ mod tests {
         let query = store.query(&[]).await.expect("empty query");
         assert!(query.is_empty());
 
-        let dyn_store: Arc<dyn EventStore> = Arc::new(RepositoryStore::new(unreachable_postgres_repo()));
+        let dyn_store: Arc<dyn EventStore> =
+            Arc::new(RepositoryStore::new(unreachable_postgres_repo()));
         let dyn_delete_err = EventStore::delete(&dyn_store, "still-not-hex")
             .await
             .expect_err("dyn delete should fail");
@@ -1438,10 +1437,7 @@ mod tests {
             vec!["e".to_string(), "zz-not-hex".to_string()],
             vec!["e".to_string(), "11".repeat(32)],
             vec!["a".to_string(), "bad-address".to_string()],
-            vec![
-                "a".to_string(),
-                format!("30023:{}:demo", delete.pubkey),
-            ],
+            vec!["a".to_string(), format!("30023:{}:demo", delete.pubkey)],
         ];
 
         apply_delete_repo(&repo, "default", &delete)

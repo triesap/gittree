@@ -20,10 +20,7 @@ impl<S: EventStore> SessionDriver<S> {
             return vec![encode_response(notice.into())];
         }
         let responses = self.session.handle_raw(input).await;
-        responses
-            .into_iter()
-            .map(encode_response)
-            .collect()
+        responses.into_iter().map(encode_response).collect()
     }
 
     pub async fn run(
@@ -53,7 +50,9 @@ impl<S: EventStore> SessionDriver<S> {
         mut broadcast_rx: broadcast::Receiver<crate::NostrEvent>,
     ) {
         for message in self.session.initial_messages() {
-            if outbound.send(encode_response(message)).await.is_err() { return; }
+            if outbound.send(encode_response(message)).await.is_err() {
+                return;
+            }
         }
         loop {
             tokio::select! {
@@ -144,9 +143,7 @@ mod tests {
 
         let session = Session::new(store);
         let mut driver = SessionDriver::new(session);
-        let frames = driver
-            .handle_text(r#"["REQ","sub",{}]"#)
-            .await;
+        let frames = driver.handle_text(r#"["REQ","sub",{}]"#).await;
 
         let decoded = decode_frames(&frames);
         assert_eq!(decoded.len(), 2);
@@ -227,7 +224,10 @@ mod tests {
             .await
             .expect("send inbound");
         drop(in_tx);
-        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timeout")
+            .expect("task");
     }
 
     #[tokio::test]
@@ -252,7 +252,10 @@ mod tests {
             .expect("first frame");
         drop(out_rx);
         drop(in_tx);
-        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timeout")
+            .expect("task");
     }
 
     #[tokio::test]
@@ -303,7 +306,10 @@ mod tests {
             .await
             .expect("send inbound");
         drop(in_tx);
-        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timeout")
+            .expect("task");
     }
 
     #[tokio::test]
@@ -325,10 +331,15 @@ mod tests {
             .expect("response");
 
         drop(out_rx);
-        broadcast_tx.send(sample_event("broadcast")).expect("send broadcast");
+        broadcast_tx
+            .send(sample_event("broadcast"))
+            .expect("send broadcast");
         drop(broadcast_tx);
 
-        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timeout")
+            .expect("task");
         drop(in_tx);
     }
 
@@ -352,7 +363,9 @@ mod tests {
         let first: Value = serde_json::from_str(&first).expect("json");
         assert_eq!(first[0], Value::String("EOSE".to_string()));
 
-        broadcast_tx.send(sample_event("broadcast-hit")).expect("send broadcast");
+        broadcast_tx
+            .send(sample_event("broadcast-hit"))
+            .expect("send broadcast");
         let second = timeout(Duration::from_secs(1), out_rx.recv())
             .await
             .expect("timeout")
@@ -362,7 +375,10 @@ mod tests {
 
         drop(in_tx);
         drop(broadcast_tx);
-        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timeout")
+            .expect("task");
     }
 
     #[tokio::test]
@@ -374,9 +390,14 @@ mod tests {
         drop(out_rx);
         let (broadcast_tx, broadcast_rx) = broadcast::channel(1);
         let task = tokio::spawn(driver.run_with_broadcast(in_rx, out_tx, broadcast_rx));
-        broadcast_tx.send(sample_event("broadcast-only")).expect("send broadcast");
+        broadcast_tx
+            .send(sample_event("broadcast-only"))
+            .expect("send broadcast");
         drop(broadcast_tx);
-        timeout(Duration::from_secs(1), task).await.expect("timeout").expect("task");
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timeout")
+            .expect("task");
     }
 
     #[tokio::test]

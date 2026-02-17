@@ -95,11 +95,7 @@ pub fn decode_client_message(input: &str) -> Result<ClientMessage, ProtocolError
             if items.len() < 3 {
                 return Err(ProtocolError::MissingField("filters"));
             }
-            let filters = items
-                .iter()
-                .skip(2)
-                .cloned()
-                .collect::<Vec<_>>();
+            let filters = items.iter().skip(2).cloned().collect::<Vec<_>>();
             Ok(ClientMessage::Req {
                 subscription_id,
                 filters,
@@ -129,11 +125,7 @@ pub fn decode_client_message(input: &str) -> Result<ClientMessage, ProtocolError
             if items.len() < 3 {
                 return Err(ProtocolError::MissingField("filters"));
             }
-            let filters = items
-                .iter()
-                .skip(2)
-                .cloned()
-                .collect::<Vec<_>>();
+            let filters = items.iter().skip(2).cloned().collect::<Vec<_>>();
             Ok(ClientMessage::Count {
                 subscription_id,
                 filters,
@@ -172,7 +164,9 @@ pub fn encode_server_message(message: &ServerMessage) -> Result<String, Protocol
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message};
+    use super::{
+        ClientMessage, ProtocolError, ServerMessage, decode_client_message, encode_server_message,
+    };
     use serde_json::json;
 
     #[test]

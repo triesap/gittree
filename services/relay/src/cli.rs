@@ -120,7 +120,14 @@ mod tests {
 
     #[test]
     fn parse_accepts_short_flags() {
-        let args = ["gittree-relay", "-c", "cfg.toml", "-b", "0.0.0.0:3030", "-h"];
+        let args = [
+            "gittree-relay",
+            "-c",
+            "cfg.toml",
+            "-b",
+            "0.0.0.0:3030",
+            "-h",
+        ];
         let cli = RelayCli::parse(args).expect("parse cli");
         assert_eq!(cli.config_path, Some(PathBuf::from("cfg.toml")));
         assert_eq!(cli.bind, Some("0.0.0.0:3030".to_string()));

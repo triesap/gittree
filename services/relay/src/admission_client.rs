@@ -1,7 +1,7 @@
+use async_trait::async_trait;
 use gittree_core::{AdmissionDecision, EventFilter};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use async_trait::async_trait;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,27 +309,27 @@ fn admission_decision_from_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::admission_decision_from_payload;
     use super::AdmissionDecisionPayload;
-    use super::AdmissionRequestError;
     use super::AdmissionFallback;
     use super::AdmissionFilter;
     use super::AdmissionHookClient;
     use super::AdmissionHookConfig;
     use super::AdmissionHookError;
+    use super::AdmissionRequestError;
     use super::AdmissionRequestPayload;
     use super::AdmissionTransport;
     use super::HttpAdmissionTransport;
     use super::RelayEvent;
+    use super::admission_decision_from_payload;
+    use async_trait::async_trait;
     use axum::Json;
     use axum::Router;
     use axum::http::StatusCode;
     use axum::routing::post;
-    use async_trait::async_trait;
     use gittree_core::AdmissionDecision;
     use gittree_core::EventFilter;
-    use std::future::IntoFuture;
     use std::collections::BTreeMap;
+    use std::future::IntoFuture;
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -532,12 +532,19 @@ mod tests {
         let reject = admission_decision_from_payload(AdmissionDecisionPayload::Reject {
             reason: String::new(),
         });
-        assert!(matches!(reject, Err(AdmissionHookError::InvalidDecision(_))));
+        assert!(matches!(
+            reject,
+            Err(AdmissionHookError::InvalidDecision(_))
+        ));
 
-        let related = admission_decision_from_payload(
-            AdmissionDecisionPayload::RequiresRelatedEvents { filters: Vec::new() },
-        );
-        assert!(matches!(related, Err(AdmissionHookError::InvalidDecision(_))));
+        let related =
+            admission_decision_from_payload(AdmissionDecisionPayload::RequiresRelatedEvents {
+                filters: Vec::new(),
+            });
+        assert!(matches!(
+            related,
+            Err(AdmissionHookError::InvalidDecision(_))
+        ));
     }
 
     #[test]
@@ -662,11 +669,8 @@ mod tests {
     #[tokio::test]
     async fn new_http_client_constructs_transport_and_accepts() {
         let endpoint = spawn_accept_server().await;
-        let config = AdmissionHookConfig::new(
-            endpoint,
-            Duration::from_secs(1),
-            AdmissionFallback::Reject,
-        );
+        let config =
+            AdmissionHookConfig::new(endpoint, Duration::from_secs(1), AdmissionFallback::Reject);
         let client = AdmissionHookClient::new_http(config).expect("client");
         let decision = client.decide(&sample_event()).await;
         assert!(matches!(decision, AdmissionDecision::Accept));
@@ -695,11 +699,8 @@ mod tests {
     #[tokio::test]
     async fn admission_decider_trait_dispatches_to_http_client() {
         let endpoint = spawn_accept_server().await;
-        let config = AdmissionHookConfig::new(
-            endpoint,
-            Duration::from_secs(1),
-            AdmissionFallback::Reject,
-        );
+        let config =
+            AdmissionHookConfig::new(endpoint, Duration::from_secs(1), AdmissionFallback::Reject);
         let client = AdmissionHookClient::new_http(config).expect("client");
         let decision = decide_via_trait(&client, &sample_event()).await;
         assert!(matches!(decision, AdmissionDecision::Accept));

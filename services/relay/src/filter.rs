@@ -50,12 +50,7 @@ impl Filter {
     }
 
     pub fn matches(&self, event: &NostrEvent, tags: &TagIndex) -> bool {
-        if !self.ids.is_empty()
-            && !self
-                .ids
-                .iter()
-                .any(|prefix| event.id.starts_with(prefix))
-        {
+        if !self.ids.is_empty() && !self.ids.iter().any(|prefix| event.id.starts_with(prefix)) {
             return false;
         }
 
@@ -88,7 +83,10 @@ impl Filter {
             let Some(existing) = tags.values(tag) else {
                 return false;
             };
-            if !values.iter().any(|value| existing.iter().any(|existing| existing == value)) {
+            if !values
+                .iter()
+                .any(|value| existing.iter().any(|existing| existing == value))
+            {
                 return false;
             }
         }
@@ -192,7 +190,10 @@ mod tests {
         assert_eq!(filter.since, Some(50));
         assert_eq!(filter.until, Some(150));
         assert_eq!(filter.limit, Some(10));
-        assert_eq!(filter.tags.get("e"), Some(&vec!["1".to_string(), "2".to_string()]));
+        assert_eq!(
+            filter.tags.get("e"),
+            Some(&vec!["1".to_string(), "2".to_string()])
+        );
     }
 
     #[test]

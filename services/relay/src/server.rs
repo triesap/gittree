@@ -53,7 +53,10 @@ impl TenantRepository for PostgresRepositories {
     }
 
     fn tenant_store(&self, tenant_id: &str) -> Arc<dyn EventStore> {
-        Arc::new(RepositoryStore::with_tenant(self.clone(), tenant_id.to_string()))
+        Arc::new(RepositoryStore::with_tenant(
+            self.clone(),
+            tenant_id.to_string(),
+        ))
     }
 
     fn membership_repository(&self) -> Arc<dyn RelayMembershipRepository> {
@@ -274,10 +277,7 @@ fn classify_outbound_message(outbound: Option<String>) -> Option<Message> {
     outbound.map(Message::Text)
 }
 
-async fn handle_inbound_action(
-    in_tx: &mpsc::Sender<String>,
-    action: InboundSocketAction,
-) -> bool {
+async fn handle_inbound_action(in_tx: &mpsc::Sender<String>, action: InboundSocketAction) -> bool {
     match action {
         InboundSocketAction::Forward(text) => in_tx.send(text).await.is_ok(),
         InboundSocketAction::Continue => true,
@@ -305,15 +305,15 @@ async fn pump_socket_io<R, S>(
     S: Sink<Message> + Unpin,
 {
     while tokio::select! {
-            biased;
-            msg = receiver.next() => {
-                let action = classify_inbound_message(msg);
-                handle_inbound_action(in_tx, action).await
-            }
-            outbound = out_rx.recv() => {
-                handle_outbound_message(sender, outbound).await
-            }
-        } {}
+        biased;
+        msg = receiver.next() => {
+            let action = classify_inbound_message(msg);
+            handle_inbound_action(in_tx, action).await
+        }
+        outbound = out_rx.recv() => {
+            handle_outbound_message(sender, outbound).await
+        }
+    } {}
 }
 
 type SocketReceiver = SplitStream<WebSocket>;
@@ -348,25 +348,29 @@ async fn handle_socket_with_pump<P>(
     let (out_tx, mut out_rx) = mpsc::channel(128);
     let broadcast_rx = state.broadcast.subscribe();
 
-    let (read_auth_required, write_auth_required, read_membership_required, write_membership_required) =
-        match tenant.tenant.as_ref() {
-            Some(record) => {
-                let read_membership_required = !record.public_read;
-                let write_membership_required = !record.public_write;
-                (
-                    read_membership_required,
-                    record.auth_required || write_membership_required,
-                    read_membership_required,
-                    write_membership_required,
-                )
-            }
-            None => (
-                state.config.policy.auth_required,
-                state.config.policy.auth_required,
-                false,
-                false,
-            ),
-        };
+    let (
+        read_auth_required,
+        write_auth_required,
+        read_membership_required,
+        write_membership_required,
+    ) = match tenant.tenant.as_ref() {
+        Some(record) => {
+            let read_membership_required = !record.public_read;
+            let write_membership_required = !record.public_write;
+            (
+                read_membership_required,
+                record.auth_required || write_membership_required,
+                read_membership_required,
+                write_membership_required,
+            )
+        }
+        None => (
+            state.config.policy.auth_required,
+            state.config.policy.auth_required,
+            false,
+            false,
+        ),
+    };
     let relay_url = tenant
         .tenant
         .as_ref()
@@ -390,12 +394,7 @@ async fn handle_socket_with_pump<P>(
     if let (Some(record), Some(membership)) = (tenant.tenant.as_ref(), membership.as_ref()) {
         session =
             session.with_relay_signer(record.relay_pubkey.clone(), record.relay_secret.clone());
-        let _ = seed_owner_membership(
-            membership,
-            &tenant.tenant_id,
-            &record.relay_pubkey,
-        )
-        .await;
+        let _ = seed_owner_membership(membership, &tenant.tenant_id, &record.relay_pubkey).await;
     }
 
     let session = session.with_metrics(state.metrics.clone());
@@ -448,15 +447,13 @@ mod tests {
         handle_socket_with_pump, nip11_response, relay_url_from_host, resolve_tenant,
         seed_owner_membership,
     };
-    use crate::{
-        MemoryStore, NostrEvent, Policy, RelayConfig, RelayError, RelayMetrics,
-    };
+    use crate::{MemoryStore, NostrEvent, Policy, RelayConfig, RelayError, RelayMetrics};
     use async_trait::async_trait;
     use axum::Router;
-    use axum::extract::ws::{Message, WebSocketUpgrade};
     use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::extract::ws::{Message, WebSocketUpgrade};
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
+    use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use futures_util::{SinkExt, StreamExt};
     use gittree_storage::{
@@ -465,8 +462,8 @@ mod tests {
     };
     use secp256k1::{Keypair, Secp256k1, SecretKey};
     use serde_json::json;
-    use std::pin::Pin;
     use std::collections::HashMap;
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll};
     use std::time::Duration;
@@ -565,7 +562,10 @@ mod tests {
 
     #[async_trait]
     impl RelayMembershipRepository for FailingMembershipRepository {
-        async fn upsert_membership(&self, _record: RelayMembershipRecord) -> Result<(), StorageError> {
+        async fn upsert_membership(
+            &self,
+            _record: RelayMembershipRecord,
+        ) -> Result<(), StorageError> {
             if self.fail_upsert {
                 return Err(StorageError::Internal {
                     message: "upsert failed".to_string(),
@@ -614,7 +614,11 @@ mod tests {
             Ok(None)
         }
 
-        async fn delete_invite(&self, _tenant_id: &str, _invite_code: &str) -> Result<(), StorageError> {
+        async fn delete_invite(
+            &self,
+            _tenant_id: &str,
+            _invite_code: &str,
+        ) -> Result<(), StorageError> {
             Ok(())
         }
     }
@@ -857,7 +861,12 @@ mod tests {
         let app = build_router(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -892,10 +901,7 @@ mod tests {
 
         let event = signed_event("event-1");
         let payload = json!(["EVENT", event]).to_string();
-        socket
-            .send(WsMessage::Text(payload))
-            .await
-            .expect("send");
+        socket.send(WsMessage::Text(payload)).await.expect("send");
 
         let message = timeout(Duration::from_secs(2), socket.next())
             .await
@@ -925,7 +931,9 @@ mod tests {
         tokio::spawn(axum::serve(listener, app).into_future());
 
         let url = format!("ws://{addr}/");
-        let err = connect_async(url).await.expect_err("expected handshake failure");
+        let err = connect_async(url)
+            .await
+            .expect_err("expected handshake failure");
         match err {
             tokio_tungstenite::tungstenite::Error::Http(response) => {
                 assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -1154,7 +1162,9 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             ACCEPT,
-            "text/html,application/nostr+json;q=0.9".parse().expect("accept"),
+            "text/html,application/nostr+json;q=0.9"
+                .parse()
+                .expect("accept"),
         );
         assert!(accepts_nostr_json(&headers));
     }
@@ -1193,7 +1203,10 @@ mod tests {
     fn relay_url_from_host_adds_scheme_when_missing() {
         assert_eq!(relay_url_from_host("relay.local"), "wss://relay.local");
         assert_eq!(relay_url_from_host("ws://relay.local"), "ws://relay.local");
-        assert_eq!(relay_url_from_host("wss://relay.local"), "wss://relay.local");
+        assert_eq!(
+            relay_url_from_host("wss://relay.local"),
+            "wss://relay.local"
+        );
     }
 
     #[test]
@@ -1226,39 +1239,35 @@ mod tests {
 
     #[test]
     fn classify_outbound_message_maps_text_and_none() {
-        assert!(matches!(
-            super::classify_outbound_message(None),
-            None
-        ));
+        assert!(matches!(super::classify_outbound_message(None), None));
 
-        let mapped = super::classify_outbound_message(Some("frame".to_string()))
-            .expect("message");
+        let mapped = super::classify_outbound_message(Some("frame".to_string())).expect("message");
         assert!(matches!(mapped, Message::Text(ref payload) if payload == "frame"));
     }
 
     #[tokio::test]
     async fn handle_inbound_action_covers_forward_continue_break_and_send_failure() {
         let (in_tx, mut in_rx) = mpsc::channel(1);
-        assert!(super::handle_inbound_action(
-            &in_tx,
-            super::InboundSocketAction::Forward("req".to_string()),
-        )
-        .await);
+        assert!(
+            super::handle_inbound_action(
+                &in_tx,
+                super::InboundSocketAction::Forward("req".to_string()),
+            )
+            .await
+        );
         assert_eq!(in_rx.recv().await.as_deref(), Some("req"));
 
-        assert!(super::handle_inbound_action(
-            &in_tx,
-            super::InboundSocketAction::Continue,
-        )
-        .await);
+        assert!(super::handle_inbound_action(&in_tx, super::InboundSocketAction::Continue,).await);
         assert!(!super::handle_inbound_action(&in_tx, super::InboundSocketAction::Break).await);
 
         drop(in_rx);
-        assert!(!super::handle_inbound_action(
-            &in_tx,
-            super::InboundSocketAction::Forward("dropped".to_string()),
-        )
-        .await);
+        assert!(
+            !super::handle_inbound_action(
+                &in_tx,
+                super::InboundSocketAction::Forward("dropped".to_string()),
+            )
+            .await
+        );
     }
 
     #[tokio::test]
@@ -1391,7 +1400,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_tenant_returns_tenant_context_when_found() {
         let tenant = sample_tenant_record();
-        let repos = Arc::new(FakeTenantRepository::with_tenant("tenant.local", tenant.clone()));
+        let repos = Arc::new(FakeTenantRepository::with_tenant(
+            "tenant.local",
+            tenant.clone(),
+        ));
         let state = super::RelayState {
             config: sample_config(),
             policy: Policy::default(),
@@ -1404,7 +1416,9 @@ mod tests {
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("host", "TENANT.LOCAL:443".parse().expect("host"));
-        let context = resolve_tenant(&state, &headers).await.expect("tenant context");
+        let context = resolve_tenant(&state, &headers)
+            .await
+            .expect("tenant context");
         assert_eq!(context.tenant_id, tenant.id);
         assert!(context.tenant.is_some());
     }
@@ -1485,13 +1499,15 @@ mod tests {
 
     #[tokio::test]
     async fn seed_owner_membership_surfaces_repository_errors() {
-        let lookup_repo: Arc<dyn RelayMembershipRepository> = Arc::new(FailingMembershipRepository::lookup());
+        let lookup_repo: Arc<dyn RelayMembershipRepository> =
+            Arc::new(FailingMembershipRepository::lookup());
         let lookup_err = seed_owner_membership(&lookup_repo, "tenant", &[0x33; 32])
             .await
             .expect_err("lookup error");
         assert!(lookup_err.to_string().contains("lookup failed"));
 
-        let upsert_repo: Arc<dyn RelayMembershipRepository> = Arc::new(FailingMembershipRepository::upsert());
+        let upsert_repo: Arc<dyn RelayMembershipRepository> =
+            Arc::new(FailingMembershipRepository::upsert());
         let upsert_err = seed_owner_membership(&upsert_repo, "tenant", &[0x33; 32])
             .await
             .expect_err("upsert error");
@@ -1508,7 +1524,10 @@ mod tests {
         let listed = repo.list_memberships("tenant").await.expect("list");
         assert!(listed.is_empty());
 
-        let removed = repo.remove_membership("tenant", &[0x11; 32]).await.expect("remove");
+        let removed = repo
+            .remove_membership("tenant", &[0x11; 32])
+            .await
+            .expect("remove");
         assert!(!removed);
 
         repo.insert_invite(RelayInviteRecord {
@@ -1536,9 +1555,9 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_signal_future_can_start_and_be_aborted() {
-        let task = tokio::spawn(
-            super::await_shutdown_signal(std::future::pending::<Result<(), std::io::Error>>()),
-        );
+        let task = tokio::spawn(super::await_shutdown_signal(std::future::pending::<
+            Result<(), std::io::Error>,
+        >()));
         tokio::time::sleep(Duration::from_millis(10)).await;
         task.abort();
     }
@@ -1617,10 +1636,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
-        let server =
-            axum::serve(listener, app).with_graceful_shutdown(async { std::future::pending::<()>().await });
-        let result = tokio::time::timeout(Duration::from_millis(20), super::run_server(server)).await;
-        assert!(result.is_err(), "run_server should still be pending without a shutdown signal");
+        let server = axum::serve(listener, app)
+            .with_graceful_shutdown(async { std::future::pending::<()>().await });
+        let result =
+            tokio::time::timeout(Duration::from_millis(20), super::run_server(server)).await;
+        assert!(
+            result.is_err(),
+            "run_server should still be pending without a shutdown signal"
+        );
     }
 
     #[tokio::test]
@@ -1662,5 +1685,4 @@ mod tests {
         let err = result.err().expect("expected invalid write url");
         assert!(matches!(err, RelayError::Storage(_)));
     }
-
 }

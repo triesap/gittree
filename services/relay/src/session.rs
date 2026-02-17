@@ -395,7 +395,10 @@ impl<S: EventStore> Session<S> {
             Ok(bytes) => bytes,
             Err(_) => return Err(format!("{RESTRICTED_PREFIX} invalid pubkey")),
         };
-        let member = match membership.membership_by_pubkey(tenant_id, &pubkey_bytes).await {
+        let member = match membership
+            .membership_by_pubkey(tenant_id, &pubkey_bytes)
+            .await
+        {
             Ok(member) => member,
             Err(err) => return Err(err.to_string()),
         };
@@ -856,151 +859,150 @@ impl<S: EventStore> Session<S> {
         };
 
         if event.kind == NIP43_JOIN_KIND {
-                let Some(invite_code) = find_tag_value(&event.tags, "claim") else {
+            let Some(invite_code) = find_tag_value(&event.tags, "claim") else {
+                self.record_event("rejected");
+                return Some(membership_response(
+                    &event.id,
+                    false,
+                    format!("{RESTRICTED_PREFIX} missing invite code"),
+                ));
+            };
+
+            let invite = match membership.invite_by_code(tenant_id, &invite_code).await {
+                Ok(invite) => invite,
+                Err(err) => {
+                    self.record_event("rejected");
+                    return Some(vec![Notice::message(err.to_string()).into()]);
+                }
+            };
+            let Some(invite) = invite else {
+                self.record_event("rejected");
+                return Some(membership_response(
+                    &event.id,
+                    false,
+                    format!("{RESTRICTED_PREFIX} that is an invalid invite code."),
+                ));
+            };
+
+            if let Some(expires_at) = invite.expires_at {
+                if expires_at < now {
                     self.record_event("rejected");
                     return Some(membership_response(
                         &event.id,
                         false,
-                        format!("{RESTRICTED_PREFIX} missing invite code"),
+                        format!("{RESTRICTED_PREFIX} that invite code is expired."),
                     ));
-                };
+                }
+            }
 
-                let invite = match membership.invite_by_code(tenant_id, &invite_code).await {
-                    Ok(invite) => invite,
-                    Err(err) => {
-                        self.record_event("rejected");
-                        return Some(vec![Notice::message(err.to_string()).into()]);
-                    }
-                };
-                let Some(invite) = invite else {
+            if let Some(invitee) = invite.invitee_pubkey.as_ref() {
+                if invitee != &pubkey_bytes {
                     self.record_event("rejected");
                     return Some(membership_response(
                         &event.id,
                         false,
-                        format!("{RESTRICTED_PREFIX} that is an invalid invite code."),
-                    ));
-                };
-
-                if let Some(expires_at) = invite.expires_at {
-                    if expires_at < now {
-                        self.record_event("rejected");
-                        return Some(membership_response(
-                            &event.id,
-                            false,
-                            format!("{RESTRICTED_PREFIX} that invite code is expired."),
-                        ));
-                    }
-                }
-
-                if let Some(invitee) = invite.invitee_pubkey.as_ref() {
-                    if invitee != &pubkey_bytes {
-                        self.record_event("rejected");
-                        return Some(membership_response(
-                            &event.id,
-                            false,
-                            format!("{RESTRICTED_PREFIX} invite code does not match pubkey."),
-                        ));
-                    }
-                }
-
-                let existing = match membership
-                    .membership_by_pubkey(tenant_id, &pubkey_bytes)
-                    .await
-                {
-                    Ok(record) => record,
-                    Err(err) => {
-                        self.record_event("rejected");
-                        return Some(vec![Notice::message(err.to_string()).into()]);
-                    }
-                };
-
-                let already_active = existing
-                    .as_ref()
-                    .is_some_and(|record| record.status == MEMBERSHIP_STATUS_ACTIVE);
-                if already_active {
-                    self.record_event("duplicate");
-                    return Some(membership_response(
-                        &event.id,
-                        true,
-                        format!("{DUPLICATE_PREFIX} you are already a member of this relay."),
+                        format!("{RESTRICTED_PREFIX} invite code does not match pubkey."),
                     ));
                 }
+            }
 
-                let created_at = existing
-                    .as_ref()
-                    .map(|record| record.created_at)
-                    .unwrap_or(now);
-                let record = RelayMembershipRecord {
-                    tenant_id: tenant_id.to_string(),
-                    pubkey: pubkey_bytes,
-                    role: invite.role.clone(),
-                    status: MEMBERSHIP_STATUS_ACTIVE.to_string(),
-                    created_at,
-                    updated_at: now,
-                };
-                if let Err(err) = membership.upsert_membership(record).await {
+            let existing = match membership
+                .membership_by_pubkey(tenant_id, &pubkey_bytes)
+                .await
+            {
+                Ok(record) => record,
+                Err(err) => {
                     self.record_event("rejected");
                     return Some(vec![Notice::message(err.to_string()).into()]);
                 }
-                if let Err(err) = membership.delete_invite(tenant_id, &invite_code).await {
-                    self.record_event("rejected");
-                    return Some(vec![Notice::message(err.to_string()).into()]);
-                }
-                self.record_event("accepted");
-                Some(membership_response(
+            };
+
+            let already_active = existing
+                .as_ref()
+                .is_some_and(|record| record.status == MEMBERSHIP_STATUS_ACTIVE);
+            if already_active {
+                self.record_event("duplicate");
+                return Some(membership_response(
                     &event.id,
                     true,
-                    format!("{INFO_PREFIX} welcome to the relay."),
-                ))
+                    format!("{DUPLICATE_PREFIX} you are already a member of this relay."),
+                ));
+            }
+
+            let created_at = existing
+                .as_ref()
+                .map(|record| record.created_at)
+                .unwrap_or(now);
+            let record = RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: pubkey_bytes,
+                role: invite.role.clone(),
+                status: MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at,
+                updated_at: now,
+            };
+            if let Err(err) = membership.upsert_membership(record).await {
+                self.record_event("rejected");
+                return Some(vec![Notice::message(err.to_string()).into()]);
+            }
+            if let Err(err) = membership.delete_invite(tenant_id, &invite_code).await {
+                self.record_event("rejected");
+                return Some(vec![Notice::message(err.to_string()).into()]);
+            }
+            self.record_event("accepted");
+            Some(membership_response(
+                &event.id,
+                true,
+                format!("{INFO_PREFIX} welcome to the relay."),
+            ))
         } else {
-                let existing = match membership
-                    .membership_by_pubkey(tenant_id, &pubkey_bytes)
-                    .await
-                {
-                    Ok(record) => record,
-                    Err(err) => {
-                        self.record_event("rejected");
-                        return Some(vec![Notice::message(err.to_string()).into()]);
-                    }
-                };
-
-                let Some(record) = existing else {
-                    self.record_event("rejected");
-                    return Some(membership_response(
-                        &event.id,
-                        false,
-                        format!("{RESTRICTED_PREFIX} not a member of this relay."),
-                    ));
-                };
-
-                if record.status != MEMBERSHIP_STATUS_ACTIVE {
-                    self.record_event("rejected");
-                    return Some(membership_response(
-                        &event.id,
-                        false,
-                        format!("{RESTRICTED_PREFIX} not a member of this relay."),
-                    ));
-                }
-
-                let record = RelayMembershipRecord {
-                    tenant_id: record.tenant_id,
-                    pubkey: record.pubkey,
-                    role: record.role,
-                    status: MEMBERSHIP_STATUS_LEFT.to_string(),
-                    created_at: record.created_at,
-                    updated_at: now,
-                };
-                if let Err(err) = membership.upsert_membership(record).await {
+            let existing = match membership
+                .membership_by_pubkey(tenant_id, &pubkey_bytes)
+                .await
+            {
+                Ok(record) => record,
+                Err(err) => {
                     self.record_event("rejected");
                     return Some(vec![Notice::message(err.to_string()).into()]);
                 }
-                self.record_event("accepted");
-                Some(membership_response(
+            };
+
+            let Some(record) = existing else {
+                self.record_event("rejected");
+                return Some(membership_response(
                     &event.id,
-                    true,
-                    format!("{INFO_PREFIX} access revoked."),
-                ))
-            
+                    false,
+                    format!("{RESTRICTED_PREFIX} not a member of this relay."),
+                ));
+            };
+
+            if record.status != MEMBERSHIP_STATUS_ACTIVE {
+                self.record_event("rejected");
+                return Some(membership_response(
+                    &event.id,
+                    false,
+                    format!("{RESTRICTED_PREFIX} not a member of this relay."),
+                ));
+            }
+
+            let record = RelayMembershipRecord {
+                tenant_id: record.tenant_id,
+                pubkey: record.pubkey,
+                role: record.role,
+                status: MEMBERSHIP_STATUS_LEFT.to_string(),
+                created_at: record.created_at,
+                updated_at: now,
+            };
+            if let Err(err) = membership.upsert_membership(record).await {
+                self.record_event("rejected");
+                return Some(vec![Notice::message(err.to_string()).into()]);
+            }
+            self.record_event("accepted");
+            Some(membership_response(
+                &event.id,
+                true,
+                format!("{INFO_PREFIX} access revoked."),
+            ))
         }
     }
 
@@ -1067,7 +1069,10 @@ impl<S: EventStore> Session<S> {
             Ok(bytes) => bytes,
             Err(_) => return Err(format!("{RESTRICTED_PREFIX} invalid pubkey")),
         };
-        let member = match membership.membership_by_pubkey(tenant_id, &pubkey_bytes).await {
+        let member = match membership
+            .membership_by_pubkey(tenant_id, &pubkey_bytes)
+            .await
+        {
             Ok(member) => member,
             Err(err) => return Err(err.to_string()),
         };
@@ -2319,7 +2324,9 @@ mod tests {
         session.auth = None;
 
         let response = session
-            .handle_message(ClientMessage::Event(serde_json::to_value(signed_event("seed")).unwrap()))
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("seed")).unwrap(),
+            ))
             .await;
         assert!(matches!(
             response[0],
@@ -2564,8 +2571,8 @@ mod tests {
     async fn handle_membership_event_rejects_invalid_pubkey_hex() {
         let tenant_id = "tenant-1";
         let membership = Arc::new(InMemoryRepositories::new());
-        let mut session =
-            Session::new(MemoryStore::new()).with_membership(Some(tenant_id.to_string()), Some(membership));
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(membership));
         let mut event = signed_event_with_tags(
             "join-invalid-pubkey",
             super::NIP43_JOIN_KIND,
@@ -2916,8 +2923,8 @@ mod tests {
             )
             .await
             .expect("insert invite");
-        let mut session =
-            Session::new(MemoryStore::new()).with_membership(Some(tenant_id.to_string()), Some(upsert_error));
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(upsert_error));
         let response = session
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(join_event).expect("event"),
@@ -2958,8 +2965,8 @@ mod tests {
             .await
             .expect("insert invite");
 
-        let mut session =
-            Session::new(MemoryStore::new()).with_membership(Some(tenant_id.to_string()), Some(membership));
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(membership));
         let response = session
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(join_event).expect("event"),
@@ -2982,8 +2989,8 @@ mod tests {
         let pubkey_bytes = hex::decode(&leave_event.pubkey).expect("pubkey");
 
         let lookup_error = Arc::new(ScriptedMembership::new("membership_by_pubkey"));
-        let mut session =
-            Session::new(MemoryStore::new()).with_membership(Some(tenant_id.to_string()), Some(lookup_error));
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(lookup_error));
         let response = session
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(leave_event.clone()).expect("event"),
@@ -3004,8 +3011,8 @@ mod tests {
             })
             .await
             .expect("seed membership");
-        let mut session =
-            Session::new(MemoryStore::new()).with_membership(Some(tenant_id.to_string()), Some(upsert_error));
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(upsert_error));
         let response = session
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(leave_event).expect("event"),
@@ -3023,8 +3030,8 @@ mod tests {
             super::NIP43_LEAVE_KIND,
             vec![vec!["-".to_string()]],
         );
-        let mut session =
-            Session::new(MemoryStore::new()).with_membership(Some(tenant_id.to_string()), Some(membership));
+        let mut session = Session::new(MemoryStore::new())
+            .with_membership(Some(tenant_id.to_string()), Some(membership));
         let response = session
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(event).expect("event"),
@@ -3302,21 +3309,17 @@ mod tests {
                 filters: vec![json!({})],
             })
             .await;
-        assert!(req_response
-            .iter()
-            .any(|message| matches!(message, ServerMessage::Eose { .. })));
+        assert!(
+            req_response
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Eose { .. }))
+        );
 
         let (tx, _) = tokio::sync::broadcast::channel(4);
-        let mut event_session = Session::with_broadcast(
-            MemoryStore::new(),
-            Policy::default(),
-            None,
-            tx,
-            true,
-            true,
-        )
-        .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
-        .with_membership_requirements(false, true);
+        let mut event_session =
+            Session::with_broadcast(MemoryStore::new(), Policy::default(), None, tx, true, true)
+                .with_membership(Some(tenant_id.to_string()), Some(membership.clone()))
+                .with_membership_requirements(false, true);
         authenticate_session(&mut event_session).await;
         let event_pubkey = event_session
             .auth
@@ -3353,9 +3356,10 @@ mod tests {
     #[tokio::test]
     async fn req_membership_requirements_reject_invalid_authenticated_pubkey_hex() {
         let membership = Arc::new(InMemoryRepositories::new());
-        let mut session = Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
-            .with_membership(Some("tenant-1".to_string()), Some(membership))
-            .with_membership_requirements(true, false);
+        let mut session =
+            Session::with_policy_and_auth(MemoryStore::new(), Policy::default(), true)
+                .with_membership(Some("tenant-1".to_string()), Some(membership))
+                .with_membership_requirements(true, false);
         session.auth.as_mut().expect("auth").authenticated_pubkey = Some("not-hex".to_string());
         let response = session
             .handle_message(ClientMessage::Req {
@@ -3375,16 +3379,10 @@ mod tests {
     async fn event_membership_requirements_reject_invalid_authenticated_pubkey_hex() {
         let membership = Arc::new(InMemoryRepositories::new());
         let (tx, _) = tokio::sync::broadcast::channel(4);
-        let mut session = Session::with_broadcast(
-            MemoryStore::new(),
-            Policy::default(),
-            None,
-            tx,
-            true,
-            false,
-        )
-        .with_membership(Some("tenant-1".to_string()), Some(membership))
-        .with_membership_requirements(false, true);
+        let mut session =
+            Session::with_broadcast(MemoryStore::new(), Policy::default(), None, tx, true, false)
+                .with_membership(Some("tenant-1".to_string()), Some(membership))
+                .with_membership_requirements(false, true);
         session.auth.as_mut().expect("auth").authenticated_pubkey = Some("not-hex".to_string());
         let response = session
             .handle_message(ClientMessage::Event(
@@ -3805,12 +3803,18 @@ mod tests {
         let mut session = Session::new(store);
         assert!(!session.is_authenticated());
         assert_eq!(session.authenticated_pubkey(), None);
-        let membership_err = session.require_membership().await.expect_err("membership required");
+        let membership_err = session
+            .require_membership()
+            .await
+            .expect_err("membership required");
         assert!(membership_err.contains("relay does not support membership"));
 
         let event = signed_event("arc-dispatch");
         assert!(session.dispatch_event(&event).is_empty());
-        let virtual_events = session.virtual_events(&[], 1).await.expect("virtual events");
+        let virtual_events = session
+            .virtual_events(&[], 1)
+            .await
+            .expect("virtual events");
         assert!(virtual_events.is_empty());
         assert!(
             session

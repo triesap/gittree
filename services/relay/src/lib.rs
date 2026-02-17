@@ -18,8 +18,8 @@ mod policy;
 mod protocol;
 mod server;
 mod session;
-mod subscription;
 mod store;
+mod subscription;
 mod tags;
 
 pub use admission_client::{
@@ -38,8 +38,8 @@ pub use protocol::{
 };
 pub use server::serve;
 pub use session::Session;
-pub use subscription::{SubscriptionId, SubscriptionRegistry};
 pub use store::{EventStore, MemoryStore, RepositoryStore, StoreError, StoreOutcome};
+pub use subscription::{SubscriptionId, SubscriptionRegistry};
 pub use tags::{TagError, TagIndex};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
@@ -392,29 +392,29 @@ pub fn build_nip11_document(
 
 #[cfg(test)]
 mod tests {
-    use super::ENV_STORAGE_APP_NAME;
-    use super::ENV_STORAGE_MAX_CONNECTIONS;
-    use super::ENV_STORAGE_READ_URL;
+    use super::AdmissionConfigError;
+    use super::AdmissionFallback;
+    use super::AdmissionHookError;
+    use super::ConfigError;
     use super::DEFAULT_ADMISSION_TIMEOUT_SECS;
     use super::ENV_ADMISSION_FALLBACK;
     use super::ENV_ADMISSION_TIMEOUT_SECS;
     use super::ENV_ADMISSION_URL;
-    use super::AdmissionConfigError;
-    use super::AdmissionFallback;
-    use super::AdmissionHookError;
+    use super::ENV_STORAGE_APP_NAME;
+    use super::ENV_STORAGE_MAX_CONNECTIONS;
+    use super::ENV_STORAGE_READ_URL;
     use super::ObservabilityError;
+    use super::Policy;
     use super::RelayConfig;
     use super::RelayConfigError;
     use super::RelayError;
-    use super::ConfigError;
     use super::StorageConfig;
     use super::StorageConfigError;
-    use super::Policy;
     use super::build_nip11_document;
     use super::build_repositories;
     use super::init_observability;
-    use gittree_storage::RelayTenantRecord;
     use gittree_config::RelayPolicyConfig;
+    use gittree_storage::RelayTenantRecord;
     use std::error::Error;
     use std::fs;
     use std::path::PathBuf;
@@ -600,7 +600,10 @@ mod tests {
                                     assert!(doc.supported_nips.as_ref().unwrap().contains(&34));
                                     let limitation = doc.limitation.as_ref().expect("limitation");
                                     assert_eq!(limitation.restricted_writes, Some(true));
-                                    assert_eq!(limitation.max_event_tags, Some(policy.max_tags as u64));
+                                    assert_eq!(
+                                        limitation.max_event_tags,
+                                        Some(policy.max_tags as u64)
+                                    );
                                     assert_eq!(
                                         limitation.max_content_length,
                                         Some(policy.max_content_len as u64)
@@ -696,11 +699,11 @@ mod tests {
         let init_ok = matches!(&result, Ok(handle) if handle.prometheus_registry().is_some());
         let already_initialized = matches!(
             result,
-            Err(RelayError::Observability(ObservabilityError::SubscriberInit(_)))
+            Err(RelayError::Observability(
+                ObservabilityError::SubscriberInit(_)
+            ))
         );
-        assert!(
-            init_ok || already_initialized
-        );
+        assert!(init_ok || already_initialized);
     }
 
     #[test]
@@ -742,7 +745,9 @@ bind = "127.0.0.1:9010"
                         let err = RelayConfig::from_env().expect_err("invalid timeout");
                         assert!(matches!(
                             err,
-                            RelayConfigError::Admission(AdmissionConfigError::InvalidTimeout { .. })
+                            RelayConfigError::Admission(
+                                AdmissionConfigError::InvalidTimeout { .. }
+                            )
                         ));
                     });
                 });
@@ -829,10 +834,7 @@ bind = "127.0.0.1:9010"
         let timeout_err = AdmissionConfigError::InvalidTimeout {
             value: "abc".to_string(),
         };
-        assert_eq!(
-            timeout_err.to_string(),
-            "invalid admission timeout: abc"
-        );
+        assert_eq!(timeout_err.to_string(), "invalid admission timeout: abc");
     }
 
     #[test]
@@ -937,7 +939,11 @@ bind = "127.0.0.1:9010"
         let _guard = ENV_LOCK.lock().expect("env lock");
 
         let storage_err = RelayConfigError::Storage(StorageConfigError::MissingEnv("MISSING"));
-        assert!(storage_err.to_string().contains("relay storage config error"));
+        assert!(
+            storage_err
+                .to_string()
+                .contains("relay storage config error")
+        );
         assert!(storage_err.source().is_some());
 
         with_env_var("GITTREE_RELAY_BIND", "bad-bind", || {
@@ -966,28 +972,34 @@ bind = "127.0.0.1:9010"
         assert_eq!(cli.to_string(), "relay cli error: unknown flag --bad");
         assert!(cli.source().is_some());
 
-        let config = RelayError::Config(RelayConfigError::Config(ConfigError::MissingEnv("MISSING")));
-        assert!(config
-            .to_string()
-            .contains("relay config error: missing env MISSING"));
+        let config =
+            RelayError::Config(RelayConfigError::Config(ConfigError::MissingEnv("MISSING")));
+        assert!(
+            config
+                .to_string()
+                .contains("relay config error: missing env MISSING")
+        );
         assert!(config.source().is_some());
 
-        let observability_config = RelayError::ObservabilityConfig(
-            super::ObservabilityConfigError::InvalidEnv {
+        let observability_config =
+            RelayError::ObservabilityConfig(super::ObservabilityConfigError::InvalidEnv {
                 key: "GITTREE_LOG_JSON",
                 value: "maybe".to_string(),
-            },
+            });
+        assert!(
+            observability_config
+                .to_string()
+                .contains("relay observability config error")
         );
-        assert!(observability_config
-            .to_string()
-            .contains("relay observability config error"));
         assert!(observability_config.source().is_some());
 
         let observability =
             RelayError::Observability(super::ObservabilityError::SubscriberInit("dup".to_string()));
-        assert!(observability
-            .to_string()
-            .contains("relay observability error"));
+        assert!(
+            observability
+                .to_string()
+                .contains("relay observability error")
+        );
         assert!(observability.source().is_some());
 
         let storage = RelayError::Storage(gittree_storage::StorageError::Internal {
