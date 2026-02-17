@@ -1432,9 +1432,23 @@ mod tests {
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn db_debug_enabled() -> bool {
+        require_db_tests()
+            || matches!(
+                std::env::var("GITTREE_STORAGE_DEBUG_DB").ok().as_deref(),
+                Some("1")
+            )
+    }
+
+    fn debug_db(message: impl AsRef<str>) {
+        if db_debug_enabled() {
+            eprintln!("storage-db: {}", message.as_ref());
+        }
+    }
+
     enum TestIsolation {
         Database(String),
-        Schema(String),
+        Schema { database: String, name: String },
     }
 
     struct TestDatabase {
@@ -1452,6 +1466,10 @@ mod tests {
                 .max_connections(1)
                 .connect_with(admin_options)
                 .await
+                .map_err(|error| {
+                    debug_db(format!("failed admin connection to postgres database: {error}"));
+                    error
+                })
                 .ok();
 
             if let Some(admin_pool) = admin_pool {
@@ -1460,27 +1478,59 @@ mod tests {
                 let create_database_ok = sqlx::query(&create_database)
                     .execute(&admin_pool)
                     .await
+                    .map_err(|error| {
+                        debug_db(format!(
+                            "failed create database {database_name}, falling back to schema mode: {error}"
+                        ));
+                        error
+                    })
                     .is_ok();
                 admin_pool.close().await;
 
                 if create_database_ok {
                     return Self::provision_with_database(base_url, database_name).await;
                 }
+
+                if let Some(test_db) = Self::provision_with_schema(base_url.clone(), Some("postgres")).await
+                {
+                    return Some(test_db);
+                }
             }
 
-            Self::provision_with_schema(base_url).await
+            Self::provision_with_schema(base_url, None).await
         }
 
         async fn provision_with_database(base_url: String, database_name: String) -> Option<Self> {
-            let mut test_options = PgConnectOptions::from_str(&base_url).ok()?;
+            let mut test_options = match PgConnectOptions::from_str(&base_url) {
+                Ok(options) => options,
+                Err(error) => {
+                    debug_db(format!(
+                        "invalid storage test database url while provisioning database mode: {error}"
+                    ));
+                    return None;
+                }
+            };
             test_options = test_options.database(&database_name);
-            let pool = PgPoolOptions::new()
+            let pool = match PgPoolOptions::new()
                 .max_connections(5)
                 .connect_with(test_options)
                 .await
-                .ok()?;
+            {
+                Ok(pool) => pool,
+                Err(error) => {
+                    debug_db(format!(
+                        "failed connect to isolated database {database_name}: {error}"
+                    ));
+                    return None;
+                }
+            };
 
-            run_migrations(&pool).await?;
+            if run_migrations(&pool).await.is_none() {
+                debug_db(format!(
+                    "failed migrations in isolated database {database_name}"
+                ));
+                return None;
+            }
 
             Some(Self {
                 base_url,
@@ -1489,27 +1539,68 @@ mod tests {
             })
         }
 
-        async fn provision_with_schema(base_url: String) -> Option<Self> {
+        async fn provision_with_schema(
+            base_url: String,
+            database_override: Option<&str>,
+        ) -> Option<Self> {
             let schema_name = unique_schema_name();
-            let test_options = PgConnectOptions::from_str(&base_url).ok()?;
-            let pool = PgPoolOptions::new()
+            let mut test_options = match PgConnectOptions::from_str(&base_url) {
+                Ok(options) => options,
+                Err(error) => {
+                    debug_db(format!(
+                        "invalid storage test database url while provisioning schema mode: {error}"
+                    ));
+                    return None;
+                }
+            };
+            let database = database_override
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| database_name_from_url(&base_url));
+            test_options = test_options.database(&database);
+            let pool = match PgPoolOptions::new()
                 .max_connections(1)
                 .min_connections(1)
                 .connect_with(test_options)
                 .await
-                .ok()?;
+            {
+                Ok(pool) => pool,
+                Err(error) => {
+                    debug_db(format!(
+                        "failed connect for schema mode on database {database}: {error}"
+                    ));
+                    return None;
+                }
+            };
 
             let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema_name);
-            sqlx::query(&create_schema).execute(&pool).await.ok()?;
+            if let Err(error) = sqlx::query(&create_schema).execute(&pool).await {
+                debug_db(format!(
+                    "failed create schema {schema_name} in database {database}: {error}"
+                ));
+                return None;
+            }
 
             let set_search_path = format!("SET search_path TO \"{}\"", schema_name);
-            sqlx::query(&set_search_path).execute(&pool).await.ok()?;
+            if let Err(error) = sqlx::query(&set_search_path).execute(&pool).await {
+                debug_db(format!(
+                    "failed set search_path for schema {schema_name} in database {database}: {error}"
+                ));
+                return None;
+            }
 
-            run_migrations(&pool).await?;
+            if run_migrations(&pool).await.is_none() {
+                debug_db(format!(
+                    "failed migrations for schema {schema_name} in database {database}"
+                ));
+                return None;
+            }
 
             Some(Self {
                 base_url,
-                isolation: TestIsolation::Schema(schema_name),
+                isolation: TestIsolation::Schema {
+                    database,
+                    name: schema_name,
+                },
                 pool,
             })
         }
@@ -1517,7 +1608,7 @@ mod tests {
         fn scope_name(&self) -> &str {
             match &self.isolation {
                 TestIsolation::Database(name) => name,
-                TestIsolation::Schema(name) => name,
+                TestIsolation::Schema { name, .. } => name,
             }
         }
 
@@ -1558,8 +1649,12 @@ WHERE datname = $1
                     let _ = sqlx::query(&drop_database).execute(&admin_pool).await;
                     admin_pool.close().await;
                 }
-                TestIsolation::Schema(schema_name) => {
-                    let admin_options = PgConnectOptions::from_str(&self.base_url).ok()?;
+                TestIsolation::Schema {
+                    database,
+                    name: schema_name,
+                } => {
+                    let mut admin_options = PgConnectOptions::from_str(&self.base_url).ok()?;
+                    admin_options = admin_options.database(&database);
                     let admin_pool = PgPoolOptions::new()
                         .max_connections(1)
                         .connect_with(admin_options)
@@ -1617,9 +1712,24 @@ WHERE datname = $1
     }
 
     async fn run_migrations(pool: &PgPool) -> Option<()> {
-        let runner = MigrationRunner::new(core_migrations()).ok()?;
-        let mut connection = pool.acquire().await.ok()?;
-        runner.run(&mut *connection).await.ok()?;
+        let runner = match MigrationRunner::new(core_migrations()) {
+            Ok(runner) => runner,
+            Err(error) => {
+                debug_db(format!("failed to construct migration runner: {error}"));
+                return None;
+            }
+        };
+        let mut connection = match pool.acquire().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                debug_db(format!("failed to acquire migration connection: {error}"));
+                return None;
+            }
+        };
+        if let Err(error) = runner.run(&mut *connection).await {
+            debug_db(format!("failed running migrations: {error}"));
+            return None;
+        }
         drop(connection);
         Some(())
     }
@@ -1636,6 +1746,18 @@ WHERE datname = $1
             now,
             counter
         )
+    }
+
+    fn database_name_from_url(url: &str) -> String {
+        let Some(path_with_query) = url.split('/').nth(3) else {
+            return "postgres".to_string();
+        };
+        let database = path_with_query.split('?').next().unwrap_or_default();
+        if database.is_empty() {
+            "postgres".to_string()
+        } else {
+            database.to_string()
+        }
     }
 
     fn unique_schema_name() -> String {
