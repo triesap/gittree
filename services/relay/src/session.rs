@@ -4139,6 +4139,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_arc_store_executes_dispatch_and_membership_join_paths() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let membership = Arc::new(InMemoryRepositories::new());
+        let tenant_id = "tenant-arc";
+        let mut session = Session::new(store).with_membership(
+            Some(tenant_id.to_string()),
+            Some(membership.clone()),
+        );
+
+        let _ = session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "sub".to_string(),
+                filters: vec![json!({"kinds": [1]})],
+            })
+            .await;
+        let dispatch_responses = session.dispatch_event(&signed_event("arc-dispatch-hit"));
+        assert!(dispatch_responses
+            .iter()
+            .any(|response| matches!(response, ServerMessage::Event { .. })));
+
+        let member_pubkey_hex = signed_event("arc-member").pubkey;
+        let member_pubkey = hex::decode(&member_pubkey_hex).expect("pubkey");
+        membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: member_pubkey.clone(),
+                role: "member".to_string(),
+                status: "pending".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+        membership
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-arc",
+                    "member",
+                    member_pubkey_hex.as_str(),
+                    Some(member_pubkey_hex.as_str()),
+                    None,
+                    1,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+
+        let join_event = signed_event_with_tags(
+            "arc-join",
+            super::NIP43_JOIN_KIND,
+            vec![
+                vec!["-".to_string()],
+                vec!["claim".to_string(), "invite-arc".to_string()],
+            ],
+        );
+        let join_responses = session
+            .handle_membership_event(&join_event, 10)
+            .await
+            .expect("membership response");
+        assert!(matches!(
+            join_responses.first(),
+            Some(ServerMessage::Ok { accepted: true, .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn req_generates_invite_claim_when_member() {
         let membership = Arc::new(InMemoryRepositories::new());
         let tenant_id = "tenant-1";
