@@ -417,7 +417,7 @@ mod tests {
         let event = sample_event();
 
         let decision = client.decide(&event).await;
-        assert!(matches!(decision, gittree_core::AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
 
         let calls = client.transport.calls.lock().expect("calls lock");
         assert_eq!(calls.len(), 1);
@@ -444,12 +444,11 @@ mod tests {
         let event = sample_event();
 
         let decision = client.decide(&event).await;
-        match decision {
-            gittree_core::AdmissionDecision::Reject { reason } => {
-                assert!(reason.contains("admission unavailable"));
-            }
-            _ => panic!("expected reject fallback"),
-        }
+        let reason = match decision {
+            AdmissionDecision::Reject { reason } => reason,
+            _ => String::new(),
+        };
+        assert!(reason.contains("admission unavailable"));
     }
 
     #[tokio::test]
@@ -476,15 +475,14 @@ mod tests {
         let event = sample_event();
 
         let decision = client.decide(&event).await;
-        match decision {
-            gittree_core::AdmissionDecision::RequiresRelatedEvents { filters } => {
-                assert_eq!(filters.len(), 1);
-                assert_eq!(filters[0].authors, vec!["pub".to_string()]);
-                assert_eq!(filters[0].ids, vec!["event".to_string()]);
-                assert_eq!(filters[0].limit, Some(1));
-            }
-            _ => panic!("expected related-event decision"),
-        }
+        let filters = match decision {
+            AdmissionDecision::RequiresRelatedEvents { filters } => filters,
+            _ => Vec::new(),
+        };
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].authors, vec!["pub".to_string()]);
+        assert_eq!(filters[0].ids, vec!["event".to_string()]);
+        assert_eq!(filters[0].limit, Some(1));
     }
 
     #[tokio::test]
@@ -524,7 +522,7 @@ mod tests {
         let event = sample_event();
 
         let decision = client.decide(&event).await;
-        assert!(matches!(decision, gittree_core::AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 
     #[test]
@@ -532,19 +530,23 @@ mod tests {
         let reject = admission_decision_from_payload(AdmissionDecisionPayload::Reject {
             reason: String::new(),
         });
-        assert!(matches!(
+        assert_eq!(
             reject,
-            Err(AdmissionHookError::InvalidDecision(_))
-        ));
+            Err(AdmissionHookError::InvalidDecision(
+                "missing reject reason".to_string()
+            ))
+        );
 
         let related =
             admission_decision_from_payload(AdmissionDecisionPayload::RequiresRelatedEvents {
                 filters: Vec::new(),
             });
-        assert!(matches!(
+        assert_eq!(
             related,
-            Err(AdmissionHookError::InvalidDecision(_))
-        ));
+            Err(AdmissionHookError::InvalidDecision(
+                "missing related filters".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -560,7 +562,7 @@ mod tests {
         let mut invalid_tag_event = sample_event();
         invalid_tag_event.tags = vec![Vec::new()];
         let invalid_tag = AdmissionRequestPayload::try_from(&invalid_tag_event).unwrap_err();
-        assert!(matches!(invalid_tag, AdmissionRequestError::InvalidTag));
+        assert_eq!(invalid_tag, AdmissionRequestError::InvalidTag);
     }
 
     #[test]
@@ -635,7 +637,7 @@ mod tests {
             .send("http://127.0.0.1:1/decide", &sample_request_payload())
             .await
             .unwrap_err();
-        assert!(matches!(err, AdmissionHookError::Transport(_)));
+        assert!(matches!(err, AdmissionHookError::Transport(message) if !message.is_empty()));
     }
 
     #[tokio::test]
@@ -646,13 +648,12 @@ mod tests {
             .send(&endpoint, &sample_request_payload())
             .await
             .unwrap_err();
-        match err {
-            AdmissionHookError::Transport(message) => {
-                assert!(message.contains("admission error 403 Forbidden"));
-                assert!(message.contains("denied"));
-            }
-            other => panic!("expected transport error, got {other:?}"),
-        }
+        let message = match err {
+            AdmissionHookError::Transport(message) => message,
+            _ => String::new(),
+        };
+        assert!(message.contains("admission error 403 Forbidden"));
+        assert!(message.contains("denied"));
     }
 
     #[tokio::test]
@@ -663,7 +664,7 @@ mod tests {
             .send(&endpoint, &sample_request_payload())
             .await
             .unwrap_err();
-        assert!(matches!(err, AdmissionHookError::Decode(_)));
+        assert!(matches!(err, AdmissionHookError::Decode(message) if !message.is_empty()));
     }
 
     #[test]
@@ -690,7 +691,7 @@ mod tests {
             AdmissionHookConfig::new(endpoint, Duration::from_secs(1), AdmissionFallback::Reject);
         let client = AdmissionHookClient::new_http(config);
         let decision = client.decide(&sample_event()).await;
-        assert!(matches!(decision, AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 
     async fn decide_via_trait(
@@ -710,7 +711,7 @@ mod tests {
         );
         let client = AdmissionHookClient::new(config, transport);
         let decision = decide_via_trait(&client, &sample_event()).await;
-        assert!(matches!(decision, AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 
     #[tokio::test]
@@ -720,6 +721,6 @@ mod tests {
             AdmissionHookConfig::new(endpoint, Duration::from_secs(1), AdmissionFallback::Reject);
         let client = AdmissionHookClient::new_http(config);
         let decision = decide_via_trait(&client, &sample_event()).await;
-        assert!(matches!(decision, AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 }
