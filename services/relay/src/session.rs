@@ -1041,7 +1041,7 @@ impl<S: EventStore> Session<S> {
             content: String::new(),
             sig: String::new(),
         };
-        sign_event(&mut event, signer)?;
+        sign_event(&mut event, signer);
         Ok(Some(event))
     }
 
@@ -1110,7 +1110,7 @@ impl<S: EventStore> Session<S> {
             content: String::new(),
             sig: String::new(),
         };
-        sign_event(&mut event, signer)?;
+        sign_event(&mut event, signer);
         Ok(event)
     }
 
@@ -1314,15 +1314,14 @@ fn membership_response(event_id: &str, accepted: bool, message: String) -> Vec<S
     }]
 }
 
-fn sign_event(event: &mut crate::NostrEvent, signer: &TenantSigner) -> Result<(), String> {
+fn sign_event(event: &mut crate::NostrEvent, signer: &TenantSigner) {
     event.id = event.compute_id();
-    let id_bytes = hex::decode(&event.id).map_err(|_| "invalid event id".to_string())?;
-    let msg = Message::from_digest_slice(&id_bytes).map_err(|err| err.to_string())?;
+    let id_bytes = hex::decode(&event.id).expect("event id is always canonical hex");
+    let msg = Message::from_digest_slice(&id_bytes).expect("canonical event id is 32-byte digest");
     let secp = Secp256k1::new();
     let keypair = Keypair::from_secret_key(&secp, &signer.secret_key);
     let sig = secp.sign_schnorr(&msg, &keypair);
     event.sig = hex::encode(sig.as_ref());
-    Ok(())
 }
 
 fn generate_invite_code() -> String {
@@ -3233,7 +3232,7 @@ mod tests {
             sig: String::new(),
         };
 
-        super::sign_event(&mut event, &signer).expect("sign event");
+        super::sign_event(&mut event, &signer);
         assert_eq!(event.id.len(), 64);
         assert_eq!(event.sig.len(), 128);
     }
