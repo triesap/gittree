@@ -311,7 +311,10 @@ async fn serve_inner(bind: &str, router: Router) -> Result<(), ControlError> {
 
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
-    let repositories = build_repositories(&config)?;
+    let repositories = match build_repositories(&config) {
+        Ok(repositories) => repositories,
+        Err(err) => return Err(err),
+    };
     let bind = config.bind.clone();
     let relay_urls = config.relay_urls;
     let public_git_url = config.public_git_url;
@@ -1217,7 +1220,7 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
         .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
     let event_id = event_id_from_bytes(event_id)?;
 
-    let expected_id = build_event_id(event)?;
+    let expected_id = build_event_id(event);
     if expected_id != event.id {
         return Err(ControlHttpError::BadRequest(
             "event id mismatch".to_string(),
@@ -1238,7 +1241,7 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
     Ok(())
 }
 
-fn build_event_id(event: &ApiSignedNostrEvent) -> Result<String, ControlHttpError> {
+fn build_event_id(event: &ApiSignedNostrEvent) -> String {
     let payload = serde_json::json!([
         0,
         event.pubkey,
@@ -1251,7 +1254,7 @@ fn build_event_id(event: &ApiSignedNostrEvent) -> Result<String, ControlHttpErro
     let mut hasher = sha2::Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
-    Ok(hex::encode(digest))
+    hex::encode(digest)
 }
 
 fn unix_timestamp() -> i64 {
@@ -1873,6 +1876,13 @@ mod tests {
         matches!(err, super::ControlError::Observability(_))
     }
 
+    fn is_control_error_forgejo_or_observability(err: &super::ControlError) -> bool {
+        matches!(
+            err,
+            super::ControlError::Forgejo(_) | super::ControlError::Observability(_)
+        )
+    }
+
     fn is_control_error_storage_or_observability(err: &super::ControlError) -> bool {
         is_control_error_storage(err) || is_control_error_observability(err)
     }
@@ -1934,7 +1944,20 @@ mod tests {
         assert!(is_control_error_storage_or_observability(
             &control_observability_err
         ));
+        assert!(is_control_error_forgejo_or_observability(
+            &control_observability_err
+        ));
         assert!(!is_control_error_observability(&control_storage_err));
+        assert!(!is_control_error_forgejo_or_observability(
+            &control_storage_err
+        ));
+
+        let control_forgejo_err = super::ControlError::Forgejo(ForgejoError::Request(
+            "request failed".to_string(),
+        ));
+        assert!(is_control_error_forgejo_or_observability(
+            &control_forgejo_err
+        ));
 
         let unauthorized = ControlHttpError::Unauthorized("nope".to_string());
         assert!(is_http_unauthorized(&unauthorized));
@@ -2298,7 +2321,7 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("invalid forgejo token should fail");
-            assert!(err.to_string().contains("control forgejo error"));
+            assert!(is_control_error_forgejo_or_observability(&err));
         });
     }
 
@@ -5629,7 +5652,7 @@ mod tests {
         let short_id = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&short_id));
 
-        event.id = super::build_event_id(&event).expect("event id");
+        event.id = super::build_event_id(&event);
         event.sig = "11".repeat(63);
         let short_sig = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&short_sig));
@@ -5669,7 +5692,7 @@ mod tests {
             .expect("signed"),
         );
         event.pubkey = "00".repeat(32);
-        event.id = super::build_event_id(&event).expect("event id");
+        event.id = super::build_event_id(&event);
         let err = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&err));
     }
@@ -5703,7 +5726,7 @@ mod tests {
             .expect("signed"),
         );
         event.pubkey = "gg".repeat(32);
-        event.id = super::build_event_id(&event).expect("event id");
+        event.id = super::build_event_id(&event);
         let err = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&err));
     }
@@ -5741,7 +5764,7 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001"
         )
         .to_string();
-        event.id = super::build_event_id(&event).expect("event id");
+        event.id = super::build_event_id(&event);
         let err = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&err));
     }
@@ -5775,7 +5798,7 @@ mod tests {
             .expect("signed"),
         );
         event.sig = "gg".repeat(64);
-        event.id = super::build_event_id(&event).expect("event id");
+        event.id = super::build_event_id(&event);
         let err = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&err));
     }
