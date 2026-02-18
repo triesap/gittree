@@ -60,6 +60,14 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn is_config_error(result: &Result<(), RelayError>) -> bool {
+        matches!(result, Err(RelayError::Config(_)))
+    }
+
+    fn is_cli_error(result: &Result<(), RelayError>) -> bool {
+        matches!(result, Err(RelayError::Cli(_)))
+    }
+
     fn set_env_var_for_test(key: &str, value: &str) -> Option<OsString> {
         let previous = std::env::var_os(key);
         // SAFETY: these tests serialize env mutations using ENV_LOCK and restore previous values.
@@ -125,13 +133,13 @@ mod tests {
             "/definitely/missing/gittree-relay.toml",
         ])
         .await;
-        assert!(matches!(result, Err(RelayError::Config(_))));
+        assert!(is_config_error(&result));
     }
 
     #[tokio::test]
     async fn run_with_unknown_flag_returns_cli_error() {
         let result = run_with_args(["gittree-relay", "--unknown"]).await;
-        assert!(matches!(result, Err(RelayError::Cli(_))));
+        assert!(is_cli_error(&result));
     }
 
     #[tokio::test]
@@ -180,7 +188,7 @@ bind = "127.0.0.1:9123"
         let result = run_with_args_and_serve(["gittree-relay"], unexpected_serve).await;
 
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
-        assert!(matches!(result, Err(RelayError::Config(_))));
+        assert!(is_config_error(&result));
     }
 
     #[tokio::test]
@@ -248,5 +256,16 @@ bind = "127.0.0.1:9123"
         assert!(std::env::var_os(key).is_none());
 
         restore_env_var(key, previous);
+    }
+
+    #[test]
+    fn error_match_helpers_cover_non_matching_results() {
+        let ok: Result<(), RelayError> = Ok(());
+        let serve_err = Err(RelayError::Serve("boom".to_string()));
+
+        assert!(!is_config_error(&ok));
+        assert!(!is_config_error(&serve_err));
+        assert!(!is_cli_error(&ok));
+        assert!(!is_cli_error(&serve_err));
     }
 }
