@@ -4709,6 +4709,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_nostr_returns_internal_when_forgejo_create_repo_fails() {
+        let responses = vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }];
+        let (state, transport, repos) = test_state(responses);
+        let (pubkey, privkey) = test_keys();
+        repos
+            .upsert_account(AccountRecord::new(&pubkey, "alice").expect("account"))
+            .await
+            .expect("upsert");
+        let now = super::unix_timestamp();
+        let (body, header) = signed_repo_create_request(&state, &pubkey, &privkey, "demo", now);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn create_repo_nostr_returns_internal_when_account_lookup_fails() {
         let (mut state, transport, repos) = test_state(Vec::new());
         state.repositories = Arc::new(
@@ -4791,6 +4823,72 @@ mod tests {
         .await
         .expect_err("invalid relay state should be rejected");
         assert!(is_http_bad_request(&err));
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_with_announcement_rejects_missing_required_fields() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let (pubkey, privkey) = test_keys();
+        let cases = vec![
+            CreateRepoInput {
+                owner: Some(" ".to_string()),
+                name: "demo".to_string(),
+                identifier: Some("demo".to_string()),
+                description: None,
+                private: Some(false),
+                auto_init: None,
+                pubkey: pubkey.clone(),
+                privkey: privkey.clone(),
+            },
+            CreateRepoInput {
+                owner: Some("alice".to_string()),
+                name: " ".to_string(),
+                identifier: Some("demo".to_string()),
+                description: None,
+                private: Some(false),
+                auto_init: None,
+                pubkey: pubkey.clone(),
+                privkey: privkey.clone(),
+            },
+            CreateRepoInput {
+                owner: Some("alice".to_string()),
+                name: "demo".to_string(),
+                identifier: Some(" ".to_string()),
+                description: None,
+                private: Some(false),
+                auto_init: None,
+                pubkey: pubkey.clone(),
+                privkey: privkey.clone(),
+            },
+            CreateRepoInput {
+                owner: Some("alice".to_string()),
+                name: "demo".to_string(),
+                identifier: Some("demo".to_string()),
+                description: None,
+                private: Some(false),
+                auto_init: None,
+                pubkey: "zz".repeat(32),
+                privkey: privkey.clone(),
+            },
+            CreateRepoInput {
+                owner: Some("alice".to_string()),
+                name: "demo".to_string(),
+                identifier: Some("demo".to_string()),
+                description: None,
+                private: Some(false),
+                auto_init: None,
+                pubkey,
+                privkey: "zz".repeat(32),
+            },
+        ];
+
+        for input in cases {
+            let err = super::create_repo_with_announcement(&state, input)
+                .await
+                .expect_err("invalid required field should fail");
+            assert!(is_http_bad_request(&err));
+        }
         assert!(transport.requests().is_empty());
     }
 
