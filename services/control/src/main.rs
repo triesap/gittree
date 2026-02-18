@@ -37,6 +37,7 @@ mod tests {
     use gittree_config::{ConfigError, ControlAuthConfig, ForgejoConfig};
     use gittree_control::{ControlConfig, ControlConfigError, ControlError, serve};
     use gittree_storage::StorageConfig;
+    use std::process::Command;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -124,5 +125,29 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ControlError::Serve(message)) if message == "boom"));
+    }
+
+    #[test]
+    fn main_exits_with_status_code_one_when_run_fails() {
+        if std::env::var("GITTREE_CONTROL_MAIN_SUBPROCESS").as_deref() == Ok("1") {
+            unsafe {
+                std::env::set_var("GITTREE_CONTROL_BIND", "not-a-socket");
+            }
+            super::main();
+            panic!("main should exit the process on failure");
+        }
+
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let exe = std::env::current_exe().expect("current exe");
+        let output = Command::new(exe)
+            .arg("--exact")
+            .arg("tests::main_exits_with_status_code_one_when_run_fails")
+            .arg("--nocapture")
+            .env("GITTREE_CONTROL_MAIN_SUBPROCESS", "1")
+            .output()
+            .expect("spawn subprocess");
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("control service failed"));
     }
 }
