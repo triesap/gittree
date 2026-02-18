@@ -769,6 +769,79 @@ mod tests {
         AuthServiceConfig::from_env_with(|key| values.get(key).cloned())
     }
 
+    fn is_storage_invalid_config(err: &AuthConfigError) -> bool {
+        matches!(err, AuthConfigError::Storage(StorageConfigError::InvalidConfig(_)))
+    }
+
+    fn is_auth_config_missing_env(err: &AuthConfigError) -> bool {
+        matches!(err, AuthConfigError::Config(ConfigError::MissingEnv(_)))
+    }
+
+    fn is_storage_internal(result: &Result<Option<AccountRecord>, StorageError>) -> bool {
+        matches!(result, Err(StorageError::Internal { .. }))
+    }
+
+    fn is_forgejo_request_error(result: &Result<ForgejoResponse, ForgejoError>) -> bool {
+        matches!(result, Err(ForgejoError::Request(_)))
+    }
+
+    fn is_auth_error_serve(err: &AuthError) -> bool {
+        matches!(err, AuthError::Serve(_))
+    }
+
+    fn is_bad_request(err: &AuthHttpError) -> bool {
+        matches!(err, AuthHttpError::BadRequest(_))
+    }
+
+    fn is_unauthorized(err: &AuthHttpError) -> bool {
+        matches!(err, AuthHttpError::Unauthorized(_))
+    }
+
+    fn is_internal(err: &AuthHttpError) -> bool {
+        matches!(err, AuthHttpError::Internal(_))
+    }
+
+    #[test]
+    fn helper_matchers_cover_non_matching_variants() {
+        let config_missing = AuthConfigError::Config(ConfigError::MissingEnv("TEST"));
+        assert!(is_auth_config_missing_env(&config_missing));
+        assert!(!is_storage_invalid_config(&config_missing));
+
+        let storage_invalid = AuthConfigError::Storage(StorageConfigError::InvalidConfig(
+            "broken".to_string(),
+        ));
+        assert!(is_storage_invalid_config(&storage_invalid));
+        assert!(!is_auth_config_missing_env(&storage_invalid));
+
+        let storage_lookup_ok: Result<Option<AccountRecord>, StorageError> = Ok(None);
+        assert!(!is_storage_internal(&storage_lookup_ok));
+        let storage_lookup_err = Err(StorageError::Internal {
+            message: "boom".to_string(),
+        });
+        assert!(is_storage_internal(&storage_lookup_err));
+
+        let forgejo_ok = Ok(ForgejoResponse {
+            status: 200,
+            body: "{}".to_string(),
+        });
+        assert!(!is_forgejo_request_error(&forgejo_ok));
+        let forgejo_err = Err(ForgejoError::Request("boom".to_string()));
+        assert!(is_forgejo_request_error(&forgejo_err));
+
+        let serve_err = AuthError::Serve("bind failed".to_string());
+        assert!(is_auth_error_serve(&serve_err));
+        let config_err = AuthError::Config(config_missing);
+        assert!(!is_auth_error_serve(&config_err));
+
+        let bad_request = AuthHttpError::BadRequest("bad".to_string());
+        assert!(is_bad_request(&bad_request));
+        assert!(!is_unauthorized(&bad_request));
+        assert!(!is_internal(&bad_request));
+        assert!(!is_bad_request(&AuthHttpError::Unauthorized("nope".to_string())));
+        assert!(is_unauthorized(&AuthHttpError::Unauthorized("nope".to_string())));
+        assert!(is_internal(&AuthHttpError::Internal("boom".to_string())));
+    }
+
     #[derive(Clone, Default)]
     struct MockTransport {
         requests: Arc<Mutex<Vec<ForgejoRequest>>>,
@@ -1038,10 +1111,7 @@ mod tests {
             (ENV_STORAGE_MIN_CONNECTIONS, "2"),
         ])
         .unwrap_err();
-        assert!(matches!(
-            err,
-            AuthConfigError::Storage(StorageConfigError::InvalidConfig(_))
-        ));
+        assert!(is_storage_invalid_config(&err));
         assert!(err.to_string().contains("min_connections"));
     }
 
@@ -1109,9 +1179,10 @@ mod tests {
 
     #[test]
     fn auth_service_config_from_env_with_maps_config_error() {
-        let err = auth_service_config_from_map(&[(ENV_STORAGE_READ_URL, "postgres://localhost/gittree")])
-            .expect_err("missing forgejo config");
-        assert!(matches!(err, AuthConfigError::Config(ConfigError::MissingEnv(_))));
+        let err =
+            auth_service_config_from_map(&[(ENV_STORAGE_READ_URL, "postgres://localhost/gittree")])
+                .expect_err("missing forgejo config");
+        assert!(is_auth_config_missing_env(&err));
     }
 
     #[test]
@@ -1165,7 +1236,7 @@ mod tests {
             ..ScriptedAccountRepository::default()
         };
         let result = AccountRepository::account_by_username(&repository, "alice").await;
-        assert!(matches!(result, Err(StorageError::Internal { .. })));
+        assert!(is_storage_internal(&result));
     }
 
     #[test]
@@ -1252,7 +1323,7 @@ mod tests {
             .build()
             .expect("runtime");
         let result = runtime.block_on(async { transport.send(request).await });
-        assert!(matches!(result, Err(ForgejoError::Request(_))));
+        assert!(is_forgejo_request_error(&result));
     }
 
     #[tokio::test]
@@ -1274,9 +1345,9 @@ mod tests {
                 application_name: None,
             },
         };
-        let handle = tokio::spawn(async move { serve(config).await });
+        let handle = tokio::spawn(serve(config));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!handle.is_finished(), "serve should still be running");
+        assert!(!handle.is_finished());
         handle.abort();
         let join_error = handle.await.expect_err("join should be cancelled");
         assert!(join_error.is_cancelled());
@@ -1326,12 +1397,8 @@ mod tests {
         let err = serve_inner("not-a-socket", router)
             .await
             .expect_err("bind error");
-        assert!(
-            matches!(err, AuthError::Serve(_)),
-            "expected serve error, got: {err:?}"
-        );
+        assert!(is_auth_error_serve(&err));
     }
-
 
     #[tokio::test]
     async fn signup_rejects_missing_auth() {
@@ -1449,10 +1516,7 @@ mod tests {
             .await
             .expect("profile public response");
         assert_eq!(public_profile_response.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            transport.requests().is_empty(),
-            "unauthorized requests should not reach forgejo transport"
-        );
+        assert!(transport.requests().is_empty());
     }
 
     #[tokio::test]
@@ -1654,7 +1718,7 @@ mod tests {
         let headers = HeaderMap::new();
         let uri: Uri = "/v1/signup".parse().expect("uri");
         let err = build_request_url(&headers, &uri).unwrap_err();
-        assert!(matches!(err, AuthHttpError::BadRequest(_)));
+        assert!(is_bad_request(&err));
     }
 
     #[test]
@@ -1662,7 +1726,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTH_HEADER, "Bearer token".parse().expect("auth"));
         let err = parse_nostr_auth(&headers).unwrap_err();
-        assert!(matches!(err, AuthHttpError::Unauthorized(_)));
+        assert!(is_unauthorized(&err));
     }
 
     #[test]
@@ -1670,7 +1734,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTH_HEADER, "Nostr !!!".parse().expect("auth"));
         let err = parse_nostr_auth(&headers).unwrap_err();
-        assert!(matches!(err, AuthHttpError::Unauthorized(_)));
+        assert!(is_unauthorized(&err));
     }
 
     #[test]
@@ -1682,7 +1746,7 @@ mod tests {
             format!("Nostr {token}").parse().expect("auth"),
         );
         let err = parse_nostr_auth(&headers).unwrap_err();
-        assert!(matches!(err, AuthHttpError::Unauthorized(_)));
+        assert!(is_unauthorized(&err));
     }
 
     #[test]
@@ -1755,12 +1819,12 @@ mod tests {
             field: "display_name",
             value: "bad".to_string(),
         });
-        assert!(matches!(invalid, AuthHttpError::BadRequest(_)));
+        assert!(is_bad_request(&invalid));
 
         let internal = profile_input_error(StorageError::Internal {
             message: "boom".to_string(),
         });
-        assert!(matches!(internal, AuthHttpError::Internal(_)));
+        assert!(is_internal(&internal));
     }
 
     #[tokio::test]
@@ -1840,11 +1904,11 @@ mod tests {
     #[test]
     fn username_and_pubkey_parsing_reject_invalid_values() {
         let username_err = username_from_pubkey("bad").unwrap_err();
-        assert!(matches!(username_err, AuthHttpError::BadRequest(_)));
+        assert!(is_bad_request(&username_err));
         let pubkey_err = parse_pubkey_bytes("bad").unwrap_err();
-        assert!(matches!(pubkey_err, AuthHttpError::BadRequest(_)));
+        assert!(is_bad_request(&pubkey_err));
         let decode_err = parse_pubkey_bytes(&"gg".repeat(32)).unwrap_err();
-        assert!(matches!(decode_err, AuthHttpError::BadRequest(_)));
+        assert!(is_bad_request(&decode_err));
     }
 
     #[test]
