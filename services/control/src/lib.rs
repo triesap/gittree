@@ -5,24 +5,24 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bech32::{Bech32, Hrp};
 use gittree_app_core::{
-    nip98_payload_hash, normalize_identifier, RepoCreateRequest, RepoCreateResponse,
-    SignedNostrEvent as ApiSignedNostrEvent,
+    RepoCreateRequest, RepoCreateResponse, SignedNostrEvent as ApiSignedNostrEvent,
+    nip98_payload_hash, normalize_identifier,
 };
 use gittree_config::{
     ConfigError, ControlAuthConfig, ForgejoConfig, RelayTargetsConfig, ServicesConfig, UiConfig,
 };
 use gittree_core::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_GITTREE_CONTROL};
-use gittree_core::{format_grasp_server_url_as_clone_url, ControlAction, RepoAnnouncement};
+use gittree_core::{ControlAction, RepoAnnouncement, format_grasp_server_url_as_clone_url};
 use gittree_forgejo::{
     ForgejoClient, ForgejoCreateOrg, ForgejoCreatePullRequest, ForgejoCreateRepo,
     ForgejoCreateUser, ForgejoError, ForgejoOrg, ForgejoPullRequest, ForgejoRepo, ForgejoTransport,
     ForgejoUser, ReqwestTransport,
 };
-use gittree_nostr_auth::{validate_nip98, Nip98Event, Nip98Request};
+use gittree_nostr_auth::{Nip98Event, Nip98Request, validate_nip98};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_relay_adapter::SignedNostrEvent as RelaySignedNostrEvent;
 use gittree_storage::{
@@ -30,7 +30,7 @@ use gittree_storage::{
     RelayPublishRepository, RelayPublishRequest, RelayTenantRecord, RelayTenantRepository,
     StorageConfig, StorageError,
 };
-use secp256k1::rand::{rngs::OsRng, RngCore};
+use secp256k1::rand::{RngCore, rngs::OsRng};
 use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -166,9 +166,9 @@ fn storage_from_env() -> Result<StorageConfig, ControlConfigError> {
     };
 
     if let Err(err) = config.validate() {
-        return Err(ControlConfigError::Storage(StorageConfigError::InvalidConfig(
-            err.to_string(),
-        )));
+        return Err(ControlConfigError::Storage(
+            StorageConfigError::InvalidConfig(err.to_string()),
+        ));
     }
 
     Ok(config)
@@ -182,10 +182,9 @@ fn env_u32(key: &'static str) -> Result<Option<u32>, ControlConfigError> {
             }
             match value.parse::<u32>() {
                 Ok(parsed) => Ok(Some(parsed)),
-                Err(_) => Err(ControlConfigError::Storage(StorageConfigError::InvalidEnv {
-                    key,
-                    value,
-                })),
+                Err(_) => Err(ControlConfigError::Storage(
+                    StorageConfigError::InvalidEnv { key, value },
+                )),
             }
         }
         Err(_) => Ok(None),
@@ -200,10 +199,9 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, ControlConfigError> {
             }
             match value.parse::<u64>() {
                 Ok(parsed) => Ok(Some(parsed)),
-                Err(_) => Err(ControlConfigError::Storage(StorageConfigError::InvalidEnv {
-                    key,
-                    value,
-                })),
+                Err(_) => Err(ControlConfigError::Storage(
+                    StorageConfigError::InvalidEnv { key, value },
+                )),
             }
         }
         Err(_) => Ok(None),
@@ -255,10 +253,11 @@ pub fn init_observability() -> Result<ObservabilityHandle, ControlError> {
     Ok(handle)
 }
 
-pub fn build_repositories(
-    config: &ControlConfig,
-) -> Result<PostgresRepositories, ControlError> {
-    let pool_options = config.storage.pool_options().map_err(ControlError::Storage)?;
+pub fn build_repositories(config: &ControlConfig) -> Result<PostgresRepositories, ControlError> {
+    let pool_options = config
+        .storage
+        .pool_options()
+        .map_err(ControlError::Storage)?;
     let connect_options = config
         .storage
         .read_connect_options()
@@ -284,7 +283,10 @@ trait ControlRepositories:
 }
 
 impl<T> ControlRepositories for T where
-    T: AccountRepository + RelayPublishRepository + RelayTenantRepository + RelayMembershipRepository
+    T: AccountRepository
+        + RelayPublishRepository
+        + RelayTenantRepository
+        + RelayMembershipRepository
 {
 }
 
@@ -377,10 +379,7 @@ fn authorize(headers: &HeaderMap, token: &str) -> Result<(), ControlHttpError> {
     Ok(())
 }
 
-fn authorize_admin_pubkey(
-    pubkey: &str,
-    auth: &ControlAuthConfig,
-) -> Result<(), ControlHttpError> {
+fn authorize_admin_pubkey(pubkey: &str, auth: &ControlAuthConfig) -> Result<(), ControlHttpError> {
     if auth.admin_keys.is_empty() {
         return Ok(());
     }
@@ -851,9 +850,7 @@ async fn apply_control_action(
                 })
                 .await
                 .map_err(map_forgejo_error)?;
-            Ok(ControlEventResponse::CreateUser {
-                user: user.into(),
-            })
+            Ok(ControlEventResponse::CreateUser { user: user.into() })
         }
         ControlAction::CreateOrg {
             name,
@@ -920,9 +917,7 @@ async fn apply_control_action(
                 )
                 .await
                 .map_err(map_forgejo_error)?;
-            Ok(ControlEventResponse::CreatePullRequest {
-                pull: pull.into(),
-            })
+            Ok(ControlEventResponse::CreatePullRequest { pull: pull.into() })
         }
     }
 }
@@ -947,12 +942,8 @@ async fn create_repo_with_announcement(
 
     let npub = npub_from_hex(&input.pubkey)?;
     let secret_key = parse_secret_key(&input.privkey)?;
-    let clone_url = format_grasp_server_url_as_clone_url(
-        &state.public_git_url,
-        &npub,
-        &identifier,
-    )
-    .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, &identifier)
+        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
 
     let announcement = RepoAnnouncement {
         identifier: identifier.clone(),
@@ -1123,12 +1114,8 @@ fn validate_repo_announcement_event(
     }
 
     let npub = npub_from_hex(&event.pubkey)?;
-    let expected_clone = format_grasp_server_url_as_clone_url(
-        public_git_url,
-        &npub,
-        &identifier,
-    )
-    .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    let expected_clone = format_grasp_server_url_as_clone_url(public_git_url, &npub, &identifier)
+        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
     if !announcement.clone.iter().any(|url| url == &expected_clone) {
         return Err(ControlHttpError::BadRequest(
             "missing clone url".to_string(),
@@ -1168,7 +1155,9 @@ fn build_request_url(headers: &HeaderMap, uri: &Uri) -> Result<String, ControlHt
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("http");
-    let path = uri.path_and_query().map_or(uri.path(), |value| value.as_str());
+    let path = uri
+        .path_and_query()
+        .map_or(uri.path(), |value| value.as_str());
     Ok(format!("{scheme}://{host}{path}"))
 }
 
@@ -1223,7 +1212,9 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
         return Err(ControlHttpError::BadRequest("invalid event id".to_string()));
     }
     if event.sig.len() != 128 {
-        return Err(ControlHttpError::BadRequest("invalid event sig".to_string()));
+        return Err(ControlHttpError::BadRequest(
+            "invalid event sig".to_string(),
+        ));
     }
     if event.pubkey.len() != 64 {
         return Err(ControlHttpError::BadRequest("invalid pubkey".to_string()));
@@ -1288,18 +1279,14 @@ fn unix_timestamp() -> i64 {
 
 fn require_non_empty(field: &'static str, value: &str) -> Result<(), ControlHttpError> {
     if value.trim().is_empty() {
-        return Err(ControlHttpError::BadRequest(format!(
-            "missing {field}"
-        )));
+        return Err(ControlHttpError::BadRequest(format!("missing {field}")));
     }
     Ok(())
 }
 
 fn require_hex64(field: &'static str, value: &str) -> Result<(), ControlHttpError> {
     if value.len() != 64 || !is_hex(value) {
-        return Err(ControlHttpError::BadRequest(format!(
-            "invalid {field}"
-        )));
+        return Err(ControlHttpError::BadRequest(format!("invalid {field}")));
     }
     Ok(())
 }
@@ -1310,9 +1297,7 @@ fn is_hex(value: &str) -> bool {
 
 fn parse_secret_key(value: &str) -> Result<SecretKey, ControlHttpError> {
     if value.len() != 64 {
-        return Err(ControlHttpError::BadRequest(
-            "invalid privkey".to_string(),
-        ));
+        return Err(ControlHttpError::BadRequest("invalid privkey".to_string()));
     }
     let bytes = hex::decode(value)
         .map_err(|_| ControlHttpError::BadRequest("invalid privkey".to_string()))?;
@@ -1368,7 +1353,7 @@ impl IntoResponse for ControlHttpError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlCreateTenantResponse, AUTH_HEADER, ControlConfig, ControlHttpError, authorize,
+        AUTH_HEADER, ControlConfig, ControlCreateTenantResponse, ControlHttpError, authorize,
         authorize_admin_pubkey, build_request_url, build_router, normalize_host, npub_from_hex,
         parse_nostr_auth, parse_secret_key,
     };
@@ -1376,12 +1361,11 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{HeaderMap, Request, StatusCode};
     use axum::response::IntoResponse;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use gittree_app_core::{
-        nip98_payload_hash, nip98_sign_event, pubkey_bytes_from_npub, RepoCreateRequest,
-        RepoCreateResponse,
-        SignedNostrEvent as ApiSignedNostrEvent,
+        RepoCreateRequest, RepoCreateResponse, SignedNostrEvent as ApiSignedNostrEvent,
+        nip98_payload_hash, nip98_sign_event, pubkey_bytes_from_npub,
     };
     use gittree_config::{ControlAuthConfig, ForgejoConfig};
     use gittree_core::kinds::KIND_GITTREE_CONTROL;
@@ -1426,13 +1410,18 @@ mod tests {
 
     #[async_trait]
     impl ForgejoTransport for MockTransport {
-        async fn send(&self, request: ForgejoRequest) -> Result<ForgejoResponse, gittree_forgejo::ForgejoError> {
+        async fn send(
+            &self,
+            request: ForgejoRequest,
+        ) -> Result<ForgejoResponse, gittree_forgejo::ForgejoError> {
             self.requests.lock().expect("requests").push(request);
             self.responses
                 .lock()
                 .expect("responses")
                 .pop_front()
-                .ok_or_else(|| gittree_forgejo::ForgejoError::Request("missing mock response".to_string()))
+                .ok_or_else(|| {
+                    gittree_forgejo::ForgejoError::Request("missing mock response".to_string())
+                })
         }
     }
 
@@ -1559,7 +1548,9 @@ mod tests {
             self.inner.tenant_by_host(host).await
         }
 
-        async fn list_tenants(&self) -> Result<Vec<gittree_storage::RelayTenantRecord>, StorageError> {
+        async fn list_tenants(
+            &self,
+        ) -> Result<Vec<gittree_storage::RelayTenantRecord>, StorageError> {
             self.inner.list_tenants().await
         }
     }
@@ -1591,7 +1582,11 @@ mod tests {
             self.inner.list_memberships(tenant_id).await
         }
 
-        async fn remove_membership(&self, tenant_id: &str, pubkey: &[u8]) -> Result<bool, StorageError> {
+        async fn remove_membership(
+            &self,
+            tenant_id: &str,
+            pubkey: &[u8],
+        ) -> Result<bool, StorageError> {
             self.inner.remove_membership(tenant_id, pubkey).await
         }
 
@@ -1610,7 +1605,11 @@ mod tests {
             self.inner.invite_by_code(tenant_id, invite_code).await
         }
 
-        async fn delete_invite(&self, tenant_id: &str, invite_code: &str) -> Result<(), StorageError> {
+        async fn delete_invite(
+            &self,
+            tenant_id: &str,
+            invite_code: &str,
+        ) -> Result<(), StorageError> {
             self.inner.delete_invite(tenant_id, invite_code).await
         }
     }
@@ -1731,29 +1730,168 @@ mod tests {
             with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
                 with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
                     with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
-                        with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087/", || {
-                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                                with_env_var(
-                                    "GITTREE_STORAGE_READ_URL",
-                                    "postgres://user:pass@localhost:5432/gittree",
-                                    || {
-                                        with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
-                                            with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
-                                                with_env_var(
-                                                    "GITTREE_UI_PUBLIC_GIT_URL",
-                                                    "http://localhost:8085",
-                                                    f,
-                                                );
-                                            });
-                                        });
-                                    },
-                                );
-                            });
-                        });
+                        with_env_var(
+                            "GITTREE_FORGEJO_WEBHOOK_URL",
+                            "http://localhost:8087/",
+                            || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                                    with_env_var(
+                                        "GITTREE_STORAGE_READ_URL",
+                                        "postgres://user:pass@localhost:5432/gittree",
+                                        || {
+                                            with_env_var(
+                                                "GITTREE_RELAY_URLS",
+                                                "ws://relay.local",
+                                                || {
+                                                    with_env_var(
+                                                        "GITTREE_UI_REPO_ROOT",
+                                                        "/tmp/repos",
+                                                        || {
+                                                            with_env_var(
+                                                                "GITTREE_UI_PUBLIC_GIT_URL",
+                                                                "http://localhost:8085",
+                                                                f,
+                                                            );
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
+                                });
+                            },
+                        );
                     });
                 });
             });
         });
+    }
+
+    fn is_control_config_config_error(err: &super::ControlConfigError) -> bool {
+        matches!(err, super::ControlConfigError::Config(_))
+    }
+
+    fn is_control_config_storage_invalid_config(err: &super::ControlConfigError) -> bool {
+        matches!(
+            err,
+            super::ControlConfigError::Storage(super::StorageConfigError::InvalidConfig(_))
+        )
+    }
+
+    fn is_control_config_storage_invalid_env(
+        err: &super::ControlConfigError,
+        key: &'static str,
+    ) -> bool {
+        matches!(
+            err,
+            super::ControlConfigError::Storage(super::StorageConfigError::InvalidEnv {
+                key: observed_key,
+                ..
+            }) if observed_key == &key
+        )
+    }
+
+    fn is_control_error_observability_config(err: &super::ControlError) -> bool {
+        matches!(err, super::ControlError::ObservabilityConfig(_))
+    }
+
+    fn is_control_error_serve(err: &super::ControlError) -> bool {
+        matches!(err, super::ControlError::Serve(_))
+    }
+
+    fn is_control_error_storage(err: &super::ControlError) -> bool {
+        matches!(err, super::ControlError::Storage(_))
+    }
+
+    fn is_control_error_observability(err: &super::ControlError) -> bool {
+        matches!(err, super::ControlError::Observability(_))
+    }
+
+    fn is_control_error_storage_or_observability(err: &super::ControlError) -> bool {
+        is_control_error_storage(err) || is_control_error_observability(err)
+    }
+
+    fn is_http_unauthorized(err: &ControlHttpError) -> bool {
+        matches!(err, ControlHttpError::Unauthorized(_))
+    }
+
+    fn is_http_bad_request(err: &ControlHttpError) -> bool {
+        matches!(err, ControlHttpError::BadRequest(_))
+    }
+
+    fn is_http_internal(err: &ControlHttpError) -> bool {
+        matches!(err, ControlHttpError::Internal(_))
+    }
+
+    fn is_forgejo_request_error(err: &ForgejoError) -> bool {
+        matches!(err, ForgejoError::Request(_))
+    }
+
+    #[test]
+    fn helper_matchers_cover_non_matching_variants() {
+        let config_error = super::ControlConfigError::Config(gittree_config::ConfigError::MissingEnv(
+            "GITTREE_CONTROL_TOKEN",
+        ));
+        assert!(is_control_config_config_error(&config_error));
+        assert!(!is_control_config_storage_invalid_config(&config_error));
+        assert!(!is_control_config_storage_invalid_env(
+            &config_error,
+            super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+        ));
+
+        let storage_env_err = super::ControlConfigError::Storage(
+            super::StorageConfigError::InvalidEnv {
+                key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                value: "bad".to_string(),
+            },
+        );
+        assert!(!is_control_config_config_error(&storage_env_err));
+        assert!(is_control_config_storage_invalid_env(
+            &storage_env_err,
+            super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+        ));
+        assert!(!is_control_config_storage_invalid_config(&storage_env_err));
+
+        let control_storage_err = super::ControlError::Storage(StorageError::Internal {
+            message: "boom".to_string(),
+        });
+        assert!(is_control_error_storage(&control_storage_err));
+        assert!(is_control_error_storage_or_observability(&control_storage_err));
+        assert!(!is_control_error_serve(&control_storage_err));
+        assert!(!is_control_error_observability_config(&control_storage_err));
+
+        let control_observability_err =
+            super::ControlError::Observability(gittree_observability::ObservabilityError::LogInit(
+                "boom".to_string(),
+            ));
+        assert!(is_control_error_observability(&control_observability_err));
+        assert!(is_control_error_storage_or_observability(
+            &control_observability_err
+        ));
+        assert!(!is_control_error_observability(&control_storage_err));
+
+        let unauthorized = ControlHttpError::Unauthorized("nope".to_string());
+        assert!(is_http_unauthorized(&unauthorized));
+        assert!(!is_http_bad_request(&unauthorized));
+        assert!(!is_http_internal(&unauthorized));
+
+        let bad_request = ControlHttpError::BadRequest("bad".to_string());
+        assert!(is_http_bad_request(&bad_request));
+        assert!(!is_http_unauthorized(&bad_request));
+        assert!(!is_http_internal(&bad_request));
+
+        let internal = ControlHttpError::Internal("boom".to_string());
+        assert!(is_http_internal(&internal));
+        assert!(!is_http_unauthorized(&internal));
+        assert!(!is_http_bad_request(&internal));
+
+        let forgejo_err = ForgejoError::Request("request failed".to_string());
+        assert!(is_forgejo_request_error(&forgejo_err));
+        let forgejo_response_err = ForgejoError::Response {
+            status: 500,
+            body: "down".to_string(),
+        };
+        assert!(!is_forgejo_request_error(&forgejo_response_err));
     }
 
     #[test]
@@ -1763,29 +1901,44 @@ mod tests {
             with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
                 with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
                     with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
-                        with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087/", || {
-                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                                with_env_var(
-                                    "GITTREE_STORAGE_READ_URL",
-                                    "postgres://user:pass@localhost:5432/gittree",
-                                    || {
-                                        with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
-                                            with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
-                                                with_env_var(
-                                                    "GITTREE_UI_PUBLIC_GIT_URL",
-                                                    "http://localhost:8085",
-                                                    || {
-                                                        let config =
-                                                            ControlConfig::from_env().expect("config");
-                                                        assert!(!config.bind.is_empty());
-                                                    },
-                                                );
-                                            });
-                                        });
-                                    },
-                                );
-                            });
-                        });
+                        with_env_var(
+                            "GITTREE_FORGEJO_WEBHOOK_URL",
+                            "http://localhost:8087/",
+                            || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                                    with_env_var(
+                                        "GITTREE_STORAGE_READ_URL",
+                                        "postgres://user:pass@localhost:5432/gittree",
+                                        || {
+                                            with_env_var(
+                                                "GITTREE_RELAY_URLS",
+                                                "ws://relay.local",
+                                                || {
+                                                    with_env_var(
+                                                        "GITTREE_UI_REPO_ROOT",
+                                                        "/tmp/repos",
+                                                        || {
+                                                            with_env_var(
+                                                                "GITTREE_UI_PUBLIC_GIT_URL",
+                                                                "http://localhost:8085",
+                                                                || {
+                                                                    let config =
+                                                                        ControlConfig::from_env()
+                                                                            .expect("config");
+                                                                    assert!(
+                                                                        !config.bind.is_empty()
+                                                                    );
+                                                                },
+                                                            );
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
+                                });
+                            },
+                        );
                     });
                 });
             });
@@ -1799,18 +1952,23 @@ mod tests {
             with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
                 with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
                     with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
-                        with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087/", || {
-                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                                with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
-                                    with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
-                                        with_env_var(
-                                            "GITTREE_UI_PUBLIC_GIT_URL",
-                                            "http://localhost:8085",
-                                            || {
-                                                without_env_var("GITTREE_STORAGE_READ_URL", || {
-                                                    let err =
-                                                        ControlConfig::from_env().expect_err("config");
-                                                    assert!(matches!(
+                        with_env_var(
+                            "GITTREE_FORGEJO_WEBHOOK_URL",
+                            "http://localhost:8087/",
+                            || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                                    with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
+                                        with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
+                                            with_env_var(
+                                                "GITTREE_UI_PUBLIC_GIT_URL",
+                                                "http://localhost:8085",
+                                                || {
+                                                    without_env_var(
+                                                        "GITTREE_STORAGE_READ_URL",
+                                                        || {
+                                                            let err = ControlConfig::from_env()
+                                                                .expect_err("config");
+                                                            assert!(matches!(
                                                         err,
                                                         super::ControlConfigError::Storage(
                                                             super::StorageConfigError::MissingEnv(
@@ -1818,13 +1976,15 @@ mod tests {
                                                             )
                                                         )
                                                     ));
-                                                });
-                                            },
-                                        );
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        });
                                     });
                                 });
-                            });
-                        });
+                            },
+                        );
                     });
                 });
             });
@@ -1838,25 +1998,34 @@ mod tests {
             with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
                 with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
                     with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
-                        with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087/", || {
-                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                                with_env_var(
-                                    "GITTREE_STORAGE_READ_URL",
-                                    "postgres://user:pass@localhost:5432/gittree",
-                                    || {
-                                        with_env_var(
-                                            "GITTREE_STORAGE_MAX_CONNECTIONS",
-                                            "bad",
-                                            || {
-                                                with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
-                                                    with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
-                                                        with_env_var(
-                                                            "GITTREE_UI_PUBLIC_GIT_URL",
-                                                            "http://localhost:8085",
-                                                            || {
-                                                                let err =
+                        with_env_var(
+                            "GITTREE_FORGEJO_WEBHOOK_URL",
+                            "http://localhost:8087/",
+                            || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                                    with_env_var(
+                                        "GITTREE_STORAGE_READ_URL",
+                                        "postgres://user:pass@localhost:5432/gittree",
+                                        || {
+                                            with_env_var(
+                                                "GITTREE_STORAGE_MAX_CONNECTIONS",
+                                                "bad",
+                                                || {
+                                                    with_env_var(
+                                                        "GITTREE_RELAY_URLS",
+                                                        "ws://relay.local",
+                                                        || {
+                                                            with_env_var(
+                                                                "GITTREE_UI_REPO_ROOT",
+                                                                "/tmp/repos",
+                                                                || {
+                                                                    with_env_var(
+                                                                        "GITTREE_UI_PUBLIC_GIT_URL",
+                                                                        "http://localhost:8085",
+                                                                        || {
+                                                                            let err =
                                                                     ControlConfig::from_env().expect_err("config");
-                                                                assert!(matches!(
+                                                                            assert!(matches!(
                                                                     err,
                                                                     super::ControlConfigError::Storage(
                                                                         super::StorageConfigError::InvalidEnv {
@@ -1865,16 +2034,19 @@ mod tests {
                                                                         }
                                                                     )
                                                                 ));
-                                                            },
-                                                        );
-                                                    });
-                                                });
-                                            },
-                                        );
-                                    },
-                                );
-                            });
-                        });
+                                                                        },
+                                                                    );
+                                                                },
+                                                            );
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
+                                });
+                            },
+                        );
                     });
                 });
             });
@@ -1887,23 +2059,24 @@ mod tests {
         with_minimal_control_env(|| {
             with_env_var("GITTREE_CONTROL_BIND", "bad-bind", || {
                 let err = ControlConfig::from_env().expect_err("invalid bind should fail");
-                assert!(matches!(err, super::ControlConfigError::Config(_)));
+                assert!(is_control_config_config_error(&err));
             });
             without_env_var("GITTREE_CONTROL_TOKEN", || {
                 let err = ControlConfig::from_env().expect_err("missing auth token should fail");
-                assert!(matches!(err, super::ControlConfigError::Config(_)));
+                assert!(is_control_config_config_error(&err));
             });
             without_env_var("GITTREE_FORGEJO_BASE_URL", || {
-                let err = ControlConfig::from_env().expect_err("missing forgejo base url should fail");
-                assert!(matches!(err, super::ControlConfigError::Config(_)));
+                let err =
+                    ControlConfig::from_env().expect_err("missing forgejo base url should fail");
+                assert!(is_control_config_config_error(&err));
             });
             with_env_var("GITTREE_RELAY_URLS", "ftp://relay.local", || {
                 let err = ControlConfig::from_env().expect_err("invalid relay urls should fail");
-                assert!(matches!(err, super::ControlConfigError::Config(_)));
+                assert!(is_control_config_config_error(&err));
             });
             without_env_var("GITTREE_UI_REPO_ROOT", || {
                 let err = ControlConfig::from_env().expect_err("missing ui repo root should fail");
-                assert!(matches!(err, super::ControlConfigError::Config(_)));
+                assert!(is_control_config_config_error(&err));
             });
         });
     }
@@ -1913,7 +2086,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_JSON", "not-a-bool", || {
             let err = super::init_observability().expect_err("invalid observability env");
-            assert!(matches!(err, super::ControlError::ObservabilityConfig(_)));
+            assert!(is_control_error_observability_config(&err));
         });
     }
 
@@ -1947,10 +2120,7 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("invalid bind should fail");
-            assert!(matches!(
-                err,
-                super::ControlError::Serve(_) | super::ControlError::Observability(_)
-            ));
+            assert!(is_control_error_serve(&err) || is_control_error_observability(&err));
         });
     }
 
@@ -1961,7 +2131,7 @@ mod tests {
         let err = super::serve_inner("127.0.0.1:99999", router)
             .await
             .expect_err("invalid bind should fail");
-        assert!(matches!(err, super::ControlError::Serve(_)));
+        assert!(is_control_error_serve(&err));
     }
 
     #[test]
@@ -1995,7 +2165,7 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("observability config should fail");
-            assert!(matches!(err, super::ControlError::ObservabilityConfig(_)));
+            assert!(is_control_error_observability_config(&err));
         });
 
         with_env_var("GITTREE_LOG_JSON", "false", || {
@@ -2025,10 +2195,7 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("storage config should fail");
-            assert!(matches!(
-                err,
-                super::ControlError::Storage(_) | super::ControlError::Observability(_)
-            ));
+            assert!(is_control_error_storage_or_observability(&err));
         });
     }
 
@@ -2059,9 +2226,9 @@ mod tests {
                 .build()
                 .expect("runtime")
                 .block_on(async move {
-                    let handle = tokio::spawn(async move { super::serve(config).await });
+                    let handle = tokio::spawn(super::serve(config));
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    assert!(!handle.is_finished(), "serve should still be running");
+                    assert!(!handle.is_finished());
                     handle.abort();
                     let join_error = handle.await.expect_err("join should be cancelled");
                     assert!(join_error.is_cancelled());
@@ -2080,7 +2247,7 @@ mod tests {
                 .env("GITTREE_LOG_JSON", "false")
                 .status()
                 .expect("spawn subprocess");
-            assert!(status.success(), "subprocess serve run should succeed");
+            assert!(status.success());
         });
     }
 
@@ -2093,11 +2260,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_server_maps_errors_to_control_serve_error() {
-        let err = super::run_server::<&'static str, _>(async {
-            Err::<(), &'static str>("boom")
-        })
-        .await
-        .expect_err("error");
+        let err = super::run_server::<&'static str, _>(async { Err::<(), &'static str>("boom") })
+            .await
+            .expect_err("error");
         assert!(matches!(err, super::ControlError::Serve(message) if message.contains("boom")));
     }
 
@@ -2112,7 +2277,7 @@ mod tests {
     fn authorize_rejects_missing_header() {
         let headers = HeaderMap::new();
         let err = authorize(&headers, "token").unwrap_err();
-        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+        assert!(is_http_unauthorized(&err));
     }
 
     #[test]
@@ -2120,7 +2285,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTH_HEADER, "Nostr token".parse().expect("header"));
         let err = authorize(&headers, "token").unwrap_err();
-        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+        assert!(is_http_unauthorized(&err));
     }
 
     #[test]
@@ -2128,7 +2293,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTH_HEADER, "Bearer wrong".parse().expect("header"));
         let err = authorize(&headers, "token").unwrap_err();
-        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+        assert!(is_http_unauthorized(&err));
     }
 
     #[test]
@@ -2138,7 +2303,7 @@ mod tests {
             admin_keys: vec!["aa".repeat(32)],
         };
         let denied = authorize_admin_pubkey(&"bb".repeat(32), &auth).unwrap_err();
-        assert!(matches!(denied, ControlHttpError::Unauthorized(_)));
+        assert!(is_http_unauthorized(&denied));
 
         let open = ControlAuthConfig {
             token: "token".to_string(),
@@ -2159,7 +2324,7 @@ mod tests {
         let normalized = normalize_host("https://Relay.Local:443").expect("host");
         assert_eq!(normalized, "relay.local");
         let invalid = normalize_host("relay.local/path").unwrap_err();
-        assert!(matches!(invalid, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&invalid));
     }
 
     #[test]
@@ -2167,7 +2332,7 @@ mod tests {
         let headers = HeaderMap::new();
         let uri = "/v1/repos".parse().expect("uri");
         let err = build_request_url(&headers, &uri).expect_err("missing host");
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -2175,10 +2340,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTH_HEADER, "Nostr !!!".parse().expect("header"));
         let auth_err = parse_nostr_auth(&headers).unwrap_err();
-        assert!(matches!(auth_err, ControlHttpError::Unauthorized(_)));
+        assert!(is_http_unauthorized(&auth_err));
 
         let secret_err = parse_secret_key("bad").unwrap_err();
-        assert!(matches!(secret_err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&secret_err));
     }
 
     #[test]
@@ -2196,7 +2361,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTH_HEADER,
-            nostr_auth_header(&event).parse().expect("authorization header"),
+            nostr_auth_header(&event)
+                .parse()
+                .expect("authorization header"),
         );
         let parsed = parse_nostr_auth(&headers).expect("parsed event");
         assert_eq!(parsed.pubkey, event.pubkey);
@@ -2212,7 +2379,7 @@ mod tests {
             format!("Nostr {encoded}").parse().expect("header"),
         );
         let err = parse_nostr_auth(&headers).unwrap_err();
-        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+        assert!(is_http_unauthorized(&err));
     }
 
     #[test]
@@ -2221,10 +2388,10 @@ mod tests {
         super::require_hex64("pubkey", &pubkey).expect("valid hex");
 
         let short_err = super::require_hex64("pubkey", "aa").unwrap_err();
-        assert!(matches!(short_err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&short_err));
 
         let non_hex_err = super::require_hex64("pubkey", &"zz".repeat(32)).unwrap_err();
-        assert!(matches!(non_hex_err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&non_hex_err));
 
         let npub = npub_from_hex(&pubkey).expect("npub");
         let decoded = pubkey_bytes_from_npub(&npub).expect("decode");
@@ -2237,9 +2404,9 @@ mod tests {
         parse_secret_key(&privkey).expect("valid secret");
 
         let invalid = parse_secret_key(&"gg".repeat(32)).unwrap_err();
-        assert!(matches!(invalid, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&invalid));
         let zero_scalar = parse_secret_key(&"00".repeat(32)).unwrap_err();
-        assert!(matches!(zero_scalar, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&zero_scalar));
 
         let now = super::unix_timestamp();
         assert!(now >= 1_600_000_000);
@@ -2249,20 +2416,22 @@ mod tests {
     fn error_display_and_source_cover_variants() {
         use std::error::Error as _;
 
-        let config_variant = super::ControlConfigError::Config(gittree_config::ConfigError::InvalidConfig {
-            field: "x",
-            value: "y".to_string(),
-        });
+        let config_variant =
+            super::ControlConfigError::Config(gittree_config::ConfigError::InvalidConfig {
+                field: "x",
+                value: "y".to_string(),
+            });
         assert!(config_variant.to_string().contains("control config error"));
         assert!(config_variant.source().is_some());
 
-        let storage_variant =
-            super::ControlConfigError::Storage(super::StorageConfigError::InvalidConfig(
-                "bad storage".to_string(),
-            ));
-        assert!(storage_variant
-            .to_string()
-            .contains("control storage config error"));
+        let storage_variant = super::ControlConfigError::Storage(
+            super::StorageConfigError::InvalidConfig("bad storage".to_string()),
+        );
+        assert!(
+            storage_variant
+                .to_string()
+                .contains("control storage config error")
+        );
         assert!(storage_variant.source().is_some());
 
         let storage_missing = super::StorageConfigError::MissingEnv("KEY");
@@ -2278,7 +2447,11 @@ mod tests {
         assert!(control_config.source().is_some());
 
         let control_forgejo = super::ControlError::Forgejo(ForgejoError::Request("x".to_string()));
-        assert!(control_forgejo.to_string().contains("control forgejo error"));
+        assert!(
+            control_forgejo
+                .to_string()
+                .contains("control forgejo error")
+        );
         assert!(control_forgejo.source().is_some());
 
         let control_obs_cfg = super::ControlError::ObservabilityConfig(
@@ -2287,21 +2460,31 @@ mod tests {
                 value: "bad".to_string(),
             },
         );
-        assert!(control_obs_cfg
-            .to_string()
-            .contains("control observability config error"));
+        assert!(
+            control_obs_cfg
+                .to_string()
+                .contains("control observability config error")
+        );
         assert!(control_obs_cfg.source().is_some());
 
         let control_obs = super::ControlError::Observability(
             gittree_observability::ObservabilityError::LogInit("x".to_string()),
         );
-        assert!(control_obs.to_string().contains("control observability error"));
+        assert!(
+            control_obs
+                .to_string()
+                .contains("control observability error")
+        );
         assert!(control_obs.source().is_some());
 
         let control_storage = super::ControlError::Storage(StorageError::Internal {
             message: "boom".to_string(),
         });
-        assert!(control_storage.to_string().contains("control storage error"));
+        assert!(
+            control_storage
+                .to_string()
+                .contains("control storage error")
+        );
         assert!(control_storage.source().is_some());
 
         let control_serve = super::ControlError::Serve("bind failed".to_string());
@@ -2314,13 +2497,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTH_HEADER, "Bearer abc".parse().expect("header"));
         let err = parse_nostr_auth(&headers).unwrap_err();
-        assert!(matches!(err, ControlHttpError::Unauthorized(_)));
+        assert!(is_http_unauthorized(&err));
     }
 
     #[test]
     fn normalize_host_rejects_malformed_ipv6_host() {
         let err = normalize_host("http://[::1").unwrap_err();
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -2359,34 +2542,39 @@ mod tests {
     #[test]
     fn storage_from_env_reports_invalid_pool_bounds() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(super::ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
-                    let err = super::storage_from_env().expect_err("invalid pool bounds");
-                    assert!(matches!(
-                        err,
-                        super::ControlConfigError::Storage(super::StorageConfigError::InvalidConfig(_))
-                    ));
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                        let err = super::storage_from_env().expect_err("invalid pool bounds");
+                        assert!(is_control_config_storage_invalid_config(&err));
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     #[test]
     fn storage_from_env_parses_optional_pool_settings() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(super::ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "3", || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", || {
-                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "300", || {
-                        let config = super::storage_from_env().expect("storage config");
-                        assert_eq!(config.min_connections, 3);
-                        assert_eq!(config.idle_timeout_secs, Some(60));
-                        assert_eq!(config.max_lifetime_secs, Some(300));
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "3", || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", || {
+                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "300", || {
+                            let config = super::storage_from_env().expect("storage config");
+                            assert_eq!(config.min_connections, 3);
+                            assert_eq!(config.idle_timeout_secs, Some(60));
+                            assert_eq!(config.max_lifetime_secs, Some(300));
+                        });
                     });
                 });
-            });
-        });
+            },
+        );
     }
 
     #[test]
@@ -2411,7 +2599,7 @@ mod tests {
             public_git_url: "http://localhost:8085".to_string(),
         };
         let err = super::build_repositories(&config).expect_err("invalid storage config");
-        assert!(matches!(err, super::ControlError::Storage(_)));
+        assert!(is_control_error_storage(&err));
     }
 
     #[test]
@@ -2419,7 +2607,7 @@ mod tests {
         let err = super::map_storage_error(StorageError::Internal {
             message: "storage exploded".to_string(),
         });
-        assert!(matches!(err, ControlHttpError::Internal(_)));
+        assert!(is_http_internal(&err));
     }
 
     #[tokio::test]
@@ -2933,7 +3121,7 @@ mod tests {
             })
             .await
             .expect_err("expected missing mock response");
-        assert!(matches!(err, ForgejoError::Request(_)));
+        assert!(is_forgejo_request_error(&err));
     }
 
     #[test]
@@ -2942,13 +3130,13 @@ mod tests {
             status: 404,
             body: "missing".to_string(),
         });
-        assert!(matches!(client, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&client));
 
         let server = super::map_forgejo_error(ForgejoError::Response {
             status: 503,
             body: "down".to_string(),
         });
-        assert!(matches!(server, ControlHttpError::Internal(_)));
+        assert!(is_http_internal(&server));
     }
 
     #[test]
@@ -2968,7 +3156,12 @@ mod tests {
         let (state, _transport, _repos) = test_state(Vec::new());
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -3111,10 +3304,7 @@ mod tests {
             .await
             .expect("nostr repo response");
         assert_eq!(nostr_repo_response.status(), StatusCode::UNAUTHORIZED);
-        assert!(
-            transport.requests().is_empty(),
-            "unauthorized requests should not reach forgejo transport"
-        );
+        assert!(transport.requests().is_empty());
     }
 
     #[tokio::test]
@@ -3279,7 +3469,10 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
         assert_eq!(transport.requests().len(), 1);
     }
 
@@ -3312,9 +3505,7 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let requests = transport.requests();
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/admin/users/admin/orgs"));
+        assert!(requests[0].url.ends_with("/api/v1/admin/users/admin/orgs"));
     }
 
     #[tokio::test]
@@ -3344,7 +3535,10 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
         assert_eq!(transport.requests().len(), 1);
     }
 
@@ -3432,9 +3626,7 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let requests = transport.requests();
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/admin/users/alice/repos"));
+        assert!(requests[0].url.ends_with("/api/v1/admin/users/alice/repos"));
         let job = repos
             .claim_relay_publish(OffsetDateTime::now_utc())
             .await
@@ -3458,12 +3650,8 @@ mod tests {
             .expect("upsert");
 
         let npub = npub_from_hex(&pubkey).expect("npub");
-        let clone_url = format_grasp_server_url_as_clone_url(
-            &state.public_git_url,
-            &npub,
-            "demo",
-        )
-        .expect("clone");
+        let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, "demo")
+            .expect("clone");
         let announcement = RepoAnnouncement {
             identifier: "demo".to_string(),
             name: Some("Demo".to_string()),
@@ -3479,12 +3667,9 @@ mod tests {
         let secret_bytes = hex::decode(&privkey).expect("privkey");
         let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
         let now = super::unix_timestamp();
-        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
-            &announcement,
-            &secret,
-            now,
-        )
-        .expect("signed");
+        let signed =
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed");
         let request = RepoCreateRequest {
             event: api_event_from_relay(signed),
             private: Some(false),
@@ -3524,9 +3709,7 @@ mod tests {
         assert_eq!(repo.name, "demo");
 
         let requests = transport.requests();
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/admin/users/alice/repos"));
+        assert!(requests[0].url.ends_with("/api/v1/admin/users/alice/repos"));
         let job = repos
             .claim_relay_publish(OffsetDateTime::now_utc())
             .await
@@ -3778,9 +3961,14 @@ mod tests {
         let secret_bytes = hex::decode(&privkey).expect("privkey");
         let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
         let now = super::unix_timestamp();
-        let auth_event =
-            nip98_sign_event(&secret.secret_bytes(), "POST", "http://localhost/v1/repos", None, now)
-                .expect("auth");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            None,
+            now,
+        )
+        .expect("auth");
         let header = nostr_auth_header(&auth_event);
 
         let app = build_router(state);
@@ -3825,9 +4013,14 @@ mod tests {
         let secret_bytes = hex::decode(&privkey).expect("privkey");
         let secret = SecretKey::from_slice(&secret_bytes).expect("secret");
         let now = super::unix_timestamp();
-        let auth_event =
-            nip98_sign_event(&secret.secret_bytes(), "POST", "http://localhost/v1/repos", None, now)
-                .expect("auth");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            None,
+            now,
+        )
+        .expect("auth");
         let header = nostr_auth_header(&auth_event);
 
         let app = build_router(state);
@@ -4200,12 +4393,8 @@ mod tests {
         let (pubkey, privkey) = test_keys();
 
         let npub = npub_from_hex(&pubkey).expect("npub");
-        let clone_url = format_grasp_server_url_as_clone_url(
-            &state.public_git_url,
-            &npub,
-            "demo",
-        )
-        .expect("clone");
+        let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, "demo")
+            .expect("clone");
         let announcement = RepoAnnouncement {
             identifier: "demo".to_string(),
             name: Some("Demo".to_string()),
@@ -4221,12 +4410,9 @@ mod tests {
 
         let secret = parse_secret_key(&privkey).expect("secret");
         let now = super::unix_timestamp();
-        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
-            &announcement,
-            &secret,
-            now,
-        )
-        .expect("signed");
+        let signed =
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed");
         let request = RepoCreateRequest {
             event: api_event_from_relay(signed),
             private: Some(false),
@@ -4271,12 +4457,8 @@ mod tests {
         let (pubkey, privkey) = test_keys();
 
         let npub = npub_from_hex(&pubkey).expect("npub");
-        let clone_url = format_grasp_server_url_as_clone_url(
-            &state.public_git_url,
-            &npub,
-            "demo",
-        )
-        .expect("clone");
+        let clone_url = format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, "demo")
+            .expect("clone");
         let announcement = RepoAnnouncement {
             identifier: "demo".to_string(),
             name: Some("Demo".to_string()),
@@ -4292,12 +4474,9 @@ mod tests {
 
         let secret = parse_secret_key(&privkey).expect("secret");
         let now = super::unix_timestamp();
-        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
-            &announcement,
-            &secret,
-            now,
-        )
-        .expect("signed");
+        let signed =
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed");
         let request = RepoCreateRequest {
             event: api_event_from_relay(signed),
             private: Some(false),
@@ -4339,7 +4518,8 @@ mod tests {
     async fn create_pull_posts_to_repo_endpoint() {
         let responses = vec![ForgejoResponse {
             status: 201,
-            body: r#"{"number":5,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/5"}"#.to_string(),
+            body: r#"{"number":5,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/5"}"#
+                .to_string(),
         }];
         let (state, transport, _repos) = test_state(responses);
         let app = build_router(state);
@@ -4366,10 +4546,14 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let requests = transport.requests();
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/repos/gittree/demo/pulls"));
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert!(
+            requests[0]
+                .url
+                .ends_with("/api/v1/repos/gittree/demo/pulls")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert!(!body.is_empty());
     }
 
@@ -4483,18 +4667,18 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
         assert_eq!(transport.requests().len(), 1);
     }
 
     #[tokio::test]
     async fn control_event_rejects_non_admin_pubkey() {
         let (pubkey, privkey) = test_keys();
-        let (state, _transport, _repos) = test_state_with_auth(
-            Vec::new(),
-            vec!["aa".repeat(32)],
-            "gittree",
-        );
+        let (state, _transport, _repos) =
+            test_state_with_auth(Vec::new(), vec!["aa".repeat(32)], "gittree");
         let app = build_router(state);
         let content = serde_json::to_string(&json!({
             "action": "create_repo",
@@ -4691,9 +4875,11 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let requests = transport.requests();
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/admin/users/gittree/repos"));
+        assert!(
+            requests[0]
+                .url
+                .ends_with("/api/v1/admin/users/gittree/repos")
+        );
         let job = repos
             .claim_relay_publish(OffsetDateTime::now_utc())
             .await
@@ -4863,24 +5049,21 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert!(
-            transport.requests().is_empty(),
-            "invalid public git url should fail before forgejo requests"
-        );
+        assert!(transport.requests().is_empty());
     }
 
     #[test]
     fn helper_validators_cover_reject_paths() {
         let missing = super::require_non_empty("owner", "   ").unwrap_err();
-        assert!(matches!(missing, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&missing));
 
         let bad_hex64 = super::require_hex64("pubkey", "xyz").unwrap_err();
-        assert!(matches!(bad_hex64, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&bad_hex64));
 
         let bad_npub = npub_from_hex("11").unwrap_err();
-        assert!(matches!(bad_npub, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&bad_npub));
         let bad_npub_hex = npub_from_hex(&"gg".repeat(32)).unwrap_err();
-        assert!(matches!(bad_npub_hex, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&bad_npub_hex));
 
         let auth = ControlAuthConfig {
             token: "token".to_string(),
@@ -4919,7 +5102,7 @@ mod tests {
         );
         event.id = "00".repeat(32);
         let err = super::verify_signed_event(&event).unwrap_err();
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -4952,7 +5135,7 @@ mod tests {
         );
         event.id = "gg".repeat(32);
         let err = super::verify_signed_event(&event).unwrap_err();
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -4986,17 +5169,17 @@ mod tests {
 
         event.id = "11".repeat(31);
         let short_id = super::verify_signed_event(&event).unwrap_err();
-        assert!(matches!(short_id, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&short_id));
 
         event.id = super::build_event_id(&event).expect("event id");
         event.sig = "11".repeat(63);
         let short_sig = super::verify_signed_event(&event).unwrap_err();
-        assert!(matches!(short_sig, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&short_sig));
 
         event.sig = "11".repeat(64);
         event.pubkey = "11".repeat(31);
         let short_pubkey = super::verify_signed_event(&event).unwrap_err();
-        assert!(matches!(short_pubkey, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&short_pubkey));
     }
 
     #[test]
@@ -5030,7 +5213,7 @@ mod tests {
         event.pubkey = "00".repeat(32);
         event.id = super::build_event_id(&event).expect("event id");
         let err = super::verify_signed_event(&event).unwrap_err();
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -5064,7 +5247,7 @@ mod tests {
         event.sig = "gg".repeat(64);
         event.id = super::build_event_id(&event).expect("event id");
         let err = super::verify_signed_event(&event).unwrap_err();
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -5122,7 +5305,7 @@ mod tests {
             "http://localhost:8085",
         )
         .expect_err("missing d tag should fail");
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -5156,7 +5339,7 @@ mod tests {
         let relay_urls = vec!["ws://relay.local".to_string()];
         let err = super::validate_repo_announcement_event(&event, &event.pubkey, &relay_urls, " ")
             .expect_err("invalid public git url should fail");
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[test]
@@ -5185,7 +5368,7 @@ mod tests {
             "http://localhost:8085",
         )
         .expect_err("missing clone tag should fail validation");
-        assert!(matches!(err, ControlHttpError::BadRequest(_)));
+        assert!(is_http_bad_request(&err));
     }
 
     #[tokio::test]
@@ -5218,12 +5401,9 @@ mod tests {
         };
         let secret = parse_secret_key(&privkey).expect("secret");
         let now = super::unix_timestamp();
-        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
-            &announcement,
-            &secret,
-            now,
-        )
-        .expect("signed");
+        let signed =
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed");
         let mut event = api_event_from_relay(signed);
         event.sig = "00".repeat(64);
 
@@ -5329,14 +5509,19 @@ mod tests {
 
         let requests = transport.requests();
         assert!(requests[0].url.ends_with("/api/v1/admin/users"));
-        assert!(requests[1].url.ends_with("/api/v1/admin/users/gittree/orgs"));
+        assert!(
+            requests[1]
+                .url
+                .ends_with("/api/v1/admin/users/gittree/orgs")
+        );
     }
 
     #[tokio::test]
     async fn control_event_routes_create_pull_request_action() {
         let responses = vec![ForgejoResponse {
             status: 201,
-            body: r#"{"number":5,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/5"}"#.to_string(),
+            body: r#"{"number":5,"url":"http://localhost/api/v1/repos/gittree/demo/pulls/5"}"#
+                .to_string(),
         }];
         let (state, transport, _repos) = test_state_with_auth(responses, Vec::new(), "gittree");
         let app = build_router(state);
@@ -5367,9 +5552,11 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let requests = transport.requests();
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/repos/gittree/demo/pulls"));
+        assert!(
+            requests[0]
+                .url
+                .ends_with("/api/v1/repos/gittree/demo/pulls")
+        );
     }
 
     #[tokio::test]
@@ -5519,12 +5706,9 @@ mod tests {
         };
         let secret = parse_secret_key(&privkey).expect("secret");
         let now = super::unix_timestamp();
-        let signed = RelaySignedNostrEvent::from_announcement_with_created_at(
-            &announcement,
-            &secret,
-            now,
-        )
-        .expect("signed");
+        let signed =
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed");
 
         let mut invalid_kind = api_event_from_relay(signed.clone());
         invalid_kind.kind = 1;
