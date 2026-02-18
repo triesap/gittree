@@ -1888,6 +1888,71 @@ secret_key = "22"
     }
 
     #[test]
+    fn relay_policy_validate_rejects_zero_across_remaining_limits() {
+        let mut config = RelayPolicyConfig::default();
+        config.max_tag_values = 0;
+        let err = config.validate().expect_err("max_tag_values zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_tag_values"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.max_tag_value_len = 0;
+        let err = config
+            .validate()
+            .expect_err("max_tag_value_len zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_tag_value_len"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.max_future_seconds = 0;
+        let err = config
+            .validate()
+            .expect_err("max_future_seconds zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_future_seconds"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.max_subscriptions = Some(0);
+        let err = config
+            .validate()
+            .expect_err("max_subscriptions zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_subscriptions"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.max_limit = Some(0);
+        let err = config.validate().expect_err("max_limit zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_limit"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.max_message_bytes = Some(0);
+        let err = config
+            .validate()
+            .expect_err("max_message_bytes zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_message_bytes"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.max_events_per_min = Some(0);
+        let err = config
+            .validate()
+            .expect_err("max_events_per_min zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_events_per_min"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.max_requests_per_min = Some(0);
+        let err = config
+            .validate()
+            .expect_err("max_requests_per_min zero should fail");
+        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_requests_per_min"));
+
+        let mut config = RelayPolicyConfig::default();
+        config.retention_max_age_seconds = Some(0);
+        let err = config
+            .validate()
+            .expect_err("retention_max_age_seconds zero should fail");
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.retention_max_age_seconds")
+        );
+    }
+
+    #[test]
     fn relay_policy_toml_parses() {
         let config = RelayPolicyConfig::from_toml_str(
             r#"[relay_policy]
@@ -2266,6 +2331,92 @@ bind = "127.0.0.1:9101"
                 service: "state",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn services_config_validate_rejects_invalid_bind_per_service() {
+        let services = ServicesConfig::default();
+        let bad = "not-a-socket-addr".to_string();
+
+        let mut relay = services.clone();
+        relay.relay.bind = bad.clone();
+        assert!(matches!(
+            relay.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "relay",
+                ..
+            })
+        ));
+
+        let mut admission = services.clone();
+        admission.admission.bind = bad.clone();
+        assert!(matches!(
+            admission.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "admission",
+                ..
+            })
+        ));
+
+        let mut sync = services.clone();
+        sync.sync.bind = bad.clone();
+        assert!(matches!(
+            sync.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "sync",
+                ..
+            })
+        ));
+
+        let mut git_http = services.clone();
+        git_http.git_http.bind = bad.clone();
+        assert!(matches!(
+            git_http.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "git_http",
+                ..
+            })
+        ));
+
+        let mut ui = services.clone();
+        ui.ui.bind = bad.clone();
+        assert!(matches!(
+            ui.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "ui",
+                ..
+            })
+        ));
+
+        let mut webhook = services.clone();
+        webhook.webhook.bind = bad.clone();
+        assert!(matches!(
+            webhook.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "webhook",
+                ..
+            })
+        ));
+
+        let mut control = services.clone();
+        control.control.bind = bad.clone();
+        assert!(matches!(
+            control.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "control",
+                ..
+            })
+        ));
+
+        let mut auth = services;
+        auth.auth.bind = bad;
+        assert!(matches!(
+            auth.validate(),
+            Err(ConfigError::InvalidServiceBind {
+                service: "auth",
+                ..
+            })
         ));
     }
 
