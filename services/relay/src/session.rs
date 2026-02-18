@@ -4323,16 +4323,7 @@ mod tests {
             .handle_message(ClientMessage::Auth(json!({"kind": 1})))
             .await;
         assert_eq!(bad_auth.len(), 1);
-        assert!(matches!(
-            bad_auth.first(),
-            Some(
-                ServerMessage::Notice { .. }
-                    | ServerMessage::Ok {
-                        accepted: false,
-                        ..
-                    }
-            )
-        ));
+        assert_notice(&bad_auth[0]);
 
         authenticate_session(&mut session).await;
         let auth_pubkey_hex = session
