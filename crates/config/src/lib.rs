@@ -1664,6 +1664,15 @@ mod tests {
     }
 
     #[test]
+    fn relay_compat_mode_env_parses_allow() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_COMPAT_MODE, "allow", || {
+            let config = RelayCompatibilityConfig::from_env().expect("compat config");
+            assert_eq!(config.mode, RelayCompatibilityMode::Allow);
+        });
+    }
+
+    #[test]
     fn relay_compat_mode_env_rejects_invalid() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_COMPAT_MODE, "nope", || {
@@ -2100,6 +2109,18 @@ max_content_len = 0
     }
 
     #[test]
+    fn toml_file_validated_reports_missing_file() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "gittree-config-missing-validated-{}.toml",
+            std::process::id()
+        ));
+        let err =
+            GittreeConfig::from_toml_file_validated(&path).expect_err("missing file should fail");
+        assert!(matches!(err, ConfigError::ReadConfig { path: p, .. } if p == path));
+    }
+
+    #[test]
     fn services_config_has_expected_defaults() {
         let services = ServicesConfig::default();
         assert_eq!(services.relay.bind, DEFAULT_RELAY_BIND);
@@ -2304,6 +2325,18 @@ bind = "127.0.0.1:9120"
         let services = ServicesConfig::from_toml_file_validated(&path).expect("validated");
         assert_eq!(services.auth.bind, "127.0.0.1:9120");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn services_toml_file_validated_reports_missing_file() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "gittree-services-missing-validated-{}.toml",
+            std::process::id()
+        ));
+        let err =
+            ServicesConfig::from_toml_file_validated(&path).expect_err("missing file should fail");
+        assert!(matches!(err, ConfigError::ReadConfig { path: p, .. } if p == path));
     }
 
     #[test]
