@@ -698,7 +698,6 @@ async fn create_tenant_handler(
     })?;
 
     let host = normalize_host(&payload.host)?;
-    require_non_empty("host", &host)?;
     if let Some(existing) = state
         .repositories
         .tenant_by_host(&host)
@@ -1357,9 +1356,9 @@ impl IntoResponse for ControlHttpError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_HEADER, ControlConfig, ControlCreateTenantResponse, ControlHttpError,
-        CreateRepoInput, authorize, authorize_admin_pubkey, build_request_url, build_router,
-        normalize_host, npub_from_hex, parse_nostr_auth, parse_secret_key,
+        AUTH_HEADER, ControlConfig, ControlCreateTenantResponse, ControlHttpError, CreateRepoInput,
+        authorize, authorize_admin_pubkey, build_request_url, build_router, normalize_host,
+        npub_from_hex, parse_nostr_auth, parse_secret_key,
     };
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
@@ -1435,6 +1434,8 @@ mod tests {
         fail_tenant_lookup: bool,
         fail_upsert_tenant: bool,
         fail_upsert_membership: bool,
+        fail_account_lookup: bool,
+        fail_enqueue_publish: bool,
     }
 
     impl FailingControlRepositories {
@@ -1449,7 +1450,19 @@ mod tests {
                 fail_tenant_lookup,
                 fail_upsert_tenant,
                 fail_upsert_membership,
+                fail_account_lookup: false,
+                fail_enqueue_publish: false,
             }
+        }
+
+        fn with_fail_account_lookup(mut self) -> Self {
+            self.fail_account_lookup = true;
+            self
+        }
+
+        fn with_fail_enqueue_publish(mut self) -> Self {
+            self.fail_enqueue_publish = true;
+            self
         }
     }
 
@@ -1469,6 +1482,9 @@ mod tests {
             &self,
             pubkey: &[u8],
         ) -> Result<Option<AccountRecord>, StorageError> {
+            if self.fail_account_lookup {
+                return Err(forced_storage_error("forced account lookup failure"));
+            }
             self.inner.account_by_pubkey(pubkey).await
         }
 
@@ -1486,6 +1502,9 @@ mod tests {
             &self,
             request: gittree_storage::RelayPublishRequest,
         ) -> Result<(), StorageError> {
+            if self.fail_enqueue_publish {
+                return Err(forced_storage_error("forced relay enqueue failure"));
+            }
             self.inner.enqueue_relay_publish(request).await
         }
 
@@ -1700,6 +1719,49 @@ mod tests {
         format!("Nostr {token}")
     }
 
+    fn signed_repo_create_request(
+        state: &super::ControlAppState,
+        pubkey: &str,
+        privkey: &str,
+        identifier: &str,
+        now: i64,
+    ) -> (Vec<u8>, String) {
+        let npub = npub_from_hex(pubkey).expect("npub");
+        let clone_url =
+            format_grasp_server_url_as_clone_url(&state.public_git_url, &npub, identifier)
+                .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: identifier.to_string(),
+            name: Some(identifier.to_string()),
+            description: Some("nostr repo".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: state.relay_urls.clone(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey.to_string()],
+        };
+        let secret = parse_secret_key(privkey).expect("secret");
+        let signed =
+            RelaySignedNostrEvent::from_announcement_with_created_at(&announcement, &secret, now)
+                .expect("signed");
+        let request = RepoCreateRequest {
+            event: api_event_from_relay(signed),
+            private: Some(false),
+        };
+        let body = serde_json::to_vec(&request).expect("body");
+        let auth_event = nip98_sign_event(
+            &secret.secret_bytes(),
+            "POST",
+            "http://localhost/v1/repos",
+            nip98_payload_hash(&body).as_deref(),
+            now,
+        )
+        .expect("auth");
+        (body, nostr_auth_header(&auth_event))
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
         unsafe {
@@ -1833,9 +1895,9 @@ mod tests {
 
     #[test]
     fn helper_matchers_cover_non_matching_variants() {
-        let config_error = super::ControlConfigError::Config(gittree_config::ConfigError::MissingEnv(
-            "GITTREE_CONTROL_TOKEN",
-        ));
+        let config_error = super::ControlConfigError::Config(
+            gittree_config::ConfigError::MissingEnv("GITTREE_CONTROL_TOKEN"),
+        );
         assert!(is_control_config_config_error(&config_error));
         assert!(!is_control_config_storage_invalid_config(&config_error));
         assert!(!is_control_config_storage_invalid_env(
@@ -1843,12 +1905,11 @@ mod tests {
             super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
         ));
 
-        let storage_env_err = super::ControlConfigError::Storage(
-            super::StorageConfigError::InvalidEnv {
+        let storage_env_err =
+            super::ControlConfigError::Storage(super::StorageConfigError::InvalidEnv {
                 key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
                 value: "bad".to_string(),
-            },
-        );
+            });
         assert!(!is_control_config_config_error(&storage_env_err));
         assert!(is_control_config_storage_invalid_env(
             &storage_env_err,
@@ -1860,14 +1921,15 @@ mod tests {
             message: "boom".to_string(),
         });
         assert!(is_control_error_storage(&control_storage_err));
-        assert!(is_control_error_storage_or_observability(&control_storage_err));
+        assert!(is_control_error_storage_or_observability(
+            &control_storage_err
+        ));
         assert!(!is_control_error_serve(&control_storage_err));
         assert!(!is_control_error_observability_config(&control_storage_err));
 
-        let control_observability_err =
-            super::ControlError::Observability(gittree_observability::ObservabilityError::LogInit(
-                "boom".to_string(),
-            ));
+        let control_observability_err = super::ControlError::Observability(
+            gittree_observability::ObservabilityError::LogInit("boom".to_string()),
+        );
         assert!(is_control_error_observability(&control_observability_err));
         assert!(is_control_error_storage_or_observability(
             &control_observability_err
@@ -2236,7 +2298,7 @@ mod tests {
             let err = runtime
                 .block_on(async { super::serve(config).await })
                 .expect_err("invalid forgejo token should fail");
-            assert!(matches!(err, super::ControlError::Forgejo(_)));
+            assert!(err.to_string().contains("control forgejo error"));
         });
     }
 
@@ -3757,6 +3819,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_returns_internal_on_forgejo_error() {
+        let responses = vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }];
+        let (state, transport, _repos) = test_state(responses);
+        let (pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_repo_returns_internal_when_publish_enqueue_fails() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"full_name":"alice/demo","name":"demo","owner":{"username":"alice"},"html_url":"http://localhost/alice/demo"}"#.to_string(),
+        }];
+        let (mut state, transport, repos) = test_state(responses);
+        state.repositories = Arc::new(
+            FailingControlRepositories::new(repos, false, false, false).with_fail_enqueue_publish(),
+        );
+        let (pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": pubkey,
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn create_repo_accepts_signed_announcement() {
         let responses = vec![ForgejoResponse {
             status: 201,
@@ -4572,6 +4709,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_nostr_returns_internal_when_account_lookup_fails() {
+        let (mut state, transport, repos) = test_state(Vec::new());
+        state.repositories = Arc::new(
+            FailingControlRepositories::new(repos, false, false, false).with_fail_account_lookup(),
+        );
+        let (pubkey, privkey) = test_keys();
+        let now = super::unix_timestamp();
+        let (body, header) = signed_repo_create_request(&state, &pubkey, &privkey, "demo", now);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_repo_nostr_returns_internal_when_publish_enqueue_fails() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: r#"{"full_name":"alice/demo","name":"demo","owner":{"username":"alice"},"html_url":"http://localhost/alice/demo"}"#.to_string(),
+        }];
+        let (mut state, transport, repos) = test_state(responses);
+        let (pubkey, privkey) = test_keys();
+        repos
+            .upsert_account(AccountRecord::new(&pubkey, "alice").expect("account"))
+            .await
+            .expect("upsert");
+        state.repositories = Arc::new(
+            FailingControlRepositories::new(repos, false, false, false).with_fail_enqueue_publish(),
+        );
+        let now = super::unix_timestamp();
+        let (body, header) = signed_repo_create_request(&state, &pubkey, &privkey, "demo", now);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repos")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn create_repo_with_announcement_rejects_invalid_state_relay_url() {
         let (mut state, transport, _repos) = test_state(Vec::new());
         state.relay_urls = vec![String::new()];
@@ -5211,14 +5410,12 @@ mod tests {
 
         let bad_pubkey_bytes = super::parse_pubkey_bytes("zz").unwrap_err();
         assert!(is_http_bad_request(&bad_pubkey_bytes));
-        let good_pubkey_bytes =
-            super::parse_pubkey_bytes(&"11".repeat(32)).expect("decode pubkey");
+        let good_pubkey_bytes = super::parse_pubkey_bytes(&"11".repeat(32)).expect("decode pubkey");
         assert_eq!(good_pubkey_bytes.len(), 32);
 
         let bad_event_id = super::event_id_from_bytes(vec![0u8; 31]).unwrap_err();
         assert!(is_http_bad_request(&bad_event_id));
-        let good_event_id =
-            super::event_id_from_bytes(vec![0u8; 32]).expect("event id bytes");
+        let good_event_id = super::event_id_from_bytes(vec![0u8; 32]).expect("event id bytes");
         assert_eq!(good_event_id.len(), 32);
 
         let bad_sig = super::parse_schnorr_signature(&[0u8; 63]).unwrap_err();
@@ -5446,6 +5643,7 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001"
         )
         .to_string();
+        event.id = super::build_event_id(&event).expect("event id");
         let err = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&err));
     }
@@ -5795,7 +5993,7 @@ mod tests {
 
     #[tokio::test]
     async fn control_event_create_actions_surface_forgejo_failures() {
-        let (pubkey, _privkey) = test_keys();
+        let (pubkey, privkey) = test_keys();
 
         let (state, _transport, _repos) = test_state(vec![ForgejoResponse {
             status: 503,
@@ -5835,6 +6033,34 @@ mod tests {
             "content": serde_json::to_string(&json!({
                 "action": "create_org",
                 "name": "acme"
+            })).expect("content")
+        });
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/events")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let (state, _transport, _repos) = test_state(vec![ForgejoResponse {
+            status: 503,
+            body: "forgejo down".to_string(),
+        }]);
+        let payload = json!({
+            "kind": KIND_GITTREE_CONTROL.0,
+            "pubkey": pubkey.clone(),
+            "content": serde_json::to_string(&json!({
+                "action": "create_repo",
+                "name": "demo",
+                "pubkey": pubkey,
+                "privkey": privkey
             })).expect("content")
         });
         let response = build_router(state)
