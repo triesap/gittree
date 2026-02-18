@@ -130,8 +130,8 @@ mod tests {
             format!("30617:{}:repo", "zz".repeat(32)),
         ];
         for value in cases {
-            assert!(RepoAddress::parse(&value).is_err(), "value should fail: {value}");
-            assert!(validate_repo_address(&value).is_err(), "value should fail: {value}");
+            assert!(RepoAddress::parse(&value).is_err());
+            assert!(validate_repo_address(&value).is_err());
         }
     }
 
