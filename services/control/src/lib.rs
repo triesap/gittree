@@ -751,10 +751,7 @@ async fn create_tenant_handler(
         .map_err(map_storage_error)?;
 
     let owner_pubkey = auth.pubkey.clone();
-    let owner_pubkey_bytes = match hex::decode(&owner_pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
-    };
+    let owner_pubkey_bytes = parse_pubkey_bytes(&owner_pubkey)?;
     let membership = RelayMembershipRecord {
         tenant_id: tenant_id.clone(),
         pubkey: owner_pubkey_bytes,
@@ -1019,10 +1016,7 @@ async fn create_repo_from_signed_event(
         &state.public_git_url,
     )?;
 
-    let pubkey_bytes = match hex::decode(auth_pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
-    };
+    let pubkey_bytes = parse_pubkey_bytes(auth_pubkey)?;
     let account = state
         .repositories
         .account_by_pubkey(&pubkey_bytes)
@@ -1222,10 +1216,7 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
 
     let event_id = hex::decode(&event.id)
         .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
-    let event_id: [u8; 32] = match event_id.try_into() {
-        Ok(value) => value,
-        Err(_) => return Err(ControlHttpError::BadRequest("invalid event id".to_string())),
-    };
+    let event_id = event_id_from_bytes(event_id)?;
 
     let expected_id = build_event_id(event)?;
     if expected_id != event.id {
@@ -1236,14 +1227,8 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
     let msg = Message::from_digest(event_id);
     let sig_bytes = hex::decode(&event.sig)
         .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
-    let sig = match secp256k1::schnorr::Signature::from_slice(&sig_bytes) {
-        Ok(value) => value,
-        Err(_) => return Err(ControlHttpError::BadRequest("invalid event sig".to_string())),
-    };
-    let pubkey_bytes = match hex::decode(&event.pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
-    };
+    let sig = parse_schnorr_signature(&sig_bytes)?;
+    let pubkey_bytes = parse_pubkey_bytes(&event.pubkey)?;
     let pubkey = match XOnlyPublicKey::from_slice(&pubkey_bytes) {
         Ok(value) => value,
         Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
@@ -1305,17 +1290,36 @@ fn parse_secret_key(value: &str) -> Result<SecretKey, ControlHttpError> {
         .map_err(|_| ControlHttpError::BadRequest("invalid privkey".to_string()))
 }
 
+fn parse_pubkey_bytes(value: &str) -> Result<Vec<u8>, ControlHttpError> {
+    hex::decode(value).map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))
+}
+
+fn event_id_from_bytes(bytes: Vec<u8>) -> Result<[u8; 32], ControlHttpError> {
+    bytes
+        .try_into()
+        .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))
+}
+
+fn parse_schnorr_signature(
+    sig_bytes: &[u8],
+) -> Result<secp256k1::schnorr::Signature, ControlHttpError> {
+    secp256k1::schnorr::Signature::from_slice(sig_bytes)
+        .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))
+}
+
+fn encode_npub(bytes: &[u8]) -> Result<String, ControlHttpError> {
+    let hrp = Hrp::parse("npub").expect("npub hrp should always parse");
+    let value =
+        bech32::encode::<Bech32>(hrp, bytes).expect("bech32 encoding should always succeed");
+    Ok(value)
+}
+
 fn npub_from_hex(pubkey: &str) -> Result<String, ControlHttpError> {
     if pubkey.len() != 64 {
         return Err(ControlHttpError::BadRequest("invalid pubkey".to_string()));
     }
-    let bytes = hex::decode(pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
-    let hrp = Hrp::parse("npub").expect("npub hrp should always parse");
-    match bech32::encode::<Bech32>(hrp, &bytes) {
-        Ok(value) => Ok(value),
-        Err(err) => Err(ControlHttpError::Internal(err.to_string())),
-    }
+    let bytes = parse_pubkey_bytes(pubkey)?;
+    encode_npub(&bytes)
 }
 
 fn map_forgejo_error(error: ForgejoError) -> ControlHttpError {
@@ -1353,9 +1357,9 @@ impl IntoResponse for ControlHttpError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_HEADER, ControlConfig, ControlCreateTenantResponse, ControlHttpError, authorize,
-        authorize_admin_pubkey, build_request_url, build_router, normalize_host, npub_from_hex,
-        parse_nostr_auth, parse_secret_key,
+        AUTH_HEADER, ControlConfig, ControlCreateTenantResponse, ControlHttpError,
+        CreateRepoInput, authorize, authorize_admin_pubkey, build_request_url, build_router,
+        normalize_host, npub_from_hex, parse_nostr_auth, parse_secret_key,
     };
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
@@ -4452,6 +4456,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_with_announcement_rejects_invalid_state_relay_url() {
+        let (mut state, transport, _repos) = test_state(Vec::new());
+        state.relay_urls = vec![String::new()];
+        let (pubkey, privkey) = test_keys();
+        let err = super::create_repo_with_announcement(
+            &state,
+            CreateRepoInput {
+                owner: None,
+                name: "demo".to_string(),
+                identifier: None,
+                description: Some("bad relay state".to_string()),
+                private: Some(false),
+                auto_init: None,
+                pubkey,
+                privkey,
+            },
+        )
+        .await
+        .expect_err("invalid relay state should be rejected");
+        assert!(is_http_bad_request(&err), "{err:?}");
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn create_repo_nostr_rejects_missing_required_relay_url() {
         let (state, _transport, _repos) = test_state(Vec::new());
         let (pubkey, privkey) = test_keys();
@@ -5065,6 +5093,25 @@ mod tests {
         let bad_npub_hex = npub_from_hex(&"gg".repeat(32)).unwrap_err();
         assert!(is_http_bad_request(&bad_npub_hex));
 
+        let bad_pubkey_bytes = super::parse_pubkey_bytes("zz").unwrap_err();
+        assert!(is_http_bad_request(&bad_pubkey_bytes));
+        let good_pubkey_bytes =
+            super::parse_pubkey_bytes(&"11".repeat(32)).expect("decode pubkey");
+        assert_eq!(good_pubkey_bytes.len(), 32);
+
+        let bad_event_id = super::event_id_from_bytes(vec![0u8; 31]).unwrap_err();
+        assert!(is_http_bad_request(&bad_event_id));
+        let good_event_id =
+            super::event_id_from_bytes(vec![0u8; 32]).expect("event id bytes");
+        assert_eq!(good_event_id.len(), 32);
+
+        let bad_sig = super::parse_schnorr_signature(&[0u8; 63]).unwrap_err();
+        assert!(is_http_bad_request(&bad_sig));
+        let _good_sig = super::parse_schnorr_signature(&[0u8; 64]).expect("signature");
+
+        let good_npub_encode = super::encode_npub(&[0u8; 32]).expect("npub");
+        assert!(good_npub_encode.starts_with("npub1"));
+
         let auth = ControlAuthConfig {
             token: "token".to_string(),
             admin_keys: vec!["aa".repeat(32)],
@@ -5212,6 +5259,77 @@ mod tests {
         );
         event.pubkey = "00".repeat(32);
         event.id = super::build_event_id(&event).expect("event id");
+        let err = super::verify_signed_event(&event).unwrap_err();
+        assert!(is_http_bad_request(&err));
+    }
+
+    #[test]
+    fn verify_signed_event_rejects_non_hex_pubkey_with_valid_length() {
+        let (pubkey, privkey) = test_keys();
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url =
+            format_grasp_server_url_as_clone_url("http://localhost:8085", &npub, "demo")
+                .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("invalid pubkey hex".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: vec!["ws://relay.local".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let mut event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(
+                &announcement,
+                &secret,
+                super::unix_timestamp(),
+            )
+            .expect("signed"),
+        );
+        event.pubkey = "gg".repeat(32);
+        event.id = super::build_event_id(&event).expect("event id");
+        let err = super::verify_signed_event(&event).unwrap_err();
+        assert!(is_http_bad_request(&err));
+    }
+
+    #[test]
+    fn verify_signed_event_rejects_non_canonical_sig_bytes() {
+        let (pubkey, privkey) = test_keys();
+        let npub = npub_from_hex(&pubkey).expect("npub");
+        let clone_url =
+            format_grasp_server_url_as_clone_url("http://localhost:8085", &npub, "demo")
+                .expect("clone");
+        let announcement = RepoAnnouncement {
+            identifier: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            description: Some("invalid sig parse".to_string()),
+            root_commit: None,
+            clone: vec![clone_url],
+            web: Vec::new(),
+            relays: vec!["ws://relay.local".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![pubkey],
+        };
+        let secret = parse_secret_key(&privkey).expect("secret");
+        let mut event = api_event_from_relay(
+            RelaySignedNostrEvent::from_announcement_with_created_at(
+                &announcement,
+                &secret,
+                super::unix_timestamp(),
+            )
+            .expect("signed"),
+        );
+        event.sig = concat!(
+            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+            "0000000000000000000000000000000000000000000000000000000000000001"
+        )
+        .to_string();
         let err = super::verify_signed_event(&event).unwrap_err();
         assert!(is_http_bad_request(&err));
     }
