@@ -42,6 +42,10 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn is_config_error(result: &Result<(), ControlError>) -> bool {
+        matches!(result, Err(ControlError::Config(_)))
+    }
+
     fn sample_config() -> ControlConfig {
         ControlConfig {
             bind: "127.0.0.1:8067".to_string(),
@@ -74,6 +78,9 @@ mod tests {
     #[tokio::test]
     async fn run_reports_config_error_for_invalid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::set_var("GITTREE_CONTROL_BIND", "127.0.0.1:8067");
+        }
         let previous = std::env::var_os("GITTREE_CONTROL_BIND");
         unsafe {
             std::env::set_var("GITTREE_CONTROL_BIND", "not-a-socket");
@@ -87,7 +94,7 @@ mod tests {
                 std::env::remove_var("GITTREE_CONTROL_BIND");
             },
         }
-        assert!(matches!(result, Err(ControlError::Config(_))));
+        assert!(is_config_error(&result));
     }
 
     #[tokio::test]
@@ -101,7 +108,7 @@ mod tests {
             serve,
         )
         .await;
-        assert!(matches!(result, Err(ControlError::Config(_))));
+        assert!(is_config_error(&result));
     }
 
     #[tokio::test]
@@ -149,5 +156,13 @@ mod tests {
         assert_eq!(output.status.code(), Some(1));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("control service failed"));
+    }
+
+    #[test]
+    fn error_match_helper_covers_non_matching_results() {
+        let ok: Result<(), ControlError> = Ok(());
+        let serve_err = Err(ControlError::Serve("boom".to_string()));
+        assert!(!is_config_error(&ok));
+        assert!(!is_config_error(&serve_err));
     }
 }
