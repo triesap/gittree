@@ -1721,7 +1721,11 @@ WHERE datname = $1
     }
 
     fn primary_test_database_base_url() -> String {
-        test_database_base_urls()
+        primary_test_database_base_url_from_candidates(test_database_base_urls())
+    }
+
+    fn primary_test_database_base_url_from_candidates(candidates: Vec<String>) -> String {
+        candidates
             .into_iter()
             .next()
             .unwrap_or_else(|| DEFAULT_TEST_DATABASE_URL.to_string())
@@ -1965,6 +1969,14 @@ WHERE datname = $1
     }
 
     #[test]
+    fn primary_test_database_base_url_from_candidates_defaults_to_primary_url() {
+        assert_eq!(
+            primary_test_database_base_url_from_candidates(Vec::new()),
+            DEFAULT_TEST_DATABASE_URL
+        );
+    }
+
+    #[test]
     fn dotenv_value_returns_none_for_unknown_keys() {
         assert!(dotenv_value("__GITTREE_STORAGE_TEST_UNKNOWN__").is_none());
     }
@@ -2119,19 +2131,22 @@ WHERE datname = $1
 
     #[tokio::test]
     async fn provision_with_schema_round_trip_and_cleanup_db() {
-        with_test_db_with_provision(
-            "provision_with_schema_round_trip_and_cleanup_db",
-            TestDatabase::provision_with_schema(primary_test_database_base_url(), None).await,
-            require_db_tests(),
-            |test_db| async move {
-                assert!(matches!(&test_db.isolation, TestIsolation::Schema { .. }));
-                let repositories = test_db.repositories();
-                let mappings = repositories.list_mappings().await.expect("list mappings");
-                assert!(mappings.is_empty());
-                test_db.cleanup().await;
-            },
-        )
-        .await;
+        let require_db = require_db_tests();
+        let Some(test_db) =
+            TestDatabase::provision_with_schema(primary_test_database_base_url(), None).await
+        else {
+            skip_or_fail_without_db_with_policy(
+                "provision_with_schema_round_trip_and_cleanup_db",
+                require_db,
+            );
+            return;
+        };
+
+        assert!(matches!(&test_db.isolation, TestIsolation::Schema { .. }));
+        let repositories = test_db.repositories();
+        let mappings = repositories.list_mappings().await.expect("list mappings");
+        assert!(mappings.is_empty());
+        test_db.cleanup().await;
     }
 
     #[tokio::test]
