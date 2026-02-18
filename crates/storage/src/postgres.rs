@@ -1477,7 +1477,11 @@ mod tests {
 
     impl TestDatabase {
         async fn provision() -> Option<Self> {
-            for base_url in test_database_base_urls() {
+            Self::provision_from_candidates(test_database_base_urls()).await
+        }
+
+        async fn provision_from_candidates(base_urls: Vec<String>) -> Option<Self> {
+            for base_url in base_urls {
                 if let Some(test_db) = Self::provision_from_base_url(base_url).await {
                     return Some(test_db);
                 }
@@ -2102,6 +2106,15 @@ WHERE datname = $1
         let provisioned =
             TestDatabase::provision_with_schema("not-a-url".to_string(), Some("gittree")).await;
         assert!(provisioned.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_from_candidates_returns_none_for_empty_list() {
+        assert!(
+            TestDatabase::provision_from_candidates(Vec::new())
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

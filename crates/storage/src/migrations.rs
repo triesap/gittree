@@ -712,6 +712,15 @@ mod tests {
         provision_database_executes_and_returns_option_with_value(None).await;
     }
 
+    #[tokio::test]
+    async fn provision_database_from_candidates_returns_none_for_empty_list() {
+        assert!(
+            provision_database_from_candidates(Vec::new())
+                .await
+                .is_none()
+        );
+    }
+
     fn test_database_base_urls_from_value(value: Option<String>) -> Vec<String> {
         test_database_url_candidates(
             value,
@@ -729,7 +738,13 @@ mod tests {
     }
 
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
-        for base_url in test_database_base_urls() {
+        provision_database_from_candidates(test_database_base_urls()).await
+    }
+
+    async fn provision_database_from_candidates(
+        base_urls: Vec<String>,
+    ) -> Option<(sqlx::PgPool, String, String)> {
+        for base_url in base_urls {
             if let Some((pool, database_name)) = provision_database_for_base_url(&base_url).await {
                 return Some((pool, database_name, base_url));
             }
