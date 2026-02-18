@@ -1414,7 +1414,9 @@ mod tests {
         RelayCompatibilityRepository, RelayMembershipRepository, RelayPublishRepository,
         RelayTenantRepository, RepoMappingRepository, StateRepository,
     };
-    use crate::test_support::{require_db_tests, skip_or_fail_without_db_with_policy};
+    use crate::test_support::{
+        require_db_tests, skip_or_fail_without_db_with_policy, test_database_url_candidates,
+    };
     use crate::{
         AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
         RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishRequest,
@@ -1430,6 +1432,8 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
+    const SUPERUSER_TEST_DATABASE_URL: &str =
+        "postgres://postgres:postgres@127.0.0.1:5432/postgres";
     const UNREACHABLE_TEST_DATABASE_URL: &str =
         "postgres://gittree:gittree@127.0.0.1:1/gittree?connect_timeout=1";
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1473,7 +1477,12 @@ mod tests {
 
     impl TestDatabase {
         async fn provision() -> Option<Self> {
-            Self::provision_from_base_url(test_database_base_url()).await
+            for base_url in test_database_base_urls() {
+                if let Some(test_db) = Self::provision_from_base_url(base_url).await {
+                    return Some(test_db);
+                }
+            }
+            None
         }
 
         async fn provision_from_base_url(base_url: String) -> Option<Self> {
@@ -1661,19 +1670,17 @@ WHERE datname = $1
         }
     }
 
-    fn test_database_base_url_from_value(value: Option<String>) -> String {
-        match value {
-            Some(url) => url,
-            None => DEFAULT_TEST_DATABASE_URL.to_string(),
-        }
-    }
-
-    fn test_database_base_url_from_candidates(
+    fn test_database_base_urls_from_candidates(
         explicit: Option<String>,
         write_url: Option<String>,
         read_url: Option<String>,
-    ) -> String {
-        test_database_base_url_from_value(explicit.or(write_url).or(read_url))
+    ) -> Vec<String> {
+        test_database_url_candidates(
+            explicit,
+            write_url,
+            read_url,
+            &[DEFAULT_TEST_DATABASE_URL, SUPERUSER_TEST_DATABASE_URL],
+        )
     }
 
     fn dotenv_value(key: &str) -> Option<String> {
@@ -1697,8 +1704,8 @@ WHERE datname = $1
         None
     }
 
-    fn test_database_base_url() -> String {
-        test_database_base_url_from_candidates(
+    fn test_database_base_urls() -> Vec<String> {
+        test_database_base_urls_from_candidates(
             std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok(),
             std::env::var("GITTREE_STORAGE_WRITE_URL")
                 .ok()
@@ -1707,6 +1714,13 @@ WHERE datname = $1
                 .ok()
                 .or_else(|| dotenv_value("GITTREE_STORAGE_READ_URL")),
         )
+    }
+
+    fn primary_test_database_base_url() -> String {
+        test_database_base_urls()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| DEFAULT_TEST_DATABASE_URL.to_string())
     }
 
     async fn with_test_db<F, Fut>(test_name: &str, run: F)
@@ -1916,38 +1930,33 @@ WHERE datname = $1
     }
 
     #[test]
-    fn test_database_base_url_from_value_prefers_explicit_value() {
+    fn test_database_base_urls_from_candidates_applies_precedence_and_fallbacks() {
         assert_eq!(
-            test_database_base_url_from_value(Some("postgres://custom".to_string())),
-            "postgres://custom".to_string()
-        );
-        assert_eq!(
-            test_database_base_url_from_value(None),
-            DEFAULT_TEST_DATABASE_URL.to_string()
-        );
-    }
-
-    #[test]
-    fn test_database_base_url_from_candidates_applies_precedence() {
-        assert_eq!(
-            test_database_base_url_from_candidates(
+            test_database_base_urls_from_candidates(
                 Some("postgres://explicit".to_string()),
                 Some("postgres://write".to_string()),
                 Some("postgres://read".to_string()),
             ),
-            "postgres://explicit".to_string()
+            vec![
+                "postgres://explicit".to_string(),
+                "postgres://write".to_string(),
+                "postgres://read".to_string(),
+                DEFAULT_TEST_DATABASE_URL.to_string(),
+                SUPERUSER_TEST_DATABASE_URL.to_string(),
+            ]
         );
         assert_eq!(
-            test_database_base_url_from_candidates(
+            test_database_base_urls_from_candidates(
                 None,
                 Some("postgres://write".to_string()),
                 Some("postgres://read".to_string()),
             ),
-            "postgres://write".to_string()
-        );
-        assert_eq!(
-            test_database_base_url_from_candidates(None, None, Some("postgres://read".to_string())),
-            "postgres://read".to_string()
+            vec![
+                "postgres://write".to_string(),
+                "postgres://read".to_string(),
+                DEFAULT_TEST_DATABASE_URL.to_string(),
+                SUPERUSER_TEST_DATABASE_URL.to_string(),
+            ]
         );
     }
 
@@ -2099,7 +2108,7 @@ WHERE datname = $1
     async fn provision_with_schema_round_trip_and_cleanup_db() {
         with_test_db_with_provision(
             "provision_with_schema_round_trip_and_cleanup_db",
-            TestDatabase::provision_with_schema(test_database_base_url(), None).await,
+            TestDatabase::provision_with_schema(primary_test_database_base_url(), None).await,
             require_db_tests(),
             |test_db| async move {
                 assert!(matches!(&test_db.isolation, TestIsolation::Schema { .. }));
@@ -2118,7 +2127,7 @@ WHERE datname = $1
             "provision_from_base_url_falls_back_to_schema_when_create_database_fails",
             |bootstrap_db| async move {
                 let _role_guard = role_admin_mutex().lock().expect("role admin lock");
-                let base_url = test_database_base_url();
+                let base_url = bootstrap_db.base_url.clone();
                 let mut admin_options =
                     PgConnectOptions::from_str(&base_url).expect("base options");
                 admin_options = admin_options.database("postgres");
@@ -2179,7 +2188,7 @@ WHERE datname = $1
             "provision_from_base_url_continues_when_first_schema_fallback_is_unavailable",
             |bootstrap_db| async move {
                 let _role_guard = role_admin_mutex().lock().expect("role admin lock");
-                let base_url = test_database_base_url();
+                let base_url = bootstrap_db.base_url.clone();
                 let mut admin_options =
                     PgConnectOptions::from_str(&base_url).expect("base options");
                 admin_options = admin_options.database("postgres");

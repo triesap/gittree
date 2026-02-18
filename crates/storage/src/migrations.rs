@@ -252,7 +252,9 @@ mod tests {
     use super::MigrationRunner;
     use super::core_migrations;
     use crate::StorageError;
-    use crate::test_support::{require_db_tests, skip_or_fail_without_db_with_policy};
+    use crate::test_support::{
+        require_db_tests, skip_or_fail_without_db_with_policy, test_database_url_candidates,
+    };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::collections::HashSet;
     use std::str::FromStr;
@@ -672,14 +674,21 @@ mod tests {
     }
 
     #[test]
-    fn test_database_base_url_prefers_explicit_value() {
+    fn test_database_base_urls_prefer_explicit_then_defaults() {
         assert_eq!(
-            test_database_base_url_from_value(Some("postgres://custom".to_string())),
-            "postgres://custom".to_string()
+            test_database_base_urls_from_value(Some("postgres://custom".to_string())),
+            vec![
+                "postgres://custom".to_string(),
+                DEFAULT_TEST_DATABASE_URL.to_string(),
+                "postgres://postgres:postgres@127.0.0.1:5432/postgres".to_string()
+            ]
         );
         assert_eq!(
-            test_database_base_url_from_value(None),
-            DEFAULT_TEST_DATABASE_URL.to_string()
+            test_database_base_urls_from_value(None),
+            vec![
+                DEFAULT_TEST_DATABASE_URL.to_string(),
+                "postgres://postgres:postgres@127.0.0.1:5432/postgres".to_string()
+            ]
         );
     }
 
@@ -703,19 +712,32 @@ mod tests {
         provision_database_executes_and_returns_option_with_value(None).await;
     }
 
-    fn test_database_base_url_from_value(value: Option<String>) -> String {
-        match value {
-            Some(url) => url,
-            None => DEFAULT_TEST_DATABASE_URL.to_string(),
-        }
+    fn test_database_base_urls_from_value(value: Option<String>) -> Vec<String> {
+        test_database_url_candidates(
+            value,
+            None,
+            None,
+            &[
+                DEFAULT_TEST_DATABASE_URL,
+                "postgres://postgres:postgres@127.0.0.1:5432/postgres",
+            ],
+        )
     }
 
-    fn test_database_base_url() -> String {
-        test_database_base_url_from_value(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok())
+    fn test_database_base_urls() -> Vec<String> {
+        test_database_base_urls_from_value(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok())
     }
 
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
-        let base_url = test_database_base_url();
+        for base_url in test_database_base_urls() {
+            if let Some((pool, database_name)) = provision_database_for_base_url(&base_url).await {
+                return Some((pool, database_name, base_url));
+            }
+        }
+        None
+    }
+
+    async fn provision_database_for_base_url(base_url: &str) -> Option<(sqlx::PgPool, String)> {
         let mut admin_options = PgConnectOptions::from_str(&base_url).ok()?;
         admin_options = admin_options.database("postgres");
         let admin_pool = PgPoolOptions::new()
@@ -736,7 +758,7 @@ mod tests {
             .connect_with(test_options)
             .await
             .ok()?;
-        Some((pool, database_name, base_url))
+        Some((pool, database_name))
     }
 
     async fn provision_database_executes_and_returns_option_with_value(

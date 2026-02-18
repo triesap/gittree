@@ -17,10 +17,44 @@ fn require_db_tests_from_value(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
+pub(crate) fn test_database_url_candidates(
+    explicit: Option<String>,
+    write_url: Option<String>,
+    read_url: Option<String>,
+    defaults: &[&str],
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut push_unique = |value: String| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if candidates.iter().any(|candidate| candidate == trimmed) {
+            return;
+        }
+        candidates.push(trimmed.to_string());
+    };
+
+    if let Some(value) = explicit {
+        push_unique(value);
+    }
+    if let Some(value) = write_url {
+        push_unique(value);
+    }
+    if let Some(value) = read_url {
+        push_unique(value);
+    }
+    for value in defaults {
+        push_unique((*value).to_string());
+    }
+    candidates
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         require_db_tests, require_db_tests_from_value, skip_or_fail_without_db_with_policy,
+        test_database_url_candidates,
     };
 
     #[test]
@@ -43,5 +77,35 @@ mod tests {
             skip_or_fail_without_db_with_policy("sample_test", true);
         });
         assert!(panic.is_err());
+    }
+
+    #[test]
+    fn test_database_url_candidates_dedupes_and_preserves_priority_order() {
+        let candidates = test_database_url_candidates(
+            Some("postgres://explicit".to_string()),
+            Some("postgres://write".to_string()),
+            Some("postgres://read".to_string()),
+            &["postgres://write", "postgres://default"],
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                "postgres://explicit".to_string(),
+                "postgres://write".to_string(),
+                "postgres://read".to_string(),
+                "postgres://default".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_database_url_candidates_ignores_empty_values() {
+        let candidates = test_database_url_candidates(
+            Some(String::new()),
+            Some("   ".to_string()),
+            None,
+            &["", "postgres://default"],
+        );
+        assert_eq!(candidates, vec!["postgres://default".to_string()]);
     }
 }
