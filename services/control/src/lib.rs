@@ -4585,6 +4585,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_rejects_invalid_pubkey_point_bytes() {
+        let (state, transport, _repos) = test_state(Vec::new());
+        let (_pubkey, privkey) = test_keys();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/repos")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, "Bearer token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "owner":"alice",
+                            "name":"demo",
+                            "pubkey": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+                            "privkey": privkey
+                        }))
+                        .expect("body"),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn create_repo_rejects_invalid_privkey_hex_and_scalar() {
         let (state, transport, _repos) = test_state(Vec::new());
         let (pubkey, _privkey) = test_keys();
