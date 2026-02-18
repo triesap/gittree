@@ -290,9 +290,7 @@ impl ControlAuthConfig {
         let admin_keys = env_optional_string(ENV_CONTROL_ADMIN_KEYS)
             .map(parse_csv_values)
             .unwrap_or_default();
-        let config = Self { token, admin_keys };
-        config.validate()?;
-        Ok(config)
+        Ok(Self { token, admin_keys })
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -1504,6 +1502,7 @@ mod tests {
     use crate::ENV_RELAY_URLS;
     use crate::ENV_STATE_BIND;
     use crate::ENV_SYNC_BIND;
+    use crate::ENV_UI_AUTH_URL;
     use crate::ENV_UI_BIND;
     use crate::ENV_UI_PUBLIC_GIT_URL;
     use crate::ENV_UI_REPO_ROOT;
@@ -1652,6 +1651,16 @@ mod tests {
         let config = RelayTargetsConfig::from_toml_str("relay_urls = [\"wss://relay.example\"]")
             .expect("relay targets");
         assert_eq!(config.relay_urls, vec!["wss://relay.example".to_string()]);
+    }
+
+    #[test]
+    fn relay_targets_toml_rejects_invalid_url_after_parse() {
+        let err = RelayTargetsConfig::from_toml_str("relay_urls = [\"ftp://relay.example\"]")
+            .expect_err("invalid relay url should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidRelayUrl(value) if value == "ftp://relay.example"
+        ));
     }
 
     #[test]
@@ -2124,6 +2133,19 @@ max_content_len = 0
     }
 
     #[test]
+    fn from_env_validated_with_keys_rejects_invalid_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_RELAY_BIND_TEST2, "bad-bind", || {
+            let err = GittreeConfig::from_env_validated_with_keys(ENV_RELAY_BIND_TEST2)
+                .expect_err("invalid bind should fail");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidRelayBind(value) if value == "bad-bind"
+            ));
+        });
+    }
+
+    #[test]
     fn toml_str_parses_valid_config() {
         let config =
             GittreeConfig::from_toml_str("relay_bind = \"127.0.0.1:9999\"").expect("parse config");
@@ -2530,6 +2552,121 @@ bind = "127.0.0.1:9120"
     }
 
     #[test]
+    fn forgejo_config_from_env_with_reports_missing_required_fields() {
+        let base_values = env_map(&[
+            (ENV_FORGEJO_BASE_URL, "http://localhost:3000"),
+            (ENV_FORGEJO_API_TOKEN, "token"),
+            (ENV_FORGEJO_OWNER, "gittree"),
+            (ENV_FORGEJO_WEBHOOK_URL, "http://localhost:8090/"),
+            (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
+            (ENV_FORGEJO_REPO_PRIVATE, "false"),
+        ]);
+
+        for missing_key in [
+            ENV_FORGEJO_BASE_URL,
+            ENV_FORGEJO_API_TOKEN,
+            ENV_FORGEJO_OWNER,
+            ENV_FORGEJO_WEBHOOK_URL,
+            ENV_FORGEJO_WEBHOOK_SECRET,
+        ] {
+            let mut values = base_values.clone();
+            values.remove(missing_key);
+            let err = ForgejoConfig::from_env_with(|key| values.get(key).cloned())
+                .expect_err("missing required env should fail");
+            assert!(matches!(err, ConfigError::MissingEnv(key) if key == missing_key));
+        }
+    }
+
+    #[test]
+    fn forgejo_config_from_env_with_rejects_invalid_repo_private_bool() {
+        let values = env_map(&[
+            (ENV_FORGEJO_BASE_URL, "http://localhost:3000"),
+            (ENV_FORGEJO_API_TOKEN, "token"),
+            (ENV_FORGEJO_OWNER, "gittree"),
+            (ENV_FORGEJO_WEBHOOK_URL, "http://localhost:8090/"),
+            (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
+            (ENV_FORGEJO_REPO_PRIVATE, "notabool"),
+        ]);
+        let err = ForgejoConfig::from_env_with(|key| values.get(key).cloned())
+            .expect_err("invalid repo_private should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidConfig {
+                field: ENV_FORGEJO_REPO_PRIVATE,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn forgejo_config_from_env_with_rejects_invalid_urls() {
+        let invalid_base_url = env_map(&[
+            (ENV_FORGEJO_BASE_URL, "ws://localhost:3000"),
+            (ENV_FORGEJO_API_TOKEN, "token"),
+            (ENV_FORGEJO_OWNER, "gittree"),
+            (ENV_FORGEJO_WEBHOOK_URL, "http://localhost:8090/"),
+            (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
+            (ENV_FORGEJO_REPO_PRIVATE, "false"),
+        ]);
+        let err = ForgejoConfig::from_env_with(|key| invalid_base_url.get(key).cloned())
+            .expect_err("invalid forgejo base url should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidConfig {
+                field: "forgejo.base_url",
+                ..
+            }
+        ));
+
+        let invalid_webhook_url = env_map(&[
+            (ENV_FORGEJO_BASE_URL, "http://localhost:3000"),
+            (ENV_FORGEJO_API_TOKEN, "token"),
+            (ENV_FORGEJO_OWNER, "gittree"),
+            (ENV_FORGEJO_WEBHOOK_URL, "ws://localhost:8090/"),
+            (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
+            (ENV_FORGEJO_REPO_PRIVATE, "false"),
+        ]);
+        let err = ForgejoConfig::from_env_with(|key| invalid_webhook_url.get(key).cloned())
+            .expect_err("invalid forgejo webhook url should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidConfig {
+                field: "forgejo.webhook_url",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn forgejo_config_validate_rejects_invalid_urls() {
+        let mut config = ForgejoConfig {
+            base_url: "ws://localhost:3000".to_string(),
+            api_token: "token".to_string(),
+            owner: "gittree".to_string(),
+            webhook_url: "http://localhost:8087/".to_string(),
+            webhook_secret: "secret".to_string(),
+            repo_private: true,
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "forgejo.base_url",
+                ..
+            })
+        ));
+
+        config.base_url = "http://localhost:3000".to_string();
+        config.webhook_url = "ws://localhost:8087/".to_string();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "forgejo.webhook_url",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn forgejo_config_from_toml_parses() {
         let toml = r#"
 [forgejo]
@@ -2547,6 +2684,47 @@ repo_private = true
         assert_eq!(config.webhook_url, "http://localhost:8090/");
         assert_eq!(config.webhook_secret, "secret");
         assert!(config.repo_private);
+    }
+
+    #[test]
+    fn forgejo_config_from_toml_rejects_invalid_urls() {
+        let invalid_base = ForgejoConfig::from_toml_str(
+            r#"
+[forgejo]
+base_url = "ws://localhost:3000"
+api_token = "token"
+owner = "gittree"
+webhook_url = "http://localhost:8090/"
+webhook_secret = "secret"
+"#,
+        )
+        .expect_err("invalid base url should fail");
+        assert!(matches!(
+            invalid_base,
+            ConfigError::InvalidConfig {
+                field: "forgejo.base_url",
+                ..
+            }
+        ));
+
+        let invalid_webhook = ForgejoConfig::from_toml_str(
+            r#"
+[forgejo]
+base_url = "http://localhost:3000"
+api_token = "token"
+owner = "gittree"
+webhook_url = "ws://localhost:8090/"
+webhook_secret = "secret"
+"#,
+        )
+        .expect_err("invalid webhook url should fail");
+        assert!(matches!(
+            invalid_webhook,
+            ConfigError::InvalidConfig {
+                field: "forgejo.webhook_url",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2568,6 +2746,43 @@ repo_private = true
     }
 
     #[test]
+    fn ui_config_from_env_reports_missing_required_fields() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_UI_REPO_ROOT, " ", || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", || {
+                let err = UiConfig::from_env().expect_err("blank repo root should fail");
+                assert!(matches!(err, ConfigError::MissingEnv(ENV_UI_REPO_ROOT)));
+            });
+        });
+
+        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, " ", || {
+                let err = UiConfig::from_env().expect_err("blank public git url should fail");
+                assert!(matches!(err, ConfigError::MissingEnv(ENV_UI_PUBLIC_GIT_URL)));
+            });
+        });
+    }
+
+    #[test]
+    fn ui_config_from_env_rejects_invalid_urls() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", || {
+                with_env_var(ENV_UI_AUTH_URL, "ws://localhost:8089", || {
+                    let err = UiConfig::from_env().expect_err("invalid auth_url should fail");
+                    assert!(matches!(
+                        err,
+                        ConfigError::InvalidConfig {
+                            field: "ui.auth_url",
+                            ..
+                        }
+                    ));
+                });
+            });
+        });
+    }
+
+    #[test]
     fn ui_config_from_toml_parses() {
         let toml = r#"
 [ui]
@@ -2583,6 +2798,26 @@ public_git_url = "http://localhost:8085"
         assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
         assert_eq!(config.app_url, DEFAULT_UI_APP_URL);
         assert_eq!(config.control_url, DEFAULT_UI_CONTROL_URL);
+    }
+
+    #[test]
+    fn ui_config_from_toml_rejects_invalid_urls() {
+        let err = UiConfig::from_toml_str(
+            r#"
+[ui]
+repo_root = "/tmp/gittree-ui"
+public_git_url = "http://localhost:8085"
+auth_url = "ws://localhost:8089"
+"#,
+        )
+        .expect_err("invalid auth_url should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidConfig {
+                field: "ui.auth_url",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2616,6 +2851,47 @@ public_git_url = "http://localhost:8085"
     }
 
     #[test]
+    fn ui_config_rejects_invalid_auth_app_and_control_urls() {
+        let base = UiConfig {
+            repo_root: std::path::PathBuf::from("/tmp/gittree-ui"),
+            public_git_url: "http://localhost:8085".to_string(),
+            auth_url: DEFAULT_UI_AUTH_URL.to_string(),
+            app_url: DEFAULT_UI_APP_URL.to_string(),
+            control_url: DEFAULT_UI_CONTROL_URL.to_string(),
+        };
+
+        let mut invalid_auth = base.clone();
+        invalid_auth.auth_url = "ws://localhost:8089".to_string();
+        assert!(matches!(
+            invalid_auth.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "ui.auth_url",
+                ..
+            })
+        ));
+
+        let mut invalid_app = base.clone();
+        invalid_app.app_url = "ws://localhost:8090".to_string();
+        assert!(matches!(
+            invalid_app.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "ui.app_url",
+                ..
+            })
+        ));
+
+        let mut invalid_control = base;
+        invalid_control.control_url = "ws://localhost:8088".to_string();
+        assert!(matches!(
+            invalid_control.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "ui.control_url",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn control_auth_from_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_CONTROL_TOKEN, "token", || {
@@ -2627,6 +2903,15 @@ public_git_url = "http://localhost:8085"
                     vec!["npub1".to_string(), "npub2".to_string()]
                 );
             });
+        });
+    }
+
+    #[test]
+    fn control_auth_from_env_requires_token() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(ENV_CONTROL_TOKEN, " ", || {
+            let err = ControlAuthConfig::from_env().expect_err("blank token should fail");
+            assert!(matches!(err, ConfigError::MissingEnv(ENV_CONTROL_TOKEN)));
         });
     }
 
@@ -2652,6 +2937,15 @@ public_git_url = "http://localhost:8085"
             config.validate(),
             Err(ConfigError::InvalidConfig { field, .. }) if field == "control.admin_keys"
         ));
+    }
+
+    #[test]
+    fn control_auth_validate_accepts_valid_values() {
+        let config = ControlAuthConfig {
+            token: "token".to_string(),
+            admin_keys: vec!["npub1".to_string(), "npub2".to_string()],
+        };
+        config.validate().expect("valid control auth config");
     }
 
     #[test]
@@ -2711,6 +3005,20 @@ public_git_url = "http://localhost:8085"
         let config = AuthConfig::from_env_with(|key| values.get(key).cloned()).expect("auth");
         assert_eq!(config.email_domain, "example.test");
         assert_eq!(config.max_skew_seconds, 120);
+    }
+
+    #[test]
+    fn auth_config_from_env_with_rejects_zero_skew() {
+        let values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "0")]);
+        let err = AuthConfig::from_env_with(|key| values.get(key).cloned())
+            .expect_err("zero skew should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidConfig {
+                field: "auth.max_skew_seconds",
+                value,
+            } if value == "0"
+        ));
     }
 
     #[test]
@@ -2914,6 +3222,106 @@ mode = "unknown"
     }
 
     #[test]
+    fn forgejo_toml_requires_each_required_field() {
+        let cases = [
+            (
+                r#"
+[forgejo]
+api_token = "token"
+owner = "gittree"
+webhook_url = "http://localhost:8080/hook"
+webhook_secret = "secret"
+"#,
+                "forgejo.base_url",
+            ),
+            (
+                r#"
+[forgejo]
+base_url = "http://localhost:3000"
+owner = "gittree"
+webhook_url = "http://localhost:8080/hook"
+webhook_secret = "secret"
+"#,
+                "forgejo.api_token",
+            ),
+            (
+                r#"
+[forgejo]
+base_url = "http://localhost:3000"
+api_token = "token"
+webhook_url = "http://localhost:8080/hook"
+webhook_secret = "secret"
+"#,
+                "forgejo.owner",
+            ),
+            (
+                r#"
+[forgejo]
+base_url = "http://localhost:3000"
+api_token = "token"
+owner = "gittree"
+webhook_secret = "secret"
+"#,
+                "forgejo.webhook_url",
+            ),
+            (
+                r#"
+[forgejo]
+base_url = "http://localhost:3000"
+api_token = "token"
+owner = "gittree"
+webhook_url = "http://localhost:8080/hook"
+"#,
+                "forgejo.webhook_secret",
+            ),
+        ];
+
+        for (toml, field) in cases {
+            let err = ForgejoConfig::from_toml_str(toml).expect_err("missing required field");
+            assert!(matches!(
+                err,
+                ConfigError::InvalidConfig {
+                    field: actual,
+                    value,
+                } if actual == field && value == "missing"
+            ));
+        }
+    }
+
+    #[test]
+    fn ui_toml_requires_repo_root_and_public_git_url() {
+        let missing_repo_root = UiConfig::from_toml_str(
+            r#"
+[ui]
+public_git_url = "http://localhost:8085"
+"#,
+        )
+        .expect_err("missing repo_root should fail");
+        assert!(matches!(
+            missing_repo_root,
+            ConfigError::InvalidConfig {
+                field: "ui.repo_root",
+                value,
+            } if value == "missing"
+        ));
+
+        let missing_public_git_url = UiConfig::from_toml_str(
+            r#"
+[ui]
+repo_root = "/tmp/gittree-ui"
+"#,
+        )
+        .expect_err("missing public_git_url should fail");
+        assert!(matches!(
+            missing_public_git_url,
+            ConfigError::InvalidConfig {
+                field: "ui.public_git_url",
+                value,
+            } if value == "missing"
+        ));
+    }
+
+    #[test]
     fn url_validators_cover_parse_and_scheme_errors() {
         super::validate_relay_url("wss://relay.example").expect("relay url");
         let relay_scheme_err = super::validate_relay_url("ftp://relay.example").unwrap_err();
@@ -3010,6 +3418,11 @@ mode = "unknown"
             assert_eq!(relay_policy_field(&err), Some("relay_policy.max_content_len"));
         });
 
+        with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max tags");
+            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_tags"));
+        });
+
         with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "abc", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max tag values");
             assert!(matches!(
@@ -3052,6 +3465,11 @@ mode = "unknown"
                     ..
                 }
             ));
+        });
+
+        with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "abc", || {
+            let err = RelayPolicyConfig::from_env().expect_err("invalid max limit");
+            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_limit"));
         });
 
         with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "abc", || {
