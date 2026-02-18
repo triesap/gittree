@@ -7,11 +7,10 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use gittree_app_core::{
-    pubkey_bytes_from_npub, Profile, ProfileUpdate,
-    ProfileVisibility as ApiProfileVisibility,
+    Profile, ProfileUpdate, ProfileVisibility as ApiProfileVisibility, pubkey_bytes_from_npub,
 };
 use gittree_config::{AuthConfig as AuthSettings, ConfigError, ForgejoConfig, ServicesConfig};
 use gittree_forgejo::{
@@ -56,8 +55,8 @@ impl AuthServiceConfig {
     where
         F: FnMut(&'static str) -> Option<String>,
     {
-        let services =
-            ServicesConfig::from_env_validated_with(&mut get_var).map_err(AuthConfigError::Config)?;
+        let services = ServicesConfig::from_env_validated_with(&mut get_var)
+            .map_err(AuthConfigError::Config)?;
         let auth = AuthSettings::from_env_with(&mut get_var).map_err(AuthConfigError::Config)?;
         let forgejo =
             ForgejoConfig::from_env_with(&mut get_var).map_err(AuthConfigError::Config)?;
@@ -120,8 +119,9 @@ fn storage_from_env_with<F>(mut get_var: F) -> Result<StorageConfig, AuthConfigE
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    let read_connection = get_var(ENV_STORAGE_READ_URL)
-        .ok_or(AuthConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL)))?;
+    let read_connection = get_var(ENV_STORAGE_READ_URL).ok_or(AuthConfigError::Storage(
+        StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL),
+    ))?;
     let write_connection = get_var(ENV_STORAGE_WRITE_URL);
     let max_connections = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, &mut get_var)?.unwrap_or(10);
     let min_connections = env_u32_with(ENV_STORAGE_MIN_CONNECTIONS, &mut get_var)?.unwrap_or(2);
@@ -451,8 +451,13 @@ async fn profile_get_handler(
         Ok(None) => return Err(AuthHttpError::BadRequest("account not found".to_string())),
         Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
     };
-    let profile = ensure_profile(&state.profiles, &auth.pubkey, &account.forgejo_username, now)
-        .await?;
+    let profile = ensure_profile(
+        &state.profiles,
+        &auth.pubkey,
+        &account.forgejo_username,
+        now,
+    )
+    .await?;
     Ok(Json(profile_response(
         &auth.pubkey,
         &account.forgejo_username,
@@ -503,10 +508,15 @@ async fn profile_patch_handler(
         Ok(None) => return Err(AuthHttpError::BadRequest("account not found".to_string())),
         Err(err) => return Err(AuthHttpError::Internal(err.to_string())),
     };
-    let profile = ensure_profile(&state.profiles, &auth.pubkey, &account.forgejo_username, now)
-        .await?;
-    let updated = apply_profile_update(&auth.pubkey, profile, update, now)
-        .map_err(profile_input_error)?;
+    let profile = ensure_profile(
+        &state.profiles,
+        &auth.pubkey,
+        &account.forgejo_username,
+        now,
+    )
+    .await?;
+    let updated =
+        apply_profile_update(&auth.pubkey, profile, update, now).map_err(profile_input_error)?;
     if let Err(err) = state.profiles.upsert_profile(updated.clone()).await {
         return Err(AuthHttpError::Internal(err.to_string()));
     }
@@ -580,7 +590,9 @@ fn parse_nostr_auth(headers: &HeaderMap) -> Result<Nip98Event, AuthHttpError> {
         .map_err(|_| AuthHttpError::Unauthorized("invalid nostr authorization".to_string()))?;
     match serde_json::from_slice::<Nip98Event>(&decoded) {
         Ok(event) => Ok(event),
-        Err(_) => Err(AuthHttpError::Unauthorized("invalid nostr event".to_string())),
+        Err(_) => Err(AuthHttpError::Unauthorized(
+            "invalid nostr event".to_string(),
+        )),
     }
 }
 
@@ -751,7 +763,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
-    fn storage_from_map(entries: &[(&'static str, &'static str)]) -> Result<StorageConfig, AuthConfigError> {
+    fn storage_from_map(
+        entries: &[(&'static str, &'static str)],
+    ) -> Result<StorageConfig, AuthConfigError> {
         let values: HashMap<&'static str, String> = entries
             .iter()
             .map(|(key, value)| (*key, (*value).to_string()))
@@ -891,7 +905,10 @@ mod tests {
             Ok(())
         }
 
-        async fn account_by_pubkey(&self, _pubkey: &[u8]) -> Result<Option<AccountRecord>, StorageError> {
+        async fn account_by_pubkey(
+            &self,
+            _pubkey: &[u8],
+        ) -> Result<Option<AccountRecord>, StorageError> {
             if let Some(message) = self.lookup_error.as_ref() {
                 return Err(StorageError::Internal {
                     message: message.clone(),
@@ -900,7 +917,10 @@ mod tests {
             Ok(self.account.clone())
         }
 
-        async fn account_by_username(&self, username: &str) -> Result<Option<AccountRecord>, StorageError> {
+        async fn account_by_username(
+            &self,
+            username: &str,
+        ) -> Result<Option<AccountRecord>, StorageError> {
             if let Some(message) = self.lookup_error.as_ref() {
                 return Err(StorageError::Internal {
                     message: message.clone(),
@@ -933,7 +953,10 @@ mod tests {
             Ok(())
         }
 
-        async fn profile_by_pubkey(&self, _pubkey: &[u8]) -> Result<Option<ProfileRecord>, StorageError> {
+        async fn profile_by_pubkey(
+            &self,
+            _pubkey: &[u8],
+        ) -> Result<Option<ProfileRecord>, StorageError> {
             if let Some(message) = self.lookup_error.as_ref() {
                 return Err(StorageError::Internal {
                     message: message.clone(),
@@ -1053,7 +1076,11 @@ mod tests {
         hex::encode(digest)
     }
 
-    fn sign_event_id(event_id: &str, keypair: &Keypair, secp: &Secp256k1<secp256k1::All>) -> String {
+    fn sign_event_id(
+        event_id: &str,
+        keypair: &Keypair,
+        secp: &Secp256k1<secp256k1::All>,
+    ) -> String {
         let bytes = hex::decode(event_id).expect("decode");
         let msg = Message::from_digest_slice(&bytes).expect("msg");
         let sig = secp.sign_schnorr_no_aux_rand(&msg, keypair);
@@ -1062,11 +1089,17 @@ mod tests {
 
     #[test]
     fn storage_from_env_with_uses_defaults_for_pool_limits() {
-        let config = storage_from_map(&[(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree")])
-            .expect("config");
+        let config = storage_from_map(&[(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+        )])
+        .expect("config");
         assert_eq!(config.max_connections, 10);
         assert_eq!(config.min_connections, 2);
-        assert_eq!(config.read_connection, "postgres://user:pass@localhost:5432/gittree");
+        assert_eq!(
+            config.read_connection,
+            "postgres://user:pass@localhost:5432/gittree"
+        );
         assert!(config.idle_timeout_secs.is_none());
         assert!(config.max_lifetime_secs.is_none());
     }
@@ -1080,9 +1113,7 @@ mod tests {
         ));
         assert_eq!(
             format!("{err}"),
-            format!(
-                "auth storage config error: missing env {ENV_STORAGE_READ_URL}"
-            )
+            format!("auth storage config error: missing env {ENV_STORAGE_READ_URL}")
         );
         assert!(err.source().is_some());
     }
@@ -1090,7 +1121,10 @@ mod tests {
     #[test]
     fn storage_from_env_rejects_invalid_numeric_values() {
         let err = storage_from_map(&[
-            (ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree"),
+            (
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
             (ENV_STORAGE_MAX_CONNECTIONS, "not-a-number"),
         ])
         .unwrap_err();
@@ -1104,9 +1138,50 @@ mod tests {
     }
 
     #[test]
+    fn storage_from_env_rejects_invalid_min_connections() {
+        let err = storage_from_map(&[
+            (
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
+            (ENV_STORAGE_MIN_CONNECTIONS, "not-a-number"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                key: ENV_STORAGE_MIN_CONNECTIONS,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn storage_from_env_rejects_invalid_max_lifetime() {
+        let err = storage_from_map(&[
+            (
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
+            (ENV_STORAGE_MAX_LIFETIME_SECS, "not-a-number"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                key: ENV_STORAGE_MAX_LIFETIME_SECS,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn storage_from_env_rejects_invalid_pool_configuration() {
         let err = storage_from_map(&[
-            (ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree"),
+            (
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
             (ENV_STORAGE_MAX_CONNECTIONS, "1"),
             (ENV_STORAGE_MIN_CONNECTIONS, "2"),
         ])
@@ -1127,8 +1202,8 @@ mod tests {
 
     #[test]
     fn env_u64_with_rejects_invalid_values() {
-        let err = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some("bad".to_string()))
-            .unwrap_err();
+        let err =
+            env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some("bad".to_string())).unwrap_err();
         assert!(matches!(
             err,
             AuthConfigError::Storage(StorageConfigError::InvalidEnv {
@@ -1164,7 +1239,10 @@ mod tests {
             ("GITTREE_FORGEJO_OWNER", "gittree"),
             ("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087"),
             ("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret"),
-            (ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree"),
+            (
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
         ])
         .expect("auth config");
         assert_eq!(config.bind, "127.0.0.1:18089");
@@ -1186,6 +1264,33 @@ mod tests {
     }
 
     #[test]
+    fn auth_service_config_from_env_with_maps_storage_error() {
+        let err = auth_service_config_from_map(&[
+            ("GITTREE_AUTH_BIND", "127.0.0.1:18089"),
+            ("GITTREE_AUTH_EMAIL_DOMAIN", "local.test"),
+            ("GITTREE_AUTH_MAX_SKEW_SECONDS", "42"),
+            ("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000"),
+            ("GITTREE_FORGEJO_API_TOKEN", "token"),
+            ("GITTREE_FORGEJO_OWNER", "gittree"),
+            ("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087"),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret"),
+            (
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
+            (ENV_STORAGE_MAX_LIFETIME_SECS, "bad"),
+        ])
+        .expect_err("storage parse error");
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                key: ENV_STORAGE_MAX_LIFETIME_SECS,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn auth_service_config_from_env_returns_result_without_panicking() {
         let _ = AuthServiceConfig::from_env();
     }
@@ -1193,7 +1298,10 @@ mod tests {
     #[test]
     fn auth_config_error_config_variant_exposes_source() {
         let err = AuthConfigError::Config(ConfigError::MissingEnv("GITTREE_AUTH_BIND"));
-        assert_eq!(err.to_string(), "auth config error: missing env GITTREE_AUTH_BIND");
+        assert_eq!(
+            err.to_string(),
+            "auth config error: missing env GITTREE_AUTH_BIND"
+        );
         assert!(err.source().is_some());
     }
 
@@ -1213,8 +1321,7 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_account_repository_account_by_username_handles_match_and_miss() {
-        let account =
-            AccountRecord::new("11".repeat(32).as_str(), "alice").expect("account");
+        let account = AccountRecord::new("11".repeat(32).as_str(), "alice").expect("account");
         let repository = ScriptedAccountRepository {
             account: Some(account),
             ..ScriptedAccountRepository::default()
@@ -1251,7 +1358,10 @@ mod tests {
         assert!(config.source().is_some());
 
         let forgejo = AuthError::Forgejo(ForgejoError::Request("boom".to_string()));
-        assert_eq!(format!("{forgejo}"), "auth forgejo error: forgejo request error: boom");
+        assert_eq!(
+            format!("{forgejo}"),
+            "auth forgejo error: forgejo request error: boom"
+        );
         assert!(forgejo.source().is_some());
 
         let storage = AuthError::Storage(StorageError::Internal {
@@ -1263,19 +1373,19 @@ mod tests {
         );
         assert!(storage.source().is_some());
 
-        let observability_config = AuthError::ObservabilityConfig(
-            ObservabilityConfigError::InvalidEnv {
+        let observability_config =
+            AuthError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv {
                 key: "GITTREE_LOG_JSON",
                 value: "maybe".to_string(),
-            },
-        );
+            });
         assert_eq!(
             format!("{observability_config}"),
             "auth observability config error: invalid env GITTREE_LOG_JSON: maybe"
         );
         assert!(observability_config.source().is_some());
 
-        let observability = AuthError::Observability(ObservabilityError::LogInit("boom".to_string()));
+        let observability =
+            AuthError::Observability(ObservabilityError::LogInit("boom".to_string()));
         assert_eq!(
             format!("{observability}"),
             "auth observability error: observability log init failed: boom"
@@ -1741,10 +1851,7 @@ mod tests {
     fn parse_nostr_auth_rejects_invalid_event_json() {
         let mut headers = HeaderMap::new();
         let token = BASE64_STANDARD.encode(br#"{"invalid":"event"}"#);
-        headers.insert(
-            AUTH_HEADER,
-            format!("Nostr {token}").parse().expect("auth"),
-        );
+        headers.insert(AUTH_HEADER, format!("Nostr {token}").parse().expect("auth"));
         let err = parse_nostr_auth(&headers).unwrap_err();
         assert!(is_unauthorized(&err));
     }
@@ -1885,7 +1992,9 @@ mod tests {
         let err = ensure_profile(&profiles, &pubkey, "gt_test", 300)
             .await
             .expect_err("lookup error");
-        assert!(matches!(err, AuthHttpError::Internal(message) if message.contains("lookup failed")));
+        assert!(
+            matches!(err, AuthHttpError::Internal(message) if message.contains("lookup failed"))
+        );
     }
 
     #[tokio::test]
@@ -1898,7 +2007,9 @@ mod tests {
         let err = ensure_profile(&profiles, &pubkey, "gt_test", 300)
             .await
             .expect_err("upsert error");
-        assert!(matches!(err, AuthHttpError::Internal(message) if message.contains("upsert failed")));
+        assert!(
+            matches!(err, AuthHttpError::Internal(message) if message.contains("upsert failed"))
+        );
     }
 
     #[test]
@@ -2021,7 +2132,10 @@ mod tests {
             .await
             .expect("body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(body.get("status").and_then(|value| value.as_str()), Some("existing"));
+        assert_eq!(
+            body.get("status").and_then(|value| value.as_str()),
+            Some("existing")
+        );
         assert_eq!(
             body.get("username").and_then(|value| value.as_str()),
             Some(username.as_str())
@@ -2035,8 +2149,7 @@ mod tests {
         let url = "http://localhost/v1/profile";
         let event = signed_event(url, "GET", now, None);
         let (state, repos, _transport) = test_state(Vec::new());
-        let account =
-            AccountRecord::new(&event.pubkey, "alice").expect("account");
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
         repos.upsert_account(account).await.expect("upsert");
 
         let app = build_router(state);
@@ -2145,8 +2258,7 @@ mod tests {
         let url = "http://localhost/v1/profile";
         let event = signed_event(url, "PATCH", now, None);
         let (state, repos, _transport) = test_state(Vec::new());
-        let account =
-            AccountRecord::new(&event.pubkey, "alice").expect("account");
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
         repos.upsert_account(account).await.expect("upsert");
         let existing = ProfileRecord::new(
             &event.pubkey,
