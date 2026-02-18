@@ -752,8 +752,10 @@ async fn create_tenant_handler(
         .map_err(map_storage_error)?;
 
     let owner_pubkey = auth.pubkey.clone();
-    let owner_pubkey_bytes = hex::decode(&owner_pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let owner_pubkey_bytes = match hex::decode(&owner_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
     let membership = RelayMembershipRecord {
         tenant_id: tenant_id.clone(),
         pubkey: owner_pubkey_bytes,
@@ -965,8 +967,10 @@ async fn create_repo_with_announcement(
         maintainers: vec![input.pubkey.clone()],
     };
 
-    let signed = RelaySignedNostrEvent::from_announcement(&announcement, &secret_key)
-        .map_err(|err| ControlHttpError::BadRequest(err.to_string()))?;
+    let signed = match RelaySignedNostrEvent::from_announcement(&announcement, &secret_key) {
+        Ok(event) => event,
+        Err(err) => return Err(ControlHttpError::BadRequest(err.to_string())),
+    };
     if signed.pubkey != input.pubkey {
         return Err(ControlHttpError::BadRequest(
             "pubkey does not match privkey".to_string(),
@@ -1024,8 +1028,10 @@ async fn create_repo_from_signed_event(
         &state.public_git_url,
     )?;
 
-    let pubkey_bytes = hex::decode(auth_pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let pubkey_bytes = match hex::decode(auth_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
     let account = state
         .repositories
         .account_by_pubkey(&pubkey_bytes)
@@ -1225,9 +1231,10 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
 
     let event_id = hex::decode(&event.id)
         .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
-    let event_id: [u8; 32] = event_id
-        .try_into()
-        .map_err(|_| ControlHttpError::BadRequest("invalid event id".to_string()))?;
+    let event_id: [u8; 32] = match event_id.try_into() {
+        Ok(value) => value,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid event id".to_string())),
+    };
 
     let expected_id = build_event_id(event)?;
     if expected_id != event.id {
@@ -1238,10 +1245,14 @@ fn verify_signed_event(event: &ApiSignedNostrEvent) -> Result<(), ControlHttpErr
     let msg = Message::from_digest(event_id);
     let sig_bytes = hex::decode(&event.sig)
         .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
-    let sig = secp256k1::schnorr::Signature::from_slice(&sig_bytes)
-        .map_err(|_| ControlHttpError::BadRequest("invalid event sig".to_string()))?;
-    let pubkey_bytes = hex::decode(&event.pubkey)
-        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let sig = match secp256k1::schnorr::Signature::from_slice(&sig_bytes) {
+        Ok(value) => value,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid event sig".to_string())),
+    };
+    let pubkey_bytes = match hex::decode(&event.pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
+    };
     let pubkey = match XOnlyPublicKey::from_slice(&pubkey_bytes) {
         Ok(value) => value,
         Err(_) => return Err(ControlHttpError::BadRequest("invalid pubkey".to_string())),
@@ -1313,12 +1324,13 @@ fn npub_from_hex(pubkey: &str) -> Result<String, ControlHttpError> {
     if pubkey.len() != 64 {
         return Err(ControlHttpError::BadRequest("invalid pubkey".to_string()));
     }
-    let bytes =
-        hex::decode(pubkey).map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
-    let hrp = Hrp::parse("npub")
-        .expect("npub hrp should always parse");
-    bech32::encode::<Bech32>(hrp, &bytes)
-        .map_err(|err| ControlHttpError::Internal(err.to_string()))
+    let bytes = hex::decode(pubkey)
+        .map_err(|_| ControlHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let hrp = Hrp::parse("npub").expect("npub hrp should always parse");
+    match bech32::encode::<Bech32>(hrp, &bytes) {
+        Ok(value) => Ok(value),
+        Err(err) => Err(ControlHttpError::Internal(err.to_string())),
+    }
 }
 
 fn map_forgejo_error(error: ForgejoError) -> ControlHttpError {
