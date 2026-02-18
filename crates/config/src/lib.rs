@@ -1559,6 +1559,46 @@ mod tests {
             .collect()
     }
 
+    fn is_toml_parse(err: &ConfigError) -> bool {
+        matches!(err, ConfigError::TomlParse { .. })
+    }
+
+    fn is_read_config(err: &ConfigError) -> bool {
+        matches!(err, ConfigError::ReadConfig { .. })
+    }
+
+    fn is_invalid_relay_url(err: &ConfigError) -> bool {
+        matches!(err, ConfigError::InvalidRelayUrl(_))
+    }
+
+    fn is_invalid_relay_compatibility_mode(err: &ConfigError) -> bool {
+        matches!(err, ConfigError::InvalidRelayCompatibilityMode(_))
+    }
+
+    fn relay_policy_field(err: &ConfigError) -> Option<&'static str> {
+        match err {
+            ConfigError::InvalidRelayPolicyConfig { field, .. } => Some(*field),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn helper_matchers_cover_non_matching_variants() {
+        let read_err = ConfigError::ReadConfig {
+            path: std::path::PathBuf::from("/tmp/missing.toml"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        assert!(!is_toml_parse(&read_err));
+        assert!(is_read_config(&read_err));
+        assert!(!is_invalid_relay_url(&read_err));
+        assert!(!is_invalid_relay_compatibility_mode(&read_err));
+        assert_eq!(relay_policy_field(&read_err), None);
+
+        let relay_url_err = ConfigError::InvalidRelayUrl("bad".to_string());
+        assert!(is_invalid_relay_url(&relay_url_err));
+        assert!(!is_read_config(&relay_url_err));
+    }
+
     #[test]
     fn default_config_has_relay_bind() {
         let config = GittreeConfig::default();
@@ -1700,7 +1740,7 @@ secret_key = "22"
 
         let parse_err = RelayProbeConfig::from_toml_str("relay_probe = [")
             .expect_err("invalid toml should fail");
-        assert!(matches!(parse_err, ConfigError::TomlParse { .. }));
+        assert!(is_toml_parse(&parse_err));
     }
 
     #[test]
@@ -1865,7 +1905,7 @@ max_content_len = 0
 
         let parse_err = RelayPolicyConfig::from_toml_str("relay_policy = [")
             .expect_err("invalid toml should fail");
-        assert!(matches!(parse_err, ConfigError::TomlParse { .. }));
+        assert!(is_toml_parse(&parse_err));
     }
 
     #[test]
@@ -2003,8 +2043,9 @@ max_content_len = 0
 
     #[test]
     fn toml_str_rejects_invalid_config() {
-        let result = GittreeConfig::from_toml_str("relay_bind = [");
-        assert!(matches!(result, Err(ConfigError::TomlParse { .. })));
+        let err =
+            GittreeConfig::from_toml_str("relay_bind = [").expect_err("invalid toml should fail");
+        assert!(is_toml_parse(&err));
     }
 
     #[test]
@@ -2022,8 +2063,8 @@ max_content_len = 0
             "gittree-config-missing-{}.toml",
             std::process::id()
         ));
-        let result = GittreeConfig::from_toml_file(&path);
-        assert!(matches!(result, Err(ConfigError::ReadConfig { .. })));
+        let err = GittreeConfig::from_toml_file(&path).expect_err("missing file should fail");
+        assert!(is_read_config(&err));
     }
 
     #[test]
@@ -2476,7 +2517,7 @@ relay_urls = ["wss://relay.example", "https://relay.example"]
         std::fs::remove_file(&path).expect("cleanup");
 
         let err = RelayTargetsConfig::from_toml_file(&path).unwrap_err();
-        assert!(matches!(err, ConfigError::ReadConfig { .. }));
+        assert!(is_read_config(&err));
     }
 
     #[test]
@@ -2529,7 +2570,7 @@ public_git_url = "http://localhost:8085"
 
         let parse_err = RelayCompatibilityConfig::from_toml_str("relay_compatibility = [")
             .expect_err("invalid toml should fail");
-        assert!(matches!(parse_err, ConfigError::TomlParse { .. }));
+        assert!(is_toml_parse(&parse_err));
 
         let invalid = RelayCompatibilityConfig::from_toml_str(
             r#"
@@ -2538,7 +2579,7 @@ mode = "unknown"
 "#,
         )
         .unwrap_err();
-        assert!(matches!(invalid, ConfigError::InvalidRelayCompatibilityMode(_)));
+        assert!(is_invalid_relay_compatibility_mode(&invalid));
     }
 
     #[test]
@@ -2598,12 +2639,12 @@ mode = "unknown"
             std::process::id()
         ));
         let forgejo_err = ForgejoConfig::from_toml_file(&forgejo_missing).unwrap_err();
-        assert!(matches!(forgejo_err, ConfigError::ReadConfig { .. }));
+        assert!(is_read_config(&forgejo_err));
 
         let mut ui_missing = std::env::temp_dir();
         ui_missing.push(format!("gittree-ui-missing-{}.toml", std::process::id()));
         let ui_err = UiConfig::from_toml_file(&ui_missing).unwrap_err();
-        assert!(matches!(ui_err, ConfigError::ReadConfig { .. }));
+        assert!(is_read_config(&ui_err));
     }
 
     #[test]
@@ -2662,9 +2703,9 @@ mode = "unknown"
     fn url_validators_cover_parse_and_scheme_errors() {
         super::validate_relay_url("wss://relay.example").expect("relay url");
         let relay_scheme_err = super::validate_relay_url("ftp://relay.example").unwrap_err();
-        assert!(matches!(relay_scheme_err, ConfigError::InvalidRelayUrl(_)));
+        assert!(is_invalid_relay_url(&relay_scheme_err));
         let relay_parse_err = super::validate_relay_url("not a url").unwrap_err();
-        assert!(matches!(relay_parse_err, ConfigError::InvalidRelayUrl(_)));
+        assert!(is_invalid_relay_url(&relay_parse_err));
 
         super::validate_http_url("ui.public_git_url", "https://gittr.ee").expect("http url");
         let http_scheme_err =
@@ -2750,13 +2791,7 @@ mode = "unknown"
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "abc", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max content len");
-            assert!(matches!(
-                err,
-                ConfigError::InvalidRelayPolicyConfig {
-                    field: "relay_policy.max_content_len",
-                    ..
-                }
-            ));
+            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_content_len"));
         });
 
         with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "abc", || {
@@ -2816,24 +2851,12 @@ mode = "unknown"
 
         with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "abc", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max events per min");
-            assert!(matches!(
-                err,
-                ConfigError::InvalidRelayPolicyConfig {
-                    field: "relay_policy.max_events_per_min",
-                    ..
-                }
-            ));
+            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_events_per_min"));
         });
 
         with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "abc", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max requests per min");
-            assert!(matches!(
-                err,
-                ConfigError::InvalidRelayPolicyConfig {
-                    field: "relay_policy.max_requests_per_min",
-                    ..
-                }
-            ));
+            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_requests_per_min"));
         });
 
         with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "abc", || {
@@ -2944,8 +2967,9 @@ mode = "unknown"
         };
         assert!(invalid_config.to_string().contains("invalid config ui.repo_root"));
         assert!(invalid_config.source().is_none());
+        let invalid_config_text = invalid_config.to_string();
         let unchanged = invalid_config.with_path(std::path::Path::new("/tmp/unused"));
-        assert!(matches!(unchanged, ConfigError::InvalidConfig { .. }));
+        assert_eq!(unchanged.to_string(), invalid_config_text);
     }
 
     #[test]
@@ -3000,10 +3024,9 @@ mode = "unknown"
         ));
 
         super::validate_relay_url("wss://relay.example").expect("valid relay url");
-        assert!(matches!(
-            super::validate_relay_url("ftp://relay.example"),
-            Err(ConfigError::InvalidRelayUrl(_))
-        ));
+        let invalid_url_err =
+            super::validate_relay_url("ftp://relay.example").expect_err("invalid relay url");
+        assert!(invalid_url_err.to_string().contains("invalid relay url"));
 
         super::validate_http_url("ui.app_url", "https://example.test").expect("valid http url");
         assert!(matches!(
