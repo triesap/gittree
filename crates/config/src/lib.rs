@@ -32,8 +32,7 @@ const ENV_RELAY_POLICY_MAX_LIMIT: &str = "GITTREE_RELAY_POLICY_MAX_LIMIT";
 const ENV_RELAY_POLICY_MAX_MESSAGE_BYTES: &str = "GITTREE_RELAY_POLICY_MAX_MESSAGE_BYTES";
 const ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN: &str = "GITTREE_RELAY_POLICY_MAX_EVENTS_PER_MIN";
 const ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN: &str = "GITTREE_RELAY_POLICY_MAX_REQUESTS_PER_MIN";
-const ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS: &str =
-    "GITTREE_RELAY_POLICY_RETENTION_MAX_AGE_SECS";
+const ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS: &str = "GITTREE_RELAY_POLICY_RETENTION_MAX_AGE_SECS";
 const ENV_RELAY_POLICY_AUTH_REQUIRED: &str = "GITTREE_RELAY_POLICY_AUTH_REQUIRED";
 const ENV_ADMISSION_BIND: &str = "GITTREE_ADMISSION_BIND";
 const ENV_STATE_BIND: &str = "GITTREE_STATE_BIND";
@@ -230,10 +229,10 @@ impl UiConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let repo_root = env_required_path(ENV_UI_REPO_ROOT)?;
         let public_git_url = env_required_string(ENV_UI_PUBLIC_GIT_URL)?;
-        let auth_url = env_optional_string(ENV_UI_AUTH_URL)
-            .unwrap_or_else(|| DEFAULT_UI_AUTH_URL.to_string());
-        let app_url = env_optional_string(ENV_UI_APP_URL)
-            .unwrap_or_else(|| DEFAULT_UI_APP_URL.to_string());
+        let auth_url =
+            env_optional_string(ENV_UI_AUTH_URL).unwrap_or_else(|| DEFAULT_UI_AUTH_URL.to_string());
+        let app_url =
+            env_optional_string(ENV_UI_APP_URL).unwrap_or_else(|| DEFAULT_UI_APP_URL.to_string());
         let control_url = env_optional_string(ENV_UI_CONTROL_URL)
             .unwrap_or_else(|| DEFAULT_UI_CONTROL_URL.to_string());
         let config = Self {
@@ -332,18 +331,19 @@ impl AuthConfig {
             Some(value) => value,
             None => DEFAULT_AUTH_EMAIL_DOMAIN.to_string(),
         };
-        let max_skew_seconds = match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, &mut get_var) {
-            Some(value) => match value.parse::<u64>() {
-                Ok(parsed) => parsed,
-                Err(_) => {
-                    return Err(ConfigError::InvalidConfig {
-                        field: "auth.max_skew_seconds",
-                        value,
-                    });
-                }
-            },
-            None => DEFAULT_AUTH_MAX_SKEW_SECS,
-        };
+        let max_skew_seconds =
+            match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, &mut get_var) {
+                Some(value) => match value.parse::<u64>() {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        return Err(ConfigError::InvalidConfig {
+                            field: "auth.max_skew_seconds",
+                            value,
+                        });
+                    }
+                },
+                None => DEFAULT_AUTH_MAX_SKEW_SECS,
+            };
         let config = Self {
             email_domain,
             max_skew_seconds,
@@ -528,9 +528,8 @@ impl RelayPolicyConfig {
             "relay_policy.max_content_len",
         )?
         .unwrap_or(DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN);
-        let max_tags =
-            env_u64_policy(ENV_RELAY_POLICY_MAX_TAGS, "relay_policy.max_tags")?
-                .unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAGS);
+        let max_tags = env_u64_policy(ENV_RELAY_POLICY_MAX_TAGS, "relay_policy.max_tags")?
+            .unwrap_or(DEFAULT_RELAY_POLICY_MAX_TAGS);
         let max_tag_values = env_u64_policy(
             ENV_RELAY_POLICY_MAX_TAG_VALUES,
             "relay_policy.max_tag_values",
@@ -567,11 +566,9 @@ impl RelayPolicyConfig {
             ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS,
             "relay_policy.retention_max_age_seconds",
         )?;
-        let auth_required = env_bool_policy(
-            ENV_RELAY_POLICY_AUTH_REQUIRED,
-            "relay_policy.auth_required",
-        )?
-        .unwrap_or(false);
+        let auth_required =
+            env_bool_policy(ENV_RELAY_POLICY_AUTH_REQUIRED, "relay_policy.auth_required")?
+                .unwrap_or(false);
 
         let config = Self {
             max_content_len,
@@ -854,32 +851,24 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, ConfigError> {
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u64>().map(Some).map_err(|_| {
-                ConfigError::InvalidRelayProbeConfig {
-                    field: key,
-                    value,
-                }
-            })
+            value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| ConfigError::InvalidRelayProbeConfig { field: key, value })
         }
         Err(_) => Ok(None),
     }
 }
 
-fn env_bool_policy(
-    key: &'static str,
-    field: &'static str,
-) -> Result<Option<bool>, ConfigError> {
+fn env_bool_policy(key: &'static str, field: &'static str) -> Result<Option<bool>, ConfigError> {
     match std::env::var(key) {
         Ok(value) => {
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            parse_bool(&value).map(Some).ok_or_else(|| {
-                ConfigError::InvalidRelayPolicyConfig {
-                    field,
-                    value,
-                }
-            })
+            parse_bool(&value)
+                .map(Some)
+                .ok_or_else(|| ConfigError::InvalidRelayPolicyConfig { field, value })
         }
         Err(_) => Ok(None),
     }
@@ -891,12 +880,10 @@ fn env_u64_policy(key: &'static str, field: &'static str) -> Result<Option<u64>,
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u64>().map(Some).map_err(|_| {
-                ConfigError::InvalidRelayPolicyConfig {
-                    field,
-                    value,
-                }
-            })
+            value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| ConfigError::InvalidRelayPolicyConfig { field, value })
         }
         Err(_) => Ok(None),
     }
@@ -939,8 +926,8 @@ fn parse_csv_values(raw: String) -> Vec<String> {
 }
 
 fn validate_relay_url(value: &str) -> Result<(), ConfigError> {
-    let parsed = url::Url::parse(value)
-        .map_err(|_| ConfigError::InvalidRelayUrl(value.to_string()))?;
+    let parsed =
+        url::Url::parse(value).map_err(|_| ConfigError::InvalidRelayUrl(value.to_string()))?;
     match parsed.scheme() {
         "ws" | "wss" | "http" | "https" => Ok(()),
         _ => Err(ConfigError::InvalidRelayUrl(value.to_string())),
@@ -948,8 +935,10 @@ fn validate_relay_url(value: &str) -> Result<(), ConfigError> {
 }
 
 fn validate_http_url(field: &'static str, value: &str) -> Result<(), ConfigError> {
-    let parsed = url::Url::parse(value)
-        .map_err(|_| ConfigError::InvalidConfig { field, value: value.to_string() })?;
+    let parsed = url::Url::parse(value).map_err(|_| ConfigError::InvalidConfig {
+        field,
+        value: value.to_string(),
+    })?;
     match parsed.scheme() {
         "http" | "https" => Ok(()),
         _ => Err(ConfigError::InvalidConfig {
@@ -1263,14 +1252,23 @@ pub enum ConfigError {
     InvalidRelayBind(String),
     InvalidRelayUrl(String),
     InvalidRelayCompatibilityMode(String),
-    InvalidRelayProbeConfig { field: &'static str, value: String },
-    InvalidRelayPolicyConfig { field: &'static str, value: String },
+    InvalidRelayProbeConfig {
+        field: &'static str,
+        value: String,
+    },
+    InvalidRelayPolicyConfig {
+        field: &'static str,
+        value: String,
+    },
     InvalidServiceBind {
         service: &'static str,
         value: String,
     },
     MissingEnv(&'static str),
-    InvalidConfig { field: &'static str, value: String },
+    InvalidConfig {
+        field: &'static str,
+        value: String,
+    },
     ReadConfig {
         path: std::path::PathBuf,
         source: std::io::Error,
@@ -1454,28 +1452,27 @@ mod tests {
     use super::RelayTargetsConfig;
     use super::ServicesConfig;
     use super::UiConfig;
+    use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_AUTH_BIND;
     use crate::DEFAULT_AUTH_EMAIL_DOMAIN;
     use crate::DEFAULT_AUTH_MAX_SKEW_SECS;
-    use crate::{DEFAULT_UI_APP_URL, DEFAULT_UI_AUTH_URL, DEFAULT_UI_CONTROL_URL};
-    use crate::DEFAULT_ADMISSION_BIND;
     use crate::DEFAULT_CONTROL_BIND;
     use crate::DEFAULT_COORDINATOR_BIND;
     use crate::DEFAULT_GIT_HTTP_BIND;
     use crate::DEFAULT_RELAY_BIND;
     use crate::DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN;
     use crate::DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS;
-    use crate::DEFAULT_RELAY_POLICY_MAX_TAGS;
     use crate::DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN;
     use crate::DEFAULT_RELAY_POLICY_MAX_TAG_VALUES;
+    use crate::DEFAULT_RELAY_POLICY_MAX_TAGS;
     use crate::DEFAULT_STATE_BIND;
     use crate::DEFAULT_SYNC_BIND;
     use crate::DEFAULT_UI_BIND;
     use crate::DEFAULT_WEBHOOK_BIND;
+    use crate::ENV_ADMISSION_BIND;
     use crate::ENV_AUTH_BIND;
     use crate::ENV_AUTH_EMAIL_DOMAIN;
     use crate::ENV_AUTH_MAX_SKEW_SECONDS;
-    use crate::ENV_ADMISSION_BIND;
     use crate::ENV_CONTROL_ADMIN_KEYS;
     use crate::ENV_CONTROL_BIND;
     use crate::ENV_CONTROL_TOKEN;
@@ -1487,7 +1484,6 @@ mod tests {
     use crate::ENV_FORGEJO_WEBHOOK_SECRET;
     use crate::ENV_FORGEJO_WEBHOOK_URL;
     use crate::ENV_GIT_HTTP_BIND;
-    use crate::ENV_WEBHOOK_BIND;
     use crate::ENV_RELAY_BIND;
     use crate::ENV_RELAY_COMPAT_MODE;
     use crate::ENV_RELAY_POLICY_AUTH_REQUIRED;
@@ -1498,9 +1494,9 @@ mod tests {
     use crate::ENV_RELAY_POLICY_MAX_MESSAGE_BYTES;
     use crate::ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN;
     use crate::ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS;
-    use crate::ENV_RELAY_POLICY_MAX_TAGS;
     use crate::ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN;
     use crate::ENV_RELAY_POLICY_MAX_TAG_VALUES;
+    use crate::ENV_RELAY_POLICY_MAX_TAGS;
     use crate::ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS;
     use crate::ENV_RELAY_PROBE_ACTIVE;
     use crate::ENV_RELAY_PROBE_SECRET_KEY;
@@ -1511,9 +1507,11 @@ mod tests {
     use crate::ENV_UI_BIND;
     use crate::ENV_UI_PUBLIC_GIT_URL;
     use crate::ENV_UI_REPO_ROOT;
+    use crate::ENV_WEBHOOK_BIND;
+    use crate::{DEFAULT_UI_APP_URL, DEFAULT_UI_AUTH_URL, DEFAULT_UI_CONTROL_URL};
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     static TEMP_CONFIG_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1651,9 +1649,8 @@ mod tests {
 
     #[test]
     fn relay_targets_toml_parses_urls() {
-        let config =
-            RelayTargetsConfig::from_toml_str("relay_urls = [\"wss://relay.example\"]")
-                .expect("relay targets");
+        let config = RelayTargetsConfig::from_toml_str("relay_urls = [\"wss://relay.example\"]")
+            .expect("relay targets");
         assert_eq!(config.relay_urls, vec!["wss://relay.example".to_string()]);
     }
 
@@ -1763,10 +1760,19 @@ secret_key = "22"
                         with_env_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS, "30", || {
                             with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "9", || {
                                 with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "200", || {
-                                    with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "9999", || {
-                                        with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "60", || {
-                                            with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "30", || {
-                                                with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "3600", || {
+                                    with_env_var(
+                                        ENV_RELAY_POLICY_MAX_MESSAGE_BYTES,
+                                        "9999",
+                                        || {
+                                            with_env_var(
+                                                ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN,
+                                                "60",
+                                                || {
+                                                    with_env_var(
+                                                        ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN,
+                                                        "30",
+                                                        || {
+                                                            with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "3600", || {
                                                     with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "true", || {
                                                         let config =
                                                             RelayPolicyConfig::from_env().expect("policy");
@@ -1784,9 +1790,12 @@ secret_key = "22"
                                                         assert!(config.auth_required);
                                                     });
                                                 });
-                                            });
-                                        });
-                                    });
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
                                 });
                             });
                         });
@@ -1817,8 +1826,14 @@ secret_key = "22"
         assert_eq!(config.max_content_len, DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN);
         assert_eq!(config.max_tags, DEFAULT_RELAY_POLICY_MAX_TAGS);
         assert_eq!(config.max_tag_values, DEFAULT_RELAY_POLICY_MAX_TAG_VALUES);
-        assert_eq!(config.max_tag_value_len, DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN);
-        assert_eq!(config.max_future_seconds, DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS);
+        assert_eq!(
+            config.max_tag_value_len,
+            DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN
+        );
+        assert_eq!(
+            config.max_future_seconds,
+            DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS
+        );
         assert_eq!(config.max_subscriptions, None);
         assert_eq!(config.max_limit, None);
         assert_eq!(config.max_message_bytes, None);
@@ -1834,8 +1849,14 @@ secret_key = "22"
         assert_eq!(config.max_content_len, DEFAULT_RELAY_POLICY_MAX_CONTENT_LEN);
         assert_eq!(config.max_tags, DEFAULT_RELAY_POLICY_MAX_TAGS);
         assert_eq!(config.max_tag_values, DEFAULT_RELAY_POLICY_MAX_TAG_VALUES);
-        assert_eq!(config.max_tag_value_len, DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN);
-        assert_eq!(config.max_future_seconds, DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS);
+        assert_eq!(
+            config.max_tag_value_len,
+            DEFAULT_RELAY_POLICY_MAX_TAG_VALUE_LEN
+        );
+        assert_eq!(
+            config.max_future_seconds,
+            DEFAULT_RELAY_POLICY_MAX_FUTURE_SECS
+        );
         assert_eq!(config.max_subscriptions, None);
         assert_eq!(config.max_limit, None);
         assert_eq!(config.max_message_bytes, None);
@@ -2186,7 +2207,8 @@ bind = "127.0.0.1:9020"
     #[test]
     fn services_toml_rejects_invalid_config() {
         let result = ServicesConfig::from_toml_str("services = [");
-        assert!(matches!(result, Err(ConfigError::TomlParse { .. })));
+        let err = result.expect_err("invalid services toml");
+        assert!(is_toml_parse(&err));
     }
 
     #[test]
@@ -2318,8 +2340,7 @@ bind = "127.0.0.1:9120"
             (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
             (ENV_FORGEJO_REPO_PRIVATE, "false"),
         ]);
-        let config =
-            ForgejoConfig::from_env_with(|key| values.get(key).cloned()).expect("forgejo");
+        let config = ForgejoConfig::from_env_with(|key| values.get(key).cloned()).expect("forgejo");
         assert_eq!(config.owner, "gittree");
         assert!(!config.repo_private);
     }
@@ -2350,7 +2371,10 @@ repo_private = true
         with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
             with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", || {
                 let config = UiConfig::from_env().expect("ui");
-                assert_eq!(config.repo_root, std::path::PathBuf::from("/tmp/gittree-ui"));
+                assert_eq!(
+                    config.repo_root,
+                    std::path::PathBuf::from("/tmp/gittree-ui")
+                );
                 assert_eq!(config.public_git_url, "http://localhost:8085");
                 assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
                 assert_eq!(config.app_url, DEFAULT_UI_APP_URL);
@@ -2367,7 +2391,10 @@ repo_root = "/tmp/gittree-ui"
 public_git_url = "http://localhost:8085"
 "#;
         let config = UiConfig::from_toml_str(toml).expect("ui");
-        assert_eq!(config.repo_root, std::path::PathBuf::from("/tmp/gittree-ui"));
+        assert_eq!(
+            config.repo_root,
+            std::path::PathBuf::from("/tmp/gittree-ui")
+        );
         assert_eq!(config.public_git_url, "http://localhost:8085");
         assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
         assert_eq!(config.app_url, DEFAULT_UI_APP_URL);
@@ -2411,7 +2438,10 @@ public_git_url = "http://localhost:8085"
             with_env_var(ENV_CONTROL_ADMIN_KEYS, "npub1, npub2", || {
                 let config = ControlAuthConfig::from_env().expect("control");
                 assert_eq!(config.token, "token");
-                assert_eq!(config.admin_keys, vec!["npub1".to_string(), "npub2".to_string()]);
+                assert_eq!(
+                    config.admin_keys,
+                    vec!["npub1".to_string(), "npub2".to_string()]
+                );
             });
         });
     }
@@ -2717,8 +2747,7 @@ mode = "unknown"
                 ..
             }
         ));
-        let http_parse_err =
-            super::validate_http_url("ui.public_git_url", "://bad").unwrap_err();
+        let http_parse_err = super::validate_http_url("ui.public_git_url", "://bad").unwrap_err();
         assert!(matches!(
             http_parse_err,
             ConfigError::InvalidConfig {
@@ -2731,8 +2760,8 @@ mode = "unknown"
     #[test]
     fn auth_and_probe_env_parsers_reject_invalid_numbers_and_bools() {
         let auth_values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "bad")]);
-        let auth_err =
-            AuthConfig::from_env_with(|key| auth_values.get(key).cloned()).expect_err("invalid skew");
+        let auth_err = AuthConfig::from_env_with(|key| auth_values.get(key).cloned())
+            .expect_err("invalid skew");
         assert!(matches!(
             auth_err,
             ConfigError::InvalidConfig {
@@ -2769,7 +2798,10 @@ mode = "unknown"
     fn relay_probe_default_and_validate_reject_zero_timeout() {
         let default_probe = RelayProbeConfig::default();
         assert!(!default_probe.active);
-        assert_eq!(default_probe.timeout_secs, crate::DEFAULT_RELAY_PROBE_TIMEOUT_SECS);
+        assert_eq!(
+            default_probe.timeout_secs,
+            crate::DEFAULT_RELAY_PROBE_TIMEOUT_SECS
+        );
         assert_eq!(default_probe.secret_key, None);
 
         let invalid = RelayProbeConfig {
@@ -2932,7 +2964,11 @@ mode = "unknown"
         assert!(invalid.source().is_none());
 
         let invalid_bind = ConfigError::InvalidRelayBind("bad".to_string());
-        assert!(invalid_bind.to_string().contains("invalid relay bind address"));
+        assert!(
+            invalid_bind
+                .to_string()
+                .contains("invalid relay bind address")
+        );
         assert!(invalid_bind.source().is_none());
 
         let invalid_url = ConfigError::InvalidRelayUrl("ftp://relay".to_string());
@@ -2940,21 +2976,33 @@ mode = "unknown"
         assert!(invalid_url.source().is_none());
 
         let invalid_mode = ConfigError::InvalidRelayCompatibilityMode("oops".to_string());
-        assert!(invalid_mode.to_string().contains("invalid relay compatibility mode"));
+        assert!(
+            invalid_mode
+                .to_string()
+                .contains("invalid relay compatibility mode")
+        );
         assert!(invalid_mode.source().is_none());
 
         let invalid_probe = ConfigError::InvalidRelayProbeConfig {
             field: "relay_probe.timeout_secs",
             value: "0".to_string(),
         };
-        assert!(invalid_probe.to_string().contains("invalid relay probe config"));
+        assert!(
+            invalid_probe
+                .to_string()
+                .contains("invalid relay probe config")
+        );
         assert!(invalid_probe.source().is_none());
 
         let invalid_service = ConfigError::InvalidServiceBind {
             service: "relay",
             value: "bad".to_string(),
         };
-        assert!(invalid_service.to_string().contains("invalid relay bind address"));
+        assert!(
+            invalid_service
+                .to_string()
+                .contains("invalid relay bind address")
+        );
         assert!(invalid_service.source().is_none());
 
         let missing_env = ConfigError::MissingEnv("KEY");
@@ -2965,7 +3013,11 @@ mode = "unknown"
             field: "ui.repo_root",
             value: "".to_string(),
         };
-        assert!(invalid_config.to_string().contains("invalid config ui.repo_root"));
+        assert!(
+            invalid_config
+                .to_string()
+                .contains("invalid config ui.repo_root")
+        );
         assert!(invalid_config.source().is_none());
         let invalid_config_text = invalid_config.to_string();
         let unchanged = invalid_config.with_path(std::path::Path::new("/tmp/unused"));
@@ -2996,6 +3048,19 @@ mode = "unknown"
             .expect_err("blank required value should fail");
         assert!(matches!(missing, ConfigError::MissingEnv("TEST_REQUIRED")));
 
+        let mut missing_var = |_name: &'static str| None;
+        let missing = super::env_required_string_with("TEST_REQUIRED", &mut missing_var)
+            .expect_err("missing required value should fail");
+        assert!(matches!(missing, ConfigError::MissingEnv("TEST_REQUIRED")));
+
+        let mut optional_empty = |_name: &'static str| Some(" ".to_string());
+        let optional = super::env_optional_string_with("TEST_OPTIONAL", &mut optional_empty);
+        assert!(optional.is_none());
+
+        let mut optional_value = |_name: &'static str| Some("value".to_string());
+        let optional = super::env_optional_string_with("TEST_OPTIONAL", &mut optional_value);
+        assert_eq!(optional, Some("value".to_string()));
+
         let mut bool_empty = |_name: &'static str| Some(" ".to_string());
         let default_true = super::env_bool_default_with("TEST_BOOL", true, &mut bool_empty)
             .expect("blank bool uses default");
@@ -3013,6 +3078,17 @@ mode = "unknown"
             invalid,
             ConfigError::InvalidConfig { field, value } if field == "TEST_BOOL" && value == "invalid"
         ));
+
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_CONFIG_TEST_OPTIONAL_STRING", " ", || {
+            assert!(super::env_optional_string("GITTREE_CONFIG_TEST_OPTIONAL_STRING").is_none());
+        });
+        with_env_var("GITTREE_CONFIG_TEST_OPTIONAL_STRING", "value", || {
+            assert_eq!(
+                super::env_optional_string("GITTREE_CONFIG_TEST_OPTIONAL_STRING"),
+                Some("value".to_string())
+            );
+        });
     }
 
     #[test]
@@ -3020,7 +3096,10 @@ mode = "unknown"
         super::validate_service_bind("relay", "127.0.0.1:8080").expect("valid bind");
         assert!(matches!(
             super::validate_service_bind("relay", "bad"),
-            Err(ConfigError::InvalidServiceBind { service: "relay", .. })
+            Err(ConfigError::InvalidServiceBind {
+                service: "relay",
+                ..
+            })
         ));
 
         super::validate_relay_url("wss://relay.example").expect("valid relay url");
@@ -3031,11 +3110,14 @@ mode = "unknown"
         super::validate_http_url("ui.app_url", "https://example.test").expect("valid http url");
         assert!(matches!(
             super::validate_http_url("ui.app_url", "ws://relay.example"),
-            Err(ConfigError::InvalidConfig { field: "ui.app_url", .. })
+            Err(ConfigError::InvalidConfig {
+                field: "ui.app_url",
+                ..
+            })
         ));
 
-        let value = super::require_toml_field(Some("ok".to_string()), "x.field")
-            .expect("present value");
+        let value =
+            super::require_toml_field(Some("ok".to_string()), "x.field").expect("present value");
         assert_eq!(value, "ok");
 
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -3056,11 +3138,9 @@ mode = "unknown"
             assert_eq!(parsed, None);
         });
         with_env_var(super::ENV_RELAY_POLICY_MAX_LIMIT, " ", || {
-            let parsed = super::env_u64_policy(
-                super::ENV_RELAY_POLICY_MAX_LIMIT,
-                "relay_policy.max_limit",
-            )
-            .expect("blank policy u64");
+            let parsed =
+                super::env_u64_policy(super::ENV_RELAY_POLICY_MAX_LIMIT, "relay_policy.max_limit")
+                    .expect("blank policy u64");
             assert_eq!(parsed, None);
         });
     }
