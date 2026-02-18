@@ -1176,6 +1176,25 @@ mod tests {
     }
 
     #[test]
+    fn storage_from_env_rejects_invalid_idle_timeout() {
+        let err = storage_from_map(&[
+            (
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
+            (ENV_STORAGE_IDLE_TIMEOUT_SECS, "not-a-number"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidEnv {
+                key: ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn storage_from_env_rejects_invalid_pool_configuration() {
         let err = storage_from_map(&[
             (
@@ -1261,6 +1280,43 @@ mod tests {
             auth_service_config_from_map(&[(ENV_STORAGE_READ_URL, "postgres://localhost/gittree")])
                 .expect_err("missing forgejo config");
         assert!(is_auth_config_missing_env(&err));
+    }
+
+    #[test]
+    fn auth_service_config_from_env_with_maps_services_config_error() {
+        let err = auth_service_config_from_map(&[
+            ("GITTREE_AUTH_BIND", "bad-bind"),
+            (ENV_STORAGE_READ_URL, "postgres://localhost/gittree"),
+        ])
+        .expect_err("invalid service bind should fail");
+        assert!(matches!(
+            err,
+            AuthConfigError::Config(ConfigError::InvalidServiceBind {
+                service: "auth",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn auth_service_config_from_env_with_maps_auth_settings_error() {
+        let err = auth_service_config_from_map(&[
+            ("GITTREE_AUTH_MAX_SKEW_SECONDS", "bad"),
+            ("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000"),
+            ("GITTREE_FORGEJO_API_TOKEN", "token"),
+            ("GITTREE_FORGEJO_OWNER", "gittree"),
+            ("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087"),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret"),
+            (ENV_STORAGE_READ_URL, "postgres://localhost/gittree"),
+        ])
+        .expect_err("invalid auth settings should fail");
+        assert!(matches!(
+            err,
+            AuthConfigError::Config(ConfigError::InvalidConfig {
+                field: "auth.max_skew_seconds",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1421,6 +1477,52 @@ mod tests {
     }
 
     #[test]
+    fn build_repositories_maps_invalid_pool_options_to_auth_error() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 1,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = build_repositories(&config).expect_err("invalid pool bounds should fail");
+        assert!(err.to_string().contains("auth storage error"));
+    }
+
+    #[test]
+    fn build_repositories_maps_invalid_write_connection_to_auth_error() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: Some("not a url".to_string()),
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = build_repositories(&config).expect_err("invalid write url should fail");
+        assert!(err.to_string().contains("auth storage error"));
+    }
+
+    #[test]
     fn mock_transport_returns_error_when_response_queue_is_empty() {
         let transport = MockTransport::new(Vec::new());
         let request = ForgejoRequest {
@@ -1525,6 +1627,28 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_missing_host_header() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "POST", now, None);
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1697,6 +1821,40 @@ mod tests {
             ForgejoResponse {
                 status: 201,
                 body: r#"{"login":"","username":"","email":"empty@example.com"}"#.to_string(),
+            },
+        ];
+        let (state, _repos, _transport) = test_state(responses);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_profile_creation_for_invalid_forgejo_username() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/signup";
+        let event = signed_event(url, "POST", now, None);
+        let long_username = "a".repeat(256);
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: String::new(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: user_json(&long_username),
             },
         ];
         let (state, _repos, _transport) = test_state(responses);
@@ -2012,6 +2170,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ensure_profile_rejects_invalid_pubkey() {
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories;
+        let err = ensure_profile(&profiles, "bad-pubkey", "gt_test", 300)
+            .await
+            .expect_err("invalid pubkey should fail");
+        assert!(is_bad_request(&err));
+    }
+
+    #[tokio::test]
+    async fn ensure_profile_rejects_invalid_profile_payload() {
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories;
+        let pubkey = "ae".repeat(32);
+        let long_username = "a".repeat(256);
+        let err = ensure_profile(&profiles, &pubkey, &long_username, 300)
+            .await
+            .expect_err("invalid profile payload should fail");
+        assert!(is_bad_request(&err));
+    }
+
     #[test]
     fn username_and_pubkey_parsing_reject_invalid_values() {
         let username_err = username_from_pubkey("bad").unwrap_err();
@@ -2202,6 +2382,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_get_rejects_missing_host_header() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let event = signed_event(url, "GET", now, None);
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn profile_get_rejects_invalid_account_username_for_profile_bootstrap() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let event = signed_event(url, "GET", now, None);
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            account: Some(AccountRecord {
+                pubkey: hex::decode(&event.pubkey).expect("pubkey"),
+                forgejo_username: "a".repeat(256),
+            }),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn profile_get_rejects_invalid_nip98_signature_context() {
         let now = unix_timestamp();
         let url = "http://localhost/v1/profile";
@@ -2332,6 +2565,121 @@ mod tests {
                     .header("host", "localhost")
                     .header(AUTH_HEADER, format!("Nostr {token}"))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn profile_patch_rejects_missing_host_header() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let update = ProfileUpdate {
+            display_name: Some("Ada".to_string()),
+            ..ProfileUpdate::default()
+        };
+        let body = Bytes::from(serde_json::to_vec(&update).expect("update json"));
+        let hash = payload_hash(&body).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&hash));
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn profile_patch_rejects_invalid_account_username_for_profile_bootstrap() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let update = ProfileUpdate {
+            display_name: Some("Ada".to_string()),
+            ..ProfileUpdate::default()
+        };
+        let body = Bytes::from(serde_json::to_vec(&update).expect("update json"));
+        let hash = payload_hash(&body).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&hash));
+        let accounts: Arc<dyn AccountRepository> = Arc::new(ScriptedAccountRepository {
+            account: Some(AccountRecord {
+                pubkey: hex::decode(&event.pubkey).expect("pubkey"),
+                forgejo_username: "a".repeat(256),
+            }),
+            ..ScriptedAccountRepository::default()
+        });
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(ScriptedProfileRepository::default());
+        let (state, _transport) = scripted_state(Vec::new(), accounts, profiles);
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn profile_patch_rejects_invalid_profile_update_fields() {
+        let now = unix_timestamp();
+        let url = "http://localhost/v1/profile";
+        let event = signed_event(url, "PATCH", now, None);
+        let (state, repos, _transport) = test_state(Vec::new());
+        let account = AccountRecord::new(&event.pubkey, "alice").expect("account");
+        repos.upsert_account(account).await.expect("upsert");
+        let existing = ProfileRecord::new(
+            &event.pubkey,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+            StorageProfileVisibility::Private,
+            now,
+            now,
+        )
+        .expect("profile");
+        repos.upsert_profile(existing).await.expect("upsert");
+
+        let update = ProfileUpdate {
+            display_name: Some("a".repeat(256)),
+            ..ProfileUpdate::default()
+        };
+        let body = Bytes::from(serde_json::to_vec(&update).expect("update json"));
+        let hash = payload_hash(&body).expect("hash");
+        let event = signed_event(url, "PATCH", now, Some(&hash));
+
+        let app = build_router(state);
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
