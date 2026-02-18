@@ -2204,6 +2204,43 @@ mod tests {
     }
 
     #[test]
+    fn serve_maps_invalid_forgejo_api_token_to_forgejo_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_JSON", "false", || {
+            let config = ControlConfig {
+                bind: "127.0.0.1:0".to_string(),
+                auth: ControlAuthConfig {
+                    token: "token".to_string(),
+                    admin_keys: Vec::new(),
+                },
+                forgejo: ForgejoConfig {
+                    api_token: "   ".to_string(),
+                    ..test_config()
+                },
+                storage: gittree_storage::StorageConfig {
+                    read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                    write_connection: None,
+                    max_connections: 10,
+                    min_connections: 2,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: None,
+                },
+                relay_urls: vec!["ws://relay.local".to_string()],
+                public_git_url: "http://localhost:8085".to_string(),
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let err = runtime
+                .block_on(async { super::serve(config).await })
+                .expect_err("invalid forgejo token should fail");
+            assert!(matches!(err, super::ControlError::Forgejo(_)));
+        });
+    }
+
+    #[test]
     fn serve_starts_and_can_be_aborted() {
         if std::env::var("GITTREE_CONTROL_SERVE_SUBPROCESS").as_deref() == Ok("1") {
             let config = ControlConfig {
@@ -2582,6 +2619,60 @@ mod tests {
     }
 
     #[test]
+    fn storage_from_env_reports_invalid_min_connections_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", || {
+                    let err = super::storage_from_env().expect_err("invalid min connections");
+                    assert!(is_control_config_storage_invalid_env(
+                        &err,
+                        super::ENV_STORAGE_MIN_CONNECTIONS,
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn storage_from_env_reports_invalid_idle_timeout_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+                    let err = super::storage_from_env().expect_err("invalid idle timeout");
+                    assert!(is_control_config_storage_invalid_env(
+                        &err,
+                        super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn storage_from_env_reports_invalid_max_lifetime_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", || {
+                    let err = super::storage_from_env().expect_err("invalid max lifetime");
+                    assert!(is_control_config_storage_invalid_env(
+                        &err,
+                        super::ENV_STORAGE_MAX_LIFETIME_SECS,
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
     fn build_repositories_maps_invalid_pool_config_to_control_error() {
         let config = super::ControlConfig {
             bind: "127.0.0.1:0".to_string(),
@@ -2603,6 +2694,31 @@ mod tests {
             public_git_url: "http://localhost:8085".to_string(),
         };
         let err = super::build_repositories(&config).expect_err("invalid storage config");
+        assert!(is_control_error_storage(&err));
+    }
+
+    #[test]
+    fn build_repositories_maps_invalid_read_url_to_control_error() {
+        let config = super::ControlConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: ControlAuthConfig {
+                token: "token".to_string(),
+                admin_keys: Vec::new(),
+            },
+            forgejo: test_config(),
+            storage: gittree_storage::StorageConfig {
+                read_connection: "postgres://bad host".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["ws://relay.local".to_string()],
+            public_git_url: "http://localhost:8085".to_string(),
+        };
+        let err = super::build_repositories(&config).expect_err("invalid read url");
         assert!(is_control_error_storage(&err));
     }
 
@@ -4475,7 +4591,7 @@ mod tests {
         )
         .await
         .expect_err("invalid relay state should be rejected");
-        assert!(is_http_bad_request(&err), "{err:?}");
+        assert!(is_http_bad_request(&err));
         assert!(transport.requests().is_empty());
     }
 
