@@ -2131,22 +2131,13 @@ WHERE datname = $1
 
     #[tokio::test]
     async fn provision_with_schema_round_trip_and_cleanup_db() {
-        let require_db = require_db_tests();
-        let Some(test_db) =
-            TestDatabase::provision_with_schema(primary_test_database_base_url(), None).await
-        else {
-            skip_or_fail_without_db_with_policy(
-                "provision_with_schema_round_trip_and_cleanup_db",
-                require_db,
-            );
-            return;
-        };
-
-        assert!(matches!(&test_db.isolation, TestIsolation::Schema { .. }));
-        let repositories = test_db.repositories();
-        let mappings = repositories.list_mappings().await.expect("list mappings");
-        assert!(mappings.is_empty());
-        test_db.cleanup().await;
+        with_test_db_with_provision(
+            "provision_with_schema_round_trip_and_cleanup_db",
+            TestDatabase::provision_with_schema(primary_test_database_base_url(), None).await,
+            require_db_tests(),
+            noop_test_db,
+        )
+        .await;
     }
 
     #[tokio::test]
