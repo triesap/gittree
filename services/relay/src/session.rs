@@ -1486,6 +1486,29 @@ mod tests {
 
     #[test]
     #[should_panic]
+    fn assertion_helper_panics_on_wrong_count_variant() {
+        assert_count(
+            &ServerMessage::Notice {
+                message: "notice".to_string(),
+            },
+            1,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_count_mismatch() {
+        assert_count(
+            &ServerMessage::Count {
+                subscription_id: "sub".to_string(),
+                count: 1,
+            },
+            2,
+        );
+    }
+
+    #[test]
+    #[should_panic]
     fn assertion_helper_panics_on_non_rejected_ok() {
         assert_ok_rejected(&ServerMessage::Ok {
             event_id: "id".to_string(),
@@ -1501,6 +1524,24 @@ mod tests {
             event_id: "id".to_string(),
             accepted: false,
             message: String::new(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_non_rejected_non_empty_ok() {
+        assert_ok_rejected_with_non_empty_message(&ServerMessage::Ok {
+            event_id: "id".to_string(),
+            accepted: true,
+            message: "saved".to_string(),
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn assertion_helper_panics_on_non_ok_variant_for_rejected_non_empty() {
+        assert_ok_rejected_with_non_empty_message(&ServerMessage::Notice {
+            message: "notice".to_string(),
         });
     }
 
