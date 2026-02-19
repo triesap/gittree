@@ -1846,6 +1846,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_user_propagates_get_user_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
     async fn ensure_repo_for_owner_propagates_unexpected_lookup_status() {
         let responses = vec![ForgejoResponse {
             status: 500,
@@ -1858,6 +1879,20 @@ mod tests {
             .await
             .expect_err("unexpected status should fail");
         assert_eq!(err.to_string(), "forgejo response 500: down");
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_for_owner_propagates_lookup_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo_for_owner("alice", "demo", None)
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
     }
 
     #[tokio::test]
@@ -1909,6 +1944,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_repo_conflict_without_lookup_response_returns_request_error() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("conflict lookup without response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
     async fn ensure_repo_user_fallback_conflict_and_error_paths_are_mapped() {
         let responses = vec![
             ForgejoResponse {
@@ -1957,6 +2016,76 @@ mod tests {
             .await
             .expect_err("user fallback error should propagate");
         assert_eq!(err.to_string(), "forgejo response 500: down");
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_user_fallback_conflict_without_lookup_response_returns_request_error() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("fallback lookup without response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_repo_for_owner_conflict_without_lookup_response_returns_request_error() {
+        let responses = vec![ForgejoResponse {
+            status: 409,
+            body: "exists".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: None,
+                    private: None,
+                    auto_init: None,
+                },
+            )
+            .await
+            .expect_err("conflict lookup without response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_for_owner_propagates_list_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .ensure_webhook_for_owner("alice", "repo")
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
     }
 
     #[tokio::test]
