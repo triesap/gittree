@@ -151,7 +151,7 @@ pub fn validate_nip98(
         });
     }
 
-    let expected_id = build_event_id(event)?;
+    let expected_id = build_event_id(event);
     if !expected_id.eq_ignore_ascii_case(&event.id) {
         return Err(Nip98Error::InvalidEventId {
             expected: expected_id,
@@ -188,7 +188,7 @@ fn tag_value<'a>(tags: &'a [Vec<String>], key: &str) -> Option<&'a str> {
     None
 }
 
-fn build_event_id(event: &Nip98Event) -> Result<String, Nip98Error> {
+fn build_event_id(event: &Nip98Event) -> String {
     let payload = serde_json::json!([
         0,
         event.pubkey,
@@ -197,13 +197,14 @@ fn build_event_id(event: &Nip98Event) -> Result<String, Nip98Error> {
         event.tags,
         event.content
     ]);
-    let serialized = serialize_event_payload(&payload)?;
+    let serialized = payload.to_string();
     let mut hasher = sha2::Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
-    Ok(hex::encode(digest))
+    hex::encode(digest)
 }
 
+#[cfg(test)]
 fn serialize_event_payload<T: serde::Serialize>(payload: &T) -> Result<String, Nip98Error> {
     serde_json::to_string(payload).map_err(|err| Nip98Error::InvalidEventEncoding(err.to_string()))
 }
@@ -431,7 +432,7 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidMethod { .. }));
+        assert_eq!(err.to_string(), "method mismatch (expected GET, got POST)");
     }
 
     #[test]
@@ -445,7 +446,10 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidUrl { .. }));
+        assert_eq!(
+            err.to_string(),
+            "url mismatch (expected https://gittr.ee/v1/other, got https://gittr.ee/v1/signup)"
+        );
     }
 
     #[test]
@@ -462,7 +466,10 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::PayloadMismatch { .. }));
+        assert_eq!(
+            err.to_string(),
+            format!("payload mismatch (expected {}, got {})", expected, payload_hash)
+        );
     }
 
     #[test]
@@ -498,7 +505,15 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::TimeSkew { .. }));
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "created_at outside skew (created_at {}, now {}, max {})",
+                NOW - 1000,
+                NOW,
+                60
+            )
+        );
     }
 
     #[test]
@@ -513,7 +528,7 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidEventId { .. }));
+        assert!(err.to_string().starts_with("event id mismatch"));
     }
 
     #[test]
@@ -528,7 +543,7 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidKind(_)));
+        assert_eq!(err.to_string(), format!("invalid kind: {}", NIP98_KIND + 1));
     }
 
     #[test]
@@ -543,7 +558,7 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::MissingTag("u")));
+        assert_eq!(err.to_string(), "missing tag: u");
     }
 
     #[test]
@@ -560,7 +575,7 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::MissingTag("method")));
+        assert_eq!(err.to_string(), "missing tag: method");
     }
 
     #[test]
@@ -574,7 +589,7 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::MissingTag("payload")));
+        assert_eq!(err.to_string(), "missing tag: payload");
     }
 
     #[test]
@@ -589,7 +604,37 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidHex { field, .. } if field == "event.id"));
+        assert!(err.to_string().starts_with("invalid hex for event.id:"));
+    }
+
+    #[test]
+    fn rejects_invalid_pubkey_hex_in_validate() {
+        let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
+        event.pubkey = "zz".repeat(32);
+        let request = Nip98Request {
+            method: "POST",
+            url: "https://gittr.ee/v1/signup",
+            payload_sha256: None,
+            now: NOW,
+            max_skew_seconds: 60,
+        };
+        let err = validate_nip98(&event, &request).unwrap_err();
+        assert!(err.to_string().starts_with("invalid hex for event.pubkey:"));
+    }
+
+    #[test]
+    fn rejects_invalid_signature_hex_in_validate() {
+        let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
+        event.sig = "zz".repeat(64);
+        let request = Nip98Request {
+            method: "POST",
+            url: "https://gittr.ee/v1/signup",
+            payload_sha256: None,
+            now: NOW,
+            max_skew_seconds: 60,
+        };
+        let err = validate_nip98(&event, &request).unwrap_err();
+        assert!(err.to_string().starts_with("invalid hex for event.sig:"));
     }
 
     #[test]
@@ -598,7 +643,7 @@ mod tests {
         let secp = Secp256k1::new();
         let other_key = SecretKey::from_slice(&[2u8; 32]).expect("secret");
         let other_pair = Keypair::from_secret_key(&secp, &other_key);
-        let event_id = super::build_event_id(&event).expect("event id");
+        let event_id = super::build_event_id(&event);
         let sig = sign_event_id(&event_id, &other_pair, &secp);
         event.sig = sig;
         let request = Nip98Request {
@@ -609,7 +654,7 @@ mod tests {
             max_skew_seconds: 60,
         };
         let err = validate_nip98(&event, &request).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidSignature));
+        assert_eq!(err.to_string(), "invalid signature");
     }
 
     #[test]
@@ -617,7 +662,7 @@ mod tests {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.sig = "zz".to_string();
         let err = verify_signature(&event).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidSignatureEncoding));
+        assert_eq!(err.to_string(), "invalid signature encoding");
     }
 
     #[test]
@@ -625,7 +670,7 @@ mod tests {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.sig = "11".repeat(63);
         let err = verify_signature(&event).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidSignatureEncoding));
+        assert_eq!(err.to_string(), "invalid signature encoding");
     }
 
     #[test]
@@ -633,7 +678,7 @@ mod tests {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.id = "zz".to_string();
         let err = verify_signature(&event).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidEventIdEncoding));
+        assert_eq!(err.to_string(), "invalid event id encoding");
     }
 
     #[test]
@@ -641,7 +686,7 @@ mod tests {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.id = "11".repeat(31);
         let err = verify_signature(&event).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidEventIdEncoding));
+        assert_eq!(err.to_string(), "invalid event id encoding");
     }
 
     #[test]
@@ -649,7 +694,7 @@ mod tests {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.pubkey = "zz".to_string();
         let err = verify_signature(&event).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidPublicKey));
+        assert_eq!(err.to_string(), "invalid public key");
     }
 
     #[test]
@@ -657,7 +702,7 @@ mod tests {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.pubkey = "11".repeat(31);
         let err = verify_signature(&event).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidPublicKey));
+        assert_eq!(err.to_string(), "invalid public key");
     }
 
     #[test]
@@ -665,7 +710,7 @@ mod tests {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
         event.pubkey = "ff".repeat(32);
         let err = verify_signature(&event).unwrap_err();
-        assert!(matches!(err, Nip98Error::InvalidPublicKey));
+        assert_eq!(err.to_string(), "invalid public key");
     }
 
     struct FailingSerialize;
@@ -685,6 +730,8 @@ mod tests {
     #[test]
     fn serialize_event_payload_maps_serialization_failures() {
         let err = serialize_event_payload(&FailingSerialize).expect_err("serialization must fail");
-        assert!(matches!(err, Nip98Error::InvalidEventEncoding(_)));
+        assert!(err
+            .to_string()
+            .starts_with("invalid event encoding:"));
     }
 }
