@@ -4464,6 +4464,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_arc_store_covers_req_and_count_rejections() {
+        let req_rate_store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let mut req_rate_limited = Session::with_policy(
+            req_rate_store,
+            Policy {
+                max_requests_per_min: Some(1),
+                ..Policy::default()
+            },
+        );
+        let _ = req_rate_limited
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-1".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        let req_rate_limited_response = req_rate_limited
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-2".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert_notice(&req_rate_limited_response[0]);
+
+        let (req_auth_tx, _) = tokio::sync::broadcast::channel(4);
+        let req_auth_store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let mut req_auth_required = Session::with_broadcast(
+            req_auth_store,
+            Policy::default(),
+            None,
+            req_auth_tx,
+            true,
+            false,
+        );
+        let req_auth_response = req_auth_required
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-auth".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert_eq!(
+            closed_reason(&req_auth_response[0]),
+            super::AUTH_REQUIRED_REASON
+        );
+
+        let req_parse_store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let mut req_parse_error = Session::new(req_parse_store);
+        let req_parse_response = req_parse_error
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-parse".to_string(),
+                filters: vec![json!({"ids": "not-an-array"})],
+            })
+            .await;
+        assert_notice(&req_parse_response[0]);
+
+        let count_limit_store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let mut count_limit_exceeded = Session::with_policy(
+            count_limit_store,
+            Policy {
+                max_limit: Some(1),
+                ..Policy::default()
+            },
+        );
+        let count_limit_response = count_limit_exceeded
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count-limit".to_string(),
+                filters: vec![json!({"limit": 2})],
+            })
+            .await;
+        assert_notice(&count_limit_response[0]);
+
+        let mut count_query_error = Session::new(scripted_store_dyn(ScriptedStore::query_error()));
+        let count_query_response = count_query_error
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count-query".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert_notice(&count_query_response[0]);
+    }
+
+    #[tokio::test]
     async fn req_generates_invite_claim_when_member() {
         let membership = Arc::new(InMemoryRepositories::new());
         let tenant_id = "tenant-1";
