@@ -1357,7 +1357,7 @@ mod tests {
     use super::Session;
     use crate::{
         AdmissionDecider, ClientMessage, EventStore, MemoryStore, NostrEvent, Policy,
-        ServerMessage, StoreError, StoreOutcome,
+        ServerMessage, StoreError, StoreOutcome, SubscriptionId,
     };
     use async_trait::async_trait;
     use gittree_core::{AdmissionDecision, EventFilter};
@@ -1400,6 +1400,26 @@ mod tests {
                 accepted: false,
                 ..
             }
+        ));
+    }
+
+    fn assert_ok_accepted(message: &ServerMessage) {
+        assert!(matches!(
+            message,
+            ServerMessage::Ok {
+                accepted: true,
+                ..
+            }
+        ));
+    }
+
+    fn assert_some_ok_accepted(message: Option<&ServerMessage>) {
+        assert!(matches!(
+            message,
+            Some(ServerMessage::Ok {
+                accepted: true,
+                ..
+            })
         ));
     }
 
@@ -2281,10 +2301,7 @@ mod tests {
         let response = session
             .handle_message(ClientMessage::Auth(serde_json::to_value(event).unwrap()))
             .await;
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok { accepted: true, .. }
-        ));
+        assert_ok_accepted(&response[0]);
     }
 
     #[tokio::test]
@@ -2683,10 +2700,7 @@ mod tests {
                 serde_json::to_value(event.clone()).unwrap(),
             ))
             .await;
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok { accepted: true, .. }
-        ));
+        assert_ok_accepted(&response[0]);
 
         let pubkey_bytes = hex::decode(&event.pubkey).expect("pubkey");
         let record = membership
@@ -3195,10 +3209,7 @@ mod tests {
                 serde_json::to_value(join_event).expect("event"),
             ))
             .await;
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok { accepted: true, .. }
-        ));
+        assert_ok_accepted(&response[0]);
     }
 
     #[tokio::test]
@@ -3300,10 +3311,7 @@ mod tests {
                 serde_json::to_value(event.clone()).unwrap(),
             ))
             .await;
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok { accepted: true, .. }
-        ));
+        assert_ok_accepted(&response[0]);
 
         let record = membership
             .membership_by_pubkey(tenant_id, &pubkey_bytes)
@@ -4247,10 +4255,7 @@ mod tests {
             .handle_membership_event(&join_event, 10)
             .await
             .expect("membership response");
-        assert!(matches!(
-            join_responses.first(),
-            Some(ServerMessage::Ok { accepted: true, .. })
-        ));
+        assert_some_ok_accepted(join_responses.first());
     }
 
     #[tokio::test]
@@ -4314,10 +4319,7 @@ mod tests {
             .handle_membership_event(&leave_event, 30)
             .await
             .expect("leave response");
-        assert!(matches!(
-            leave_responses.first(),
-            Some(ServerMessage::Ok { accepted: true, .. })
-        ));
+        assert_some_ok_accepted(leave_responses.first());
     }
 
     #[tokio::test]
@@ -4428,10 +4430,7 @@ mod tests {
                 serde_json::to_value(signed_event("arc-core-valid")).expect("event json"),
             ))
             .await;
-        assert!(matches!(
-            valid_event.first(),
-            Some(ServerMessage::Ok { accepted: true, .. })
-        ));
+        assert_some_ok_accepted(valid_event.first());
 
         let auth_kind_event = signed_event_with_tags(
             "arc-core-auth-kind",
@@ -4542,6 +4541,181 @@ mod tests {
             })
             .await;
         assert_notice(&count_query_response[0]);
+    }
+
+    #[tokio::test]
+    async fn session_arc_store_covers_membership_error_branches() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let tenant_id = "tenant-arc-membership-branches";
+        let membership = Arc::new(InMemoryRepositories::new());
+
+        let mut missing_tenant = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+            .with_membership(None, Some(membership.clone()));
+        authenticate_session(&mut missing_tenant).await;
+        let missing_tenant_err = missing_tenant
+            .require_membership()
+            .await
+            .expect_err("tenant is required");
+        assert!(missing_tenant_err.contains("relay does not support membership"));
+
+        let missing_auth =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        let missing_auth_err = missing_auth
+            .require_membership()
+            .await
+            .expect_err("auth is required");
+        assert_eq!(missing_auth_err, super::AUTH_REQUIRED_REASON);
+
+        let mut invalid_auth_pubkey =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        invalid_auth_pubkey.auth = Some(super::AuthState {
+            challenge: "arc-invalid-pubkey".to_string(),
+            authenticated_pubkey: Some("zz".to_string()),
+        });
+        let invalid_auth_pubkey_err = invalid_auth_pubkey
+            .require_membership()
+            .await
+            .expect_err("pubkey must decode");
+        assert!(invalid_auth_pubkey_err.contains("invalid pubkey"));
+
+        let mut missing_member = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        authenticate_session(&mut missing_member).await;
+        let missing_member_err = missing_member
+            .require_membership()
+            .await
+            .expect_err("member must exist");
+        assert!(missing_member_err.contains("membership required"));
+
+        let lookup_error_membership = Arc::new(ScriptedMembership::new("membership_by_pubkey"));
+        let mut lookup_error = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(lookup_error_membership));
+        authenticate_session(&mut lookup_error).await;
+        let lookup_error_message = lookup_error
+            .require_membership()
+            .await
+            .expect_err("membership lookup should fail");
+        assert!(lookup_error_message.contains("membership_by_pubkey failure"));
+
+        let inactive_membership = Arc::new(InMemoryRepositories::new());
+        let inactive_pubkey = hex::decode(&signed_event("arc-inactive-member").pubkey).expect("pubkey");
+        inactive_membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: inactive_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_LEFT.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+        let mut inactive_member = Session::with_policy_and_auth(store, Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(inactive_membership));
+        authenticate_session(&mut inactive_member).await;
+        let inactive_member_err = inactive_member
+            .require_membership()
+            .await
+            .expect_err("inactive members are rejected");
+        assert!(inactive_member_err.contains("membership required"));
+    }
+
+    #[tokio::test]
+    async fn session_arc_store_covers_dispatch_and_virtual_branch_edges() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+
+        let mut dispatch_session = Session::new(store.clone());
+        dispatch_session
+            .registry
+            .insert(SubscriptionId::new("arc-empty".to_string()), Vec::new());
+        let dispatch = dispatch_session.dispatch_event(&signed_event("arc-empty-dispatch"));
+        assert!(dispatch.is_empty());
+
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x73; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+
+        let tenant_id = "tenant-arc-virtual-branches";
+        let virtual_membership = Arc::new(InMemoryRepositories::new());
+        let virtual_pubkey = hex::decode(&signed_event("arc-virtual-member").pubkey).expect("pubkey");
+        virtual_membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: virtual_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+
+        let mut non_matching_virtual = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(virtual_membership.clone()))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            )
+            .with_relay_url(Some("wss://relay.example".to_string()));
+        authenticate_session(&mut non_matching_virtual).await;
+        let non_matching_filters = vec![crate::Filter {
+            ids: Vec::new(),
+            authors: vec!["ff".repeat(32)],
+            kinds: vec![super::NIP43_MEMBERSHIP_KIND],
+            since: None,
+            until: None,
+            limit: None,
+            tags: std::collections::BTreeMap::new(),
+        }];
+        let non_matching_events = non_matching_virtual
+            .virtual_events(&non_matching_filters, 100)
+            .await
+            .expect("virtual events");
+        assert!(non_matching_events.is_empty());
+
+        let list_error_membership = Arc::new(ScriptedMembership::new("list_memberships"));
+        let list_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(list_error_membership))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        let membership_filters = vec![crate::Filter {
+            ids: Vec::new(),
+            authors: Vec::new(),
+            kinds: vec![super::NIP43_MEMBERSHIP_KIND],
+            since: None,
+            until: None,
+            limit: None,
+            tags: std::collections::BTreeMap::new(),
+        }];
+        let membership_error = list_error_session
+            .virtual_events(&membership_filters, 100)
+            .await
+            .expect_err("list_memberships errors should propagate");
+        assert!(membership_error.contains("list_memberships failure"));
+
+        let invite_error_session = Session::new(store)
+            .with_membership(Some(tenant_id.to_string()), Some(virtual_membership))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        let invite_filters = vec![crate::Filter {
+            ids: Vec::new(),
+            authors: Vec::new(),
+            kinds: vec![super::NIP43_INVITE_KIND],
+            since: None,
+            until: None,
+            limit: None,
+            tags: std::collections::BTreeMap::new(),
+        }];
+        let invite_error = invite_error_session
+            .virtual_events(&invite_filters, 100)
+            .await
+            .expect_err("invite requires authenticated member");
+        assert!(invite_error.contains(super::AUTH_REQUIRED_REASON));
     }
 
     #[tokio::test]
@@ -4920,10 +5094,7 @@ mod tests {
             .handle_message(ClientMessage::Event(serde_json::to_value(event).unwrap()))
             .await;
         assert_eq!(response.len(), 1);
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok { accepted: true, .. }
-        ));
+        assert_ok_accepted(&response[0]);
     }
 
     #[tokio::test]
@@ -5002,10 +5173,7 @@ mod tests {
                 serde_json::to_value(event.clone()).unwrap(),
             ))
             .await;
-        assert!(matches!(
-            response[0],
-            ServerMessage::Ok { accepted: true, .. }
-        ));
+        assert_ok_accepted(&response[0]);
 
         let received = rx.recv().await.expect("broadcast");
         assert_eq!(received.id, event.id);
