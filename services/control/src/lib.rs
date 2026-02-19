@@ -6482,4 +6482,263 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
+
+    #[tokio::test]
+    async fn dyn_forgejo_client_exercises_additional_method_paths() {
+        let repo_json = |owner: &str, name: &str| {
+            format!(
+                r#"{{"full_name":"{owner}/{name}","name":"{name}","owner":{{"username":"{owner}"}},"html_url":"http://localhost/{owner}/{name}"}}"#
+            )
+        };
+        let user_json = |username: &str| {
+            format!(
+                r#"{{"login":"{username}","username":"{username}","email":"{username}@example.com"}}"#
+            )
+        };
+
+        let responses = vec![
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("gittree", "existing"),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("gittree", "org-success"),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("gittree", "user-fallback"),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("gittree", "org-conflict"),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("gittree", "user-conflict"),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "{}".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: r#"{"name":"acme","full_name":"Acme"}"#.to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: repo_json("alice", "owner-success"),
+            },
+            ForgejoResponse {
+                status: 409,
+                body: "exists".to_string(),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("alice", "owner-conflict"),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: r#"{"number":7,"url":"http://localhost/api/v1/repos/alice/demo/pulls/7"}"#
+                    .to_string(),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: user_json("existing"),
+            },
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: user_json("alice"),
+            },
+        ];
+        let (state, transport, _repos) = test_state(responses);
+        let client = &state.forgejo;
+
+        assert_eq!(
+            client
+                .ensure_repo("existing", None)
+                .await
+                .expect("existing repo")
+                .full_name,
+            "gittree/existing"
+        );
+        assert_eq!(
+            client
+                .ensure_repo("org-success", None)
+                .await
+                .expect("org create repo")
+                .full_name,
+            "gittree/org-success"
+        );
+        assert_eq!(
+            client
+                .ensure_repo("user-fallback", None)
+                .await
+                .expect("user fallback repo")
+                .full_name,
+            "gittree/user-fallback"
+        );
+        assert_eq!(
+            client
+                .ensure_repo("org-conflict", None)
+                .await
+                .expect("org conflict lookup repo")
+                .full_name,
+            "gittree/org-conflict"
+        );
+        assert_eq!(
+            client
+                .ensure_repo("user-conflict", None)
+                .await
+                .expect("user conflict lookup repo")
+                .full_name,
+            "gittree/user-conflict"
+        );
+
+        client
+            .ensure_webhook_for_owner("alice", "demo")
+            .await
+            .expect("ensure webhook");
+
+        assert_eq!(
+            client
+                .create_org(
+                    "admin",
+                    gittree_forgejo::ForgejoCreateOrg {
+                        username: "acme".to_string(),
+                        full_name: Some("Acme".to_string()),
+                        description: None,
+                        visibility: None,
+                    },
+                )
+                .await
+                .expect("create org")
+                .name,
+            "acme"
+        );
+
+        assert_eq!(
+            client
+                .create_repo_for_owner(
+                    "alice",
+                    gittree_forgejo::ForgejoCreateRepo {
+                        name: "owner-success".to_string(),
+                        description: None,
+                        private: None,
+                        auto_init: None,
+                    },
+                )
+                .await
+                .expect("create repo for owner")
+                .full_name,
+            "alice/owner-success"
+        );
+        assert_eq!(
+            client
+                .create_repo_for_owner(
+                    "alice",
+                    gittree_forgejo::ForgejoCreateRepo {
+                        name: "owner-conflict".to_string(),
+                        description: None,
+                        private: None,
+                        auto_init: None,
+                    },
+                )
+                .await
+                .expect("repo for owner conflict lookup")
+                .full_name,
+            "alice/owner-conflict"
+        );
+
+        assert_eq!(
+            client
+                .create_pull_request(
+                    "alice",
+                    "demo",
+                    gittree_forgejo::ForgejoCreatePullRequest {
+                        head: "feature".to_string(),
+                        base: "main".to_string(),
+                        title: "Add feature".to_string(),
+                        body: None,
+                    },
+                )
+                .await
+                .expect("create pull request")
+                .number,
+            7
+        );
+
+        assert_eq!(
+            client
+                .ensure_user(gittree_forgejo::ForgejoCreateUser {
+                    username: "existing".to_string(),
+                    email: "existing@example.com".to_string(),
+                    password: "secret".to_string(),
+                    full_name: None,
+                    must_change_password: None,
+                    send_notify: None,
+                })
+                .await
+                .expect("existing user")
+                .username,
+            "existing"
+        );
+        assert_eq!(
+            client
+                .ensure_user(gittree_forgejo::ForgejoCreateUser {
+                    username: "alice".to_string(),
+                    email: "alice@example.com".to_string(),
+                    password: "secret".to_string(),
+                    full_name: None,
+                    must_change_password: None,
+                    send_notify: None,
+                })
+                .await
+                .expect("created user")
+                .username,
+            "alice"
+        );
+
+        assert_eq!(transport.requests().len(), 23);
+    }
 }
