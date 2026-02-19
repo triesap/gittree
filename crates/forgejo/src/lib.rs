@@ -813,8 +813,8 @@ mod tests {
         .await
         .expect_err("error");
         let message = err.to_string();
-        assert!(message.starts_with("forgejo request error:"), "{message}");
-        assert!(message.contains("boom"), "{message}");
+        assert!(message.starts_with("forgejo request error:"));
+        assert!(message.contains("boom"));
     }
 
     #[test]
@@ -844,8 +844,8 @@ mod tests {
             body: "teapot".to_string(),
         };
         let message = format!("{response}");
-        assert!(message.contains("418"), "{message}");
-        assert!(message.contains("teapot"), "{message}");
+        assert!(message.contains("418"));
+        assert!(message.contains("teapot"));
 
         let not_found = ForgejoError::NotFound("missing".to_string());
         assert!(format!("{not_found}").contains("missing"));
@@ -860,8 +860,8 @@ mod tests {
         };
         let err = response.into_user().expect_err("parse");
         let message = err.to_string();
-        assert!(message.starts_with("forgejo parse error:"), "{message}");
-        assert!(message.contains("mismatched login and username"), "{message}");
+        assert!(message.starts_with("forgejo parse error:"));
+        assert!(message.contains("mismatched login and username"));
     }
 
     #[test]
@@ -873,8 +873,8 @@ mod tests {
         };
         let err = response.into_user().expect_err("parse");
         let message = err.to_string();
-        assert!(message.starts_with("forgejo parse error:"), "{message}");
-        assert!(message.contains("missing username"), "{message}");
+        assert!(message.starts_with("forgejo parse error:"));
+        assert!(message.contains("missing username"));
     }
 
     #[test]
@@ -1678,8 +1678,8 @@ mod tests {
             .await
             .expect_err("negative number should fail");
         let message = err.to_string();
-        assert!(message.starts_with("forgejo parse error:"), "{message}");
-        assert!(message.contains("invalid pull request number"), "{message}");
+        assert!(message.starts_with("forgejo parse error:"));
+        assert!(message.contains("invalid pull request number"));
     }
 
     #[tokio::test]
@@ -1814,7 +1814,7 @@ mod tests {
             .await
             .expect_err("invalid payload should fail");
         let message = err.to_string();
-        assert!(message.starts_with("forgejo parse error:"), "{message}");
+        assert!(message.starts_with("forgejo parse error:"));
     }
 
     #[test]
@@ -1971,7 +1971,7 @@ mod tests {
             .await
             .expect_err("invalid url should fail");
         let message = err.to_string();
-        assert!(message.starts_with("forgejo request error:"), "{message}");
+        assert!(message.starts_with("forgejo request error:"));
     }
 
     #[tokio::test]
