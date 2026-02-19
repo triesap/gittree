@@ -63,7 +63,7 @@ mod tests {
         let decision =
             evaluate_admission(KIND_GIT_REPO_STATE.0, "pubkey", "event", &[], Some("relay"))
                 .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 
     #[test]
@@ -89,7 +89,7 @@ mod tests {
             Some("gittr.ee"),
         )
         .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 
     #[test]
@@ -115,7 +115,12 @@ mod tests {
             Some("gittr.ee"),
         )
         .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+        assert_eq!(
+            decision,
+            AdmissionDecision::Reject {
+                reason: "repository announcement missing clone tags".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -141,7 +146,12 @@ mod tests {
             Some("gittr.ee"),
         )
         .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+        assert_eq!(
+            decision,
+            AdmissionDecision::Reject {
+                reason: "repository announcement missing relays tags".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -167,7 +177,12 @@ mod tests {
             Some("gittr.ee"),
         )
         .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+        assert_eq!(
+            decision,
+            AdmissionDecision::Reject {
+                reason: "repository announcement does not list relay host".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -188,17 +203,69 @@ mod tests {
         let decision =
             evaluate_admission(KIND_GIT_REPO_ANNOUNCEMENT.0, "pubkey", "event", &tags, None)
                 .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+        assert_eq!(
+            decision,
+            AdmissionDecision::Reject {
+                reason: "missing relay host for announcement check".to_string(),
+            }
+        );
     }
 
     #[test]
     fn admission_requires_related_filters_for_other_kinds() {
+        let expected_filters = crate::event_filters::build_related_event_filters(
+            KIND_GIT_PATCH.0,
+            "pubkey",
+            "eventid",
+            &[],
+        );
         let decision =
             evaluate_admission(KIND_GIT_PATCH.0, "pubkey", "eventid", &[], Some("relay"))
                 .expect("decision");
-        assert!(matches!(
+        assert_eq!(
             decision,
-            AdmissionDecision::RequiresRelatedEvents { ref filters } if !filters.is_empty()
-        ));
+            AdmissionDecision::RequiresRelatedEvents {
+                filters: expected_filters,
+            }
+        );
+    }
+
+    #[test]
+    fn admission_rejects_announcement_with_invalid_tags_payload() {
+        let err = evaluate_admission(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            "pubkey",
+            "event",
+            &[vec!["d".to_string()]],
+            Some("gittr.ee"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::CoreError::MissingField("d")));
+    }
+
+    #[test]
+    fn admission_errors_for_invalid_relay_host_format() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let tags = announcement.to_tags();
+        let err = evaluate_admission(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            "pubkey",
+            "event",
+            &tags,
+            Some("://invalid"),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "invalid field grasp_url: ://invalid");
     }
 }
