@@ -149,19 +149,19 @@ pub struct ForgejoConfig {
 
 impl ForgejoConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_env_with(|key| std::env::var(key).ok())
+        let mut get_var = |key| std::env::var(key).ok();
+        Self::from_env_with(&mut get_var)
     }
 
-    pub fn from_env_with<F>(mut get_var: F) -> Result<Self, ConfigError>
-    where
-        F: FnMut(&'static str) -> Option<String>,
-    {
-        let base_url = env_required_string_with(ENV_FORGEJO_BASE_URL, &mut get_var)?;
-        let api_token = env_required_string_with(ENV_FORGEJO_API_TOKEN, &mut get_var)?;
-        let owner = env_required_string_with(ENV_FORGEJO_OWNER, &mut get_var)?;
-        let webhook_url = env_required_string_with(ENV_FORGEJO_WEBHOOK_URL, &mut get_var)?;
-        let webhook_secret = env_required_string_with(ENV_FORGEJO_WEBHOOK_SECRET, &mut get_var)?;
-        let repo_private = env_bool_default_with(ENV_FORGEJO_REPO_PRIVATE, true, &mut get_var)?;
+    pub fn from_env_with(
+        get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let base_url = env_required_string_with(ENV_FORGEJO_BASE_URL, get_var)?;
+        let api_token = env_required_string_with(ENV_FORGEJO_API_TOKEN, get_var)?;
+        let owner = env_required_string_with(ENV_FORGEJO_OWNER, get_var)?;
+        let webhook_url = env_required_string_with(ENV_FORGEJO_WEBHOOK_URL, get_var)?;
+        let webhook_secret = env_required_string_with(ENV_FORGEJO_WEBHOOK_SECRET, get_var)?;
+        let repo_private = env_bool_default_with(ENV_FORGEJO_REPO_PRIVATE, true, get_var)?;
         let config = Self {
             base_url,
             api_token,
@@ -318,19 +318,19 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_env_with(|key| std::env::var(key).ok())
+        let mut get_var = |key| std::env::var(key).ok();
+        Self::from_env_with(&mut get_var)
     }
 
-    pub fn from_env_with<F>(mut get_var: F) -> Result<Self, ConfigError>
-    where
-        F: FnMut(&'static str) -> Option<String>,
-    {
-        let email_domain = match env_optional_string_with(ENV_AUTH_EMAIL_DOMAIN, &mut get_var) {
+    pub fn from_env_with(
+        get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let email_domain = match env_optional_string_with(ENV_AUTH_EMAIL_DOMAIN, get_var) {
             Some(value) => value,
             None => DEFAULT_AUTH_EMAIL_DOMAIN.to_string(),
         };
         let max_skew_seconds =
-            match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, &mut get_var) {
+            match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, get_var) {
                 Some(value) => match value.parse::<u64>() {
                     Ok(parsed) => parsed,
                     Err(_) => {
@@ -643,63 +643,61 @@ impl Default for ServicesConfig {
 
 impl ServicesConfig {
     pub fn from_env() -> Self {
-        Self::from_env_with(|key| std::env::var(key).ok())
+        let mut get_var = |key| std::env::var(key).ok();
+        Self::from_env_with(&mut get_var)
     }
 
-    pub fn from_env_with<F>(mut get_var: F) -> Self
-    where
-        F: FnMut(&'static str) -> Option<String>,
-    {
+    pub fn from_env_with(get_var: &mut dyn FnMut(&'static str) -> Option<String>) -> Self {
         Self {
             relay: ServiceConfig::new(env_or_default_with(
                 ENV_RELAY_BIND,
                 DEFAULT_RELAY_BIND,
-                &mut get_var,
+                get_var,
             )),
             admission: ServiceConfig::new(env_or_default_with(
                 ENV_ADMISSION_BIND,
                 DEFAULT_ADMISSION_BIND,
-                &mut get_var,
+                get_var,
             )),
             state: ServiceConfig::new(env_or_default_with(
                 ENV_STATE_BIND,
                 DEFAULT_STATE_BIND,
-                &mut get_var,
+                get_var,
             )),
             coordinator: ServiceConfig::new(env_or_default_with(
                 ENV_COORDINATOR_BIND,
                 DEFAULT_COORDINATOR_BIND,
-                &mut get_var,
+                get_var,
             )),
             sync: ServiceConfig::new(env_or_default_with(
                 ENV_SYNC_BIND,
                 DEFAULT_SYNC_BIND,
-                &mut get_var,
+                get_var,
             )),
             git_http: ServiceConfig::new(env_or_default_with(
                 ENV_GIT_HTTP_BIND,
                 DEFAULT_GIT_HTTP_BIND,
-                &mut get_var,
+                get_var,
             )),
             ui: ServiceConfig::new(env_or_default_with(
                 ENV_UI_BIND,
                 DEFAULT_UI_BIND,
-                &mut get_var,
+                get_var,
             )),
             webhook: ServiceConfig::new(env_or_default_with(
                 ENV_WEBHOOK_BIND,
                 DEFAULT_WEBHOOK_BIND,
-                &mut get_var,
+                get_var,
             )),
             control: ServiceConfig::new(env_or_default_with(
                 ENV_CONTROL_BIND,
                 DEFAULT_CONTROL_BIND,
-                &mut get_var,
+                get_var,
             )),
             auth: ServiceConfig::new(env_or_default_with(
                 ENV_AUTH_BIND,
                 DEFAULT_AUTH_BIND,
-                &mut get_var,
+                get_var,
             )),
         }
     }
@@ -734,13 +732,13 @@ impl ServicesConfig {
     }
 
     pub fn from_env_validated() -> Result<Self, ConfigError> {
-        Self::from_env_validated_with(|key| std::env::var(key).ok())
+        let mut get_var = |key| std::env::var(key).ok();
+        Self::from_env_validated_with(&mut get_var)
     }
 
-    pub fn from_env_validated_with<F>(get_var: F) -> Result<Self, ConfigError>
-    where
-        F: FnMut(&'static str) -> Option<String>,
-    {
+    pub fn from_env_validated_with(
+        get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
         let config = Self::from_env_with(get_var);
         config.validate()?;
         Ok(config)
@@ -756,13 +754,15 @@ impl ServicesConfig {
 }
 
 fn env_or_default(key: &'static str, default: &str) -> String {
-    env_or_default_with(key, default, &mut |name| std::env::var(name).ok())
+    let mut get_var = |name| std::env::var(name).ok();
+    env_or_default_with(key, default, &mut get_var)
 }
 
-fn env_or_default_with<F>(key: &'static str, default: &str, get_var: &mut F) -> String
-where
-    F: FnMut(&'static str) -> Option<String>,
-{
+fn env_or_default_with(
+    key: &'static str,
+    default: &str,
+    get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+) -> String {
     env_or_default_from(get_var(key), default)
 }
 
@@ -770,10 +770,10 @@ fn env_or_default_from(value: Option<String>, default: &str) -> String {
     value.unwrap_or_else(|| default.to_string())
 }
 
-fn env_required_string_with<F>(key: &'static str, get_var: &mut F) -> Result<String, ConfigError>
-where
-    F: FnMut(&'static str) -> Option<String>,
-{
+fn env_required_string_with(
+    key: &'static str,
+    get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+) -> Result<String, ConfigError> {
     env_required_string_from(key, get_var(key))
 }
 
@@ -788,14 +788,11 @@ fn env_required_string_from(
     Ok(value)
 }
 
-fn env_bool_default_with<F>(
+fn env_bool_default_with(
     key: &'static str,
     default: bool,
-    get_var: &mut F,
-) -> Result<bool, ConfigError>
-where
-    F: FnMut(&'static str) -> Option<String>,
-{
+    get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+) -> Result<bool, ConfigError> {
     env_bool_default_from(key, default, get_var(key))
 }
 
@@ -818,10 +815,10 @@ fn env_bool_default_from(
     }
 }
 
-fn env_optional_string_with<F>(key: &'static str, get_var: &mut F) -> Option<String>
-where
-    F: FnMut(&'static str) -> Option<String>,
-{
+fn env_optional_string_with(
+    key: &'static str,
+    get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+) -> Option<String> {
     env_optional_string_from(get_var(key))
 }
 
@@ -2290,7 +2287,8 @@ max_content_len = 0
             (ENV_RELAY_BIND, "127.0.0.1:10080"),
             (ENV_AUTH_BIND, "127.0.0.1:10089"),
         ]);
-        let services = ServicesConfig::from_env_with(|key| values.get(key).cloned());
+        let mut get_var = |key| values.get(key).cloned();
+        let services = ServicesConfig::from_env_with(&mut get_var);
         assert_eq!(services.relay.bind, "127.0.0.1:10080");
         assert_eq!(services.auth.bind, "127.0.0.1:10089");
         assert_eq!(services.git_http.bind, DEFAULT_GIT_HTTP_BIND);
@@ -2299,8 +2297,8 @@ max_content_len = 0
     #[test]
     fn services_config_from_env_validated_with_rejects_invalid_bind() {
         let values = env_map(&[(ENV_STATE_BIND, "bad")]);
-        let err = ServicesConfig::from_env_validated_with(|key| values.get(key).cloned())
-            .expect_err("invalid state bind");
+        let mut get_var = |key| values.get(key).cloned();
+        let err = ServicesConfig::from_env_validated_with(&mut get_var).expect_err("invalid state bind");
         assert!(matches!(
             err,
             ConfigError::InvalidServiceBind {
@@ -2489,7 +2487,8 @@ bind = "127.0.0.1:9101"
 
     #[test]
     fn services_config_from_env_validated_with_accepts_default_values() {
-        let services = ServicesConfig::from_env_validated_with(|_| None).expect("validated");
+        let mut get_var = |_| None;
+        let services = ServicesConfig::from_env_validated_with(&mut get_var).expect("validated");
         assert_eq!(services.relay.bind, DEFAULT_RELAY_BIND);
         assert_eq!(services.auth.bind, DEFAULT_AUTH_BIND);
     }
@@ -2570,7 +2569,8 @@ bind = "127.0.0.1:9120"
             (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
             (ENV_FORGEJO_REPO_PRIVATE, "false"),
         ]);
-        let config = ForgejoConfig::from_env_with(|key| values.get(key).cloned()).expect("forgejo");
+        let mut get_var = |key| values.get(key).cloned();
+        let config = ForgejoConfig::from_env_with(&mut get_var).expect("forgejo");
         assert_eq!(config.owner, "gittree");
         assert!(!config.repo_private);
     }
@@ -2595,7 +2595,8 @@ bind = "127.0.0.1:9120"
         ] {
             let mut values = base_values.clone();
             values.remove(missing_key);
-            let err = ForgejoConfig::from_env_with(|key| values.get(key).cloned())
+            let mut get_var = |key| values.get(key).cloned();
+            let err = ForgejoConfig::from_env_with(&mut get_var)
                 .expect_err("missing required env should fail");
             assert!(matches!(err, ConfigError::MissingEnv(key) if key == missing_key));
         }
@@ -2611,7 +2612,8 @@ bind = "127.0.0.1:9120"
             (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
             (ENV_FORGEJO_REPO_PRIVATE, "notabool"),
         ]);
-        let err = ForgejoConfig::from_env_with(|key| values.get(key).cloned())
+        let mut get_var = |key| values.get(key).cloned();
+        let err = ForgejoConfig::from_env_with(&mut get_var)
             .expect_err("invalid repo_private should fail");
         assert!(matches!(
             err,
@@ -2632,7 +2634,8 @@ bind = "127.0.0.1:9120"
             (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
             (ENV_FORGEJO_REPO_PRIVATE, "false"),
         ]);
-        let err = ForgejoConfig::from_env_with(|key| invalid_base_url.get(key).cloned())
+        let mut get_var = |key| invalid_base_url.get(key).cloned();
+        let err = ForgejoConfig::from_env_with(&mut get_var)
             .expect_err("invalid forgejo base url should fail");
         assert!(matches!(
             err,
@@ -2650,7 +2653,8 @@ bind = "127.0.0.1:9120"
             (ENV_FORGEJO_WEBHOOK_SECRET, "secret"),
             (ENV_FORGEJO_REPO_PRIVATE, "false"),
         ]);
-        let err = ForgejoConfig::from_env_with(|key| invalid_webhook_url.get(key).cloned())
+        let mut get_var = |key| invalid_webhook_url.get(key).cloned();
+        let err = ForgejoConfig::from_env_with(&mut get_var)
             .expect_err("invalid forgejo webhook url should fail");
         assert!(matches!(
             err,
@@ -3026,7 +3030,8 @@ auth_url = "ws://localhost:8089"
             (ENV_AUTH_EMAIL_DOMAIN, "example.test"),
             (ENV_AUTH_MAX_SKEW_SECONDS, "120"),
         ]);
-        let config = AuthConfig::from_env_with(|key| values.get(key).cloned()).expect("auth");
+        let mut get_var = |key| values.get(key).cloned();
+        let config = AuthConfig::from_env_with(&mut get_var).expect("auth");
         assert_eq!(config.email_domain, "example.test");
         assert_eq!(config.max_skew_seconds, 120);
     }
@@ -3034,7 +3039,8 @@ auth_url = "ws://localhost:8089"
     #[test]
     fn auth_config_from_env_with_rejects_zero_skew() {
         let values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "0")]);
-        let err = AuthConfig::from_env_with(|key| values.get(key).cloned())
+        let mut get_var = |key| values.get(key).cloned();
+        let err = AuthConfig::from_env_with(&mut get_var)
             .expect_err("zero skew should fail");
         assert!(matches!(
             err,
@@ -3376,7 +3382,8 @@ repo_root = "/tmp/gittree-ui"
     #[test]
     fn auth_and_probe_env_parsers_reject_invalid_numbers_and_bools() {
         let auth_values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "bad")]);
-        let auth_err = AuthConfig::from_env_with(|key| auth_values.get(key).cloned())
+        let mut get_var = |key| auth_values.get(key).cloned();
+        let auth_err = AuthConfig::from_env_with(&mut get_var)
             .expect_err("invalid skew");
         assert!(matches!(
             auth_err,

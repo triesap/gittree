@@ -50,19 +50,17 @@ pub struct AuthServiceConfig {
 
 impl AuthServiceConfig {
     pub fn from_env() -> Result<Self, AuthConfigError> {
-        Self::from_env_with(|key| std::env::var(key).ok())
+        let mut get_var = |key| std::env::var(key).ok();
+        Self::from_env_with(&mut get_var)
     }
 
-    fn from_env_with<F>(mut get_var: F) -> Result<Self, AuthConfigError>
-    where
-        F: FnMut(&'static str) -> Option<String>,
-    {
-        let services = ServicesConfig::from_env_validated_with(&mut get_var)
-            .map_err(AuthConfigError::Config)?;
-        let auth = AuthSettings::from_env_with(&mut get_var).map_err(AuthConfigError::Config)?;
-        let forgejo =
-            ForgejoConfig::from_env_with(&mut get_var).map_err(AuthConfigError::Config)?;
-        let storage = storage_from_env_with(&mut get_var)?;
+    fn from_env_with(
+        get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, AuthConfigError> {
+        let services = ServicesConfig::from_env_validated_with(get_var).map_err(AuthConfigError::Config)?;
+        let auth = AuthSettings::from_env_with(get_var).map_err(AuthConfigError::Config)?;
+        let forgejo = ForgejoConfig::from_env_with(get_var).map_err(AuthConfigError::Config)?;
+        let storage = storage_from_env_with(get_var)?;
         Ok(Self {
             bind: services.auth.bind,
             auth,
@@ -117,18 +115,17 @@ impl std::fmt::Display for StorageConfigError {
 
 impl std::error::Error for StorageConfigError {}
 
-fn storage_from_env_with<F>(mut get_var: F) -> Result<StorageConfig, AuthConfigError>
-where
-    F: FnMut(&'static str) -> Option<String>,
-{
+fn storage_from_env_with(
+    get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+) -> Result<StorageConfig, AuthConfigError> {
     let read_connection = get_var(ENV_STORAGE_READ_URL).ok_or(AuthConfigError::Storage(
         StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL),
     ))?;
     let write_connection = get_var(ENV_STORAGE_WRITE_URL);
-    let max_connections = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, &mut get_var)?.unwrap_or(10);
-    let min_connections = env_u32_with(ENV_STORAGE_MIN_CONNECTIONS, &mut get_var)?.unwrap_or(2);
-    let idle_timeout_secs = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, &mut get_var)?;
-    let max_lifetime_secs = env_u64_with(ENV_STORAGE_MAX_LIFETIME_SECS, &mut get_var)?;
+    let max_connections = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, get_var)?.unwrap_or(10);
+    let min_connections = env_u32_with(ENV_STORAGE_MIN_CONNECTIONS, get_var)?.unwrap_or(2);
+    let idle_timeout_secs = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, get_var)?;
+    let max_lifetime_secs = env_u64_with(ENV_STORAGE_MAX_LIFETIME_SECS, get_var)?;
     let application_name = get_var(ENV_STORAGE_APP_NAME);
 
     let config = StorageConfig {
@@ -150,10 +147,10 @@ where
     Ok(config)
 }
 
-fn env_u32_with<F>(key: &'static str, mut get_var: F) -> Result<Option<u32>, AuthConfigError>
-where
-    F: FnMut(&'static str) -> Option<String>,
-{
+fn env_u32_with(
+    key: &'static str,
+    get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+) -> Result<Option<u32>, AuthConfigError> {
     parse_env_u32(key, get_var(key))
 }
 
@@ -175,10 +172,10 @@ fn parse_env_u32(key: &'static str, value: Option<String>) -> Result<Option<u32>
     }
 }
 
-fn env_u64_with<F>(key: &'static str, mut get_var: F) -> Result<Option<u64>, AuthConfigError>
-where
-    F: FnMut(&'static str) -> Option<String>,
-{
+fn env_u64_with(
+    key: &'static str,
+    get_var: &mut dyn FnMut(&'static str) -> Option<String>,
+) -> Result<Option<u64>, AuthConfigError> {
     parse_env_u64(key, get_var(key))
 }
 
@@ -239,15 +236,14 @@ impl std::error::Error for AuthError {
 }
 
 pub fn init_observability() -> Result<ObservabilityHandle, AuthError> {
-    init_observability_with(|| {
-        gittree_observability::ObservabilityConfig::from_env("gittree-auth")
-    })
+    let mut load_config =
+        || gittree_observability::ObservabilityConfig::from_env("gittree-auth");
+    init_observability_with(&mut load_config)
 }
 
-fn init_observability_with<F>(load_config: F) -> Result<ObservabilityHandle, AuthError>
-where
-    F: FnOnce() -> Result<gittree_observability::ObservabilityConfig, ObservabilityConfigError>,
-{
+fn init_observability_with(
+    load_config: &mut dyn FnMut() -> Result<gittree_observability::ObservabilityConfig, ObservabilityConfigError>,
+) -> Result<ObservabilityHandle, AuthError> {
     let config = load_config().map_err(AuthError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(AuthError::Observability)?;
     Ok(handle)
@@ -290,39 +286,43 @@ async fn serve_inner(bind: &str, router: Router) -> Result<(), AuthError> {
 }
 
 pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
-    serve_with_init(config, init_observability).await
+    let init_fn: Box<dyn FnOnce() -> Result<(), AuthError> + Send> =
+        Box::new(|| init_observability().map(|_| ()));
+    serve_with_init(config, init_fn).await
 }
 
-async fn serve_with_init<FInit, TInit>(
+async fn serve_with_init(
     config: AuthServiceConfig,
-    init_fn: FInit,
-) -> Result<(), AuthError>
-where
-    FInit: FnOnce() -> Result<TInit, AuthError>,
-{
-    let _observability = init_fn()?;
+    init_fn: Box<dyn FnOnce() -> Result<(), AuthError> + Send>,
+) -> Result<(), AuthError> {
+    init_fn()?;
     serve_without_observability(config).await
 }
 
 async fn serve_without_observability(config: AuthServiceConfig) -> Result<(), AuthError> {
-    serve_without_observability_with(config, |cfg| {
+    let build_repositories_fn: Box<
+        dyn FnOnce(
+                &AuthServiceConfig,
+            ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
+            + Send,
+    > = Box::new(|cfg: &AuthServiceConfig| {
         let repositories = Arc::new(build_repositories(cfg)?);
         let accounts: Arc<dyn AccountRepository> = repositories.clone();
         let profiles: Arc<dyn ProfileRepository> = repositories;
         Ok((accounts, profiles))
-    })
-    .await
+    });
+    serve_without_observability_with(config, build_repositories_fn).await
 }
 
-async fn serve_without_observability_with<FRepos>(
+async fn serve_without_observability_with(
     config: AuthServiceConfig,
-    build_repositories_fn: FRepos,
-) -> Result<(), AuthError>
-where
-    FRepos: FnOnce(
-        &AuthServiceConfig,
-    ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>,
-{
+    build_repositories_fn: Box<
+        dyn FnOnce(
+                &AuthServiceConfig,
+            ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
+            + Send,
+    >,
+) -> Result<(), AuthError> {
     let (accounts, profiles) = build_repositories_fn(&config)?;
     let bind = config.bind;
     let auth = config.auth;
@@ -849,7 +849,8 @@ mod tests {
             .iter()
             .map(|(key, value)| (*key, (*value).to_string()))
             .collect();
-        storage_from_env_with(|key| values.get(key).cloned())
+        let mut get_var = |key| values.get(key).cloned();
+        storage_from_env_with(&mut get_var)
     }
 
     fn auth_service_config_from_map(
@@ -859,7 +860,8 @@ mod tests {
             .iter()
             .map(|(key, value)| (*key, (*value).to_string()))
             .collect();
-        AuthServiceConfig::from_env_with(|key| values.get(key).cloned())
+        let mut get_var = |key| values.get(key).cloned();
+        AuthServiceConfig::from_env_with(&mut get_var)
     }
 
     fn is_storage_invalid_config(err: &AuthConfigError) -> bool {
@@ -1205,7 +1207,8 @@ mod tests {
 
     #[test]
     fn storage_from_env_requires_read_connection() {
-        let err = storage_from_env_with(|_| None).unwrap_err();
+        let mut get_var = |_| None;
+        let err = storage_from_env_with(&mut get_var).unwrap_err();
         assert!(matches!(
             err,
             AuthConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
@@ -1310,18 +1313,18 @@ mod tests {
 
     #[test]
     fn env_parsers_treat_empty_values_as_absent() {
-        let empty_u32 = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, |_| Some("   ".to_string()))
-            .expect("empty u32");
+        let mut get_var_u32 = |_| Some("   ".to_string());
+        let empty_u32 = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, &mut get_var_u32).expect("empty u32");
         assert!(empty_u32.is_none());
-        let empty_u64 = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some(String::new()))
-            .expect("empty u64");
+        let mut get_var_u64 = |_| Some(String::new());
+        let empty_u64 = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, &mut get_var_u64).expect("empty u64");
         assert!(empty_u64.is_none());
     }
 
     #[test]
     fn env_u64_with_rejects_invalid_values() {
-        let err =
-            env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some("bad".to_string())).unwrap_err();
+        let mut get_var = |_| Some("bad".to_string());
+        let err = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, &mut get_var).unwrap_err();
         assert!(matches!(
             err,
             AuthConfigError::Storage(StorageConfigError::InvalidEnv {
@@ -1523,8 +1526,8 @@ mod tests {
 
     #[test]
     fn env_u64_with_parses_valid_values() {
-        let parsed = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, |_| Some("120".to_string()))
-            .expect("valid u64");
+        let mut get_var = |_| Some("120".to_string());
+        let parsed = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, &mut get_var).expect("valid u64");
         assert_eq!(parsed, Some(120));
     }
 
@@ -1786,12 +1789,19 @@ mod tests {
                 application_name: None,
             },
         };
-        let handle = tokio::spawn(super::serve_without_observability_with(config, |_| {
+        let build_repositories_fn: Box<
+            dyn FnOnce(
+                    &AuthServiceConfig,
+                ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
+                + Send,
+        > = Box::new(|_| {
             let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
             let accounts: Arc<dyn AccountRepository> = repositories.clone();
             let profiles: Arc<dyn ProfileRepository> = repositories;
             Ok((accounts, profiles))
-        }));
+        });
+        let handle =
+            tokio::spawn(super::serve_without_observability_with(config, build_repositories_fn));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!handle.is_finished());
         handle.abort();
@@ -1826,13 +1836,14 @@ mod tests {
 
     #[test]
     fn init_observability_reports_config_error_for_invalid_env() {
-        let err = super::init_observability_with(|| {
+        let mut load_config = || {
             Err(ObservabilityConfigError::InvalidEnv {
                 key: "GITTREE_LOG_JSON",
                 value: "not-a-bool".to_string(),
             })
-        })
-        .expect_err("invalid observability env");
+        };
+        let err = super::init_observability_with(&mut load_config)
+            .expect_err("invalid observability env");
         assert!(is_auth_error_observability_config(&err));
     }
 
@@ -1843,8 +1854,12 @@ mod tests {
             ..gittree_observability::ObservabilityConfig::default()
         };
 
-        let first = super::init_observability_with(|| Ok(config.clone()));
-        let second = super::init_observability_with(|| Ok(config));
+        let first_value = config.clone();
+        let second_value = config;
+        let mut first_config = move || Ok(first_value.clone());
+        let mut second_config = move || Ok(second_value.clone());
+        let first = super::init_observability_with(&mut first_config);
+        let second = super::init_observability_with(&mut second_config);
         let err = first
             .err()
             .or_else(|| second.err())
@@ -1871,9 +1886,12 @@ mod tests {
                 application_name: None,
             },
         };
-        let err = super::serve_with_init(config, || -> Result<(), AuthError> {
-            Err(AuthError::Serve("observability init failed".to_string()))
-        })
+        let err = super::serve_with_init(
+            config,
+            Box::new(|| -> Result<(), AuthError> {
+                Err(AuthError::Serve("observability init failed".to_string()))
+            }),
+        )
         .await
         .expect_err("init error");
         assert!(is_auth_error_serve(&err));
@@ -1901,7 +1919,7 @@ mod tests {
                 application_name: None,
             },
         };
-        let err = super::serve_with_init(config, || Ok(()))
+        let err = super::serve_with_init(config, Box::new(|| Ok(())))
             .await
             .expect_err("forgejo token error");
         assert!(is_auth_error_forgejo(&err));
