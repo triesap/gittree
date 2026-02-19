@@ -2,7 +2,6 @@ use gittree_relay::{RelayCli, RelayConfig, RelayError, serve};
 use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
-#[cfg(not(test))]
 use std::process::ExitCode;
 
 type RelayFuture = Pin<Box<dyn Future<Output = Result<(), RelayError>> + 'static>>;
@@ -13,7 +12,11 @@ type ServeFn = dyn Fn(RelayConfig) -> RelayFuture;
 async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
     let args = std::env::args_os().collect::<Vec<OsString>>();
-    if let Some(message) = run_and_capture_error(Box::pin(run_with_args(args))).await {
+    exit_code_from_error_message(run_and_capture_error(Box::pin(run_with_args(args))).await)
+}
+
+fn exit_code_from_error_message(message: Option<String>) -> ExitCode {
+    if let Some(message) = message {
         eprintln!("{message}");
         return ExitCode::FAILURE;
     }
@@ -56,7 +59,10 @@ async fn run_with_args_and_serve(args: Vec<OsString>, serve_fn: &ServeFn) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::{RelayFuture, run_and_capture_error, run_with_args, run_with_args_and_serve, serve_boxed};
+    use super::{
+        RelayFuture, exit_code_from_error_message, run_and_capture_error, run_with_args,
+        run_with_args_and_serve, serve_boxed,
+    };
     use gittree_relay::{RelayConfig, RelayError};
     use std::ffi::OsString;
     use std::fs;
@@ -310,5 +316,14 @@ bind = "127.0.0.1:9123"
                 .await
                 .expect("error message");
         assert_eq!(result, "relay service failed: relay serve error: boom");
+    }
+
+    #[test]
+    fn exit_code_from_error_message_maps_none_and_some() {
+        assert_eq!(exit_code_from_error_message(None), std::process::ExitCode::SUCCESS);
+        assert_eq!(
+            exit_code_from_error_message(Some("relay service failed: boom".to_string())),
+            std::process::ExitCode::FAILURE
+        );
     }
 }

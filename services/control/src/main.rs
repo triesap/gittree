@@ -5,7 +5,11 @@ use std::process::ExitCode;
 #[tokio::main]
 async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
-    if let Err(err) = run().await {
+    exit_code_from_run_result(run().await)
+}
+
+fn exit_code_from_run_result(result: Result<(), ControlError>) -> ExitCode {
+    if let Err(err) = result {
         eprintln!("control service failed: {err}");
         return ExitCode::FAILURE;
     }
@@ -35,7 +39,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{run, run_with};
+    use super::{exit_code_from_run_result, run, run_with};
     use gittree_config::{ConfigError, ControlAuthConfig, ForgejoConfig};
     use gittree_control::{ControlConfig, ControlConfigError, ControlError, serve};
     use gittree_storage::StorageConfig;
@@ -156,6 +160,14 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ControlError::Serve(message)) if message == "boom"));
+    }
+
+    #[test]
+    fn exit_code_from_run_result_maps_ok_and_error_results() {
+        let ok: Result<(), ControlError> = Ok(());
+        let err = Err(ControlError::Serve("boom".to_string()));
+        assert_eq!(exit_code_from_run_result(ok), ExitCode::SUCCESS);
+        assert_eq!(exit_code_from_run_result(err), ExitCode::FAILURE);
     }
 
     #[test]
