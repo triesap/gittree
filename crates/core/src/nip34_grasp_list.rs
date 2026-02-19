@@ -7,7 +7,7 @@ pub struct UserGraspList {
 }
 
 impl UserGraspList {
-    pub fn from_tags(tags: &[Vec<String>]) -> Result<Self> {
+    pub fn from_tags_lossy(tags: &[Vec<String>]) -> Self {
         let mut urls = Vec::new();
 
         for tag in tags {
@@ -18,7 +18,11 @@ impl UserGraspList {
             }
         }
 
-        Ok(Self { urls })
+        Self { urls }
+    }
+
+    pub fn from_tags(tags: &[Vec<String>]) -> Result<Self> {
+        Ok(Self::from_tags_lossy(tags))
     }
 
     pub fn to_tags(&self) -> Vec<Vec<String>> {

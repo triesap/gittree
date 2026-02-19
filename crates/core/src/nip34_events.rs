@@ -43,7 +43,7 @@ impl Nip34Event {
                 event: StatusEvent::from_tags(tags)?,
             }),
             k if k == KIND_USER_GRASP_LIST.0 => {
-                Ok(Nip34Event::UserGraspList(UserGraspList::from_tags(tags)?))
+                Ok(Nip34Event::UserGraspList(UserGraspList::from_tags_lossy(tags)))
             }
             _ => Err(CoreError::InvalidField {
                 field: "kind",
@@ -141,7 +141,6 @@ mod tests {
         let tags = announcement.to_tags();
         let event = Nip34Event::parse(KIND_GIT_REPO_ANNOUNCEMENT.0, &tags).expect("parse");
         assert_eq!(event.kind(), KIND_GIT_REPO_ANNOUNCEMENT);
-        assert!(matches!(event, Nip34Event::RepoAnnouncement(_)));
     }
 
     #[test]
@@ -162,7 +161,6 @@ mod tests {
         let tags = pr.to_tags();
         let event = Nip34Event::parse(KIND_GIT_PULL_REQUEST.0, &tags).expect("parse");
         assert_eq!(event.kind(), KIND_GIT_PULL_REQUEST);
-        assert!(matches!(event, Nip34Event::PullRequest(_)));
     }
 
     #[test]
@@ -180,7 +178,6 @@ mod tests {
         let tags = status.to_tags();
         let event = Nip34Event::parse(KIND_GIT_STATUS_OPEN.0, &tags).expect("parse");
         assert_eq!(event.kind(), KIND_GIT_STATUS_OPEN);
-        assert!(matches!(event, Nip34Event::Status { .. }));
     }
 
     #[test]
@@ -191,7 +188,6 @@ mod tests {
         let tags = list.to_tags();
         let event = Nip34Event::parse(KIND_USER_GRASP_LIST.0, &tags).expect("parse");
         assert_eq!(event.kind(), KIND_USER_GRASP_LIST);
-        assert!(matches!(event, Nip34Event::UserGraspList(_)));
     }
 
     #[test]
@@ -229,7 +225,7 @@ mod tests {
         };
         let tags = list.to_tags();
         let event = Nip34Event::parse_validated(KIND_USER_GRASP_LIST.0, &tags).expect("parse");
-        assert!(matches!(event, Nip34Event::UserGraspList(_)));
+        assert_eq!(event.kind(), KIND_USER_GRASP_LIST);
     }
 
     #[test]
@@ -247,7 +243,7 @@ mod tests {
         };
         let parsed_state =
             Nip34Event::parse(KIND_GIT_REPO_STATE.0, &repo_state.to_tags()).expect("state parse");
-        assert!(matches!(parsed_state, Nip34Event::RepoState(_)));
+        assert_eq!(parsed_state.kind(), KIND_GIT_REPO_STATE);
 
         let patch = Patch {
             repo_address: format!("30617:{pubkey}:repo"),
@@ -269,7 +265,7 @@ mod tests {
         };
         let parsed_patch =
             Nip34Event::parse(KIND_GIT_PATCH.0, &patch.to_tags()).expect("patch parse");
-        assert!(matches!(parsed_patch, Nip34Event::Patch(_)));
+        assert_eq!(parsed_patch.kind(), KIND_GIT_PATCH);
 
         let update = PullRequestUpdate {
             repo_address: format!("30617:{pubkey}:repo"),
@@ -283,7 +279,7 @@ mod tests {
         };
         let parsed_update = Nip34Event::parse(KIND_GIT_PULL_REQUEST_UPDATE.0, &update.to_tags())
             .expect("update parse");
-        assert!(matches!(parsed_update, Nip34Event::PullRequestUpdate(_)));
+        assert_eq!(parsed_update.kind(), KIND_GIT_PULL_REQUEST_UPDATE);
 
         let issue = Issue {
             repo_address: format!("30617:{pubkey}:repo"),
@@ -293,7 +289,7 @@ mod tests {
         };
         let parsed_issue =
             Nip34Event::parse(KIND_GIT_ISSUE.0, &issue.to_tags()).expect("issue parse");
-        assert!(matches!(parsed_issue, Nip34Event::Issue(_)));
+        assert_eq!(parsed_issue.kind(), KIND_GIT_ISSUE);
     }
 
     #[test]
@@ -317,8 +313,33 @@ mod tests {
         ] {
             let event = Nip34Event::parse(kind.0, &tags).expect("status parse");
             assert_eq!(event.kind(), kind);
-            assert!(matches!(event, Nip34Event::Status { .. }));
         }
+    }
+
+    #[test]
+    fn parse_rejects_invalid_tags_for_each_variant() {
+        let tags = Vec::<Vec<String>>::new();
+        for kind in [
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            KIND_GIT_REPO_STATE.0,
+            KIND_GIT_PATCH.0,
+            KIND_GIT_PULL_REQUEST.0,
+            KIND_GIT_PULL_REQUEST_UPDATE.0,
+            KIND_GIT_ISSUE.0,
+            KIND_GIT_STATUS_OPEN.0,
+        ] {
+            let err = Nip34Event::parse(kind, &tags).expect_err("missing required fields");
+            assert!(!matches!(err, crate::CoreError::InvalidField { field: "kind", .. }));
+        }
+    }
+
+    #[test]
+    fn parse_validated_propagates_parse_errors() {
+        let err = Nip34Event::parse_validated(9999, &[]).expect_err("invalid kind");
+        assert!(matches!(
+            err,
+            crate::CoreError::InvalidField { field: "kind", .. }
+        ));
     }
 
     #[test]
