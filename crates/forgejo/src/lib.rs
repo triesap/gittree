@@ -271,7 +271,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             .send(ForgejoRequest {
                 method: ForgejoMethod::Post,
                 url,
-                body: Some(serialize_json(&user)?),
+                body: Some(serialize_json(&user)),
             })
             .await?;
         match response.status {
@@ -300,7 +300,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             .send(ForgejoRequest {
                 method: ForgejoMethod::Post,
                 url,
-                body: Some(serialize_json(&org)?),
+                body: Some(serialize_json(&org)),
             })
             .await?;
         match response.status {
@@ -335,7 +335,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             .send(ForgejoRequest {
                 method: ForgejoMethod::Post,
                 url,
-                body: Some(serialize_json(&payload)?),
+                body: Some(serialize_json(&payload)),
             })
             .await?;
         match response.status {
@@ -369,7 +369,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             .send(ForgejoRequest {
                 method: ForgejoMethod::Post,
                 url,
-                body: Some(serialize_json(&request)?),
+                body: Some(serialize_json(&request)),
             })
             .await?;
         match response.status {
@@ -463,7 +463,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             .send(ForgejoRequest {
                 method: ForgejoMethod::Post,
                 url: org_url,
-                body: Some(serialize_json(&payload)?),
+                body: Some(serialize_json(&payload)),
             })
             .await?;
         match response.status {
@@ -471,9 +471,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
                 let repo = parse_json::<ForgejoRepoResponse>(&response.body)?;
                 return Ok(repo.into_repo());
             }
-            403 | 404 => {
-                tracing::debug!(status = response.status, "org repo creation unavailable");
-            }
+            403 | 404 => {}
             409 => {
                 return self
                     .get_repo(name)
@@ -494,7 +492,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             .send(ForgejoRequest {
                 method: ForgejoMethod::Post,
                 url: user_url,
-                body: Some(serialize_json(&payload)?),
+                body: Some(serialize_json(&payload)),
             })
             .await?;
         match response.status {
@@ -571,7 +569,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
             .send(ForgejoRequest {
                 method: ForgejoMethod::Post,
                 url,
-                body: Some(serialize_json(&payload)?),
+                body: Some(serialize_json(&payload)),
             })
             .await?;
         match response.status {
@@ -730,8 +728,9 @@ fn parse_json<T: for<'de> Deserialize<'de>>(input: &str) -> Result<T, ForgejoErr
     serde_json::from_str(input).map_err(|err| ForgejoError::Parse(err.to_string()))
 }
 
-fn serialize_json<T: Serialize>(value: &T) -> Result<String, ForgejoError> {
-    serde_json::to_string(value).map_err(|err| ForgejoError::Parse(err.to_string()))
+fn serialize_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .expect("forgejo payload serialization should not fail for static request structs")
 }
 
 #[cfg(test)]
@@ -845,20 +844,16 @@ mod tests {
     }
 
     #[test]
-    fn serialize_json_maps_serializer_failure() {
-        struct FailingSerialize;
-
-        impl serde::Serialize for FailingSerialize {
-            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                Err(serde::ser::Error::custom("serialize boom"))
-            }
-        }
-
-        let err = super::serialize_json(&FailingSerialize).expect_err("serialize should fail");
-        assert_eq!(err.to_string(), "forgejo parse error: serialize boom");
+    fn serialize_json_serializes_request_payloads() {
+        let body = super::serialize_json(&ForgejoCreateUser {
+            username: "alice".to_string(),
+            email: "alice@example.com".to_string(),
+            full_name: None,
+            password: "secret".to_string(),
+            must_change_password: None,
+            send_notify: None,
+        });
+        assert!(body.contains("\"username\":\"alice\""));
     }
 
     #[test]
