@@ -1488,6 +1488,11 @@ mod tests {
         ];
         let transport = MockTransport::new(responses);
         let client = ForgejoClient::with_transport(test_config(), transport.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
 
         let repo = client.ensure_repo("fallback", None).await.expect("repo");
         assert_eq!(repo.full_name, "gittree/fallback");
@@ -2109,6 +2114,28 @@ mod tests {
             .await
             .expect_err("unexpected status should fail");
         assert_eq!(err.to_string(), "forgejo response 503: down");
+    }
+
+    #[tokio::test]
+    async fn create_repo_for_owner_propagates_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: None,
+                    private: None,
+                    auto_init: None,
+                },
+            )
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
     }
 
     #[tokio::test]
