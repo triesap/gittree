@@ -37,6 +37,7 @@ mod tests {
     use gittree_auth::{AuthConfigError, AuthError, AuthServiceConfig, StorageConfigError, serve};
     use gittree_config::{AuthConfig as AuthSettings, ForgejoConfig};
     use gittree_storage::StorageConfig;
+    use std::ffi::OsString;
     use std::process::Command;
     use std::sync::Mutex;
 
@@ -44,6 +45,17 @@ mod tests {
 
     fn is_config_error(result: &Result<(), AuthError>) -> bool {
         matches!(result, Err(AuthError::Config(_)))
+    }
+
+    fn restore_auth_bind(previous: Option<OsString>) {
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("GITTREE_AUTH_BIND", value);
+            },
+            None => unsafe {
+                std::env::remove_var("GITTREE_AUTH_BIND");
+            },
+        }
     }
 
     fn sample_config() -> AuthServiceConfig {
@@ -84,14 +96,24 @@ mod tests {
             std::env::set_var("GITTREE_AUTH_BIND", "not-a-socket");
         }
         let result = run().await;
-        match previous {
-            Some(value) => unsafe {
-                std::env::set_var("GITTREE_AUTH_BIND", value);
-            },
-            None => unsafe {
-                std::env::remove_var("GITTREE_AUTH_BIND");
-            },
+        restore_auth_bind(previous);
+        assert!(is_config_error(&result));
+    }
+
+    #[tokio::test]
+    async fn run_reports_config_error_for_invalid_bind_when_env_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let original = std::env::var_os("GITTREE_AUTH_BIND");
+        unsafe {
+            std::env::remove_var("GITTREE_AUTH_BIND");
         }
+        let previous = std::env::var_os("GITTREE_AUTH_BIND");
+        unsafe {
+            std::env::set_var("GITTREE_AUTH_BIND", "not-a-socket");
+        }
+        let result = run().await;
+        restore_auth_bind(previous);
+        restore_auth_bind(original);
         assert!(is_config_error(&result));
     }
 
@@ -158,5 +180,19 @@ mod tests {
         let serve_err = Err(AuthError::Serve("boom".to_string()));
         assert!(!is_config_error(&ok));
         assert!(!is_config_error(&serve_err));
+    }
+
+    #[test]
+    fn restore_auth_bind_covers_some_and_none() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let original = std::env::var_os("GITTREE_AUTH_BIND");
+
+        restore_auth_bind(Some(OsString::from("127.0.0.1:9191")));
+        assert_eq!(std::env::var("GITTREE_AUTH_BIND").ok().as_deref(), Some("127.0.0.1:9191"));
+
+        restore_auth_bind(None);
+        assert!(std::env::var_os("GITTREE_AUTH_BIND").is_none());
+
+        restore_auth_bind(original);
     }
 }
