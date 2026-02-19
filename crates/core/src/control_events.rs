@@ -144,6 +144,18 @@ mod tests {
     use crate::kinds::KIND_GITTREE_CONTROL;
     use crate::CoreError;
 
+    fn assert_invalid_field(json: &str, field: &'static str) {
+        let err = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::InvalidField {
+                field: candidate,
+                ..
+            } if candidate == field
+        ));
+    }
+
     #[test]
     fn parse_accepts_valid_payload() {
         let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
@@ -305,5 +317,73 @@ mod tests {
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
         assert!(matches!(action, ControlAction::CreatePullRequest { .. }));
+    }
+
+    #[test]
+    fn parse_rejects_create_user_with_empty_username() {
+        let json = r#"{"action":"create_user","username":"  ","email":"alice@example.com","password":"secret-password"}"#;
+        assert_invalid_field(json, "username");
+    }
+
+    #[test]
+    fn parse_rejects_create_user_with_empty_email() {
+        let json =
+            r#"{"action":"create_user","username":"alice","email":"  ","password":"secret-password"}"#;
+        assert_invalid_field(json, "email");
+    }
+
+    #[test]
+    fn parse_rejects_create_user_with_empty_password() {
+        let json =
+            r#"{"action":"create_user","username":"alice","email":"alice@example.com","password":"  "}"#;
+        assert_invalid_field(json, "password");
+    }
+
+    #[test]
+    fn parse_rejects_create_repo_with_empty_name() {
+        let json = r#"{"action":"create_repo","name":"  ","owner":"gittree","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
+        assert_invalid_field(json, "name");
+    }
+
+    #[test]
+    fn parse_rejects_create_repo_with_invalid_privkey() {
+        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"not-a-key"}"#;
+        assert_invalid_field(json, "privkey");
+    }
+
+    #[test]
+    fn parse_rejects_create_repo_with_non_hex_64_pubkey() {
+        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"zze92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
+        assert_invalid_field(json, "pubkey");
+    }
+
+    #[test]
+    fn parse_rejects_create_pull_request_with_empty_owner() {
+        let json = r#"{"action":"create_pull_request","owner":"  ","repo":"repo-one","head":"feature-branch","base":"main","title":"my pull request"}"#;
+        assert_invalid_field(json, "owner");
+    }
+
+    #[test]
+    fn parse_rejects_create_pull_request_with_empty_repo() {
+        let json = r#"{"action":"create_pull_request","owner":"gittree","repo":"  ","head":"feature-branch","base":"main","title":"my pull request"}"#;
+        assert_invalid_field(json, "repo");
+    }
+
+    #[test]
+    fn parse_rejects_create_pull_request_with_empty_head() {
+        let json = r#"{"action":"create_pull_request","owner":"gittree","repo":"repo-one","head":"  ","base":"main","title":"my pull request"}"#;
+        assert_invalid_field(json, "head");
+    }
+
+    #[test]
+    fn parse_rejects_create_pull_request_with_empty_base() {
+        let json = r#"{"action":"create_pull_request","owner":"gittree","repo":"repo-one","head":"feature-branch","base":"  ","title":"my pull request"}"#;
+        assert_invalid_field(json, "base");
+    }
+
+    #[test]
+    fn parse_rejects_create_pull_request_with_empty_title() {
+        let json = r#"{"action":"create_pull_request","owner":"gittree","repo":"repo-one","head":"feature-branch","base":"main","title":"  "}"#;
+        assert_invalid_field(json, "title");
     }
 }
