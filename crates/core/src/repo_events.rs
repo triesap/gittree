@@ -313,6 +313,31 @@ mod tests {
     }
 
     #[test]
+    fn latest_state_from_maintainers_returns_none_when_no_maintainer_state_matches() {
+        let alice = hex_of(0x11, 64);
+        let bob = hex_of(0x22, 64);
+        let events = vec![NostrEvent::new(
+            KIND_GIT_REPO_STATE.0,
+            bob,
+            10,
+            state_with_commit("repo", "0123456789abcdef0123456789abcdef01234567").to_tags(),
+        )];
+        assert!(latest_state_from_maintainers(&events, &[alice]).is_none());
+    }
+
+    #[test]
+    fn latest_state_from_maintainers_returns_none_for_invalid_state_tags() {
+        let alice = hex_of(0x11, 64);
+        let events = vec![NostrEvent::new(
+            KIND_GIT_REPO_STATE.0,
+            alice.clone(),
+            10,
+            vec![vec!["x".to_string(), "invalid".to_string()]],
+        )];
+        assert!(latest_state_from_maintainers(&events, &[alice]).is_none());
+    }
+
+    #[test]
     fn collect_clone_urls_filters_by_maintainers_and_identifier() {
         let alice = hex_of(0x11, 64);
         let bob = hex_of(0x22, 64);

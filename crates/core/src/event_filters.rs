@@ -279,6 +279,13 @@ mod tests {
         assert!(filters.iter().all(|filter| filter.kinds.is_empty()));
     }
 
+    #[test]
+    fn ignores_author_only_pointer_with_invalid_kind() {
+        let tags = vec![vec!["a".to_string(), "not-a-kind:author".to_string()]];
+        let filters = build_related_event_filters(1617, "pubkey", "eventid", &tags);
+        assert!(filters.iter().all(|filter| filter.kinds.is_empty()));
+    }
+
     fn map_for(tag: &str, values: &[&str]) -> BTreeMap<String, Vec<String>> {
         let mut map = BTreeMap::new();
         map.insert(
