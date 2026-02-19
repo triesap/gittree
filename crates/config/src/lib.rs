@@ -763,17 +763,25 @@ fn env_or_default_with<F>(key: &'static str, default: &str, get_var: &mut F) -> 
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    match get_var(key) {
-        Some(value) => value,
-        None => default.to_string(),
-    }
+    env_or_default_from(get_var(key), default)
+}
+
+fn env_or_default_from(value: Option<String>, default: &str) -> String {
+    value.unwrap_or_else(|| default.to_string())
 }
 
 fn env_required_string_with<F>(key: &'static str, get_var: &mut F) -> Result<String, ConfigError>
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    let value = get_var(key).ok_or(ConfigError::MissingEnv(key))?;
+    env_required_string_from(key, get_var(key))
+}
+
+fn env_required_string_from(
+    key: &'static str,
+    value: Option<String>,
+) -> Result<String, ConfigError> {
+    let value = value.ok_or(ConfigError::MissingEnv(key))?;
     if value.trim().is_empty() {
         return Err(ConfigError::MissingEnv(key));
     }
@@ -788,7 +796,15 @@ fn env_bool_default_with<F>(
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    match get_var(key) {
+    env_bool_default_from(key, default, get_var(key))
+}
+
+fn env_bool_default_from(
+    key: &'static str,
+    default: bool,
+    value: Option<String>,
+) -> Result<bool, ConfigError> {
+    match value {
         Some(value) => {
             if value.trim().is_empty() {
                 return Ok(default);
@@ -806,7 +822,11 @@ fn env_optional_string_with<F>(key: &'static str, get_var: &mut F) -> Option<Str
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    match get_var(key) {
+    env_optional_string_from(get_var(key))
+}
+
+fn env_optional_string_from(value: Option<String>) -> Option<String> {
+    match value {
         Some(value) if value.trim().is_empty() => None,
         Some(value) => Some(value),
         None => None,
