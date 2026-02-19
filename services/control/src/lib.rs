@@ -302,6 +302,11 @@ async fn serve_inner(bind: &str, router: Router) -> Result<(), ControlError> {
     map_server_result(axum::serve(listener, router).await)
 }
 
+fn build_reqwest_transport(api_token: &str) -> Result<Arc<dyn ForgejoTransport>, ControlError> {
+    let transport = ReqwestTransport::new(api_token.to_string()).map_err(ControlError::Forgejo)?;
+    Ok(Arc::new(transport))
+}
+
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
     let _observability = init_observability()?;
     serve_without_observability(config).await
@@ -316,9 +321,7 @@ async fn serve_without_observability(config: ControlConfig) -> Result<(), Contro
     let forgejo_config = config.forgejo;
     let forgejo_owner = forgejo_config.owner.clone();
     let repo_private_default = forgejo_config.repo_private;
-    let transport =
-        ReqwestTransport::new(forgejo_config.api_token.clone()).map_err(ControlError::Forgejo)?;
-    let transport: Arc<dyn ForgejoTransport> = Arc::new(transport);
+    let transport = build_reqwest_transport(&forgejo_config.api_token)?;
     let forgejo = ForgejoClient::with_transport(forgejo_config, transport);
     let state = ControlAppState {
         auth,
@@ -2402,6 +2405,20 @@ mod tests {
         let err = super::map_server_result(Err(std::io::Error::other("boom")))
             .expect_err("error");
         assert!(matches!(err, super::ControlError::Serve(message) if message.contains("boom")));
+    }
+
+    #[test]
+    fn build_reqwest_transport_accepts_non_empty_token() {
+        let transport = super::build_reqwest_transport("token").expect("transport");
+        assert!(Arc::strong_count(&transport) >= 1);
+    }
+
+    #[test]
+    fn build_reqwest_transport_rejects_blank_token() {
+        let err = super::build_reqwest_transport("   ")
+            .err()
+            .expect("blank token should fail");
+        assert!(err.to_string().contains("forgejo"));
     }
 
     #[test]
