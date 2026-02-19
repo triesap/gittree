@@ -86,6 +86,13 @@ mod tests {
         matches!(result, Err(RelayError::Cli(_)))
     }
 
+    fn assert_storage_error(result: Result<(), RelayError>) {
+        match result {
+            Err(RelayError::Storage(_)) => {}
+            _ => panic!("expected storage error"),
+        }
+    }
+
     fn set_env_var_for_test(key: &str, value: &str) -> Option<OsString> {
         let previous = std::env::var_os(key);
         // SAFETY: these tests serialize env mutations using ENV_LOCK and restore previous values.
@@ -267,7 +274,13 @@ bind = "127.0.0.1:9123"
         let result = serve_boxed(config).await;
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
 
-        assert!(matches!(result, Err(RelayError::Storage(_))));
+        assert_storage_error(result);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected storage error")]
+    fn assert_storage_error_panics_for_non_storage_error() {
+        assert_storage_error(Ok(()));
     }
 
     #[test]
