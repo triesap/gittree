@@ -812,7 +812,9 @@ mod tests {
         })
         .await
         .expect_err("error");
-        assert!(matches!(err, ForgejoError::Request(message) if message.contains("boom")));
+        let message = err.to_string();
+        assert!(message.starts_with("forgejo request error:"), "{message}");
+        assert!(message.contains("boom"), "{message}");
     }
 
     #[test]
@@ -829,10 +831,7 @@ mod tests {
         }
 
         let err = super::serialize_json(&FailingSerialize).expect_err("serialize should fail");
-        assert!(matches!(
-            err,
-            ForgejoError::Parse(message) if message.contains("serialize boom")
-        ));
+        assert_eq!(err.to_string(), "forgejo parse error: serialize boom");
     }
 
     #[test]
@@ -860,7 +859,9 @@ mod tests {
             email: None,
         };
         let err = response.into_user().expect_err("parse");
-        assert!(matches!(err, ForgejoError::Parse(_)));
+        let message = err.to_string();
+        assert!(message.starts_with("forgejo parse error:"), "{message}");
+        assert!(message.contains("mismatched login and username"), "{message}");
     }
 
     #[test]
@@ -871,7 +872,9 @@ mod tests {
             email: None,
         };
         let err = response.into_user().expect_err("parse");
-        assert!(matches!(err, ForgejoError::Parse(_)));
+        let message = err.to_string();
+        assert!(message.starts_with("forgejo parse error:"), "{message}");
+        assert!(message.contains("missing username"), "{message}");
     }
 
     #[test]
@@ -999,10 +1002,7 @@ mod tests {
             .ensure_repo("beta", None)
             .await
             .expect_err("non success");
-        assert!(matches!(
-            err,
-            ForgejoError::Response { status: 500, body } if body == "nope"
-        ));
+        assert_eq!(err.to_string(), "forgejo response 500: nope");
     }
 
     #[test]
@@ -1015,10 +1015,13 @@ mod tests {
     fn client_new_rejects_empty_api_token() {
         let mut config = test_config();
         config.api_token = "   ".to_string();
-        assert!(matches!(
-            ForgejoClient::new(config),
-            Err(ForgejoError::Request(message)) if message.contains("must not be empty")
-        ));
+        let err = ForgejoClient::new(config)
+            .err()
+            .expect("empty token should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: forgejo api token must not be empty"
+        );
     }
 
     #[test]
@@ -1029,10 +1032,13 @@ mod tests {
 
     #[test]
     fn reqwest_transport_new_rejects_empty_token() {
-        assert!(matches!(
-            ReqwestTransport::new(""),
-            Err(ForgejoError::Request(message)) if message.contains("must not be empty")
-        ));
+        let err = ReqwestTransport::new("")
+            .err()
+            .expect("empty token should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: forgejo api token must not be empty"
+        );
     }
 
     #[tokio::test]
@@ -1630,7 +1636,7 @@ mod tests {
             )
             .await
             .expect_err("missing repo should fail");
-        assert!(matches!(err, ForgejoError::NotFound(name) if name == "demo"));
+        assert_eq!(err.to_string(), "forgejo not found: demo");
     }
 
     #[tokio::test]
@@ -1671,7 +1677,9 @@ mod tests {
             )
             .await
             .expect_err("negative number should fail");
-        assert!(matches!(err, ForgejoError::Parse(message) if message.contains("invalid pull request number")));
+        let message = err.to_string();
+        assert!(message.starts_with("forgejo parse error:"), "{message}");
+        assert!(message.contains("invalid pull request number"), "{message}");
     }
 
     #[tokio::test]
@@ -1694,7 +1702,7 @@ mod tests {
             })
             .await
             .expect_err("status error");
-        assert!(matches!(err, ForgejoError::Response { status: 409, .. }));
+        assert_eq!(err.to_string(), "forgejo response 409: already exists");
     }
 
     #[tokio::test]
@@ -1718,7 +1726,7 @@ mod tests {
             )
             .await
             .expect_err("status error");
-        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+        assert_eq!(err.to_string(), "forgejo response 500: oops");
     }
 
     #[tokio::test]
@@ -1743,7 +1751,7 @@ mod tests {
             )
             .await
             .expect_err("status error");
-        assert!(matches!(err, ForgejoError::Response { status: 422, .. }));
+        assert_eq!(err.to_string(), "forgejo response 422: invalid branch");
     }
 
     #[tokio::test]
@@ -1759,7 +1767,7 @@ mod tests {
             .ensure_webhook("repo")
             .await
             .expect_err("hook list failure should surface");
-        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+        assert_eq!(err.to_string(), "forgejo response 500: down");
     }
 
     #[tokio::test]
@@ -1781,7 +1789,7 @@ mod tests {
             .ensure_webhook("repo")
             .await
             .expect_err("hook create failure should surface");
-        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+        assert_eq!(err.to_string(), "forgejo response 500: down");
     }
 
     #[tokio::test]
@@ -1805,7 +1813,8 @@ mod tests {
             )
             .await
             .expect_err("invalid payload should fail");
-        assert!(matches!(err, ForgejoError::Parse(_)));
+        let message = err.to_string();
+        assert!(message.starts_with("forgejo parse error:"), "{message}");
     }
 
     #[test]
@@ -1833,7 +1842,7 @@ mod tests {
             })
             .await
             .expect_err("unexpected status should fail");
-        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+        assert_eq!(err.to_string(), "forgejo response 500: down");
     }
 
     #[tokio::test]
@@ -1848,7 +1857,7 @@ mod tests {
             .ensure_repo_for_owner("alice", "demo", None)
             .await
             .expect_err("unexpected status should fail");
-        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+        assert_eq!(err.to_string(), "forgejo response 500: down");
     }
 
     #[tokio::test]
@@ -1871,7 +1880,7 @@ mod tests {
             )
             .await
             .expect_err("unexpected status should fail");
-        assert!(matches!(err, ForgejoError::Response { status: 503, .. }));
+        assert_eq!(err.to_string(), "forgejo response 503: down");
     }
 
     #[tokio::test]
@@ -1896,7 +1905,7 @@ mod tests {
             .ensure_repo("demo", None)
             .await
             .expect_err("conflict fallback should fail when repo is still missing");
-        assert!(matches!(err, ForgejoError::NotFound(name) if name == "demo"));
+        assert_eq!(err.to_string(), "forgejo not found: demo");
     }
 
     #[tokio::test]
@@ -1925,7 +1934,7 @@ mod tests {
             .ensure_repo("demo", None)
             .await
             .expect_err("user fallback conflict should fail without existing repo");
-        assert!(matches!(err, ForgejoError::NotFound(name) if name == "demo"));
+        assert_eq!(err.to_string(), "forgejo not found: demo");
 
         let responses = vec![
             ForgejoResponse {
@@ -1947,7 +1956,7 @@ mod tests {
             .ensure_repo("demo", None)
             .await
             .expect_err("user fallback error should propagate");
-        assert!(matches!(err, ForgejoError::Response { status: 500, .. }));
+        assert_eq!(err.to_string(), "forgejo response 500: down");
     }
 
     #[tokio::test]
@@ -1961,7 +1970,8 @@ mod tests {
             })
             .await
             .expect_err("invalid url should fail");
-        assert!(matches!(err, ForgejoError::Request(_)));
+        let message = err.to_string();
+        assert!(message.starts_with("forgejo request error:"), "{message}");
     }
 
     #[tokio::test]
@@ -2012,6 +2022,9 @@ mod tests {
             })
             .await
             .expect_err("missing response should fail");
-        assert!(matches!(err, ForgejoError::Request(_)));
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
     }
 }
