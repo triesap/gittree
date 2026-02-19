@@ -229,8 +229,16 @@ impl std::error::Error for AuthError {
 }
 
 pub fn init_observability() -> Result<ObservabilityHandle, AuthError> {
-    let config = gittree_observability::ObservabilityConfig::from_env("gittree-auth")
-        .map_err(AuthError::ObservabilityConfig)?;
+    init_observability_with(|| {
+        gittree_observability::ObservabilityConfig::from_env("gittree-auth")
+    })
+}
+
+fn init_observability_with<F>(load_config: F) -> Result<ObservabilityHandle, AuthError>
+where
+    F: FnOnce() -> Result<gittree_observability::ObservabilityConfig, ObservabilityConfigError>,
+{
+    let config = load_config().map_err(AuthError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(AuthError::Observability)?;
     Ok(handle)
 }
@@ -264,6 +272,10 @@ async fn serve_inner(bind: &str, router: Router) -> Result<(), AuthError> {
 
 pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
     let _observability = init_observability()?;
+    serve_without_observability(config).await
+}
+
+async fn serve_without_observability(config: AuthServiceConfig) -> Result<(), AuthError> {
     let repositories = Arc::new(build_repositories(&config)?);
     let bind = config.bind.clone();
     let auth = config.auth;
@@ -803,6 +815,18 @@ mod tests {
         matches!(err, AuthError::Serve(_))
     }
 
+    fn is_auth_error_storage(err: &AuthError) -> bool {
+        matches!(err, AuthError::Storage(_))
+    }
+
+    fn is_auth_error_forgejo(err: &AuthError) -> bool {
+        matches!(err, AuthError::Forgejo(_))
+    }
+
+    fn is_auth_error_observability_config(err: &AuthError) -> bool {
+        matches!(err, AuthError::ObservabilityConfig(_))
+    }
+
     fn is_bad_request(err: &AuthHttpError) -> bool {
         matches!(err, AuthHttpError::BadRequest(_))
     }
@@ -844,6 +868,9 @@ mod tests {
 
         let serve_err = AuthError::Serve("bind failed".to_string());
         assert!(is_auth_error_serve(&serve_err));
+        assert!(!is_auth_error_storage(&serve_err));
+        assert!(!is_auth_error_forgejo(&serve_err));
+        assert!(!is_auth_error_observability_config(&serve_err));
         let config_err = AuthError::Config(config_missing);
         assert!(!is_auth_error_serve(&config_err));
 
@@ -1584,7 +1611,50 @@ mod tests {
                 application_name: None,
             },
         };
-        assert!(serve(config).await.is_err());
+        let err = super::serve_without_observability(config)
+            .await
+            .expect_err("storage error");
+        assert!(is_auth_error_storage(&err));
+    }
+
+    #[test]
+    fn init_observability_reports_config_error_for_invalid_env() {
+        let err = super::init_observability_with(|| {
+            Err(ObservabilityConfigError::InvalidEnv {
+                key: "GITTREE_LOG_JSON",
+                value: "not-a-bool".to_string(),
+            })
+        })
+        .expect_err("invalid observability env");
+        assert!(is_auth_error_observability_config(&err));
+    }
+
+    #[tokio::test]
+    async fn serve_without_observability_maps_invalid_forgejo_api_token() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: ForgejoConfig {
+                api_token: "   ".to_string(),
+                ..test_config()
+            },
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = super::serve_without_observability(config)
+            .await
+            .expect_err("forgejo token error");
+        assert!(is_auth_error_forgejo(&err));
     }
 
     #[tokio::test]
