@@ -152,7 +152,11 @@ fn env_u32_with<F>(key: &'static str, mut get_var: F) -> Result<Option<u32>, Aut
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    match get_var(key) {
+    parse_env_u32(key, get_var(key))
+}
+
+fn parse_env_u32(key: &'static str, value: Option<String>) -> Result<Option<u32>, AuthConfigError> {
+    match value {
         Some(value) => {
             if value.trim().is_empty() {
                 return Ok(None);
@@ -173,7 +177,11 @@ fn env_u64_with<F>(key: &'static str, mut get_var: F) -> Result<Option<u64>, Aut
 where
     F: FnMut(&'static str) -> Option<String>,
 {
-    match get_var(key) {
+    parse_env_u64(key, get_var(key))
+}
+
+fn parse_env_u64(key: &'static str, value: Option<String>) -> Result<Option<u64>, AuthConfigError> {
+    match value {
         Some(value) => {
             if value.trim().is_empty() {
                 return Ok(None);
