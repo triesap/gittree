@@ -3051,6 +3051,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn without_env_var_keeps_key_missing_when_unset() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_CONTROL_TEST_REMOVE_MISSING";
+        unsafe {
+            std::env::remove_var(key);
+        }
+        without_env_var(key, || {
+            assert!(std::env::var(key).is_err());
+        });
+        assert!(std::env::var_os(key).is_none());
+    }
+
+    #[test]
+    fn with_env_var_restores_missing_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_CONTROL_TEST_SET_MISSING";
+        unsafe {
+            std::env::remove_var(key);
+        }
+        with_env_var(key, "during", || {
+            assert_eq!(std::env::var(key).expect("set"), "during");
+        });
+        assert!(std::env::var_os(key).is_none());
+    }
+
     #[tokio::test]
     async fn create_repo_nostr_rejects_invalid_json_body() {
         let (state, _transport, _repos) = test_state(Vec::new());

@@ -3764,4 +3764,18 @@ repo_root = "/tmp/gittree-ui"
             std::env::remove_var(key);
         }
     }
+
+    #[test]
+    fn with_env_var_restores_missing_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_CONFIG_TEST_RESTORE_MISSING";
+        // SAFETY: test holds ENV_LOCK and keeps key unset before/after.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        with_env_var(key, "during", || {
+            assert_eq!(std::env::var(key).expect("during value"), "during");
+        });
+        assert!(std::env::var_os(key).is_none());
+    }
 }
