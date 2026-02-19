@@ -271,7 +271,17 @@ async fn serve_inner(bind: &str, router: Router) -> Result<(), AuthError> {
 }
 
 pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
-    let _observability = init_observability()?;
+    serve_with_init(config, init_observability).await
+}
+
+async fn serve_with_init<FInit, TInit>(
+    config: AuthServiceConfig,
+    init_fn: FInit,
+) -> Result<(), AuthError>
+where
+    FInit: FnOnce() -> Result<TInit, AuthError>,
+{
+    let _observability = init_fn()?;
     serve_without_observability(config).await
 }
 
@@ -1633,12 +1643,66 @@ mod tests {
 
         let first = super::init_observability_with(|| Ok(config.clone()));
         let second = super::init_observability_with(|| Ok(config));
-        let err = match (first, second) {
-            (Err(err), _) => err,
-            (Ok(_), Err(err)) => err,
-            (Ok(_), Ok(_)) => panic!("observability init unexpectedly succeeded twice"),
-        };
+        let err = first
+            .err()
+            .or_else(|| second.err())
+            .expect("observability init unexpectedly succeeded twice");
         assert!(is_auth_error_observability(&err));
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_propagates_init_error() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = super::serve_with_init(config, || -> Result<(), AuthError> {
+            Err(AuthError::Serve("observability init failed".to_string()))
+        })
+        .await
+        .expect_err("init error");
+        assert!(is_auth_error_serve(&err));
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_runs_without_observability_dependency() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: ForgejoConfig {
+                api_token: "   ".to_string(),
+                ..test_config()
+            },
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = super::serve_with_init(config, || Ok(()))
+            .await
+            .expect_err("forgejo token error");
+        assert!(is_auth_error_forgejo(&err));
     }
 
     #[tokio::test]
