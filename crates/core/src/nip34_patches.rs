@@ -395,6 +395,27 @@ mod tests {
     }
 
     #[test]
+    fn patch_to_tags_skips_optional_fields_when_absent() {
+        let pubkey = hex_of(0x11, 64);
+        let patch = Patch {
+            repo_address: format!("30617:{pubkey}:repo"),
+            repo_refs: Vec::new(),
+            mentions: Vec::new(),
+            root_event: None,
+            reply_event: None,
+            is_root: false,
+            is_root_revision: false,
+            commit: None,
+            parent_commit: None,
+            commit_pgp_sig: None,
+            committer: None,
+        };
+
+        let tags = patch.to_tags();
+        assert_eq!(tags, vec![vec!["a".to_string(), format!("30617:{pubkey}:repo")]]);
+    }
+
+    #[test]
     fn patch_validation_rejects_invalid_optional_fields() {
         let pubkey = hex_of(0x11, 64);
         let base = Patch {
@@ -453,6 +474,7 @@ mod tests {
     #[test]
     fn parse_e_tag_handles_short_and_non_e_tags() {
         assert!(parse_e_tag(&[]).is_none());
+        assert!(parse_e_tag(&["e".to_string()]).is_none());
         assert!(parse_e_tag(&["p".to_string(), "abc".to_string()]).is_none());
         assert_eq!(
             parse_e_tag(&[
@@ -463,5 +485,29 @@ mod tests {
             ]),
             Some(("deadbeef", Some("root")))
         );
+    }
+
+    #[test]
+    fn patch_validation_rejects_invalid_repo_address() {
+        let patch = Patch {
+            repo_address: "not-a-repo-address".to_string(),
+            repo_refs: Vec::new(),
+            mentions: Vec::new(),
+            root_event: None,
+            reply_event: None,
+            is_root: false,
+            is_root_revision: false,
+            commit: None,
+            parent_commit: None,
+            commit_pgp_sig: None,
+            committer: None,
+        };
+        assert!(matches!(
+            patch.validate(),
+            Err(crate::CoreError::InvalidField {
+                field: "a",
+                ..
+            })
+        ));
     }
 }

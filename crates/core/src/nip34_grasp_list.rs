@@ -106,6 +106,15 @@ mod tests {
                 "ws://localhost:8080".to_string()
             ]
         );
+
+        let lossy = UserGraspList::from_tags_lossy(&tags);
+        assert_eq!(lossy, parsed);
+    }
+
+    #[test]
+    fn grasp_list_validate_allows_empty_url_list() {
+        let list = UserGraspList { urls: Vec::new() };
+        list.validate().expect("empty list is valid");
     }
 
     #[test]

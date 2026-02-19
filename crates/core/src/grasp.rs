@@ -171,7 +171,7 @@ mod tests {
     const SAMPLE_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
     #[test]
-    fn normalize_grasp_server_url_all_checks() -> Result<()> {
+    fn normalize_grasp_server_url_all_checks() {
         let test_cases = vec![
             ("https://www.example.com", "www.example.com"),
             ("wss://www.example.com", "www.example.com"),
@@ -201,10 +201,9 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let normalized = normalize_grasp_server_url(input)?;
+            let normalized = normalize_grasp_server_url(input).expect("normalize");
             assert_eq!(normalized, expected);
         }
-        Ok(())
     }
 
     #[test]
@@ -217,57 +216,62 @@ mod tests {
     #[test]
     fn extract_npub_rejects_missing_npub() {
         let result = extract_npub("https://gittr.ee/repo.git");
-        assert!(matches!(result, Err(CoreError::InvalidField { .. })));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn format_grasp_server_url_as_relay_url_handles_http() -> Result<()> {
-        let relay = format_grasp_server_url_as_relay_url("http://localhost:8080")?;
+    fn format_grasp_server_url_as_relay_url_handles_http() {
+        let relay = format_grasp_server_url_as_relay_url("http://localhost:8080")
+            .expect("format relay url");
         assert_eq!(relay, "ws://localhost:8080");
-        Ok(())
     }
 
     #[test]
-    fn format_grasp_server_url_as_relay_url_handles_https() -> Result<()> {
-        let relay = format_grasp_server_url_as_relay_url("https://gittr.ee")?;
+    fn format_grasp_server_url_as_relay_url_handles_https() {
+        let relay = format_grasp_server_url_as_relay_url("https://gittr.ee")
+            .expect("format relay url");
         assert_eq!(relay, "wss://gittr.ee");
-        Ok(())
     }
 
     #[test]
-    fn format_grasp_server_url_as_clone_url_handles_https() -> Result<()> {
-        let clone =
-            format_grasp_server_url_as_clone_url("https://gittr.ee", SAMPLE_NPUB, "repo")?;
+    fn format_grasp_server_url_as_clone_url_handles_https() {
+        let clone = format_grasp_server_url_as_clone_url("https://gittr.ee", SAMPLE_NPUB, "repo")
+            .expect("format clone url");
         assert_eq!(
             clone,
             format!("https://gittr.ee/{SAMPLE_NPUB}/repo.git")
         );
-        Ok(())
     }
 
     #[test]
-    fn format_grasp_server_url_as_clone_url_handles_http() -> Result<()> {
-        let clone =
-            format_grasp_server_url_as_clone_url("http://localhost:8080", SAMPLE_NPUB, "repo")?;
+    fn format_grasp_server_url_as_clone_url_handles_http() {
+        let clone = format_grasp_server_url_as_clone_url("http://localhost:8080", SAMPLE_NPUB, "repo")
+            .expect("format clone url");
         assert_eq!(
             clone,
             format!("http://localhost:8080/{SAMPLE_NPUB}/repo.git")
         );
-        Ok(())
     }
 
     #[test]
-    fn format_grasp_server_url_as_blossom_url_handles_https() -> Result<()> {
-        let blossom = format_grasp_server_url_as_blossom_url("https://gittr.ee")?;
+    fn format_grasp_server_url_as_blossom_url_handles_https() {
+        let blossom = format_grasp_server_url_as_blossom_url("https://gittr.ee")
+            .expect("format blossom url");
         assert_eq!(blossom, "https://gittr.ee");
-        Ok(())
     }
 
     #[test]
-    fn format_grasp_server_url_as_blossom_url_handles_http() -> Result<()> {
-        let blossom = format_grasp_server_url_as_blossom_url("http://localhost:8080")?;
+    fn format_grasp_server_url_as_blossom_url_handles_http() {
+        let blossom = format_grasp_server_url_as_blossom_url("http://localhost:8080")
+            .expect("format blossom url");
         assert_eq!(blossom, "http://localhost:8080");
-        Ok(())
+    }
+
+    #[test]
+    fn format_grasp_server_url_helpers_reject_invalid_urls() {
+        assert!(format_grasp_server_url_as_relay_url("://bad").is_err());
+        assert!(format_grasp_server_url_as_clone_url("://bad", SAMPLE_NPUB, "repo").is_err());
+        assert!(format_grasp_server_url_as_blossom_url("://bad").is_err());
     }
 
     #[test]

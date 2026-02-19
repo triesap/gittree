@@ -156,13 +156,19 @@ mod tests {
         ));
     }
 
+    fn assert_action_tag(action: ControlAction, expected: &str) {
+        let value = serde_json::to_value(action).expect("serialize action");
+        let action = value.get("action").and_then(|candidate| candidate.as_str());
+        assert_eq!(action, Some(expected));
+    }
+
     #[test]
     fn parse_accepts_valid_payload() {
         let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
-        assert!(matches!(action, ControlAction::CreateRepo { .. }));
+        assert_action_tag(action, "create_repo");
     }
 
     #[test]
@@ -201,7 +207,7 @@ mod tests {
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
-        assert!(matches!(action, ControlAction::CreateUser { .. }));
+        assert_action_tag(action, "create_user");
     }
 
     #[test]
@@ -238,7 +244,7 @@ mod tests {
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
-        assert!(matches!(action, ControlAction::CreateOrg { .. }));
+        assert_action_tag(action, "create_org");
     }
 
     #[test]
@@ -247,7 +253,7 @@ mod tests {
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
-        assert!(matches!(action, ControlAction::CreateOrg { .. }));
+        assert_action_tag(action, "create_org");
     }
 
     #[test]
@@ -298,7 +304,7 @@ mod tests {
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
-        assert!(matches!(action, ControlAction::CreateRepo { .. }));
+        assert_action_tag(action, "create_repo");
     }
 
     #[test]
@@ -307,7 +313,7 @@ mod tests {
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
-        assert!(matches!(action, ControlAction::CreateRepo { .. }));
+        assert_action_tag(action, "create_repo");
     }
 
     #[test]
@@ -316,7 +322,7 @@ mod tests {
         let action =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
                 .expect("action");
-        assert!(matches!(action, ControlAction::CreatePullRequest { .. }));
+        assert_action_tag(action, "create_pull_request");
     }
 
     #[test]
