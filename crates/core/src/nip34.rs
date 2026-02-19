@@ -214,13 +214,11 @@ impl RepoState {
         let mut tags = Vec::new();
         tags.push(vec!["d".to_string(), self.identifier.clone()]);
 
-        let mut keys: Vec<&String> = self.state.keys().collect();
-        keys.sort();
+        let mut refs: Vec<(&String, &String)> = self.state.iter().collect();
+        refs.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-        for key in keys {
-            if let Some(value) = self.state.get(key) {
-                tags.push(vec![key.clone(), value.clone()]);
-            }
+        for (key, value) in refs {
+            tags.push(vec![key.clone(), value.clone()]);
         }
 
         tags
