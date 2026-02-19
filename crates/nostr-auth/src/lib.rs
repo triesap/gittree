@@ -34,6 +34,7 @@ pub struct Nip98Request<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nip98Auth {
     pub pubkey: String,
+    pub pubkey_bytes: [u8; 32],
     pub event_id: String,
 }
 
@@ -158,10 +159,11 @@ pub fn validate_nip98(
         });
     }
 
-    verify_signature(event)?;
+    let pubkey_bytes = verify_signature(event)?;
 
     Ok(Nip98Auth {
         pubkey: event.pubkey.clone(),
+        pubkey_bytes,
         event_id: event.id.clone(),
     })
 }
@@ -206,7 +208,7 @@ fn serialize_event_payload<T: serde::Serialize>(payload: &T) -> Result<String, N
     serde_json::to_string(payload).map_err(|err| Nip98Error::InvalidEventEncoding(err.to_string()))
 }
 
-fn verify_signature(event: &Nip98Event) -> Result<(), Nip98Error> {
+fn verify_signature(event: &Nip98Event) -> Result<[u8; 32], Nip98Error> {
     let event_id = match hex::decode(&event.id) {
         Ok(value) => value,
         Err(_) => return Err(Nip98Error::InvalidEventIdEncoding),
@@ -223,7 +225,11 @@ fn verify_signature(event: &Nip98Event) -> Result<(), Nip98Error> {
         Ok(value) => value,
         Err(_) => return Err(Nip98Error::InvalidSignatureEncoding),
     };
-    let pubkey_bytes = match hex::decode(&event.pubkey) {
+    let pubkey_vec = match hex::decode(&event.pubkey) {
+        Ok(value) => value,
+        Err(_) => return Err(Nip98Error::InvalidPublicKey),
+    };
+    let pubkey_bytes: [u8; 32] = match pubkey_vec.as_slice().try_into() {
         Ok(value) => value,
         Err(_) => return Err(Nip98Error::InvalidPublicKey),
     };
@@ -233,7 +239,8 @@ fn verify_signature(event: &Nip98Event) -> Result<(), Nip98Error> {
     };
     let secp = Secp256k1::verification_only();
     secp.verify_schnorr(&sig, &msg, &pubkey)
-        .map_err(|_| Nip98Error::InvalidSignature)
+        .map_err(|_| Nip98Error::InvalidSignature)?;
+    Ok(pubkey_bytes)
 }
 
 #[cfg(test)]
@@ -405,6 +412,11 @@ mod tests {
         };
         let auth = validate_nip98(&event, &request).expect("valid");
         assert_eq!(auth.pubkey, event.pubkey);
+        let expected_bytes: [u8; 32] = hex::decode(&event.pubkey)
+            .expect("pubkey")
+            .try_into()
+            .expect("pubkey bytes");
+        assert_eq!(auth.pubkey_bytes, expected_bytes);
         assert_eq!(auth.event_id, event.id);
     }
 
@@ -468,6 +480,11 @@ mod tests {
 
         let auth = validate_nip98(&event, &request).expect("matching payload should validate");
         assert_eq!(auth.pubkey, event.pubkey);
+        let expected_bytes: [u8; 32] = hex::decode(&event.pubkey)
+            .expect("pubkey")
+            .try_into()
+            .expect("pubkey bytes");
+        assert_eq!(auth.pubkey_bytes, expected_bytes);
     }
 
     #[test]

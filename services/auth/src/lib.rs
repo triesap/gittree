@@ -371,8 +371,8 @@ async fn signup_handler(
         Err(err) => return Err(AuthHttpError::Unauthorized(err.to_string())),
     };
 
-    let username = username_from_pubkey(&auth.pubkey)?;
-    let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
+    let username = username_from_valid_pubkey(&auth.pubkey);
+    let pubkey_bytes = auth.pubkey_bytes.to_vec();
 
     let existing = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
         Ok(existing) => existing,
@@ -457,7 +457,7 @@ async fn profile_get_handler(
         Err(err) => return Err(AuthHttpError::Unauthorized(err.to_string())),
     };
 
-    let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
+    let pubkey_bytes = auth.pubkey_bytes.to_vec();
     let account = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
         Ok(Some(account)) => account,
         Ok(None) => return Err(AuthHttpError::BadRequest("account not found".to_string())),
@@ -514,7 +514,7 @@ async fn profile_patch_handler(
         }
     };
 
-    let pubkey_bytes = parse_pubkey_bytes(&auth.pubkey)?;
+    let pubkey_bytes = auth.pubkey_bytes.to_vec();
     let account = match state.accounts.account_by_pubkey(&pubkey_bytes).await {
         Ok(Some(account)) => account,
         Ok(None) => return Err(AuthHttpError::BadRequest("account not found".to_string())),
@@ -625,13 +625,18 @@ fn unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+#[cfg(test)]
 fn username_from_pubkey(pubkey: &str) -> Result<String, AuthHttpError> {
     if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AuthHttpError::BadRequest("invalid pubkey".to_string()));
     }
+    Ok(username_from_valid_pubkey(pubkey))
+}
+
+fn username_from_valid_pubkey(pubkey: &str) -> String {
     let prefix = &pubkey[..12];
     let suffix = &pubkey[pubkey.len() - 12..];
-    Ok(format!("gt_{prefix}{suffix}"))
+    format!("gt_{prefix}{suffix}")
 }
 
 fn parse_pubkey_bytes(pubkey: &str) -> Result<Vec<u8>, AuthHttpError> {
@@ -827,6 +832,10 @@ mod tests {
         matches!(err, AuthError::ObservabilityConfig(_))
     }
 
+    fn is_auth_error_observability(err: &AuthError) -> bool {
+        matches!(err, AuthError::Observability(_))
+    }
+
     fn is_bad_request(err: &AuthHttpError) -> bool {
         matches!(err, AuthHttpError::BadRequest(_))
     }
@@ -871,6 +880,7 @@ mod tests {
         assert!(!is_auth_error_storage(&serve_err));
         assert!(!is_auth_error_forgejo(&serve_err));
         assert!(!is_auth_error_observability_config(&serve_err));
+        assert!(!is_auth_error_observability(&serve_err));
         let config_err = AuthError::Config(config_missing);
         assert!(!is_auth_error_serve(&config_err));
 
@@ -1567,24 +1577,9 @@ mod tests {
 
     #[tokio::test]
     async fn serve_starts_and_can_be_aborted() {
-        let config = AuthServiceConfig {
-            bind: "127.0.0.1:0".to_string(),
-            auth: AuthSettings {
-                email_domain: "example.com".to_string(),
-                max_skew_seconds: 60,
-            },
-            forgejo: test_config(),
-            storage: StorageConfig {
-                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
-                write_connection: None,
-                max_connections: 10,
-                min_connections: 2,
-                idle_timeout_secs: None,
-                max_lifetime_secs: None,
-                application_name: None,
-            },
-        };
-        let handle = tokio::spawn(serve(config));
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let router = build_router(state);
+        let handle = tokio::spawn(serve_inner("127.0.0.1:0", router));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!handle.is_finished());
         handle.abort();
@@ -1629,6 +1624,23 @@ mod tests {
         assert!(is_auth_error_observability_config(&err));
     }
 
+    #[test]
+    fn init_observability_with_maps_observability_init_error() {
+        let config = gittree_observability::ObservabilityConfig {
+            service_name: "gittree-auth-test".to_string(),
+            ..gittree_observability::ObservabilityConfig::default()
+        };
+
+        let first = super::init_observability_with(|| Ok(config.clone()));
+        let second = super::init_observability_with(|| Ok(config));
+        let err = match (first, second) {
+            (Err(err), _) => err,
+            (Ok(_), Err(err)) => err,
+            (Ok(_), Ok(_)) => panic!("observability init unexpectedly succeeded twice"),
+        };
+        assert!(is_auth_error_observability(&err));
+    }
+
     #[tokio::test]
     async fn serve_without_observability_maps_invalid_forgejo_api_token() {
         let config = AuthServiceConfig {
@@ -1655,6 +1667,36 @@ mod tests {
             .await
             .expect_err("forgejo token error");
         assert!(is_auth_error_forgejo(&err));
+    }
+
+    #[test]
+    fn serve_maps_storage_or_observability_before_bind() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 1,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let err = runtime
+            .block_on(async { super::serve(config).await })
+            .expect_err("serve error");
+        assert!(is_auth_error_storage(&err) || is_auth_error_observability(&err));
     }
 
     #[tokio::test]
