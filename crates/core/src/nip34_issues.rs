@@ -114,6 +114,24 @@ mod tests {
     }
 
     #[test]
+    fn issue_to_tags_omits_subject_when_none() {
+        let pubkey = hex_of(0x11, 64);
+        let issue = Issue {
+            repo_address: format!("30617:{pubkey}:repo"),
+            mentions: vec![hex_of(0x22, 64)],
+            subject: None,
+            labels: vec!["bug".to_string()],
+        };
+
+        let tags = issue.to_tags();
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| matches!(tag.as_slice(), [name, ..] if name == "subject"))
+        );
+    }
+
+    #[test]
     fn issue_rejects_empty_subject() {
         let pubkey = hex_of(0x11, 64);
         let issue = Issue {

@@ -913,6 +913,15 @@ mod tests {
     }
 
     #[test]
+    fn state_head_commit_returns_none_without_head() {
+        let repo_state = RepoState {
+            identifier: "repo".to_string(),
+            state: HashMap::new(),
+        };
+        assert_eq!(repo_state.head_commit(), None);
+    }
+
+    #[test]
     fn state_head_commit_resolves_symbolic() {
         let mut state = HashMap::new();
         state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
