@@ -286,22 +286,54 @@ where
 }
 
 async fn serve_without_observability(config: AuthServiceConfig) -> Result<(), AuthError> {
-    let repositories = Arc::new(build_repositories(&config)?);
-    let bind = config.bind.clone();
+    serve_without_observability_with(config, |cfg| {
+        let repositories = Arc::new(build_repositories(cfg)?);
+        let accounts: Arc<dyn AccountRepository> = repositories.clone();
+        let profiles: Arc<dyn ProfileRepository> = repositories;
+        Ok((accounts, profiles))
+    })
+    .await
+}
+
+async fn serve_without_observability_with<FRepos>(
+    config: AuthServiceConfig,
+    build_repositories_fn: FRepos,
+) -> Result<(), AuthError>
+where
+    FRepos: FnOnce(
+        &AuthServiceConfig,
+    ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>,
+{
+    let (accounts, profiles) = build_repositories_fn(&config)?;
+    let bind = config.bind;
     let auth = config.auth;
     let forgejo_config = config.forgejo;
-    let transport =
-        ReqwestTransport::new(forgejo_config.api_token.clone()).map_err(AuthError::Forgejo)?;
-    let transport: Arc<dyn ForgejoTransport> = Arc::new(transport);
+    let transport = build_reqwest_transport(&forgejo_config.api_token)?;
+    serve_with_components(&bind, auth, forgejo_config, transport, accounts, profiles).await
+}
+
+fn build_reqwest_transport(api_token: &str) -> Result<Arc<dyn ForgejoTransport>, AuthError> {
+    let transport = ReqwestTransport::new(api_token.to_string()).map_err(AuthError::Forgejo)?;
+    Ok(Arc::new(transport))
+}
+
+async fn serve_with_components(
+    bind: &str,
+    auth: AuthSettings,
+    forgejo_config: ForgejoConfig,
+    transport: Arc<dyn ForgejoTransport>,
+    accounts: Arc<dyn AccountRepository>,
+    profiles: Arc<dyn ProfileRepository>,
+) -> Result<(), AuthError> {
     let forgejo = ForgejoClient::with_transport(forgejo_config, transport);
     let state = AuthAppState {
         auth,
         forgejo,
-        accounts: repositories.clone(),
-        profiles: repositories,
+        accounts,
+        profiles,
     };
     let router = build_router(state);
-    serve_inner(&bind, router).await
+    serve_inner(bind, router).await
 }
 
 fn build_router(state: AuthAppState) -> Router {
@@ -1590,6 +1622,102 @@ mod tests {
         let (state, _repos, _transport) = test_state(Vec::new());
         let router = build_router(state);
         let handle = tokio::spawn(serve_inner("127.0.0.1:0", router));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!handle.is_finished());
+        handle.abort();
+        let join_error = handle.await.expect_err("join should be cancelled");
+        assert!(join_error.is_cancelled());
+    }
+
+    #[test]
+    fn build_reqwest_transport_accepts_non_empty_token() {
+        let transport = super::build_reqwest_transport("token").expect("transport");
+        drop(transport);
+    }
+
+    #[test]
+    fn build_reqwest_transport_rejects_blank_token() {
+        let err = super::build_reqwest_transport("   ")
+            .err()
+            .expect("forgejo token unexpectedly accepted");
+        assert!(is_auth_error_forgejo(&err));
+    }
+
+    #[tokio::test]
+    async fn serve_with_components_starts_and_can_be_aborted() {
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        let accounts: Arc<dyn AccountRepository> = repositories.clone();
+        let profiles: Arc<dyn ProfileRepository> = repositories;
+        let transport = Arc::new(MockTransport::new(Vec::new()));
+        let transport_dyn: Arc<dyn ForgejoTransport> = transport;
+        let auth = AuthSettings {
+            email_domain: "example.com".to_string(),
+            max_skew_seconds: 60,
+        };
+        let handle = tokio::spawn(super::serve_with_components(
+            "127.0.0.1:0",
+            auth,
+            test_config(),
+            transport_dyn,
+            accounts,
+            profiles,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!handle.is_finished());
+        handle.abort();
+        let join_error = handle.await.expect_err("join should be cancelled");
+        assert!(join_error.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn serve_with_components_returns_serve_error_for_invalid_bind() {
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        let accounts: Arc<dyn AccountRepository> = repositories.clone();
+        let profiles: Arc<dyn ProfileRepository> = repositories;
+        let transport = Arc::new(MockTransport::new(Vec::new()));
+        let transport_dyn: Arc<dyn ForgejoTransport> = transport;
+        let auth = AuthSettings {
+            email_domain: "example.com".to_string(),
+            max_skew_seconds: 60,
+        };
+        let err = super::serve_with_components(
+            "not-a-socket",
+            auth,
+            test_config(),
+            transport_dyn,
+            accounts,
+            profiles,
+        )
+        .await
+        .expect_err("bind error");
+        assert!(is_auth_error_serve(&err));
+    }
+
+    #[tokio::test]
+    async fn serve_without_observability_with_starts_and_can_be_aborted() {
+        let config = AuthServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            auth: AuthSettings {
+                email_domain: "example.com".to_string(),
+                max_skew_seconds: 60,
+            },
+            forgejo: test_config(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let handle = tokio::spawn(super::serve_without_observability_with(config, |_| {
+            let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+            let accounts: Arc<dyn AccountRepository> = repositories.clone();
+            let profiles: Arc<dyn ProfileRepository> = repositories;
+            Ok((accounts, profiles))
+        }));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!handle.is_finished());
         handle.abort();
