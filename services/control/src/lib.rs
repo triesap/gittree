@@ -290,15 +290,8 @@ impl<T> ControlRepositories for T where
 {
 }
 
-async fn run_server<E, Fut>(server: Fut) -> Result<(), ControlError>
-where
-    E: std::fmt::Display,
-    Fut: std::future::IntoFuture<Output = Result<(), E>>,
-{
-    match server.into_future().await {
-        Ok(()) => Ok(()),
-        Err(err) => Err(ControlError::Serve(err.to_string())),
-    }
+fn map_server_result(result: std::io::Result<()>) -> Result<(), ControlError> {
+    result.map_err(|err| ControlError::Serve(err.to_string()))
 }
 
 async fn serve_inner(bind: &str, router: Router) -> Result<(), ControlError> {
@@ -306,7 +299,7 @@ async fn serve_inner(bind: &str, router: Router) -> Result<(), ControlError> {
         Ok(value) => value,
         Err(err) => return Err(ControlError::Serve(err.to_string())),
     };
-    run_server(axum::serve(listener, router)).await
+    map_server_result(axum::serve(listener, router).await)
 }
 
 pub async fn serve(config: ControlConfig) -> Result<(), ControlError> {
@@ -2399,17 +2392,14 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn run_server_returns_ok_when_server_future_is_ok() {
-        super::run_server::<&'static str, _>(async { Ok::<(), &'static str>(()) })
-            .await
-            .expect("ok");
+    #[test]
+    fn map_server_result_returns_ok_for_success() {
+        super::map_server_result(Ok(())).expect("ok");
     }
 
-    #[tokio::test]
-    async fn run_server_maps_errors_to_control_serve_error() {
-        let err = super::run_server::<&'static str, _>(async { Err::<(), &'static str>("boom") })
-            .await
+    #[test]
+    fn map_server_result_maps_errors_to_control_serve_error() {
+        let err = super::map_server_result(Err(std::io::Error::other("boom")))
             .expect_err("error");
         assert!(matches!(err, super::ControlError::Serve(message) if message.contains("boom")));
     }
