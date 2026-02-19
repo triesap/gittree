@@ -1,13 +1,15 @@
 use gittree_control::{ControlConfig, ControlError, serve};
 use std::future::Future;
+use std::process::ExitCode;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
     if let Err(err) = run().await {
         eprintln!("control service failed: {err}");
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
 }
 
 async fn run() -> Result<(), ControlError> {
@@ -38,7 +40,7 @@ mod tests {
     use gittree_control::{ControlConfig, ControlConfigError, ControlError, serve};
     use gittree_storage::StorageConfig;
     use std::ffi::OsString;
-    use std::process::Command;
+    use std::process::{Command, ExitCode};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -162,8 +164,8 @@ mod tests {
             unsafe {
                 std::env::set_var("GITTREE_CONTROL_BIND", "not-a-socket");
             }
-            super::main();
-            panic!("main should exit the process on failure");
+            assert_eq!(super::main(), ExitCode::FAILURE);
+            return;
         }
 
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -175,7 +177,7 @@ mod tests {
             .env("GITTREE_CONTROL_MAIN_SUBPROCESS", "1")
             .output()
             .expect("spawn subprocess");
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(0));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("control service failed"));
     }

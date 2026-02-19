@@ -1,13 +1,15 @@
 use gittree_auth::{AuthError, AuthServiceConfig, serve};
 use std::future::Future;
+use std::process::ExitCode;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
     if let Err(err) = run().await {
         eprintln!("auth service failed: {err}");
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
 }
 
 async fn run() -> Result<(), AuthError> {
@@ -38,7 +40,7 @@ mod tests {
     use gittree_config::{AuthConfig as AuthSettings, ForgejoConfig};
     use gittree_storage::StorageConfig;
     use std::ffi::OsString;
-    use std::process::Command;
+    use std::process::{Command, ExitCode};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -156,8 +158,8 @@ mod tests {
             unsafe {
                 std::env::set_var("GITTREE_AUTH_BIND", "not-a-socket");
             }
-            super::main();
-            panic!("main should exit the process on failure");
+            assert_eq!(super::main(), ExitCode::FAILURE);
+            return;
         }
 
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -169,7 +171,7 @@ mod tests {
             .env("GITTREE_AUTH_MAIN_SUBPROCESS", "1")
             .output()
             .expect("spawn subprocess");
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(0));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("auth service failed"));
     }

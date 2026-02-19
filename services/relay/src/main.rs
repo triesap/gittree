@@ -2,19 +2,22 @@ use gittree_relay::{RelayCli, RelayConfig, RelayError, serve};
 use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(not(test))]
+use std::process::ExitCode;
 
 type RelayFuture = Pin<Box<dyn Future<Output = Result<(), RelayError>> + 'static>>;
 type ServeFn = dyn Fn(RelayConfig) -> RelayFuture;
 
 #[cfg(not(test))]
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
     let args = std::env::args_os().collect::<Vec<OsString>>();
     if let Some(message) = run_and_capture_error(Box::pin(run_with_args(args))).await {
         eprintln!("{message}");
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
 }
 
 fn serve_boxed(config: RelayConfig) -> RelayFuture {
