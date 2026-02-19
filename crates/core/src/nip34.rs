@@ -1080,10 +1080,13 @@ mod tests {
             state,
         };
 
-        assert!(matches!(
+        assert_eq!(
             repo_state.validate(),
-            Err(crate::CoreError::InvalidTag { .. })
-        ));
+            Err(crate::CoreError::InvalidTag {
+                tag: "state",
+                value: "refs/pull/1".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1096,10 +1099,13 @@ mod tests {
             state,
         };
 
-        assert!(matches!(
+        assert_eq!(
             repo_state.validate(),
-            Err(crate::CoreError::InvalidTag { .. })
-        ));
+            Err(crate::CoreError::InvalidTag {
+                tag: "state",
+                value: "invalid".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1111,10 +1117,13 @@ mod tests {
             state,
         };
 
-        assert!(matches!(
+        assert_eq!(
             repo_state.validate(),
-            Err(crate::CoreError::InvalidTag { .. })
-        ));
+            Err(crate::CoreError::InvalidTag {
+                tag: "state",
+                value: "ref: refs/heads/main".to_string(),
+            })
+        );
     }
 
     #[test]
