@@ -90,6 +90,21 @@ mod tests {
     }
 
     #[test]
+    fn collect_tag_values_ignores_empty_and_header_only_tags() {
+        let tags = vec![
+            Vec::new(),
+            vec!["clone".to_string()],
+            vec!["clone".to_string(), "a".to_string()],
+        ];
+
+        let values = collect_tag_values(&tags, "clone");
+        assert_eq!(values, vec!["a"]);
+
+        let unique = collect_tag_values_unique(&tags, "clone");
+        assert_eq!(unique, vec!["a"]);
+    }
+
+    #[test]
     fn join_tag_values_formats_tag() {
         let tag = join_tag_values(
             "relays",

@@ -267,6 +267,38 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_from_nip11_handles_absent_grasp_field() {
+        let doc = RelayInfoDocument {
+            name: None,
+            description: None,
+            banner: None,
+            icon: None,
+            pubkey: None,
+            self_pubkey: None,
+            contact: None,
+            supported_nips: Some(vec![34]),
+            software: None,
+            version: None,
+            privacy_policy: None,
+            terms_of_service: None,
+            limitation: None,
+            retention: None,
+            relay_countries: None,
+            language_tags: None,
+            tags: None,
+            posting_policy: None,
+            payments_url: None,
+            fees: None,
+            supported_grasps: None,
+            repo_acceptance_criteria: None,
+            curation: None,
+        };
+
+        let supported = capabilities_from_nip11(&doc);
+        assert_eq!(supported, vec![RelayCapability::Nip34]);
+    }
+
+    #[test]
     fn active_probe_success_does_not_duplicate_existing_requirements() {
         let mut supported = vec![RelayCapability::Nip01, RelayCapability::Nip34];
         merge_active_probe_evidence(&mut supported, ActiveProbeEvidence::success());

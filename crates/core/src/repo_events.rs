@@ -201,6 +201,29 @@ mod tests {
     }
 
     #[test]
+    fn find_repo_announcement_skips_wrong_kind_and_pubkey() {
+        let pubkey = hex_of(0x11, 64);
+        let other_pubkey = hex_of(0x22, 64);
+        let events = vec![
+            NostrEvent::new(
+                KIND_GIT_REPO_STATE.0,
+                pubkey.clone(),
+                0,
+                announcement("repo", Vec::new()).to_tags(),
+            ),
+            NostrEvent::new(
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                other_pubkey,
+                0,
+                announcement("repo", Vec::new()).to_tags(),
+            ),
+        ];
+
+        let found = find_repo_announcement(&events, &pubkey, "repo");
+        assert!(found.is_none());
+    }
+
+    #[test]
     fn collect_maintainers_recurses_over_maintainers() {
         let alice = hex_of(0x11, 64);
         let bob = hex_of(0x22, 64);
