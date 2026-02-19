@@ -1,45 +1,38 @@
 use gittree_relay::{RelayCli, RelayConfig, RelayError, serve};
+use std::ffi::OsString;
 use std::future::Future;
+use std::pin::Pin;
 
+type RelayFuture = Pin<Box<dyn Future<Output = Result<(), RelayError>> + 'static>>;
+type ServeFn = dyn Fn(RelayConfig) -> RelayFuture;
+
+#[cfg(not(test))]
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-    if let Some(message) = run_and_capture_error(run).await {
+    let args = std::env::args_os().collect::<Vec<OsString>>();
+    if let Some(message) = run_and_capture_error(Box::pin(run_with_args(args))).await {
         eprintln!("{message}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), RelayError> {
-    run_with_args(std::env::args_os()).await
+fn serve_boxed(config: RelayConfig) -> RelayFuture {
+    Box::pin(serve(config))
 }
 
-async fn run_with_args<I, T>(args: I) -> Result<(), RelayError>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-{
-    run_with_args_and_serve(args, serve).await
+async fn run_with_args(args: Vec<OsString>) -> Result<(), RelayError> {
+    run_with_args_and_serve(args, &serve_boxed).await
 }
 
-async fn run_and_capture_error<F, Fut>(run_fn: F) -> Option<String>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(), RelayError>>,
-{
-    match run_fn().await {
+async fn run_and_capture_error(run_future: RelayFuture) -> Option<String> {
+    match run_future.await {
         Ok(()) => None,
         Err(err) => Some(format!("relay service failed: {err}")),
     }
 }
 
-async fn run_with_args_and_serve<I, T, F, Fut>(args: I, serve_fn: F) -> Result<(), RelayError>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-    F: FnOnce(RelayConfig) -> Fut,
-    Fut: Future<Output = Result<(), RelayError>>,
-{
+async fn run_with_args_and_serve(args: Vec<OsString>, serve_fn: &ServeFn) -> Result<(), RelayError> {
     let cli = RelayCli::parse(args).map_err(RelayError::Cli)?;
     if cli.help {
         println!("{}", RelayCli::help_text());
@@ -60,16 +53,21 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{run_and_capture_error, run_with_args, run_with_args_and_serve};
+    use super::{RelayFuture, run_and_capture_error, run_with_args, run_with_args_and_serve, serve_boxed};
     use gittree_relay::{RelayConfig, RelayError};
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use std::process;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static CAPTURED_CONFIG: Mutex<Option<RelayConfig>> = Mutex::new(None);
+
+    fn cli_args(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
 
     fn is_config_error(result: &Result<(), RelayError>) -> bool {
         matches!(result, Err(RelayError::Config(_)))
@@ -120,36 +118,43 @@ mod tests {
         path
     }
 
-    async fn unexpected_serve(_config: RelayConfig) -> Result<(), RelayError> {
-        Err(RelayError::Serve("unexpected serve invocation".to_string()))
+    fn unexpected_serve(_config: RelayConfig) -> RelayFuture {
+        Box::pin(async { Err(RelayError::Serve("unexpected serve invocation".to_string())) })
+    }
+
+    fn capturing_serve(config: RelayConfig) -> RelayFuture {
+        *CAPTURED_CONFIG.lock().expect("capture lock") = Some(config);
+        Box::pin(async { Ok(()) })
     }
 
     #[tokio::test]
     async fn run_with_help_flag_returns_ok() {
-        let result = run_with_args(["gittree-relay", "--help"]).await;
+        let result = run_with_args(cli_args(&["gittree-relay", "--help"])).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn run_with_help_flag_does_not_invoke_serve_handler() {
-        let result = run_with_args_and_serve(["gittree-relay", "--help"], unexpected_serve).await;
+        let result =
+            run_with_args_and_serve(cli_args(&["gittree-relay", "--help"]), &unexpected_serve)
+                .await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn run_with_missing_config_file_returns_config_error() {
-        let result = run_with_args([
+        let result = run_with_args(cli_args(&[
             "gittree-relay",
             "--config",
             "/definitely/missing/gittree-relay.toml",
-        ])
+        ]))
         .await;
         assert!(is_config_error(&result));
     }
 
     #[tokio::test]
     async fn run_with_unknown_flag_returns_cli_error() {
-        let result = run_with_args(["gittree-relay", "--unknown"]).await;
+        let result = run_with_args(cli_args(&["gittree-relay", "--unknown"])).await;
         assert!(is_cli_error(&result));
     }
 
@@ -166,24 +171,20 @@ mod tests {
 bind = "127.0.0.1:9123"
 "#,
         );
-        let captured = Arc::new(Mutex::new(None::<RelayConfig>));
-        let captured_ref = captured.clone();
+        *CAPTURED_CONFIG.lock().expect("capture lock") = None;
         let result = run_with_args_and_serve(
-            [
+            cli_args(&[
                 "gittree-relay",
                 "--config",
                 path.to_str().expect("path string"),
-            ],
-            move |config| {
-                *captured_ref.lock().expect("capture lock") = Some(config);
-                async { Ok(()) }
-            },
+            ]),
+            &capturing_serve,
         )
         .await;
         let _ = fs::remove_file(path);
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
         assert!(result.is_ok());
-        let config = captured
+        let config = CAPTURED_CONFIG
             .lock()
             .expect("capture lock")
             .clone()
@@ -196,7 +197,7 @@ bind = "127.0.0.1:9123"
         let _guard = ENV_LOCK.lock().expect("env lock");
         let previous = clear_env_var_for_test("GITTREE_STORAGE_READ_URL");
 
-        let result = run_with_args_and_serve(["gittree-relay"], unexpected_serve).await;
+        let result = run_with_args_and_serve(cli_args(&["gittree-relay"]), &unexpected_serve).await;
 
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
         assert!(is_config_error(&result));
@@ -209,21 +210,17 @@ bind = "127.0.0.1:9123"
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
         );
-        let captured = Arc::new(Mutex::new(None::<RelayConfig>));
-        let captured_ref = captured.clone();
+        *CAPTURED_CONFIG.lock().expect("capture lock") = None;
 
         let result = run_with_args_and_serve(
-            ["gittree-relay", "--bind", "127.0.0.1:9191"],
-            move |config| {
-                *captured_ref.lock().expect("capture lock") = Some(config);
-                async { Ok(()) }
-            },
+            cli_args(&["gittree-relay", "--bind", "127.0.0.1:9191"]),
+            &capturing_serve,
         )
         .await;
 
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
         assert!(result.is_ok());
-        let config = captured
+        let config = CAPTURED_CONFIG
             .lock()
             .expect("capture lock")
             .clone()
@@ -239,12 +236,29 @@ bind = "127.0.0.1:9123"
             "postgres://user:pass@localhost:5432/gittree",
         );
 
-        let result = run_with_args_and_serve(["gittree-relay"], unexpected_serve).await;
+        let result = run_with_args_and_serve(cli_args(&["gittree-relay"]), &unexpected_serve).await;
 
         restore_env_var("GITTREE_STORAGE_READ_URL", previous);
         assert!(
             matches!(result, Err(RelayError::Serve(message)) if message == "unexpected serve invocation")
         );
+    }
+
+    #[tokio::test]
+    async fn serve_boxed_propagates_storage_validation_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = set_env_var_for_test(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+        );
+
+        let mut config = RelayConfig::from_env().expect("relay config");
+        config.storage.max_connections = 0;
+
+        let result = serve_boxed(config).await;
+        restore_env_var("GITTREE_STORAGE_READ_URL", previous);
+
+        assert!(matches!(result, Err(RelayError::Storage(_))));
     }
 
     #[test]
@@ -282,15 +296,16 @@ bind = "127.0.0.1:9123"
 
     #[tokio::test]
     async fn run_and_capture_error_returns_none_for_success() {
-        let result = run_and_capture_error(|| async { Ok(()) }).await;
+        let result = run_and_capture_error(Box::pin(async { Ok(()) })).await;
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn run_and_capture_error_formats_error_for_failure() {
-        let result = run_and_capture_error(|| async { Err(RelayError::Serve("boom".to_string())) })
-            .await
-            .expect("error message");
+        let result =
+            run_and_capture_error(Box::pin(async { Err(RelayError::Serve("boom".to_string())) }))
+                .await
+                .expect("error message");
         assert_eq!(result, "relay service failed: relay serve error: boom");
     }
 }
