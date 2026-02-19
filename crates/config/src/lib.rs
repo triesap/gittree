@@ -1532,21 +1532,25 @@ mod tests {
         path
     }
 
+    fn restore_env_var(key: &str, previous: Option<std::ffi::OsString>) {
+        // SAFETY: tests run single-threaded in this crate; callers hold ENV_LOCK.
+        unsafe {
+            if let Some(old) = previous {
+                std::env::set_var(key, old);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
-        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
+        // SAFETY: tests run single-threaded in this crate; callers hold ENV_LOCK.
         unsafe {
             std::env::set_var(key, value);
         }
         f();
-        match previous {
-            Some(old) => unsafe {
-                std::env::set_var(key, old);
-            },
-            None => unsafe {
-                std::env::remove_var(key);
-            },
-        }
+        restore_env_var(key, previous);
     }
 
     fn env_map(entries: &[(&'static str, &str)]) -> HashMap<&'static str, String> {

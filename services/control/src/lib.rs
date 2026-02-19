@@ -1383,6 +1383,7 @@ mod tests {
     use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde_json::json;
     use std::collections::VecDeque;
+    use std::ffi::OsString;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
     use time::OffsetDateTime;
@@ -1760,20 +1761,23 @@ mod tests {
         (body, nostr_auth_header(&auth_event))
     }
 
+    fn restore_env_var(key: &str, previous: Option<OsString>) {
+        unsafe {
+            if let Some(old) = previous {
+                std::env::set_var(key, old);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
         unsafe {
             std::env::set_var(key, value);
         }
         f();
-        match previous {
-            Some(old) => unsafe {
-                std::env::set_var(key, old);
-            },
-            None => unsafe {
-                std::env::remove_var(key);
-            },
-        }
+        restore_env_var(key, previous);
     }
 
     fn without_env_var<F: FnOnce()>(key: &str, f: F) {
@@ -1782,11 +1786,7 @@ mod tests {
             std::env::remove_var(key);
         }
         f();
-        if let Some(old) = previous {
-            unsafe {
-                std::env::set_var(key, old);
-            }
-        }
+        restore_env_var(key, previous);
     }
 
     fn with_minimal_control_env<F: FnOnce()>(f: F) {
