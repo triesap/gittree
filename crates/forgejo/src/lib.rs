@@ -930,6 +930,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_repo_propagates_lookup_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .ensure_repo("alpha", None)
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
     async fn ensure_repo_creates_when_missing() {
         let responses = vec![
             ForgejoResponse {
@@ -1706,6 +1721,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_user_propagates_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_invalid_success_payload() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: "{".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect_err("invalid payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
+    }
+
+    #[tokio::test]
     async fn create_org_non_success_returns_response_error() {
         let responses = vec![ForgejoResponse {
             status: 500,
@@ -1727,6 +1787,53 @@ mod tests {
             .await
             .expect_err("status error");
         assert_eq!(err.to_string(), "forgejo response 500: oops");
+    }
+
+    #[tokio::test]
+    async fn create_org_propagates_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_org(
+                "admin",
+                ForgejoCreateOrg {
+                    username: "acme".to_string(),
+                    full_name: None,
+                    description: None,
+                    visibility: None,
+                },
+            )
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_org_rejects_invalid_success_payload() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: "{".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_org(
+                "admin",
+                ForgejoCreateOrg {
+                    username: "acme".to_string(),
+                    full_name: None,
+                    description: None,
+                    visibility: None,
+                },
+            )
+            .await
+            .expect_err("invalid payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
     }
 
     #[tokio::test]
@@ -1752,6 +1859,55 @@ mod tests {
             .await
             .expect_err("status error");
         assert_eq!(err.to_string(), "forgejo response 422: invalid branch");
+    }
+
+    #[tokio::test]
+    async fn create_pull_request_propagates_transport_error() {
+        let transport = MockTransport::new(Vec::new());
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_pull_request(
+                "gittree",
+                "demo",
+                ForgejoCreatePullRequest {
+                    head: "feature".to_string(),
+                    base: "main".to_string(),
+                    title: "Add thing".to_string(),
+                    body: None,
+                },
+            )
+            .await
+            .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_pull_request_rejects_invalid_success_payload() {
+        let responses = vec![ForgejoResponse {
+            status: 201,
+            body: "{".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+
+        let err = client
+            .create_pull_request(
+                "gittree",
+                "demo",
+                ForgejoCreatePullRequest {
+                    head: "feature".to_string(),
+                    base: "main".to_string(),
+                    title: "Add thing".to_string(),
+                    body: None,
+                },
+            )
+            .await
+            .expect_err("invalid payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
     }
 
     #[tokio::test]
@@ -1867,6 +2023,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_user_rejects_invalid_lookup_payload() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: "{".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect_err("invalid payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
+    }
+
+    #[tokio::test]
     async fn ensure_repo_for_owner_propagates_unexpected_lookup_status() {
         let responses = vec![ForgejoResponse {
             status: 500,
@@ -1893,6 +2071,21 @@ mod tests {
             err.to_string(),
             "forgejo request error: missing mock response"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_for_owner_rejects_invalid_lookup_payload() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: "{".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo_for_owner("alice", "demo", None)
+            .await
+            .expect_err("invalid payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
     }
 
     #[tokio::test]
@@ -1965,6 +2158,45 @@ mod tests {
             err.to_string(),
             "forgejo request error: missing mock response"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_propagates_org_create_transport_error() {
+        let responses = vec![ForgejoResponse {
+            status: 404,
+            body: "missing".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("missing org create response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_rejects_invalid_org_create_payload() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "{".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("invalid org create payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
     }
 
     #[tokio::test]
@@ -2047,6 +2279,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_repo_user_fallback_propagates_create_transport_error() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("missing fallback create response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_repo_user_fallback_rejects_invalid_create_payload() {
+        let responses = vec![
+            ForgejoResponse {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            ForgejoResponse {
+                status: 403,
+                body: "forbidden".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "{".to_string(),
+            },
+        ];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("invalid fallback create payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
+    }
+
+    #[tokio::test]
     async fn create_repo_for_owner_conflict_without_lookup_response_returns_request_error() {
         let responses = vec![ForgejoResponse {
             status: 409,
@@ -2082,6 +2363,39 @@ mod tests {
             .ensure_webhook_for_owner("alice", "repo")
             .await
             .expect_err("missing response should fail");
+        assert_eq!(
+            err.to_string(),
+            "forgejo request error: missing mock response"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_rejects_invalid_hook_list_payload() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: "{".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_webhook("repo")
+            .await
+            .expect_err("invalid hook list payload should fail");
+        assert!(err.to_string().starts_with("forgejo parse error:"));
+    }
+
+    #[tokio::test]
+    async fn ensure_webhook_propagates_create_hook_transport_error() {
+        let responses = vec![ForgejoResponse {
+            status: 200,
+            body: "[]".to_string(),
+        }];
+        let transport = MockTransport::new(responses);
+        let client = ForgejoClient::with_transport(test_config(), transport);
+        let err = client
+            .ensure_webhook("repo")
+            .await
+            .expect_err("missing create hook response should fail");
         assert_eq!(
             err.to_string(),
             "forgejo request error: missing mock response"
