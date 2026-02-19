@@ -660,6 +660,14 @@ mod tests {
         assert!(matches!(err, Nip98Error::InvalidPublicKey));
     }
 
+    #[test]
+    fn verify_signature_rejects_non_curve_public_key() {
+        let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
+        event.pubkey = "ff".repeat(32);
+        let err = verify_signature(&event).unwrap_err();
+        assert!(matches!(err, Nip98Error::InvalidPublicKey));
+    }
+
     struct FailingSerialize;
 
     impl Serialize for FailingSerialize {
