@@ -795,6 +795,33 @@ mod tests {
         )
     }
 
+    async fn spawn_scripted_status_server(
+        responses: Vec<(u16, String)>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut request_buf = [0_u8; 4096];
+                let _ = socket.read(&mut request_buf).await.expect("read request");
+                let response = format!(
+                    "HTTP/1.1 {status} status\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+                socket.shutdown().await.expect("shutdown");
+            }
+        });
+        (addr, server)
+    }
+
     #[tokio::test]
     async fn map_request_error_returns_ok_value() {
         let value = super::map_request_error::<&'static str, _, _>(async {
@@ -2478,6 +2505,96 @@ mod tests {
             .expect("successful response");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, body);
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn reqwest_client_methods_cover_status_paths() {
+        let (addr, server) = spawn_scripted_status_server(vec![
+            (500, "down".to_string()),
+            (500, "down".to_string()),
+            (500, "down".to_string()),
+            (500, "down".to_string()),
+            (404, "missing".to_string()),
+            (403, "forbidden".to_string()),
+            (500, "down".to_string()),
+            (200, "[]".to_string()),
+            (500, "down".to_string()),
+        ])
+        .await;
+
+        let mut config = test_config();
+        config.base_url = format!("http://{addr}");
+        let client = ForgejoClient::new(config).expect("client");
+
+        let err = client
+            .create_user(ForgejoCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect_err("create user should fail");
+        assert_eq!(err.to_string(), "forgejo response 500: down");
+
+        let err = client
+            .create_org(
+                "admin",
+                ForgejoCreateOrg {
+                    username: "acme".to_string(),
+                    full_name: None,
+                    description: None,
+                    visibility: None,
+                },
+            )
+            .await
+            .expect_err("create org should fail");
+        assert_eq!(err.to_string(), "forgejo response 500: down");
+
+        let err = client
+            .create_repo_for_owner(
+                "alice",
+                ForgejoCreateRepo {
+                    name: "demo".to_string(),
+                    description: None,
+                    private: None,
+                    auto_init: None,
+                },
+            )
+            .await
+            .expect_err("create repo should fail");
+        assert_eq!(err.to_string(), "forgejo response 500: down");
+
+        let err = client
+            .create_pull_request(
+                "alice",
+                "demo",
+                ForgejoCreatePullRequest {
+                    head: "feature".to_string(),
+                    base: "main".to_string(),
+                    title: "title".to_string(),
+                    body: None,
+                },
+            )
+            .await
+            .expect_err("create pull request should fail");
+        assert_eq!(err.to_string(), "forgejo response 500: down");
+
+        let err = client
+            .ensure_repo("demo", None)
+            .await
+            .expect_err("fallback create should fail");
+        assert_eq!(err.to_string(), "forgejo response 500: down");
+
+        let err = client
+            .ensure_webhook_for_owner("alice", "demo")
+            .await
+            .expect_err("create hook should fail");
+        assert_eq!(err.to_string(), "forgejo response 500: down");
+
         server.await.expect("server");
     }
 
