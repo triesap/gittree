@@ -715,6 +715,27 @@ mod tests {
     }
 
     #[test]
+    fn announcement_lists_grasp_host_skips_invalid_relays_and_non_matches() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://gittr.ee/npub1example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["not-a-url".to_string(), "wss://other.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+
+        let listed = announcement
+            .lists_grasp_host("gittr.ee")
+            .expect("host check");
+        assert!(!listed);
+    }
+
+    #[test]
     fn announcement_grasp_servers_detects_matching_host() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),

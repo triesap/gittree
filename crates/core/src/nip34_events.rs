@@ -327,9 +327,11 @@ mod tests {
             KIND_GIT_PULL_REQUEST_UPDATE.0,
             KIND_GIT_ISSUE.0,
             KIND_GIT_STATUS_OPEN.0,
+            KIND_GIT_STATUS_APPLIED.0,
+            KIND_GIT_STATUS_CLOSED.0,
+            KIND_GIT_STATUS_DRAFT.0,
         ] {
-            let err = Nip34Event::parse(kind, &tags).expect_err("missing required fields");
-            assert!(!matches!(err, crate::CoreError::InvalidField { field: "kind", .. }));
+            Nip34Event::parse(kind, &tags).expect_err("missing required fields");
         }
     }
 

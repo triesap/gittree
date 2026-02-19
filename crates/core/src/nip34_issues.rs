@@ -124,11 +124,10 @@ mod tests {
         };
 
         let tags = issue.to_tags();
-        assert!(
-            !tags
-                .iter()
-                .any(|tag| matches!(tag.as_slice(), [name, ..] if name == "subject"))
-        );
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags[0], vec!["a".to_string(), format!("30617:{pubkey}:repo")]);
+        assert_eq!(tags[1], vec!["p".to_string(), hex_of(0x22, 64)]);
+        assert_eq!(tags[2], vec!["t".to_string(), "bug".to_string()]);
     }
 
     #[test]
