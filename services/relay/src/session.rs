@@ -4719,6 +4719,1088 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_arc_store_covers_req_count_and_auth_rejections() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let mut req_membership =
+            Session::new(store.clone()).with_membership_requirements(true, false);
+        let req_membership_response = req_membership
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-membership".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(
+            closed_reason(&req_membership_response[0]).contains("relay does not support membership")
+        );
+
+        let mut req_limit = Session::with_policy(
+            store.clone(),
+            Policy {
+                max_limit: Some(1),
+                ..Policy::default()
+            },
+        );
+        let req_limit_response = req_limit
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-limit".to_string(),
+                filters: vec![json!({"limit": 2})],
+            })
+            .await;
+        assert_notice(&req_limit_response[0]);
+
+        let mut req_subscription_limit = Session::with_policy(
+            store.clone(),
+            Policy {
+                max_subscriptions: Some(1),
+                ..Policy::default()
+            },
+        );
+        let _ = req_subscription_limit
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-sub-1".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        let req_subscription_limit_response = req_subscription_limit
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-sub-2".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert_notice(&req_subscription_limit_response[0]);
+
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x78; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+        let list_error_membership = Arc::new(ScriptedMembership::new("list_memberships"));
+        let mut req_virtual_error = Session::new(store.clone())
+            .with_membership(Some("tenant-arc-req-virtual".to_string()), Some(list_error_membership))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        let req_virtual_error_response = req_virtual_error
+            .handle_message(ClientMessage::Req {
+                subscription_id: "arc-req-virtual".to_string(),
+                filters: vec![json!({"kinds": [super::NIP43_MEMBERSHIP_KIND]})],
+            })
+            .await;
+        assert!(closed_reason(&req_virtual_error_response[0]).contains("list_memberships failure"));
+
+        let mut count_rate_limited = Session::with_policy(
+            store.clone(),
+            Policy {
+                max_requests_per_min: Some(1),
+                ..Policy::default()
+            },
+        );
+        let _ = count_rate_limited
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count-rate-1".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        let count_rate_limited_response = count_rate_limited
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count-rate-2".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert_notice(&count_rate_limited_response[0]);
+
+        let (auth_tx, _) = tokio::sync::broadcast::channel(4);
+        let mut count_auth_required = Session::with_broadcast(
+            store.clone(),
+            Policy::default(),
+            None,
+            auth_tx,
+            true,
+            false,
+        );
+        let count_auth_required_response = count_auth_required
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count-auth".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert_eq!(
+            closed_reason(&count_auth_required_response[0]),
+            super::AUTH_REQUIRED_REASON
+        );
+
+        let mut count_membership =
+            Session::new(store.clone()).with_membership_requirements(true, false);
+        let count_membership_response = count_membership
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count-membership".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        assert!(
+            closed_reason(&count_membership_response[0]).contains("relay does not support membership")
+        );
+
+        let mut count_parse_error = Session::new(store.clone());
+        let count_parse_error_response = count_parse_error
+            .handle_message(ClientMessage::Count {
+                subscription_id: "arc-count-parse".to_string(),
+                filters: vec![json!({"authors": "not-an-array"})],
+            })
+            .await;
+        assert_notice(&count_parse_error_response[0]);
+
+        let count_filter_ok = Session::with_policy(
+            store.clone(),
+            Policy {
+                max_limit: Some(2),
+                ..Policy::default()
+            },
+        );
+        let filter = crate::Filter {
+            ids: Vec::new(),
+            authors: Vec::new(),
+            kinds: Vec::new(),
+            since: None,
+            until: None,
+            limit: Some(1),
+            tags: std::collections::BTreeMap::new(),
+        };
+        assert!(count_filter_ok.validate_filter_limits(&[filter]).is_none());
+
+        let mut auth_session = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+            .with_relay_url(Some("wss://relay.example".to_string()));
+        let challenge = auth_session.auth_challenge().expect("challenge");
+        let invalid_kind = signed_event_with_tags_at(
+            "arc-auth-invalid-kind",
+            1,
+            vec![
+                vec!["challenge".to_string(), challenge.clone()],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
+        );
+        let invalid_kind_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(invalid_kind).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&invalid_kind_response[0]);
+
+        let mut invalid_sig = signed_event_with_tags_at(
+            "arc-auth-invalid-sig",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), challenge.clone()],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
+        );
+        invalid_sig.sig = "00".repeat(64);
+        let invalid_sig_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(invalid_sig).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&invalid_sig_response[0]);
+
+        let missing_challenge = signed_event_with_tags_at(
+            "arc-auth-missing-challenge",
+            super::AUTH_KIND,
+            vec![vec!["relay".to_string(), "wss://relay.example".to_string()]],
+            now,
+        );
+        let missing_challenge_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(missing_challenge).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&missing_challenge_response[0]);
+
+        let invalid_challenge = signed_event_with_tags_at(
+            "arc-auth-invalid-challenge",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), "wrong".to_string()],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
+        );
+        let invalid_challenge_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(invalid_challenge).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&invalid_challenge_response[0]);
+
+        let missing_relay = signed_event_with_tags_at(
+            "arc-auth-missing-relay",
+            super::AUTH_KIND,
+            vec![vec!["challenge".to_string(), challenge.clone()]],
+            now,
+        );
+        let missing_relay_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(missing_relay).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&missing_relay_response[0]);
+
+        let invalid_relay = signed_event_with_tags_at(
+            "arc-auth-invalid-relay",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), challenge.clone()],
+                vec!["relay".to_string(), "not-a-url".to_string()],
+            ],
+            now,
+        );
+        let invalid_relay_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(invalid_relay).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&invalid_relay_response[0]);
+
+        let relay_mismatch = signed_event_with_tags_at(
+            "arc-auth-relay-mismatch",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), challenge.clone()],
+                vec!["relay".to_string(), "wss://other.example".to_string()],
+            ],
+            now,
+        );
+        let relay_mismatch_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(relay_mismatch).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&relay_mismatch_response[0]);
+
+        let stale = signed_event_with_tags_at(
+            "arc-auth-stale",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), challenge],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now - super::AUTH_MAX_SKEW_SECS - 1,
+        );
+        let stale_response = auth_session
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(stale).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&stale_response[0]);
+
+        let mut auth_disabled = Session::new(store);
+        let auth_disabled_event = signed_event_with_tags_at(
+            "arc-auth-disabled",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), "ignored".to_string()],
+                vec!["relay".to_string(), "wss://relay.example".to_string()],
+            ],
+            now,
+        );
+        let auth_disabled_response = auth_disabled
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(auth_disabled_event).expect("auth value"),
+            ))
+            .await;
+        assert_ok_rejected(&auth_disabled_response[0]);
+    }
+
+    #[tokio::test]
+    async fn session_and_arc_store_cover_remaining_error_branches() {
+        let mut memory_session = Session::new(MemoryStore::new());
+        assert!(!memory_session.is_authenticated());
+        let metrics = Arc::new(crate::RelayMetrics::new());
+        memory_session = memory_session.with_metrics(metrics);
+        let _ = memory_session
+            .handle_message(ClientMessage::Req {
+                subscription_id: "memory-metrics".to_string(),
+                filters: vec![json!({})],
+            })
+            .await;
+        let _ = memory_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("memory-metrics-event")).expect("event"),
+            ))
+            .await;
+
+        let mut related_filter = EventFilter::new();
+        related_filter.tags.insert("ab".to_string(), vec!["1".to_string()]);
+        let admission = Arc::new(StubAdmission {
+            decision: AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![related_filter],
+            },
+        });
+        let mut memory_related_query_error = Session::with_admission(MemoryStore::new(), admission);
+        let related_response = memory_related_query_error
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("memory-related-query-error")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&related_response[0]);
+
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let now = super::unix_now_secs();
+
+        let mut invalid_payload = Session::new(store.clone());
+        let invalid_payload_response = invalid_payload
+            .handle_message(ClientMessage::Event(json!({"bad": true})))
+            .await;
+        assert_notice(&invalid_payload_response[0]);
+
+        let mut rate_limited = Session::with_policy(
+            store.clone(),
+            Policy {
+                max_events_per_min: Some(1),
+                ..Policy::default()
+            },
+        );
+        let _ = rate_limited
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-event-rate-1")).expect("event"),
+            ))
+            .await;
+        let rate_limited_response = rate_limited
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-event-rate-2")).expect("event"),
+            ))
+            .await;
+        assert_notice(&rate_limited_response[0]);
+
+        let mut invalid_signature = Session::new(store.clone());
+        let mut invalid_signature_event = signed_event("arc-event-invalid-signature");
+        invalid_signature_event.sig = "00".repeat(64);
+        let invalid_signature_response = invalid_signature
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(invalid_signature_event).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&invalid_signature_response[0]);
+
+        let mut policy_violation = Session::new(store.clone());
+        let future_event = signed_event_with_tags_at(
+            "arc-event-future",
+            1,
+            Vec::new(),
+            now.saturating_add(120),
+        );
+        let policy_violation_response = policy_violation
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(future_event).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&policy_violation_response[0]);
+
+        let mut auth_state_missing = Session::new(store.clone());
+        auth_state_missing.write_auth_required = true;
+        auth_state_missing.auth = None;
+        let auth_state_missing_response = auth_state_missing
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-event-no-auth-state")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&auth_state_missing_response[0]);
+
+        let mut auth_pubkey_missing =
+            Session::with_policy_and_auth(store.clone(), Policy::default(), true);
+        let auth_pubkey_missing_response = auth_pubkey_missing
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-event-auth-pubkey-missing")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&auth_pubkey_missing_response[0]);
+
+        let mut auth_pubkey_mismatch = Session::new(store.clone());
+        auth_pubkey_mismatch.write_auth_required = true;
+        auth_pubkey_mismatch.auth = Some(super::AuthState {
+            challenge: "mismatch".to_string(),
+            authenticated_pubkey: Some("aa".repeat(32)),
+        });
+        let auth_pubkey_mismatch_response = auth_pubkey_mismatch
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-event-auth-pubkey-mismatch")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&auth_pubkey_mismatch_response[0]);
+
+        let mut membership_required = Session::new(store.clone());
+        membership_required.write_auth_required = true;
+        membership_required.auth = Some(super::AuthState {
+            challenge: "membership".to_string(),
+            authenticated_pubkey: Some(signed_event("arc-membership-required").pubkey),
+        });
+        membership_required.write_membership_required = true;
+        let membership_required_response = membership_required
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-event-membership-required")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&membership_required_response[0]);
+
+        let admission_reject = Arc::new(StubAdmission {
+            decision: AdmissionDecision::Reject {
+                reason: "blocked".to_string(),
+            },
+        });
+        let mut admission_rejected = Session::with_admission(store.clone(), admission_reject);
+        let admission_rejected_response = admission_rejected
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-admission-reject")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&admission_rejected_response[0]);
+
+        let mut related_missing_filter = EventFilter::new();
+        related_missing_filter.ids = vec!["missing".to_string()];
+        related_missing_filter.limit = Some(1);
+        let admission_missing = Arc::new(StubAdmission {
+            decision: AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![related_missing_filter],
+            },
+        });
+        let mut related_missing = Session::with_admission(store.clone(), admission_missing);
+        let related_missing_response = related_missing
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-admission-related-missing")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&related_missing_response[0]);
+
+        let related_seed = signed_event("arc-admission-related-seed");
+        let related_seed_id = related_seed.id.clone();
+        store
+            .insert(related_seed)
+            .await
+            .expect("insert related seed");
+        let mut related_present_filter = EventFilter::new();
+        related_present_filter.ids = vec![related_seed_id];
+        related_present_filter.limit = Some(1);
+        let admission_related_present = Arc::new(StubAdmission {
+            decision: AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![related_present_filter],
+            },
+        });
+        let mut related_present = Session::with_admission(store.clone(), admission_related_present);
+        let related_present_response = related_present
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-admission-related-present")).expect("event"),
+            ))
+            .await;
+        assert_ok_accepted(&related_present_response[0]);
+
+        let mut related_query_filter = EventFilter::new();
+        related_query_filter.tags.insert("ab".to_string(), vec!["1".to_string()]);
+        let admission_related_query = Arc::new(StubAdmission {
+            decision: AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![related_query_filter],
+            },
+        });
+        let mut related_query_error = Session::with_admission(store.clone(), admission_related_query);
+        let related_query_error_response = related_query_error
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-admission-related-query-error")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&related_query_error_response[0]);
+
+        let mut insert_error = Session::new(scripted_store_dyn(ScriptedStore::insert_error()));
+        let insert_error_response = insert_error
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-insert-error")).expect("event"),
+            ))
+            .await;
+        assert_notice(&insert_error_response[0]);
+
+        let mut duplicate = Session::new(store.clone());
+        let duplicate_event = signed_event("arc-duplicate");
+        let inserted = duplicate
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(duplicate_event.clone()).expect("event"),
+            ))
+            .await;
+        assert_ok_accepted(&inserted[0]);
+        let duplicate_response = duplicate
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(duplicate_event).expect("event"),
+            ))
+            .await;
+        assert_ok_accepted(&duplicate_response[0]);
+
+        let join_with_tag = signed_event_with_tags(
+            "arc-join-with-tag",
+            super::NIP43_JOIN_KIND,
+            vec![
+                vec!["-".to_string()],
+                vec!["claim".to_string(), "invite".to_string()],
+            ],
+        );
+        let mut no_membership = Session::new(store.clone());
+        let no_membership_response = no_membership
+            .handle_membership_event(&join_with_tag, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&no_membership_response[0]);
+
+        let membership_backend = Arc::new(InMemoryRepositories::new());
+        let mut no_tenant = Session::new(store.clone()).with_membership(None, Some(membership_backend.clone()));
+        let no_tenant_response = no_tenant
+            .handle_membership_event(&join_with_tag, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&no_tenant_response[0]);
+
+        let mut missing_nip70 = Session::new(store.clone())
+            .with_membership(Some("tenant-arc-membership".to_string()), Some(membership_backend.clone()));
+        let missing_nip70_event = signed_event_with_tags(
+            "arc-join-missing-tag",
+            super::NIP43_JOIN_KIND,
+            vec![vec!["claim".to_string(), "invite".to_string()]],
+        );
+        let missing_nip70_response = missing_nip70
+            .handle_membership_event(&missing_nip70_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&missing_nip70_response[0]);
+
+        let mut invalid_pubkey_session = Session::new(store.clone()).with_membership(
+            Some("tenant-arc-membership".to_string()),
+            Some(membership_backend.clone()),
+        );
+        let mut invalid_pubkey_event = join_with_tag.clone();
+        invalid_pubkey_event.pubkey = "zz".to_string();
+        let invalid_pubkey_response = invalid_pubkey_session
+            .handle_membership_event(&invalid_pubkey_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&invalid_pubkey_response[0]);
+
+        let mut missing_claim = Session::new(store.clone()).with_membership(
+            Some("tenant-arc-membership".to_string()),
+            Some(membership_backend.clone()),
+        );
+        let missing_claim_event = signed_event_with_tags(
+            "arc-join-missing-claim",
+            super::NIP43_JOIN_KIND,
+            vec![vec!["-".to_string()]],
+        );
+        let missing_claim_response = missing_claim
+            .handle_membership_event(&missing_claim_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&missing_claim_response[0]);
+    }
+
+    #[tokio::test]
+    async fn session_arc_store_covers_membership_invite_and_misc_edges() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryStore::new());
+        let now = super::unix_now_secs();
+        let tenant_id = "tenant-arc-matrix";
+
+        let join_event = signed_event_with_tags(
+            "arc-join-matrix",
+            super::NIP43_JOIN_KIND,
+            vec![
+                vec!["-".to_string()],
+                vec!["claim".to_string(), "invite-matrix".to_string()],
+            ],
+        );
+        let leave_event = signed_event_with_tags(
+            "arc-leave-matrix",
+            super::NIP43_LEAVE_KIND,
+            vec![vec!["-".to_string()]],
+        );
+
+        let mut membership_path = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(InMemoryRepositories::new())));
+        let membership_path_response = membership_path
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(join_event.clone()).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&membership_path_response[0]);
+
+        let admission_accept = Arc::new(StubAdmission {
+            decision: AdmissionDecision::Accept,
+        });
+        let mut admission_accept_session = Session::with_admission(store.clone(), admission_accept);
+        let admission_accept_response = admission_accept_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-admission-accept")).expect("event"),
+            ))
+            .await;
+        assert_ok_accepted(&admission_accept_response[0]);
+
+        let mut missing_related_filter = EventFilter::new();
+        missing_related_filter.ids = vec!["missing-related".to_string()];
+        missing_related_filter.limit = Some(1);
+        let admission_missing = Arc::new(StubAdmission {
+            decision: AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![missing_related_filter],
+            },
+        });
+        let mut missing_related_session = Session::with_admission(store.clone(), admission_missing);
+        let missing_related_response = missing_related_session
+            .handle_message(ClientMessage::Event(
+                serde_json::to_value(signed_event("arc-admission-missing-related")).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&missing_related_response[0]);
+
+        let virtual_membership = Arc::new(InMemoryRepositories::new());
+        let virtual_pubkey = hex::decode(&signed_event("arc-virtual-member-matrix").pubkey).expect("pubkey");
+        virtual_membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: virtual_pubkey,
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("membership insert");
+        let secp = Secp256k1::new();
+        let relay_secret = SecretKey::from_slice(&[0x79; 32]).expect("relay secret");
+        let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
+        let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
+        let mut virtual_session = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+            .with_membership(Some(tenant_id.to_string()), Some(virtual_membership))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        authenticate_session(&mut virtual_session).await;
+        let non_matching_filters = vec![crate::Filter {
+            ids: Vec::new(),
+            authors: vec!["ff".repeat(32)],
+            kinds: vec![super::NIP43_MEMBERSHIP_KIND],
+            since: None,
+            until: None,
+            limit: None,
+            tags: std::collections::BTreeMap::new(),
+        }];
+        let non_matching_virtual = virtual_session
+            .virtual_events(&non_matching_filters, now)
+            .await
+            .expect("virtual events");
+        assert!(non_matching_virtual.is_empty());
+
+        let invite_lookup_error = ScriptedMembership::new("invite_by_code");
+        let invite_lookup_error_inviter = "11".repeat(32);
+        invite_lookup_error
+            .inner
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-matrix",
+                    "member",
+                    invite_lookup_error_inviter.as_str(),
+                    Some(join_event.pubkey.as_str()),
+                    None,
+                    now,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+        let mut invite_lookup_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(invite_lookup_error)));
+        let invite_lookup_error_response = invite_lookup_error_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_notice(&invite_lookup_error_response[0]);
+
+        let mut invite_missing_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(InMemoryRepositories::new())));
+        let invite_missing_response = invite_missing_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&invite_missing_response[0]);
+
+        let expired_membership = Arc::new(InMemoryRepositories::new());
+        let expired_inviter = "22".repeat(32);
+        expired_membership
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-matrix",
+                    "member",
+                    expired_inviter.as_str(),
+                    Some(join_event.pubkey.as_str()),
+                    Some(now - 1),
+                    now - 2,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+        let mut expired_session =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(expired_membership));
+        let expired_response = expired_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&expired_response[0]);
+
+        let mismatch_membership = Arc::new(InMemoryRepositories::new());
+        mismatch_membership
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-matrix",
+                    "member",
+                    "33".repeat(32).as_str(),
+                    Some("44".repeat(32).as_str()),
+                    None,
+                    now,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+        let mut mismatch_session =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(mismatch_membership));
+        let mismatch_response = mismatch_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&mismatch_response[0]);
+
+        let membership_lookup_error = ScriptedMembership::new("membership_by_pubkey");
+        membership_lookup_error
+            .inner
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-matrix",
+                    "member",
+                    "55".repeat(32).as_str(),
+                    Some(join_event.pubkey.as_str()),
+                    None,
+                    now,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+        let mut membership_lookup_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(membership_lookup_error)));
+        let membership_lookup_error_response = membership_lookup_error_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_notice(&membership_lookup_error_response[0]);
+
+        let already_active = Arc::new(InMemoryRepositories::new());
+        already_active
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-matrix",
+                    "member",
+                    "66".repeat(32).as_str(),
+                    Some(join_event.pubkey.as_str()),
+                    None,
+                    now,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+        already_active
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(&join_event.pubkey).expect("pubkey"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("membership insert");
+        let mut already_active_session =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(already_active));
+        let already_active_response = already_active_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_accepted(&already_active_response[0]);
+
+        let upsert_error = ScriptedMembership::new("upsert_membership");
+        upsert_error
+            .inner
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-matrix",
+                    "member",
+                    "77".repeat(32).as_str(),
+                    Some(join_event.pubkey.as_str()),
+                    None,
+                    now,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+        let mut upsert_error_session =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(Arc::new(upsert_error)));
+        let upsert_error_response = upsert_error_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_notice(&upsert_error_response[0]);
+
+        let delete_invite_error = ScriptedMembership::new("delete_invite");
+        delete_invite_error
+            .inner
+            .insert_invite(
+                RelayInviteRecord::new(
+                    tenant_id,
+                    "invite-matrix",
+                    "member",
+                    "88".repeat(32).as_str(),
+                    Some(join_event.pubkey.as_str()),
+                    None,
+                    now,
+                )
+                .expect("invite"),
+            )
+            .await
+            .expect("invite insert");
+        let mut delete_invite_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(delete_invite_error)));
+        let delete_invite_error_response = delete_invite_error_session
+            .handle_membership_event(&join_event, now)
+            .await
+            .expect("membership response");
+        assert_notice(&delete_invite_error_response[0]);
+
+        let leave_lookup_error = Arc::new(ScriptedMembership::new("membership_by_pubkey"));
+        let mut leave_lookup_error_session =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(leave_lookup_error));
+        let leave_lookup_error_response = leave_lookup_error_session
+            .handle_membership_event(&leave_event, now)
+            .await
+            .expect("membership response");
+        assert_notice(&leave_lookup_error_response[0]);
+
+        let leave_missing = Arc::new(InMemoryRepositories::new());
+        let mut leave_missing_session =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(leave_missing));
+        let leave_missing_response = leave_missing_session
+            .handle_membership_event(&leave_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&leave_missing_response[0]);
+
+        let leave_inactive = Arc::new(InMemoryRepositories::new());
+        leave_inactive
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(&leave_event.pubkey).expect("pubkey"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_LEFT.to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("membership insert");
+        let mut leave_inactive_session =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(leave_inactive));
+        let leave_inactive_response = leave_inactive_session
+            .handle_membership_event(&leave_event, now)
+            .await
+            .expect("membership response");
+        assert_ok_rejected(&leave_inactive_response[0]);
+
+        let leave_upsert_error = ScriptedMembership::new("upsert_membership");
+        leave_upsert_error
+            .inner
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(&leave_event.pubkey).expect("pubkey"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("membership insert");
+        let mut leave_upsert_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(leave_upsert_error)));
+        let leave_upsert_error_response = leave_upsert_error_session
+            .handle_membership_event(&leave_event, now)
+            .await
+            .expect("membership response");
+        assert_notice(&leave_upsert_error_response[0]);
+
+        let membership_only = Arc::new(InMemoryRepositories::new());
+        let no_tenant_membership_event =
+            Session::new(store.clone()).with_membership(None, Some(membership_only.clone()));
+        assert!(
+            no_tenant_membership_event
+                .build_membership_list_event(now)
+                .await
+                .expect("membership list")
+                .is_none()
+        );
+        let no_signer_membership_event =
+            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(membership_only.clone()));
+        assert!(
+            no_signer_membership_event
+                .build_membership_list_event(now)
+                .await
+                .expect("membership list")
+                .is_none()
+        );
+
+        let no_tenant_invite =
+            Session::new(store.clone()).with_membership(None, Some(membership_only.clone()));
+        let no_tenant_invite_err = no_tenant_invite
+            .build_invite_event(now)
+            .await
+            .expect_err("tenant required");
+        assert!(no_tenant_invite_err.contains("relay does not support invites"));
+
+        let no_signer_invite = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(membership_only.clone()));
+        let no_signer_invite_err = no_signer_invite
+            .build_invite_event(now)
+            .await
+            .expect_err("signer required");
+        assert!(no_signer_invite_err.contains("relay does not support invites"));
+
+        let inactive_invite_membership = Arc::new(InMemoryRepositories::new());
+        inactive_invite_membership
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(&join_event.pubkey).expect("pubkey"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_LEFT.to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("membership insert");
+        let mut inactive_invite_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(inactive_invite_membership.clone()))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        inactive_invite_session.auth = Some(super::AuthState {
+            challenge: "invite".to_string(),
+            authenticated_pubkey: Some(join_event.pubkey.clone()),
+        });
+        let inactive_invite_err = inactive_invite_session
+            .build_invite_event(now)
+            .await
+            .expect_err("inactive members cannot invite");
+        assert!(inactive_invite_err.contains("membership required"));
+
+        let no_member_invite = Arc::new(InMemoryRepositories::new());
+        let mut no_member_invite_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(no_member_invite))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        no_member_invite_session.auth = Some(super::AuthState {
+            challenge: "invite".to_string(),
+            authenticated_pubkey: Some(join_event.pubkey.clone()),
+        });
+        let no_member_invite_err = no_member_invite_session
+            .build_invite_event(now)
+            .await
+            .expect_err("member must exist");
+        assert!(no_member_invite_err.contains("membership required"));
+
+        let insert_invite_error = ScriptedMembership::new("insert_invite");
+        insert_invite_error
+            .inner
+            .upsert_membership(RelayMembershipRecord {
+                tenant_id: tenant_id.to_string(),
+                pubkey: hex::decode(&join_event.pubkey).expect("pubkey"),
+                role: "member".to_string(),
+                status: super::MEMBERSHIP_STATUS_ACTIVE.to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("membership insert");
+        let insert_invite_error = Arc::new(insert_invite_error);
+        let mut insert_invite_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(insert_invite_error))
+            .with_relay_signer(
+                relay_pubkey.serialize().to_vec(),
+                relay_secret.secret_bytes().to_vec(),
+            );
+        insert_invite_error_session.auth = Some(super::AuthState {
+            challenge: "invite".to_string(),
+            authenticated_pubkey: Some(join_event.pubkey.clone()),
+        });
+        let insert_invite_error_text = insert_invite_error_session
+            .build_invite_event(now)
+            .await
+            .expect_err("insert invite should fail");
+        assert!(insert_invite_error_text.contains("insert_invite failure"));
+
+        let retention_zero = Session::with_policy(
+            store.clone(),
+            Policy {
+                retention_max_age_seconds: Some(0),
+                ..Policy::default()
+            },
+        );
+        retention_zero.apply_retention(now).await.expect("retention");
+
+        let retention_positive = Session::with_policy(
+            store.clone(),
+            Policy {
+                retention_max_age_seconds: Some(1),
+                ..Policy::default()
+            },
+        );
+        retention_positive
+            .apply_retention(now)
+            .await
+            .expect("retention");
+
+        let mut auth_invalid_relay_tag = Session::with_policy_and_auth(store, Policy::default(), true)
+            .with_relay_url(Some("wss://relay.example".to_string()));
+        let auth_challenge = auth_invalid_relay_tag.auth_challenge().expect("challenge");
+        let invalid_relay_tag_event = signed_event_with_tags_at(
+            "arc-auth-invalid-relay-tag",
+            super::AUTH_KIND,
+            vec![
+                vec!["challenge".to_string(), auth_challenge],
+                vec!["relay".to_string(), "wss:///".to_string()],
+            ],
+            now,
+        );
+        let auth_invalid_relay_tag_response = auth_invalid_relay_tag
+            .handle_message(ClientMessage::Auth(
+                serde_json::to_value(invalid_relay_tag_event).expect("event"),
+            ))
+            .await;
+        assert_ok_rejected(&auth_invalid_relay_tag_response[0]);
+    }
+
+    #[tokio::test]
     async fn req_generates_invite_claim_when_member() {
         let membership = Arc::new(InMemoryRepositories::new());
         let tenant_id = "tenant-1";
