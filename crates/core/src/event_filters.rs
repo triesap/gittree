@@ -73,13 +73,11 @@ pub fn build_related_event_filters(
         filters.push(filter.with_limit(1));
     }
 
-    if !refs.event_ids.is_empty() || !refs.address_pointers.is_empty() {
-        let mut filter = EventFilter::new();
-        let mut q = refs.address_pointers.clone();
-        q.extend(refs.event_ids.clone());
-        filter.tags.insert("q".to_string(), q);
-        filters.push(filter.with_limit(1));
-    }
+    let mut filter = EventFilter::new();
+    let mut q = refs.address_pointers.clone();
+    q.extend(refs.event_ids.clone());
+    filter.tags.insert("q".to_string(), q);
+    filters.push(filter.with_limit(1));
 
     filters
 }

@@ -221,7 +221,7 @@ fn parse_e_tag(tag: &[String]) -> Option<(&str, Option<&str>)> {
         return None;
     }
 
-    let event_id = tag.get(1).map(String::as_str)?;
+    let event_id = tag[1].as_str();
     let marker = tag.get(3).map(String::as_str);
     Some((event_id, marker))
 }
@@ -445,6 +445,25 @@ mod tests {
         assert!(matches!(
             status.validate(),
             Err(CoreError::InvalidField { field: "p", .. })
+        ));
+    }
+
+    #[test]
+    fn status_validate_rejects_invalid_repo_address() {
+        let status = StatusEvent {
+            root_event: hex_of(0x11, 64),
+            reply_events: Vec::new(),
+            mentions: Vec::new(),
+            repo_address: Some("bad".to_string()),
+            repo_refs: Vec::new(),
+            applied_refs: Vec::new(),
+            merge_commit: None,
+            applied_as_commits: Vec::new(),
+        };
+
+        assert!(matches!(
+            status.validate(),
+            Err(CoreError::InvalidField { field: "a", .. })
         ));
     }
 }

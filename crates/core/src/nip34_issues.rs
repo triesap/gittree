@@ -188,4 +188,19 @@ mod tests {
             Err(crate::CoreError::InvalidField { field: "t", .. })
         ));
     }
+
+    #[test]
+    fn issue_validate_rejects_invalid_repo_address() {
+        let issue = Issue {
+            repo_address: "bad".to_string(),
+            mentions: Vec::new(),
+            subject: None,
+            labels: Vec::new(),
+        };
+
+        assert!(matches!(
+            issue.validate(),
+            Err(crate::CoreError::InvalidField { field: "a", .. })
+        ));
+    }
 }

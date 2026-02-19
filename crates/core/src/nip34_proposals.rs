@@ -752,12 +752,21 @@ mod tests {
 
         let missing_root_event = PullRequestUpdate::from_tags(&[
             vec!["a".to_string(), format!("30617:{pubkey}:repo")],
-            vec!["P".to_string(), pubkey],
+            vec!["P".to_string(), pubkey.clone()],
             vec!["c".to_string(), hex_of(0x33, 40)],
             vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
         ])
         .expect_err("missing root event should fail");
         assert!(matches!(missing_root_event, CoreError::MissingField("E")));
+
+        let missing_tip = PullRequestUpdate::from_tags(&[
+            vec!["a".to_string(), format!("30617:{pubkey}:repo")],
+            vec!["E".to_string(), hex_of(0x22, 64)],
+            vec!["P".to_string(), pubkey],
+            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+        ])
+        .expect_err("missing tip commit should fail");
+        assert!(matches!(missing_tip, CoreError::MissingField("c")));
     }
 
     #[test]

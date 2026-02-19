@@ -201,6 +201,20 @@ mod tests {
     }
 
     #[test]
+    fn find_repo_announcement_returns_none_for_invalid_tags() {
+        let pubkey = hex_of(0x11, 64);
+        let events = vec![NostrEvent::new(
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            pubkey.clone(),
+            0,
+            vec![vec!["x".to_string(), "value".to_string()]],
+        )];
+
+        let found = find_repo_announcement(&events, &pubkey, "repo");
+        assert!(found.is_none());
+    }
+
+    #[test]
     fn find_repo_announcement_skips_wrong_kind_and_pubkey() {
         let pubkey = hex_of(0x11, 64);
         let other_pubkey = hex_of(0x22, 64);

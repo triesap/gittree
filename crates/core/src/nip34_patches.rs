@@ -249,7 +249,7 @@ fn parse_e_tag(tag: &[String]) -> Option<(&str, Option<&str>)> {
         return None;
     }
 
-    let event_id = tag.get(1).map(String::as_str)?;
+    let event_id = tag[1].as_str();
     let marker = tag.get(3).map(String::as_str);
     Some((event_id, marker))
 }
