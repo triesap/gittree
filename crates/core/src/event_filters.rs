@@ -262,6 +262,23 @@ mod tests {
         assert!(filters.iter().all(|filter| filter.kinds.is_empty()));
     }
 
+    #[test]
+    fn pointer_without_identifier_builds_kind_and_author_filter() {
+        let tags = vec![vec!["a".to_string(), "30617:author".to_string()]];
+        let filters = build_related_event_filters(1617, "pubkey", "eventid", &tags);
+        let pointer_filter = &filters[1];
+        assert_eq!(pointer_filter.kinds, vec![30617]);
+        assert_eq!(pointer_filter.authors, vec!["author".to_string()]);
+        assert!(pointer_filter.tags.get("d").is_none());
+    }
+
+    #[test]
+    fn ignores_address_pointer_with_invalid_kind() {
+        let tags = vec![vec!["a".to_string(), "not-a-kind:author:repo".to_string()]];
+        let filters = build_related_event_filters(1617, "pubkey", "eventid", &tags);
+        assert!(filters.iter().all(|filter| filter.kinds.is_empty()));
+    }
+
     fn map_for(tag: &str, values: &[&str]) -> BTreeMap<String, Vec<String>> {
         let mut map = BTreeMap::new();
         map.insert(

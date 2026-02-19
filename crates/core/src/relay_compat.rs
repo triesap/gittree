@@ -224,4 +224,52 @@ mod tests {
         merge_active_probe_evidence(&mut supported, ActiveProbeEvidence::failure());
         assert_eq!(supported, vec![RelayCapability::Nip11]);
     }
+
+    #[test]
+    fn relay_capability_as_str_covers_all_variants() {
+        assert_eq!(RelayCapability::Nip01.as_str(), "nip-01");
+        assert_eq!(RelayCapability::Nip11.as_str(), "nip-11");
+        assert_eq!(RelayCapability::Nip34.as_str(), "nip-34");
+        assert_eq!(RelayCapability::Nip65.as_str(), "nip-65");
+        assert_eq!(RelayCapability::Grasp.as_str(), "grasp");
+    }
+
+    #[test]
+    fn capabilities_from_nip11_ignores_blank_grasp_entries() {
+        let doc = RelayInfoDocument {
+            name: None,
+            description: None,
+            banner: None,
+            icon: None,
+            pubkey: None,
+            self_pubkey: None,
+            contact: None,
+            supported_nips: Some(vec![1]),
+            software: None,
+            version: None,
+            privacy_policy: None,
+            terms_of_service: None,
+            limitation: None,
+            retention: None,
+            relay_countries: None,
+            language_tags: None,
+            tags: None,
+            posting_policy: None,
+            payments_url: None,
+            fees: None,
+            supported_grasps: Some(vec!["   ".to_string(), "".to_string()]),
+            repo_acceptance_criteria: None,
+            curation: None,
+        };
+        let supported = capabilities_from_nip11(&doc);
+        assert!(supported.contains(&RelayCapability::Nip01));
+        assert!(!supported.contains(&RelayCapability::Grasp));
+    }
+
+    #[test]
+    fn active_probe_success_does_not_duplicate_existing_requirements() {
+        let mut supported = vec![RelayCapability::Nip01, RelayCapability::Nip34];
+        merge_active_probe_evidence(&mut supported, ActiveProbeEvidence::success());
+        assert_eq!(supported, vec![RelayCapability::Nip01, RelayCapability::Nip34]);
+    }
 }
