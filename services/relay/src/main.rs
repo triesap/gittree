@@ -4,8 +4,8 @@ use std::future::Future;
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run().await {
-        eprintln!("relay service failed: {err}");
+    if let Some(message) = run_and_capture_error(run).await {
+        eprintln!("{message}");
         std::process::exit(1);
     }
 }
@@ -20,6 +20,17 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     run_with_args_and_serve(args, serve).await
+}
+
+async fn run_and_capture_error<F, Fut>(run_fn: F) -> Option<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), RelayError>>,
+{
+    match run_fn().await {
+        Ok(()) => None,
+        Err(err) => Some(format!("relay service failed: {err}")),
+    }
 }
 
 async fn run_with_args_and_serve<I, T, F, Fut>(args: I, serve_fn: F) -> Result<(), RelayError>
@@ -49,7 +60,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{run_with_args, run_with_args_and_serve};
+    use super::{run_and_capture_error, run_with_args, run_with_args_and_serve};
     use gittree_relay::{RelayConfig, RelayError};
     use std::ffi::OsString;
     use std::fs;
@@ -267,5 +278,19 @@ bind = "127.0.0.1:9123"
         assert!(!is_config_error(&serve_err));
         assert!(!is_cli_error(&ok));
         assert!(!is_cli_error(&serve_err));
+    }
+
+    #[tokio::test]
+    async fn run_and_capture_error_returns_none_for_success() {
+        let result = run_and_capture_error(|| async { Ok(()) }).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_and_capture_error_formats_error_for_failure() {
+        let result = run_and_capture_error(|| async { Err(RelayError::Serve("boom".to_string())) })
+            .await
+            .expect("error message");
+        assert_eq!(result, "relay service failed: relay serve error: boom");
     }
 }
