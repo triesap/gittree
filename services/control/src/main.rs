@@ -53,15 +53,23 @@ mod tests {
         matches!(result, Err(ControlError::Config(_)))
     }
 
-    fn restore_control_bind(previous: Option<OsString>) {
+    fn is_storage_error(result: &Result<(), ControlError>) -> bool {
+        matches!(result, Err(ControlError::Storage(_)))
+    }
+
+    fn restore_env_var(key: &str, previous: Option<OsString>) {
         match previous {
             Some(value) => unsafe {
-                std::env::set_var("GITTREE_CONTROL_BIND", value);
+                std::env::set_var(key, value);
             },
             None => unsafe {
-                std::env::remove_var("GITTREE_CONTROL_BIND");
+                std::env::remove_var(key);
             },
         }
+    }
+
+    fn restore_control_bind(previous: Option<OsString>) {
+        restore_env_var("GITTREE_CONTROL_BIND", previous);
     }
 
     fn sample_config() -> ControlConfig {
@@ -162,6 +170,38 @@ mod tests {
         assert!(matches!(result, Err(ControlError::Serve(message)) if message == "boom"));
     }
 
+    #[tokio::test]
+    async fn run_with_real_serve_propagates_storage_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let overrides = [
+            ("GITTREE_CONTROL_BIND", "127.0.0.1:0"),
+            ("GITTREE_CONTROL_TOKEN", "token"),
+            ("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000"),
+            ("GITTREE_FORGEJO_API_TOKEN", "token"),
+            ("GITTREE_FORGEJO_OWNER", "gittree"),
+            ("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8090"),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret"),
+            ("GITTREE_STORAGE_READ_URL", "not-a-postgres-url"),
+            ("GITTREE_RELAY_URLS", "wss://relay.local"),
+            ("GITTREE_UI_REPO_ROOT", "/tmp"),
+            ("GITTREE_UI_PUBLIC_GIT_URL", "http://localhost:8085"),
+        ];
+        let previous: Vec<(&str, Option<OsString>)> = overrides
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in overrides {
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        }
+        let result = run().await;
+        for (key, value) in previous {
+            restore_env_var(key, value);
+        }
+        assert!(is_storage_error(&result));
+    }
+
     #[test]
     fn exit_code_from_run_result_maps_ok_and_error_results() {
         let ok: Result<(), ControlError> = Ok(());
@@ -198,8 +238,13 @@ mod tests {
     fn error_match_helper_covers_non_matching_results() {
         let ok: Result<(), ControlError> = Ok(());
         let serve_err = Err(ControlError::Serve("boom".to_string()));
+        let storage_err = Err(ControlError::Storage(gittree_storage::StorageError::Internal {
+            message: "boom".to_string(),
+        }));
         assert!(!is_config_error(&ok));
         assert!(!is_config_error(&serve_err));
+        assert!(is_storage_error(&storage_err));
+        assert!(!is_storage_error(&serve_err));
     }
 
     #[test]
