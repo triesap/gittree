@@ -25,6 +25,8 @@ use gittree_storage::{
 use rand::RngCore;
 use serde::Serialize;
 use sha2::Digest;
+use std::future::{Future, pending};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower_http::cors::{Any, CorsLayer};
@@ -263,12 +265,28 @@ fn map_server_result(result: std::io::Result<()>) -> Result<(), AuthError> {
     result.map_err(|err| AuthError::Serve(err.to_string()))
 }
 
-async fn serve_inner(bind: &str, router: Router) -> Result<(), AuthError> {
+type ServerFuture = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
+type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+async fn serve_inner_with_shutdown(
+    bind: &str,
+    router: Router,
+    shutdown: ShutdownFuture,
+) -> Result<(), AuthError> {
     let listener = match tokio::net::TcpListener::bind(bind).await {
         Ok(listener) => listener,
         Err(err) => return Err(AuthError::Serve(err.to_string())),
     };
-    map_server_result(axum::serve(listener, router).await)
+    let server: ServerFuture = Box::pin(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await
+    });
+    map_server_result(server.await)
+}
+
+async fn serve_inner(bind: &str, router: Router) -> Result<(), AuthError> {
+    serve_inner_with_shutdown(bind, router, Box::pin(pending())).await
 }
 
 pub async fn serve(config: AuthServiceConfig) -> Result<(), AuthError> {
@@ -820,6 +838,7 @@ mod tests {
     use serde_json::json;
     use std::collections::{HashMap, VecDeque};
     use std::error::Error as _;
+    use std::process::Command;
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
@@ -1427,8 +1446,62 @@ mod tests {
     }
 
     #[test]
-    fn auth_service_config_from_env_returns_result_without_panicking() {
-        let _ = AuthServiceConfig::from_env();
+    fn auth_service_config_from_env_returns_success_with_required_env() {
+        if std::env::var("GITTREE_AUTH_CONFIG_SUBPROCESS").as_deref() == Ok("1") {
+            let config = AuthServiceConfig::from_env().expect("config should parse from env");
+            assert_eq!(config.bind, "127.0.0.1:18089");
+            assert_eq!(config.forgejo.owner, "gittree");
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("current exe");
+        let status = Command::new(exe)
+            .arg("--exact")
+            .arg("tests::auth_service_config_from_env_returns_success_with_required_env")
+            .arg("--nocapture")
+            .env("GITTREE_AUTH_CONFIG_SUBPROCESS", "1")
+            .env("GITTREE_AUTH_BIND", "127.0.0.1:18089")
+            .env("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000")
+            .env("GITTREE_FORGEJO_API_TOKEN", "token")
+            .env("GITTREE_FORGEJO_OWNER", "gittree")
+            .env("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8087")
+            .env("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret")
+            .env(
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            )
+            .status()
+            .expect("spawn subprocess");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn auth_service_config_from_env_reports_missing_forgejo_env() {
+        if std::env::var("GITTREE_AUTH_CONFIG_SUBPROCESS").as_deref() == Ok("2") {
+            let err = AuthServiceConfig::from_env().expect_err("missing forgejo env");
+            assert!(is_auth_config_missing_env(&err));
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("current exe");
+        let status = Command::new(exe)
+            .arg("--exact")
+            .arg("tests::auth_service_config_from_env_reports_missing_forgejo_env")
+            .arg("--nocapture")
+            .env("GITTREE_AUTH_CONFIG_SUBPROCESS", "2")
+            .env("GITTREE_AUTH_BIND", "127.0.0.1:18089")
+            .env(
+                ENV_STORAGE_READ_URL,
+                "postgres://user:pass@localhost:5432/gittree",
+            )
+            .env_remove("GITTREE_FORGEJO_BASE_URL")
+            .env_remove("GITTREE_FORGEJO_API_TOKEN")
+            .env_remove("GITTREE_FORGEJO_OWNER")
+            .env_remove("GITTREE_FORGEJO_WEBHOOK_URL")
+            .env_remove("GITTREE_FORGEJO_WEBHOOK_SECRET")
+            .status()
+            .expect("spawn subprocess");
+        assert!(status.success());
     }
 
     #[test]
@@ -1902,6 +1975,15 @@ mod tests {
         let err = super::map_server_result(Err(std::io::Error::other("boom")))
             .expect_err("serve error");
         assert!(matches!(err, AuthError::Serve(message) if message == "boom"));
+    }
+
+    #[tokio::test]
+    async fn serve_inner_with_shutdown_returns_ok_for_ephemeral_bind() {
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let router = build_router(state);
+        super::serve_inner_with_shutdown("127.0.0.1:0", router, Box::pin(async {}))
+            .await
+            .expect("serve should stop on shutdown");
     }
 
     #[tokio::test]

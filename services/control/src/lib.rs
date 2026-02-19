@@ -34,6 +34,8 @@ use secp256k1::rand::{RngCore, rngs::OsRng};
 use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use std::future::{Future, pending};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower_http::cors::{Any, CorsLayer};
@@ -294,12 +296,28 @@ fn map_server_result(result: std::io::Result<()>) -> Result<(), ControlError> {
     result.map_err(|err| ControlError::Serve(err.to_string()))
 }
 
-async fn serve_inner(bind: &str, router: Router) -> Result<(), ControlError> {
+type ServerFuture = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
+type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+async fn serve_inner_with_shutdown(
+    bind: &str,
+    router: Router,
+    shutdown: ShutdownFuture,
+) -> Result<(), ControlError> {
     let listener = match tokio::net::TcpListener::bind(bind).await {
         Ok(value) => value,
         Err(err) => return Err(ControlError::Serve(err.to_string())),
     };
-    map_server_result(axum::serve(listener, router).await)
+    let server: ServerFuture = Box::pin(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await
+    });
+    map_server_result(server.await)
+}
+
+async fn serve_inner(bind: &str, router: Router) -> Result<(), ControlError> {
+    serve_inner_with_shutdown(bind, router, Box::pin(pending())).await
 }
 
 fn build_reqwest_transport(api_token: &str) -> Result<Arc<dyn ForgejoTransport>, ControlError> {
@@ -2405,6 +2423,15 @@ mod tests {
         let err = super::map_server_result(Err(std::io::Error::other("boom")))
             .expect_err("error");
         assert!(matches!(err, super::ControlError::Serve(message) if message.contains("boom")));
+    }
+
+    #[tokio::test]
+    async fn serve_inner_with_shutdown_returns_ok_for_ephemeral_bind() {
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let router = build_router(state);
+        super::serve_inner_with_shutdown("127.0.0.1:0", router, Box::pin(async {}))
+            .await
+            .expect("serve should stop on shutdown");
     }
 
     #[test]
