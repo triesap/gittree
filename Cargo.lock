@@ -7621,6 +7621,7 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 [[package]]
 name = "ui-primitives"
 version = "0.1.0"
+source = "git+https://github.com/triesap/ui-primitives?rev=49b47f10c9cfbba60c3377e7169eafdd36b6f186#49b47f10c9cfbba60c3377e7169eafdd36b6f186"
 dependencies = [
  "ui-primitives-core",
  "ui-primitives-leptos",
@@ -7629,10 +7630,12 @@ dependencies = [
 [[package]]
 name = "ui-primitives-core"
 version = "0.1.0"
+source = "git+https://github.com/triesap/ui-primitives?rev=49b47f10c9cfbba60c3377e7169eafdd36b6f186#49b47f10c9cfbba60c3377e7169eafdd36b6f186"
 
 [[package]]
 name = "ui-primitives-leptos"
 version = "0.1.0"
+source = "git+https://github.com/triesap/ui-primitives?rev=49b47f10c9cfbba60c3377e7169eafdd36b6f186#49b47f10c9cfbba60c3377e7169eafdd36b6f186"
 dependencies = [
  "leptos",
  "send_wrapper",

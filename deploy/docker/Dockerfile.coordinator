@@ -4,7 +4,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY services ./services
 COPY migrations ./migrations
-COPY refs/ui-primitives ./refs/ui-primitives
 RUN cargo build -p gittree-coordinator --release \
     && cargo build -p gittree-git-hook --bin gittree-pre-receive --bin gittree-post-receive --release
 

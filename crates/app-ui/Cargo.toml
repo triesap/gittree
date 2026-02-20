@@ -34,7 +34,7 @@ tracing-wasm = "0.2"
 mf2-i18n-core.workspace = true
 mf2-i18n-embedded.workspace = true
 
-ui-primitives = { path = "../../refs/ui-primitives/crates/ui-primitives", features = ["core", "leptos"] }
+ui-primitives = { git = "https://github.com/triesap/ui-primitives", rev = "49b47f10c9cfbba60c3377e7169eafdd36b6f186", features = ["core", "leptos"] }
 
 gittree-app-core = { path = "../app-core" }
 gittree-core = { path = "../core", optional = true }

@@ -1,3 +1,0 @@
-[submodule "refs/ui-primitives"]
-	path = refs/ui-primitives
-	url = git@github.com:triesap/ui-primitives.git

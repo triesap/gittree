@@ -26,7 +26,6 @@ members = [
   "services/ui",
   "services/webhook",
 ]
-exclude = ["refs/ui-primitives"]
 resolver = "2"
 
 [workspace.package]

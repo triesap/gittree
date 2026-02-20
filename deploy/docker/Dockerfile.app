@@ -9,7 +9,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY services ./services
 COPY migrations ./migrations
-COPY refs/ui-primitives ./refs/ui-primitives
 RUN cargo build -p gittree-app --release
 WORKDIR /app/crates/app-ui
 RUN npm ci
