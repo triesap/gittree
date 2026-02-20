@@ -1851,6 +1851,22 @@ WHERE datname = $1
         assert!(matches!(err, StorageError::Database { .. }));
     }
 
+    fn select_row_query(columns: &[(&str, &str)]) -> String {
+        let mut query = String::from("SELECT\n");
+        for (index, (expr, alias)) in columns.iter().enumerate() {
+            query.push_str("    ");
+            query.push_str(expr);
+            query.push_str(" AS ");
+            query.push_str(alias);
+            if index + 1 != columns.len() {
+                query.push_str(",\n");
+            } else {
+                query.push('\n');
+            }
+        }
+        query
+    }
+
     #[test]
     fn to_offset_datetime_rejects_invalid_timestamp() {
         let err = PostgresRepositories::to_offset_datetime(i64::MIN).unwrap_err();
@@ -3572,71 +3588,107 @@ WHERE datname = $1
         with_test_db(
             "postgres_decoder_helpers_report_row_errors_db",
             |test_db| async move {
-                let bad_tenant_row = sqlx::query(
-                    r#"
-SELECT
-    1::integer AS id,
-    'relay.example'::text AS host,
-    E'\\x01'::bytea AS relay_pubkey,
-    E'\\x02'::bytea AS relay_secret,
-    E'\\x03'::bytea AS relay_secret_nonce,
-    'kid'::text AS relay_secret_kid,
-    NULL::text AS name,
-    NULL::text AS description,
-    NULL::text AS icon,
-    NULL::text AS banner,
-    NULL::text AS contact,
-    true AS auth_required,
-    true AS public_read,
-    false AS public_write,
-    10::bigint AS created_at,
-    11::bigint AS updated_at
-"#,
-                )
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("bad tenant row");
-                assert_db_error(
-                    relay_tenant_from_row(bad_tenant_row).expect_err("tenant row decode"),
-                );
+                let tenant_columns = vec![
+                    ("'tenant-1'::text", "id"),
+                    ("'relay.example'::text", "host"),
+                    ("E'\\\\x01'::bytea", "relay_pubkey"),
+                    ("E'\\\\x02'::bytea", "relay_secret"),
+                    ("E'\\\\x03'::bytea", "relay_secret_nonce"),
+                    ("'kid'::text", "relay_secret_kid"),
+                    ("NULL::text", "name"),
+                    ("NULL::text", "description"),
+                    ("NULL::text", "icon"),
+                    ("NULL::text", "banner"),
+                    ("NULL::text", "contact"),
+                    ("true", "auth_required"),
+                    ("true", "public_read"),
+                    ("false", "public_write"),
+                    ("10::bigint", "created_at"),
+                    ("11::bigint", "updated_at"),
+                ];
+                let tenant_invalid_values = [
+                    "1::integer",
+                    "1::integer",
+                    "'not-bytes'::text",
+                    "'not-bytes'::text",
+                    "'not-bytes'::text",
+                    "1::integer",
+                    "1::integer",
+                    "1::integer",
+                    "1::integer",
+                    "1::integer",
+                    "1::integer",
+                    "'not-bool'::text",
+                    "'not-bool'::text",
+                    "'not-bool'::text",
+                    "'not-int'::text",
+                    "'not-int'::text",
+                ];
+                for (index, invalid_value) in tenant_invalid_values.iter().enumerate() {
+                    let mut columns = tenant_columns.clone();
+                    columns[index] = (*invalid_value, columns[index].1);
+                    let row = sqlx::query(&select_row_query(&columns))
+                        .fetch_one(&test_db.pool)
+                        .await
+                        .expect("tenant decoder row");
+                    assert_db_error(relay_tenant_from_row(row).expect_err("tenant row decode"));
+                }
 
-                let bad_membership_row = sqlx::query(
-                    r#"
-SELECT
-    'tenant-1'::text AS tenant_id,
-    E'\\x04'::bytea AS pubkey,
-    9::integer AS role,
-    'active'::text AS status,
-    10::bigint AS created_at,
-    11::bigint AS updated_at
-"#,
-                )
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("bad membership row");
-                assert_db_error(
-                    relay_membership_from_row(bad_membership_row)
-                        .expect_err("membership row decode"),
-                );
+                let membership_columns = vec![
+                    ("'tenant-1'::text", "tenant_id"),
+                    ("E'\\\\x04'::bytea", "pubkey"),
+                    ("'member'::text", "role"),
+                    ("'active'::text", "status"),
+                    ("10::bigint", "created_at"),
+                    ("11::bigint", "updated_at"),
+                ];
+                let membership_invalid_values = [
+                    "1::integer",
+                    "'not-bytes'::text",
+                    "9::integer",
+                    "9::integer",
+                    "'not-int'::text",
+                    "'not-int'::text",
+                ];
+                for (index, invalid_value) in membership_invalid_values.iter().enumerate() {
+                    let mut columns = membership_columns.clone();
+                    columns[index] = (*invalid_value, columns[index].1);
+                    let row = sqlx::query(&select_row_query(&columns))
+                        .fetch_one(&test_db.pool)
+                        .await
+                        .expect("membership decoder row");
+                    assert_db_error(
+                        relay_membership_from_row(row).expect_err("membership row decode"),
+                    );
+                }
 
-                let bad_invite_row = sqlx::query(
-                    r#"
-SELECT
-    'tenant-1'::text AS tenant_id,
-    7::integer AS invite_code,
-    'member'::text AS role,
-    E'\\x05'::bytea AS inviter_pubkey,
-    NULL::bytea AS invitee_pubkey,
-    NULL::bigint AS expires_at,
-    12::bigint AS created_at
-"#,
-                )
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("bad invite row");
-                assert_db_error(
-                    relay_invite_from_row(bad_invite_row).expect_err("invite row decode"),
-                );
+                let invite_columns = vec![
+                    ("'tenant-1'::text", "tenant_id"),
+                    ("'invite-1'::text", "invite_code"),
+                    ("'member'::text", "role"),
+                    ("E'\\\\x05'::bytea", "inviter_pubkey"),
+                    ("NULL::bytea", "invitee_pubkey"),
+                    ("NULL::bigint", "expires_at"),
+                    ("12::bigint", "created_at"),
+                ];
+                let invite_invalid_values = [
+                    "1::integer",
+                    "7::integer",
+                    "7::integer",
+                    "'not-bytes'::text",
+                    "9::integer",
+                    "'not-int'::text",
+                    "'not-int'::text",
+                ];
+                for (index, invalid_value) in invite_invalid_values.iter().enumerate() {
+                    let mut columns = invite_columns.clone();
+                    columns[index] = (*invalid_value, columns[index].1);
+                    let row = sqlx::query(&select_row_query(&columns))
+                        .fetch_one(&test_db.pool)
+                        .await
+                        .expect("invite decoder row");
+                    assert_db_error(relay_invite_from_row(row).expect_err("invite row decode"));
+                }
 
                 test_db.cleanup().await;
             },
