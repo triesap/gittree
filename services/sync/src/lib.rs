@@ -206,8 +206,11 @@ struct SyncAppState {
     repo_root: PathBuf,
 }
 
-pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
-    let _observability = init_observability()?;
+async fn serve_with<InitFn, InitOut>(config: SyncConfig, init_fn: InitFn) -> Result<(), SyncError>
+where
+    InitFn: FnOnce() -> Result<InitOut, SyncError>,
+{
+    let _observability = init_fn()?;
     let state = SyncAppState {
         repo_root: config.repo_root,
     };
@@ -219,6 +222,10 @@ pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
         .await
         .map_err(|err| SyncError::Serve(err.to_string()))?;
     Ok(())
+}
+
+pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
+    serve_with(config, init_observability).await
 }
 
 fn build_router(state: SyncAppState) -> Router {
@@ -698,7 +705,6 @@ mod tests {
     use super::path_to_str;
     use super::run_with_timeout;
     use super::select_relay_urls;
-    use super::serve;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::response::IntoResponse;
@@ -786,11 +792,17 @@ mod tests {
             "postgres://user:pass@localhost:5432/gittree",
             || {
                 with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
-                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
-                            let config = SyncConfig::from_env().expect("config");
-                            assert_eq!(config.storage.idle_timeout_secs, None);
-                            assert_eq!(config.storage.max_lifetime_secs, None);
+                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
+                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
+                            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                                    let config = SyncConfig::from_env().expect("config");
+                                    assert_eq!(config.storage.max_connections, 10);
+                                    assert_eq!(config.storage.min_connections, 2);
+                                    assert_eq!(config.storage.idle_timeout_secs, None);
+                                    assert_eq!(config.storage.max_lifetime_secs, None);
+                                });
+                            });
                         });
                     });
                 });
@@ -909,6 +921,18 @@ mod tests {
         unsafe {
             std::env::remove_var(KEY);
         }
+    }
+
+    #[test]
+    fn without_env_var_restores_previous_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        const KEY: &str = "GITTREE_SYNC_TEST_ENV_RESTORE";
+        with_env_var(KEY, "before", || {
+            without_env_var(KEY, || {
+                assert!(std::env::var(KEY).is_err());
+            });
+            assert_eq!(std::env::var(KEY).ok().as_deref(), Some("before"));
+        });
     }
 
     #[test]
@@ -1074,6 +1098,30 @@ mod tests {
 
     #[tokio::test]
     async fn serve_maps_bind_error_after_observability_init() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("occupied listener");
+        let bind = occupied.local_addr().expect("occupied addr");
+        let config = SyncConfig {
+            bind: bind.to_string(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        };
+        let err = super::serve_with(config, || Ok(())).await.expect_err("bind error");
+        assert!(matches!(err, SyncError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_wrapper_maps_errors() {
         let config = SyncConfig {
             bind: "not-a-bind".to_string(),
             storage: super::StorageConfig {
@@ -1088,10 +1136,14 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = serve(config).await.expect_err("invalid bind");
+        let err = super::serve(config)
+            .await
+            .expect_err("expected serve error");
         assert!(matches!(
             err,
-            SyncError::Serve(_) | SyncError::Observability(_)
+            SyncError::Serve(_)
+                | SyncError::Observability(_)
+                | SyncError::ObservabilityConfig(_)
         ));
     }
 
