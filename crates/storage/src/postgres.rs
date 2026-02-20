@@ -1552,7 +1552,7 @@ mod tests {
                     ));
                 })
                 .ok()?;
-            run_migrations(&pool).await?;
+            run_migrations(&pool).await.expect("run database migrations");
 
             Some(Self {
                 base_url,
@@ -1594,8 +1594,11 @@ mod tests {
             sqlx::query(&create_schema).execute(&pool).await.ok()?;
 
             let set_search_path = format!("SET search_path TO \"{}\"", schema_name);
-            sqlx::query(&set_search_path).execute(&pool).await.ok()?;
-            run_migrations(&pool).await?;
+            sqlx::query(&set_search_path)
+                .execute(&pool)
+                .await
+                .expect("set schema search path");
+            run_migrations(&pool).await.expect("run schema migrations");
 
             Some(Self {
                 base_url,
@@ -1687,18 +1690,15 @@ WHERE datname = $1
         )
     }
 
-    fn dotenv_value(key: &str) -> Option<String> {
-        let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.env")
-            .canonicalize()
-            .ok()?;
-        let content = std::fs::read_to_string(env_path).ok()?;
+    fn parse_dotenv_value(content: &str, key: &str) -> Option<String> {
         for raw_line in content.lines() {
             let line = raw_line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (name, value) = line.split_once('=')?;
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
             if name.trim() != key {
                 continue;
             }
@@ -1706,6 +1706,12 @@ WHERE datname = $1
             return Some(value.to_string());
         }
         None
+    }
+
+    fn dotenv_value(key: &str) -> Option<String> {
+        let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
+        let content = std::fs::read_to_string(env_path).unwrap_or_default();
+        parse_dotenv_value(&content, key)
     }
 
     fn test_database_base_urls() -> Vec<String> {
@@ -1762,7 +1768,7 @@ WHERE datname = $1
     }
 
     async fn run_migrations(pool: &PgPool) -> Option<()> {
-        let runner = MigrationRunner::new(core_migrations()).ok()?;
+        let runner = MigrationRunner::new(core_migrations()).expect("build core migration runner");
         let mut connection = pool
             .acquire()
             .await
@@ -1770,7 +1776,10 @@ WHERE datname = $1
                 debug_db(format!("failed to acquire migration connection: {error}"));
             })
             .ok()?;
-        runner.run(&mut *connection).await.ok()?;
+        runner
+            .run(&mut *connection)
+            .await
+            .expect("apply core migrations");
         drop(connection);
         Some(())
     }
@@ -2025,6 +2034,37 @@ WHERE datname = $1
     #[test]
     fn dotenv_value_returns_none_for_unknown_keys() {
         assert!(dotenv_value("__GITTREE_STORAGE_TEST_UNKNOWN__").is_none());
+    }
+
+    #[test]
+    fn parse_dotenv_value_ignores_malformed_lines() {
+        let content = r#"
+MALFORMED
+GITTREE_STORAGE_WRITE_URL=postgres://write
+        "#;
+
+        assert_eq!(
+            parse_dotenv_value(content, "GITTREE_STORAGE_WRITE_URL"),
+            Some("postgres://write".to_string())
+        );
+        assert!(parse_dotenv_value(content, "MALFORMED").is_none());
+    }
+
+    #[test]
+    fn parse_dotenv_value_trims_wrapping_quotes() {
+        let content = r#"
+GITTREE_STORAGE_READ_URL="postgres://quoted-read"
+GITTREE_STORAGE_TEST_DATABASE_URL='postgres://quoted-test'
+        "#;
+
+        assert_eq!(
+            parse_dotenv_value(content, "GITTREE_STORAGE_READ_URL"),
+            Some("postgres://quoted-read".to_string())
+        );
+        assert_eq!(
+            parse_dotenv_value(content, "GITTREE_STORAGE_TEST_DATABASE_URL"),
+            Some("postgres://quoted-test".to_string())
+        );
     }
 
     #[test]
