@@ -553,6 +553,62 @@ mod tests {
     }
 
     #[test]
+    fn config_reports_services_and_ui_config_errors() {
+        with_minimum_config_env(&[("GITTREE_UI_BIND", Some("bad-bind"))], || {
+            let err = UiServiceConfig::from_env().expect_err("invalid service bind");
+            assert!(matches!(err, UiServiceConfigError::Config(_)));
+        });
+
+        with_minimum_config_env(&[("GITTREE_UI_REPO_ROOT", None)], || {
+            let err = UiServiceConfig::from_env().expect_err("missing ui repo root");
+            assert!(matches!(err, UiServiceConfigError::Config(_)));
+        });
+    }
+
+    #[test]
+    fn config_reports_additional_storage_validation_errors() {
+        with_minimum_config_env(
+            &[("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", Some("invalid"))],
+            || {
+                let invalid = UiServiceConfig::from_env().expect_err("invalid idle timeout");
+                assert!(matches!(
+                    invalid,
+                    UiServiceConfigError::Storage(StorageConfigError::InvalidEnv {
+                        key: "GITTREE_STORAGE_IDLE_TIMEOUT_SECS",
+                        ..
+                    })
+                ));
+            },
+        );
+
+        with_minimum_config_env(
+            &[
+                ("GITTREE_STORAGE_MIN_CONNECTIONS", Some("2")),
+                ("GITTREE_STORAGE_MAX_CONNECTIONS", Some("1")),
+            ],
+            || {
+                let invalid = UiServiceConfig::from_env().expect_err("invalid pool bounds");
+                assert!(matches!(
+                    invalid,
+                    UiServiceConfigError::Storage(StorageConfigError::InvalidConfig(_))
+                ));
+            },
+        );
+
+        with_minimum_config_env(
+            &[
+                ("GITTREE_STORAGE_MIN_CONNECTIONS", Some("")),
+                ("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", Some("")),
+            ],
+            || {
+                let config = UiServiceConfig::from_env().expect("config");
+                assert_eq!(config.storage.min_connections, 2);
+                assert_eq!(config.storage.idle_timeout_secs, None);
+            },
+        );
+    }
+
+    #[test]
     fn config_and_ui_errors_display_and_source_paths_are_stable() {
         let config = UiServiceConfigError::Config(ConfigError::InvalidConfig {
             field: "ui.repo_root",
@@ -694,6 +750,28 @@ mod tests {
         };
         let err = build_repositories(&config).expect_err("invalid pool");
         assert!(matches!(err, UiError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn build_repositories_maps_invalid_connection_string() {
+        let config = UiServiceConfig {
+            bind: "127.0.0.1:9090".to_string(),
+            storage: StorageConfig {
+                read_connection: "not-a-connection".to_string(),
+                ..test_storage_config()
+            },
+            ui: test_ui_config(),
+        };
+        let err = build_repositories(&config).expect_err("invalid connection string");
+        assert!(matches!(err, UiError::Storage(_)));
+    }
+
+    #[test]
+    fn init_observability_maps_invalid_env() {
+        with_env_vars(&[("GITTREE_LOG_JSON", Some("not-bool"))], || {
+            let err = init_observability().expect_err("invalid log config");
+            assert!(matches!(err, UiError::ObservabilityConfig(_)));
+        });
     }
 
     #[test]
