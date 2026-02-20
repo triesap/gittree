@@ -282,8 +282,14 @@ pub fn build_repositories(config: &AppServiceConfig) -> Result<PostgresRepositor
     Ok(PostgresRepositories::new(pool))
 }
 
-pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
-    let _observability = init_observability()?;
+async fn serve_with<InitFn, InitOut>(
+    config: AppServiceConfig,
+    init_fn: InitFn,
+) -> Result<(), AppError>
+where
+    InitFn: FnOnce() -> Result<InitOut, AppError>,
+{
+    let _observability = init_fn()?;
     let repositories = build_repositories(&config)?;
     let leptos_options = build_leptos_options(&config);
     let repositories = Arc::new(repositories);
@@ -309,6 +315,10 @@ pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
         .await
         .map_err(|err| AppError::Serve(err.to_string()))?;
     Ok(())
+}
+
+pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
+    serve_with(config, init_observability).await
 }
 
 fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
@@ -623,6 +633,25 @@ mod tests {
         };
         let err = super::build_repositories(&invalid_config).expect_err("invalid pool config");
         assert!(matches!(err, AppError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_maps_bind_errors_after_setup() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("occupied listener");
+        let bind = occupied.local_addr().expect("occupied addr");
+        let config = AppServiceConfig {
+            bind,
+            base_path: "/".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+
+        let err = super::serve_with(config, || Ok(())).await.expect_err("bind error");
+        assert!(matches!(err, AppError::Serve(_)));
     }
 
     #[test]

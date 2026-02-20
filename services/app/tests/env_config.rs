@@ -246,6 +246,33 @@ fn app_service_config_from_env_uses_defaults_for_empty_optional_values() {
 }
 
 #[test]
+fn app_service_config_from_env_uses_defaults_when_optional_envs_are_missing() {
+    with_env_overrides(
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+            ),
+            minimum_ui_env()[0],
+            minimum_ui_env()[1],
+        ],
+        || {
+            let config = AppServiceConfig::from_env().expect("config");
+            assert_eq!(config.bind.to_string(), "127.0.0.1:8090");
+            assert_eq!(config.base_path, "/ui");
+            assert_eq!(config.site_root, std::path::PathBuf::from("crates/app-ui/dist"));
+            assert_eq!(config.site_pkg_dir, "pkg");
+            assert_eq!(config.storage.max_connections, 10);
+            assert_eq!(config.storage.min_connections, 2);
+            assert_eq!(config.storage.idle_timeout_secs, None);
+            assert_eq!(config.storage.max_lifetime_secs, None);
+            assert_eq!(config.storage.write_connection, None);
+            assert_eq!(config.storage.application_name, None);
+        },
+    );
+}
+
+#[test]
 fn app_service_config_from_env_reports_invalid_bind_env() {
     with_env_overrides(
         &[
