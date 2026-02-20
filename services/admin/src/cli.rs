@@ -740,6 +740,31 @@ mod tests {
 
     #[test]
     fn parse_create_user_rejects_missing_optional_and_unknown_flags() {
+        let split_optional = AdminCli::parse([
+            "gittree-admin",
+            "create-user",
+            "--username",
+            "alice",
+            "--email",
+            "alice@example.com",
+            "--password",
+            "secret",
+            "--full-name",
+            "Alice",
+        ])
+        .expect("split optional args");
+        assert_eq!(
+            split_optional.command,
+            Some(AdminCommand::CreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: Some("Alice".to_string()),
+                must_change_password: None,
+                send_notify: None,
+            })
+        );
+
         let missing_full_name = AdminCli::parse([
             "gittree-admin",
             "create-user",
@@ -751,6 +776,46 @@ mod tests {
         .expect_err("missing full-name value");
         assert!(matches!(
             missing_full_name,
+            AdminCliError::MissingValue("--full-name")
+        ));
+
+        let empty_username = AdminCli::parse([
+            "gittree-admin",
+            "create-user",
+            "--username=",
+            "--email=alice@example.com",
+            "--password=secret",
+        ])
+        .expect_err("empty username");
+        assert!(matches!(
+            empty_username,
+            AdminCliError::MissingValue("--username")
+        ));
+
+        let empty_password = AdminCli::parse([
+            "gittree-admin",
+            "create-user",
+            "--username=alice",
+            "--email=alice@example.com",
+            "--password=",
+        ])
+        .expect_err("empty password");
+        assert!(matches!(
+            empty_password,
+            AdminCliError::MissingValue("--password")
+        ));
+
+        let empty_full_name = AdminCli::parse([
+            "gittree-admin",
+            "create-user",
+            "--username=alice",
+            "--email=alice@example.com",
+            "--password=secret",
+            "--full-name=",
+        ])
+        .expect_err("empty full-name");
+        assert!(matches!(
+            empty_full_name,
             AdminCliError::MissingValue("--full-name")
         ));
 
@@ -796,6 +861,32 @@ mod tests {
 
     #[test]
     fn parse_create_org_rejects_missing_optional_values_and_unknown_flag() {
+        let split_optional = AdminCli::parse([
+            "gittree-admin",
+            "create-org",
+            "--owner",
+            "root",
+            "--name",
+            "acme",
+            "--full-name",
+            "Acme Org",
+            "--description",
+            "desc",
+            "--visibility",
+            "private",
+        ])
+        .expect("split optional args");
+        assert_eq!(
+            split_optional.command,
+            Some(AdminCommand::CreateOrg {
+                owner: "root".to_string(),
+                name: "acme".to_string(),
+                full_name: Some("Acme Org".to_string()),
+                description: Some("desc".to_string()),
+                visibility: Some("private".to_string()),
+            })
+        );
+
         let missing_cases = [
             (
                 vec![
@@ -913,6 +1004,28 @@ mod tests {
 
     #[test]
     fn parse_create_repo_rejects_missing_optional_and_unknown_flags() {
+        let split_description = AdminCli::parse([
+            "gittree-admin",
+            "create-repo",
+            "--owner",
+            "alice",
+            "--name",
+            "demo",
+            "--description",
+            "demo repo",
+        ])
+        .expect("split description");
+        assert_eq!(
+            split_description.command,
+            Some(AdminCommand::CreateRepo {
+                owner: "alice".to_string(),
+                name: "demo".to_string(),
+                description: Some("demo repo".to_string()),
+                private: None,
+                auto_init: None,
+            })
+        );
+
         let missing_description = AdminCli::parse([
             "gittree-admin",
             "create-repo",
@@ -1003,6 +1116,35 @@ mod tests {
 
     #[test]
     fn parse_create_pull_rejects_missing_and_unknown_flags() {
+        let split_body = AdminCli::parse([
+            "gittree-admin",
+            "create-pull",
+            "--owner",
+            "alice",
+            "--repo",
+            "demo",
+            "--head",
+            "feature",
+            "--base",
+            "main",
+            "--title",
+            "Update",
+            "--body",
+            "details",
+        ])
+        .expect("split body");
+        assert_eq!(
+            split_body.command,
+            Some(AdminCommand::CreatePull {
+                owner: "alice".to_string(),
+                repo: "demo".to_string(),
+                head: "feature".to_string(),
+                base: "main".to_string(),
+                title: "Update".to_string(),
+                body: Some("details".to_string()),
+            })
+        );
+
         let missing_body = AdminCli::parse([
             "gittree-admin",
             "create-pull",
