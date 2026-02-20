@@ -5,11 +5,9 @@ fn map_serde_error(field: &'static str, source: serde_json::Error) -> StorageErr
     StorageError::Serialization { field, source }
 }
 
-fn to_json_field(
-    field: &'static str,
-    encode: impl FnOnce() -> Result<String, serde_json::Error>,
-) -> Result<String, StorageError> {
-    encode().map_err(|source| map_serde_error(field, source))
+fn serialize_report(report: &RelayCompatibilityReport) -> String {
+    // RelayCompatibilityReport is fully JSON-serializable by construction.
+    serde_json::to_string(report).expect("serialize relay compatibility report")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +57,7 @@ impl RelayCompatibilityRecord {
             });
         }
 
-        let report_json = to_json_field("report", || serde_json::to_string(report))?;
+        let report_json = serialize_report(report);
 
         Ok(Self {
             relay_url: report.relay_url.clone(),
@@ -230,25 +228,4 @@ mod tests {
         assert!(rendered.contains("RelayCompatibilityRecord"));
     }
 
-    #[test]
-    fn to_json_maps_serialization_error_with_field_name() {
-        use serde::Serialize;
-        use serde::ser::Error as _;
-        use serde::ser::Serializer;
-
-        struct AlwaysFail;
-
-        impl Serialize for AlwaysFail {
-            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                Err(S::Error::custom("always fail"))
-            }
-        }
-
-        let err =
-            super::to_json_field("report", || serde_json::to_string(&AlwaysFail)).unwrap_err();
-        assert!(matches!(err, StorageError::Serialization { field, .. } if field == "report"));
-    }
 }

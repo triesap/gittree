@@ -4,11 +4,9 @@ use std::collections::HashMap;
 
 const HEX_LEN: usize = 64;
 
-fn to_json_field(
-    field: &'static str,
-    encode: impl FnOnce() -> Result<String, serde_json::Error>,
-) -> Result<String, StorageError> {
-    encode().map_err(|source| StorageError::Serialization { field, source })
+fn serialize_state_map(state: &HashMap<String, String>) -> String {
+    // `HashMap<String, String>` is always serializable to JSON.
+    serde_json::to_string(state).expect("serialize state map")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +77,7 @@ impl RepoStateRecord {
             field: "state",
             value: err.to_string(),
         })?;
-        let state_json = to_json_field("state", || serde_json::to_string(&state.state))?;
+        let state_json = serialize_state_map(&state.state);
 
         Ok(Self {
             event_id: decode_hex_32("event_id", event_id)?,
@@ -209,27 +207,6 @@ mod tests {
         let parsed = record.state_map().expect("state map");
         assert!(parsed.contains_key("HEAD"));
         assert!(parsed.contains_key("refs/heads/main"));
-    }
-
-    #[test]
-    fn to_json_field_maps_serialization_error_with_field_name() {
-        use serde::Serialize;
-        use serde::ser::Error as _;
-        use serde::ser::Serializer;
-
-        struct AlwaysFail;
-
-        impl Serialize for AlwaysFail {
-            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                Err(S::Error::custom("always fail"))
-            }
-        }
-
-        let err = super::to_json_field("state", || serde_json::to_string(&AlwaysFail)).unwrap_err();
-        assert!(matches!(err, StorageError::Serialization { field, .. } if field == "state"));
     }
 
     #[test]
