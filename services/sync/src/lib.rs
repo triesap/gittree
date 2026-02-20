@@ -272,9 +272,8 @@ async fn post_receive_handler(
     State(state): State<Arc<SyncAppState>>,
     Json(payload): Json<PostReceivePayload>,
 ) -> Result<Json<SyncAckPayload>, SyncHttpError> {
-    RepoAddress::new(payload.pubkey.clone(), payload.identifier.clone()).map_err(|err| {
-        SyncHttpError::BadRequest(format!("invalid repo address: {err}"))
-    })?;
+    RepoAddress::new(payload.pubkey.clone(), payload.identifier.clone())
+        .map_err(|err| SyncHttpError::BadRequest(format!("invalid repo address: {err}")))?;
     let npub = npub_from_hex(&payload.pubkey)?;
     let repo_path = state
         .repo_root
@@ -290,8 +289,8 @@ fn npub_from_hex(pubkey: &str) -> Result<String, SyncHttpError> {
     if pubkey.len() != 64 {
         return Err(SyncHttpError::BadRequest("invalid pubkey".to_string()));
     }
-    let bytes = hex::decode(pubkey)
-        .map_err(|_| SyncHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let bytes =
+        hex::decode(pubkey).map_err(|_| SyncHttpError::BadRequest("invalid pubkey".to_string()))?;
     if bytes.len() != 32 {
         return Err(SyncHttpError::BadRequest("invalid pubkey".to_string()));
     }
@@ -678,39 +677,52 @@ impl SyncLimiter {
 
 #[cfg(test)]
 mod tests {
+    use super::CommandGitExecutor;
     use super::ENV_STORAGE_READ_URL;
     use super::GitExecError;
     use super::GitExecutor;
-    use super::ObservabilityHandle;
+    use super::PostReceivePayload;
     use super::RefChangeResult;
+    use super::RefUpdatePayload;
     use super::RefUpdatePlan;
+    use super::StorageConfigError;
+    use super::SyncAckPayload;
     use super::SyncConfig;
+    use super::SyncConfigError;
+    use super::SyncError;
+    use super::SyncHttpError;
     use super::SyncPlan;
     use super::SyncScheduleConfig;
     use super::SyncScheduler;
-    use super::select_relay_urls;
     use super::build_sync_plan;
     use super::execute_sync_plan;
     use super::init_observability;
-    use super::PostReceivePayload;
-    use super::RefUpdatePayload;
-    use super::SyncAckPayload;
+    use super::npub_from_hex;
+    use super::path_to_str;
+    use super::run_with_timeout;
+    use super::select_relay_urls;
+    use super::serve;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use axum::response::IntoResponse;
+    use gittree_config::ConfigError;
     use gittree_core::NostrEvent;
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
-    use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
+    use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_storage::{RelayCompatibilityRecord, RelayProbeMetadata};
     use std::collections::HashMap;
+    use std::error::Error;
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::Mutex;
-    use std::sync::OnceLock;
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -745,10 +757,7 @@ mod tests {
                                 config.storage.read_connection,
                                 "postgres://user:pass@localhost:5432/gittree"
                             );
-                            assert_eq!(
-                                config.relay_urls,
-                                vec!["wss://relay.example".to_string()]
-                            );
+                            assert_eq!(config.relay_urls, vec!["wss://relay.example".to_string()]);
                             assert_eq!(config.repo_root, PathBuf::from("/tmp/gittree-sync"));
                         });
                     });
@@ -777,13 +786,173 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_and_sync_error_display_and_source_paths_are_stable() {
+        let config = SyncConfigError::Config(ConfigError::InvalidConfig {
+            field: "sync.repo_root",
+            value: "bad".to_string(),
+        });
+        assert!(format!("{config}").contains("sync config error"));
+        assert!(config.source().is_some());
+
+        let storage = SyncConfigError::Storage(StorageConfigError::MissingEnv("READ"));
+        assert!(format!("{storage}").contains("sync storage config error"));
+        assert!(storage.source().is_some());
+
+        let missing = SyncConfigError::MissingEnv("KEY");
+        assert_eq!(format!("{missing}"), "missing env KEY");
+        assert!(missing.source().is_none());
+
+        let invalid = SyncConfigError::InvalidEnv {
+            key: "KEY",
+            value: "bad".to_string(),
+        };
+        assert_eq!(format!("{invalid}"), "invalid env KEY: bad");
+        assert!(invalid.source().is_none());
+
+        assert_eq!(
+            format!("{}", StorageConfigError::MissingEnv("READ")),
+            "missing env READ"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                StorageConfigError::InvalidEnv {
+                    key: "MAX",
+                    value: "bad".to_string(),
+                }
+            ),
+            "invalid env MAX: bad"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                StorageConfigError::InvalidConfig("invalid".to_string())
+            ),
+            "invalid"
+        );
+
+        let sync_config = SyncError::Config(SyncConfigError::MissingEnv("KEY"));
+        assert!(format!("{sync_config}").contains("sync error"));
+        assert!(sync_config.source().is_some());
+
+        let sync_serve = SyncError::Serve("bind".to_string());
+        assert_eq!(format!("{sync_serve}"), "sync serve error: bind");
+        assert!(sync_serve.source().is_none());
+    }
+
+    #[test]
+    fn sync_http_and_npub_validation_cover_error_paths() {
+        assert_eq!(
+            SyncHttpError::BadRequest("bad".to_string())
+                .into_response()
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            SyncHttpError::Internal("oops".to_string())
+                .into_response()
+                .status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let too_short = npub_from_hex("abcd").expect_err("short key");
+        assert_eq!(
+            too_short.into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+
+        let invalid_hex = npub_from_hex(&"zz".repeat(32)).expect_err("invalid hex");
+        assert_eq!(
+            invalid_hex.into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn select_relays_warns_when_configured_list_is_empty() {
+        let selection = select_relay_urls(&[], &[]);
+        assert!(selection.relays.is_empty());
+        assert_eq!(
+            selection.warnings,
+            vec!["no relay urls configured".to_string()]
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_and_command_executor_cover_failure_modes() {
+        let mut success = Command::new("sh");
+        success.arg("-c").arg("exit 0");
+        run_with_timeout(success, std::time::Duration::from_millis(200)).expect("success");
+
+        let mut failure = Command::new("sh");
+        failure.arg("-c").arg("exit 1");
+        let failed = run_with_timeout(failure, std::time::Duration::from_millis(200))
+            .expect_err("command failure");
+        assert!(matches!(failed, GitExecError::CommandFailed(_)));
+
+        let mut timeout = Command::new("sh");
+        timeout.arg("-c").arg("sleep 1");
+        let timed_out =
+            run_with_timeout(timeout, std::time::Duration::from_millis(20)).expect_err("timeout");
+        assert!(matches!(timed_out, GitExecError::Timeout));
+
+        let executor = CommandGitExecutor;
+        let repo_path = std::path::Path::new("/definitely/missing/repo");
+        let fetch_err = executor
+            .fetch(
+                repo_path,
+                "https://gittr.ee/repo.git",
+                std::time::Duration::from_secs(1),
+            )
+            .expect_err("missing repo should fail");
+        assert!(matches!(fetch_err, GitExecError::CommandFailed(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_to_str_rejects_non_utf8_path() {
+        let value = OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0xbc]);
+        let path = PathBuf::from(value);
+        let err = path_to_str(&path).expect_err("invalid utf8 path");
+        assert!(matches!(err, GitExecError::InvalidPath(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_maps_bind_error_after_observability_init() {
+        let config = SyncConfig {
+            bind: "not-a-bind".to_string(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        };
+        let err = serve(config).await.expect_err("invalid bind");
+        assert!(matches!(
+            err,
+            SyncError::Serve(_) | SyncError::Observability(_)
+        ));
+    }
+
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
         let app = super::build_router(super::SyncAppState {
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         });
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -816,7 +985,9 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         let ack: SyncAckPayload = serde_json::from_slice(&body).expect("ack");
         let npub = super::npub_from_hex(&payload.pubkey).expect("npub");
         let expected = repo_root.join(npub).join("repo.git");
@@ -1009,12 +1180,8 @@ mod tests {
             missing_required: Vec::new(),
             missing_optional: Vec::new(),
         };
-        let record = RelayCompatibilityRecord::new(
-            &report,
-            0,
-            &RelayProbeMetadata::default(),
-        )
-        .expect("record");
+        let record = RelayCompatibilityRecord::new(&report, 0, &RelayProbeMetadata::default())
+            .expect("record");
         let selection = select_relay_urls(
             &vec![
                 "wss://relay.example".to_string(),
@@ -1034,23 +1201,21 @@ mod tests {
             missing_required: vec![RelayCapability::Nip34],
             missing_optional: Vec::new(),
         };
-        let record = RelayCompatibilityRecord::new(
-            &report,
-            0,
-            &RelayProbeMetadata::default(),
-        )
-        .expect("record");
-        let selection = select_relay_urls(
-            &vec!["wss://relay.example".to_string()],
-            &[record],
-        );
+        let record = RelayCompatibilityRecord::new(&report, 0, &RelayProbeMetadata::default())
+            .expect("record");
+        let selection = select_relay_urls(&vec!["wss://relay.example".to_string()], &[record]);
         assert_eq!(selection.relays, vec!["wss://relay.example".to_string()]);
         assert!(!selection.warnings.is_empty());
     }
 
     #[test]
     fn observability_init_returns_registry() {
-        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
-        assert!(handle.prometheus_registry().is_some());
+        match init_observability() {
+            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
+            Err(SyncError::Observability(err)) => {
+                assert!(err.to_string().contains("already been set"));
+            }
+            Err(other) => panic!("unexpected observability init error: {other}"),
+        }
     }
 }
