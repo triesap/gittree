@@ -218,8 +218,11 @@ impl<R> Clone for UiAppState<R> {
     }
 }
 
-pub async fn serve(config: UiServiceConfig) -> Result<(), UiError> {
-    let _observability = init_observability()?;
+async fn serve_with<InitFn, InitOut>(config: UiServiceConfig, init_fn: InitFn) -> Result<(), UiError>
+where
+    InitFn: FnOnce() -> Result<InitOut, UiError>,
+{
+    let _observability = init_fn()?;
     let repositories = build_repositories(&config)?;
     let state = UiAppState {
         repositories: Arc::new(repositories),
@@ -234,6 +237,10 @@ pub async fn serve(config: UiServiceConfig) -> Result<(), UiError> {
         .await
         .map_err(|err| UiError::Serve(err.to_string()))?;
     Ok(())
+}
+
+pub async fn serve(config: UiServiceConfig) -> Result<(), UiError> {
+    serve_with(config, init_observability).await
 }
 
 fn build_router<R>(state: UiAppState<R>) -> Router
@@ -766,6 +773,33 @@ mod tests {
         assert!(matches!(err, UiError::Storage(_)));
     }
 
+    #[tokio::test]
+    async fn build_repositories_accepts_valid_config() {
+        let config = UiServiceConfig {
+            bind: "127.0.0.1:9090".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let _repos = build_repositories(&config).expect("valid repositories");
+    }
+
+    #[tokio::test]
+    async fn serve_maps_bind_errors_after_setup() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("occupied listener");
+        let bind = occupied.local_addr().expect("occupied addr");
+        let config = UiServiceConfig {
+            bind: bind.to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let err = super::serve_with(config, || Ok(()))
+            .await
+            .expect_err("bind error");
+        assert!(matches!(err, UiError::Serve(_)));
+    }
+
     #[test]
     fn init_observability_maps_invalid_env() {
         with_env_vars(&[("GITTREE_LOG_JSON", Some("not-bool"))], || {
@@ -776,8 +810,10 @@ mod tests {
 
     #[test]
     fn init_observability_returns_registry_once() {
-        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
-        assert!(handle.prometheus_registry().is_some());
+        with_env_vars(&[], || {
+            let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+            assert!(handle.prometheus_registry().is_some());
+        });
     }
 
     #[test]
