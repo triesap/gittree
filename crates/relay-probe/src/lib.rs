@@ -269,6 +269,18 @@ mod tests {
     }
 
     #[test]
+    fn resolve_nip11_url_handles_non_hierarchical_ws_urls() {
+        assert_eq!(
+            resolve_nip11_url("wss:relay.example").expect("wss url"),
+            "https://relay.example/"
+        );
+        assert_eq!(
+            resolve_nip11_url("ws:relay.example").expect("ws url"),
+            "http://relay.example/"
+        );
+    }
+
+    #[test]
     fn probe_relay_uses_nip11_document() {
         let client = StubProbeClient {
             response: Some(&NIP11_BODY),
@@ -303,6 +315,15 @@ mod tests {
 
         let fetch_err = probe_relay("wss://relay.example", &ErrorProbeClient).expect_err("http");
         assert!(matches!(fetch_err, RelayProbeError::Http(_)));
+    }
+
+    #[test]
+    fn probe_relay_rejects_invalid_relay_url() {
+        let client = StubProbeClient {
+            response: Some(&NIP11_BODY),
+        };
+        let err = probe_relay("::invalid::", &client).expect_err("invalid relay url");
+        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
     }
 
     #[test]
@@ -420,6 +441,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn probe_relay_with_adapter_rejects_invalid_relay_url() {
+        let client = StubProbeClient {
+            response: Some(&NIP11_BODY),
+        };
+        let err = probe_relay_with_adapter("::invalid::", &client, &OkAdapter)
+            .await
+            .expect_err("invalid relay url");
+        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
+    }
+
+    #[tokio::test]
     async fn relay_adapter_trait_methods_are_callable_in_tests() {
         let info = OkAdapter.relay_info().await.expect("relay info");
         assert!(info.is_none());
@@ -434,5 +466,9 @@ mod tests {
             sig: "sig".to_string(),
         };
         OkAdapter.publish_event(&event).await.expect("publish");
+
+        let failing_info = FailingAdapter.relay_info().await.expect("relay info");
+        assert!(failing_info.is_none());
+        FailingAdapter.publish_event(&event).await.expect("publish");
     }
 }
