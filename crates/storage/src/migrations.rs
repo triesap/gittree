@@ -321,6 +321,12 @@ mod tests {
         }
     }
 
+    fn assert_migration_error(err: StorageError) {
+        if !matches!(err, StorageError::Migration { .. }) {
+            panic!("expected migration error, got {err:?}");
+        }
+    }
+
     #[test]
     fn runner_orders_migrations() {
         let migrations = vec![
@@ -366,7 +372,7 @@ mod tests {
         ];
 
         let err = MigrationRunner::new(migrations).unwrap_err();
-        assert!(matches!(err, StorageError::Migration { .. }));
+        assert_migration_error(err);
     }
 
     #[test]
@@ -407,7 +413,7 @@ mod tests {
             sql: "SELECT 1",
         }];
         let err = MigrationRunner::new(migrations).unwrap_err();
-        assert!(matches!(err, StorageError::Migration { .. }));
+        assert_migration_error(err);
     }
 
     #[test]
@@ -530,7 +536,7 @@ mod tests {
             .run_with_backend(&mut ensure_fail)
             .await
             .expect_err("ensure failure");
-        assert!(matches!(err, StorageError::Migration { .. }));
+        assert_migration_error(err);
 
         let mut current_fail = ScriptedMigrationBackend {
             fail_current: true,
@@ -540,7 +546,7 @@ mod tests {
             .run_with_backend(&mut current_fail)
             .await
             .expect_err("current failure");
-        assert!(matches!(err, StorageError::Migration { .. }));
+        assert_migration_error(err);
 
         let mut execute_fail = ScriptedMigrationBackend {
             fail_execute_call: Some(1),
@@ -550,7 +556,7 @@ mod tests {
             .run_with_backend(&mut execute_fail)
             .await
             .expect_err("execute failure");
-        assert!(matches!(err, StorageError::Migration { .. }));
+        assert_migration_error(err);
         assert!(execute_fail.recorded_versions.is_empty());
 
         let mut record_fail = ScriptedMigrationBackend {
@@ -561,7 +567,15 @@ mod tests {
             .run_with_backend(&mut record_fail)
             .await
             .expect_err("record failure");
-        assert!(matches!(err, StorageError::Migration { .. }));
+        assert_migration_error(err);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected migration error")]
+    fn assert_migration_error_panics_for_non_migration_errors() {
+        assert_migration_error(StorageError::Internal {
+            message: "wrong variant".to_string(),
+        });
     }
 
     #[tokio::test]

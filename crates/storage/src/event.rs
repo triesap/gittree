@@ -172,6 +172,12 @@ mod tests {
         format!("{:02x}", byte).repeat(64)
     }
 
+    fn assert_invalid_field(err: StorageError) {
+        if !matches!(err, StorageError::InvalidField { .. }) {
+            panic!("expected invalid field error, got {err:?}");
+        }
+    }
+
     #[test]
     fn event_record_decodes_hex_fields() {
         let record = EventRecord::new(
@@ -208,7 +214,15 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, StorageError::InvalidField { .. }));
+        assert_invalid_field(err);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected invalid field error")]
+    fn assert_invalid_field_panics_for_other_errors() {
+        assert_invalid_field(StorageError::Internal {
+            message: "wrong variant".to_string(),
+        });
     }
 
     #[test]

@@ -1209,7 +1209,7 @@ mod tests {
             .upsert_account(sample_account("alice", 0x22))
             .await
             .unwrap_err();
-        assert!(matches!(err, crate::StorageError::Internal { .. }));
+        assert_internal_message(err, "account username already exists");
     }
 
     #[tokio::test]

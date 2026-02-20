@@ -82,6 +82,12 @@ mod tests {
     use super::StorageError;
     use std::error::Error as _;
 
+    fn assert_database_error(err: StorageError) {
+        if !matches!(err, StorageError::Database { .. }) {
+            panic!("expected database error, got {err:?}");
+        }
+    }
+
     #[test]
     fn storage_error_display_and_source_cover_variants() {
         let invalid_conn = StorageError::InvalidConnectionString {
@@ -157,6 +163,14 @@ mod tests {
     #[test]
     fn sqlx_error_maps_to_database_variant() {
         let err = StorageError::from(sqlx::Error::PoolTimedOut);
-        assert!(matches!(err, StorageError::Database { .. }));
+        assert_database_error(err);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected database error")]
+    fn assert_database_error_panics_for_non_database_errors() {
+        assert_database_error(StorageError::Internal {
+            message: "wrong variant".to_string(),
+        });
     }
 }

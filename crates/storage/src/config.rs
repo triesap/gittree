@@ -98,6 +98,12 @@ mod tests {
         }
     }
 
+    fn assert_invalid_connection_string(err: StorageError) {
+        if !matches!(err, StorageError::InvalidConnectionString { .. }) {
+            panic!("expected invalid connection string error, got {err:?}");
+        }
+    }
+
     #[test]
     fn read_connect_options_parses_url() {
         let config = sample_config();
@@ -192,7 +198,7 @@ mod tests {
         let mut config = sample_config();
         config.read_connection = "not-a-url".to_string();
         let err = config.read_connect_options().unwrap_err();
-        assert!(matches!(err, StorageError::InvalidConnectionString { .. }));
+        assert_invalid_connection_string(err);
     }
 
     #[test]
@@ -200,7 +206,16 @@ mod tests {
         let mut config = sample_config();
         config.write_connection = Some("not-a-url".to_string());
         let err = config.write_connect_options().unwrap_err();
-        assert!(matches!(err, StorageError::InvalidConnectionString { .. }));
+        assert_invalid_connection_string(err);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected invalid connection string error")]
+    fn assert_invalid_connection_string_panics_for_other_errors() {
+        assert_invalid_connection_string(StorageError::InvalidPoolConfig {
+            field: "max_connections",
+            value: 0,
+        });
     }
 
     #[test]
