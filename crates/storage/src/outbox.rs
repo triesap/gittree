@@ -156,6 +156,21 @@ mod tests {
     }
 
     #[test]
+    fn request_rejects_empty_forgejo_fields() {
+        let mut request = valid_request();
+        request.forgejo_owner = " ".to_string();
+        assert!(request.decode().is_err());
+
+        request = valid_request();
+        request.forgejo_repo = " ".to_string();
+        assert!(request.decode().is_err());
+
+        request = valid_request();
+        request.identifier = " ".to_string();
+        assert!(request.decode().is_err());
+    }
+
+    #[test]
     fn status_parses_expected_values() {
         assert_eq!(
             RelayPublishStatus::parse("pending").unwrap(),

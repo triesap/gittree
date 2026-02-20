@@ -328,6 +328,66 @@ mod tests {
     }
 
     #[test]
+    fn tenant_record_rejects_long_description() {
+        let err = RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            None,
+            Some("d".repeat(super::MAX_DESC_LEN + 1)),
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .expect_err("long description must fail");
+        assert!(matches!(
+            err,
+            StorageError::InvalidField {
+                field: "description",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tenant_record_rejects_long_contact() {
+        let err = RelayTenantRecord::new(
+            "tenant",
+            "org.relay",
+            &"11".repeat(32),
+            vec![1],
+            vec![2],
+            "v1",
+            None,
+            None,
+            None,
+            None,
+            Some("c".repeat(super::MAX_URL_LEN + 1)),
+            true,
+            false,
+            false,
+            1,
+            1,
+        )
+        .expect_err("long contact must fail");
+        assert!(matches!(
+            err,
+            StorageError::InvalidField {
+                field: "contact",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn tenant_record_rejects_empty_relay_secret() {
         assert!(
             RelayTenantRecord::new(
@@ -441,6 +501,57 @@ mod tests {
                 None,
                 Some("ftp://example.com/icon.png".to_string()),
                 None,
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tenant_record_rejects_invalid_banner_scheme() {
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                &"11".repeat(32),
+                vec![1],
+                vec![2],
+                "v1",
+                None,
+                None,
+                None,
+                Some("ftp://example.com/banner.png".to_string()),
+                None,
+                true,
+                false,
+                false,
+                1,
+                1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tenant_record_rejects_banner_url_too_long() {
+        let too_long_banner = format!("https://{}", "b".repeat(super::MAX_URL_LEN + 1));
+        assert!(
+            RelayTenantRecord::new(
+                "tenant",
+                "org.relay",
+                &"11".repeat(32),
+                vec![1],
+                vec![2],
+                "v1",
+                None,
+                None,
+                None,
+                Some(too_long_banner),
                 None,
                 true,
                 false,

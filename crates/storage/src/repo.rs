@@ -313,6 +313,43 @@ mod tests {
     }
 
     #[test]
+    fn announcement_record_rejects_non_hex_pubkey_with_expected_length() {
+        let announcement = sample_announcement();
+        let err = RepoAnnouncementRecord::new(&hex_32(0x11), &"zz".repeat(32), 0, &announcement)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "pubkey",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn state_record_rejects_non_hex_event_id_with_expected_length() {
+        let valid_state = RepoState {
+            identifier: "repo".to_string(),
+            state: HashMap::from([
+                ("HEAD".to_string(), "ref: refs/heads/main".to_string()),
+                (
+                    "refs/heads/main".to_string(),
+                    "0123456789abcdef0123456789abcdef01234567".to_string(),
+                ),
+            ]),
+        };
+        let err =
+            RepoStateRecord::new(&"zz".repeat(32), &hex_32(0x11), 0, &valid_state).unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "event_id",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn state_record_rejects_invalid_state_json_on_read() {
         let mut record = RepoStateRecord {
             event_id: vec![0u8; 32],

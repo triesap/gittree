@@ -104,6 +104,12 @@ mod tests {
         }
     }
 
+    fn assert_ssl_mode_prefer(mode: PgSslMode) {
+        if !matches!(mode, PgSslMode::Prefer) {
+            panic!("expected PgSslMode::Prefer, got {mode:?}");
+        }
+    }
+
     #[test]
     fn read_connect_options_parses_url() {
         let config = sample_config();
@@ -112,7 +118,7 @@ mod tests {
         assert_eq!(options.get_port(), 5432);
         assert_eq!(options.get_username(), "user");
         assert_eq!(options.get_database(), Some("gittree"));
-        assert!(matches!(options.get_ssl_mode(), PgSslMode::Prefer));
+        assert_ssl_mode_prefer(options.get_ssl_mode());
         assert_eq!(options.get_application_name(), Some("gittree"));
     }
 
@@ -216,6 +222,12 @@ mod tests {
             field: "max_connections",
             value: 0,
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "expected PgSslMode::Prefer")]
+    fn assert_ssl_mode_prefer_panics_for_other_modes() {
+        assert_ssl_mode_prefer(PgSslMode::Disable);
     }
 
     #[test]

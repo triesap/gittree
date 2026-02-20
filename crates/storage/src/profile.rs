@@ -211,6 +211,42 @@ mod tests {
     }
 
     #[test]
+    fn profile_record_rejects_long_bio() {
+        let bio = "b".repeat(super::MAX_BIO + 1);
+        let err = ProfileRecord::new(
+            &"11".repeat(32),
+            None,
+            Some(bio),
+            None,
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            20,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "bio"));
+    }
+
+    #[test]
+    fn profile_record_rejects_long_location() {
+        let location = "l".repeat(super::MAX_LOCATION + 1);
+        let err = ProfileRecord::new(
+            &"11".repeat(32),
+            None,
+            None,
+            None,
+            None,
+            Some(location),
+            ProfileVisibility::Private,
+            10,
+            20,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "location"));
+    }
+
+    #[test]
     fn profile_visibility_parses_values() {
         assert_eq!(
             super::ProfileVisibility::parse("private").expect("private"),
@@ -300,5 +336,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "website_url"));
+    }
+
+    #[test]
+    fn profile_record_rejects_avatar_url_too_long() {
+        let too_long = format!("https://{}", "a".repeat(super::MAX_AVATAR_URL + 1));
+        let err = ProfileRecord::new(
+            &"11".repeat(32),
+            None,
+            None,
+            Some(too_long),
+            None,
+            None,
+            ProfileVisibility::Private,
+            10,
+            20,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidField { field, .. } if field == "avatar_url"));
     }
 }
