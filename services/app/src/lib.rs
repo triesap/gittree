@@ -967,6 +967,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_list_repos_by_owner_rejects_invalid_npub() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/users/not-a-valid-npub/repos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn api_repo_detail_returns_entry() {
         let repositories = Arc::new(InMemoryRepositories::new());
         let record = RepoMappingRecord {
@@ -1015,6 +1034,70 @@ mod tests {
         let parsed: gittree_app_core::RepoDetail = serde_json::from_slice(&body).expect("json");
         assert_eq!(parsed.identifier, "repo");
         assert_eq!(parsed.forgejo, "owner/repo");
+    }
+
+    #[tokio::test]
+    async fn api_repo_detail_rejects_invalid_npub() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/repos/not-a-valid-npub/repo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn api_repo_detail_returns_not_found_for_missing_identifier() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let record = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            pubkey: vec![0x11; 32],
+            identifier: "repo".to_string(),
+        };
+        let pubkey_hex = pubkey_hex(0x11);
+        let npub = gittree_app_core::npub_from_bytes(&record.pubkey).expect("npub");
+        repositories
+            .upsert_mapping(record.clone())
+            .await
+            .expect("insert mapping");
+        let profile = ProfileRecord::new(
+            &pubkey_hex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        repositories.upsert_profile(profile).await.expect("profile");
+
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/repos/{npub}/missing"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
