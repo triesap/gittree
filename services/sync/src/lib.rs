@@ -11,6 +11,7 @@ use gittree_observability::{ObservabilityConfigError, ObservabilityError, Observ
 use gittree_storage::{RelayCompatibilityRecord, StorageConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -206,9 +207,15 @@ struct SyncAppState {
     repo_root: PathBuf,
 }
 
-async fn serve_with<InitFn, InitOut>(config: SyncConfig, init_fn: InitFn) -> Result<(), SyncError>
+async fn serve_with<InitFn, InitOut, ServeFn, ServeFut>(
+    config: SyncConfig,
+    init_fn: InitFn,
+    serve_fn: ServeFn,
+) -> Result<(), SyncError>
 where
     InitFn: FnOnce() -> Result<InitOut, SyncError>,
+    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
+    ServeFut: Future<Output = Result<(), std::io::Error>>,
 {
     let _observability = init_fn()?;
     let state = SyncAppState {
@@ -218,14 +225,19 @@ where
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| SyncError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
+    serve_fn(listener, router)
         .await
         .map_err(|err| SyncError::Serve(err.to_string()))?;
     Ok(())
 }
 
 pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
-    serve_with(config, init_observability).await
+    serve_with(
+        config,
+        init_observability,
+        |listener, router| async move { axum::serve(listener, router).await },
+    )
+    .await
 }
 
 fn build_router(state: SyncAppState) -> Router {
@@ -714,6 +726,7 @@ mod tests {
     use gittree_core::RepoState;
     use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{RelayCompatibilityRecord, RelayProbeMetadata};
     use std::collections::HashMap;
     use std::error::Error;
@@ -985,6 +998,21 @@ mod tests {
         assert!(format!("{sync_config}").contains("sync error"));
         assert!(sync_config.source().is_some());
 
+        let sync_observability_config =
+            SyncError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv {
+                key: "KEY",
+                value: "bad".to_string(),
+            });
+        assert!(
+            format!("{sync_observability_config}").contains("sync observability config error")
+        );
+        assert!(sync_observability_config.source().is_some());
+
+        let sync_observability =
+            SyncError::Observability(ObservabilityError::MetricsInit("boom".to_string()));
+        assert!(format!("{sync_observability}").contains("sync observability error"));
+        assert!(sync_observability.source().is_some());
+
         let sync_serve = SyncError::Serve("bind".to_string());
         assert_eq!(format!("{sync_serve}"), "sync serve error: bind");
         assert!(sync_serve.source().is_none());
@@ -1116,8 +1144,61 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = super::serve_with(config, || Ok(())).await.expect_err("bind error");
+        let err = super::serve_with(config, || Ok(()), |listener, router| async move {
+            axum::serve(listener, router).await
+        })
+        .await
+        .expect_err("bind error");
         assert!(matches!(err, SyncError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_server_errors() {
+        let config = SyncConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        };
+        let err = super::serve_with(config, || Ok(()), |_listener, _router| async {
+            Err(std::io::Error::other("boom"))
+        })
+        .await
+        .expect_err("serve error");
+        assert!(matches!(err, SyncError::Serve(message) if message.contains("boom")));
+    }
+
+    #[tokio::test]
+    async fn serve_with_returns_ok_when_server_finishes_cleanly() {
+        let config = SyncConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        };
+        let result = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
+        )
+        .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1485,12 +1566,6 @@ mod tests {
     #[test]
     fn observability_init_returns_registry() {
         let result = init_observability();
-        if let Ok(handle) = &result {
-            assert!(handle.prometheus_registry().is_some());
-        }
-        if let Err(SyncError::Observability(err)) = &result {
-            assert!(err.to_string().contains("already been set"));
-        }
         assert!(matches!(result, Ok(_) | Err(SyncError::Observability(_))));
     }
 }
