@@ -1,16 +1,16 @@
 #![forbid(unsafe_code)]
 
+use axum::Json;
+use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Json;
-use axum::Router;
 use gittree_app_core::{RepoDetail, RepoListResponse};
-use gittree_app_ui::server::{
-    list_repo_items, list_repo_items_for_npub, repo_detail_item, AppUiError,
-};
 use gittree_app_ui::AppUiState;
+use gittree_app_ui::server::{
+    AppUiError, list_repo_items, list_repo_items_for_npub, repo_detail_item,
+};
 use gittree_config::{ConfigError, UiConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
@@ -18,7 +18,7 @@ use gittree_storage::{
 };
 use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
-use leptos_axum::{handle_server_fns_with_context, LeptosRoutes};
+use leptos_axum::{LeptosRoutes, handle_server_fns_with_context};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,15 +56,15 @@ impl AppServiceConfig {
         let storage = storage_from_env()?;
         let ui = UiConfig::from_env().map_err(AppServiceConfigError::Config)?;
 
-        let bind = env_socket_addr(ENV_APP_BIND)?.unwrap_or_else(|| {
-            DEFAULT_APP_BIND
-                .parse()
-                .expect("default app bind")
-        });
-        let base_path = env_string(ENV_APP_BASE_PATH)?.unwrap_or_else(|| DEFAULT_APP_BASE_PATH.to_string());
+        let bind = env_socket_addr(ENV_APP_BIND)?
+            .unwrap_or_else(|| DEFAULT_APP_BIND.parse().expect("default app bind"));
+        let base_path =
+            env_string(ENV_APP_BASE_PATH)?.unwrap_or_else(|| DEFAULT_APP_BASE_PATH.to_string());
         let base_path = normalize_base_path(&base_path);
-        let site_root = env_path(ENV_APP_SITE_ROOT)?.unwrap_or_else(|| PathBuf::from(DEFAULT_APP_SITE_ROOT));
-        let site_pkg_dir = env_string(ENV_APP_SITE_PKG_DIR)?.unwrap_or_else(|| DEFAULT_APP_SITE_PKG_DIR.to_string());
+        let site_root =
+            env_path(ENV_APP_SITE_ROOT)?.unwrap_or_else(|| PathBuf::from(DEFAULT_APP_SITE_ROOT));
+        let site_pkg_dir = env_string(ENV_APP_SITE_PKG_DIR)?
+            .unwrap_or_else(|| DEFAULT_APP_SITE_PKG_DIR.to_string());
 
         Ok(Self {
             bind,
@@ -91,7 +91,9 @@ impl std::fmt::Display for AppServiceConfigError {
             AppServiceConfigError::Config(err) => write!(f, "app config error: {err}"),
             AppServiceConfigError::Storage(err) => write!(f, "app storage config error: {err}"),
             AppServiceConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
-            AppServiceConfigError::InvalidEnv { key, value } => write!(f, "invalid env {key}: {value}"),
+            AppServiceConfigError::InvalidEnv { key, value } => {
+                write!(f, "invalid env {key}: {value}")
+            }
         }
     }
 }
@@ -118,7 +120,9 @@ impl std::fmt::Display for StorageConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StorageConfigError::MissingEnv(key) => write!(f, "missing env {key}"),
-            StorageConfigError::InvalidEnv { key, value } => write!(f, "invalid env {key}: {value}"),
+            StorageConfigError::InvalidEnv { key, value } => {
+                write!(f, "invalid env {key}: {value}")
+            }
             StorageConfigError::InvalidConfig(message) => write!(f, "{message}"),
         }
     }
@@ -127,8 +131,9 @@ impl std::fmt::Display for StorageConfigError {
 impl std::error::Error for StorageConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, AppServiceConfigError> {
-    let read_connection = std::env::var(ENV_STORAGE_READ_URL)
-        .map_err(|_| AppServiceConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL)))?;
+    let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
+        AppServiceConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
+    })?;
     let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
     let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
     let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
@@ -159,10 +164,9 @@ fn env_u32(key: &'static str) -> Result<Option<u32>, AppServiceConfigError> {
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value
-                .parse::<u32>()
-                .map(Some)
-                .map_err(|_| AppServiceConfigError::Storage(StorageConfigError::InvalidEnv { key, value }))
+            value.parse::<u32>().map(Some).map_err(|_| {
+                AppServiceConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
+            })
         }
         Err(_) => Ok(None),
     }
@@ -174,10 +178,9 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AppServiceConfigError> {
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value
-                .parse::<u64>()
-                .map(Some)
-                .map_err(|_| AppServiceConfigError::Storage(StorageConfigError::InvalidEnv { key, value }))
+            value.parse::<u64>().map(Some).map_err(|_| {
+                AppServiceConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
+            })
         }
         Err(_) => Ok(None),
     }
@@ -189,9 +192,10 @@ fn env_socket_addr(key: &'static str) -> Result<Option<SocketAddr>, AppServiceCo
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<SocketAddr>().map(Some).map_err(|_| {
-                AppServiceConfigError::InvalidEnv { key, value }
-            })
+            value
+                .parse::<SocketAddr>()
+                .map(Some)
+                .map_err(|_| AppServiceConfigError::InvalidEnv { key, value })
         }
         Err(_) => Ok(None),
     }
@@ -239,7 +243,9 @@ impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppError::Config(err) => write!(f, "app error: {err}"),
-            AppError::ObservabilityConfig(err) => write!(f, "app observability config error: {err}"),
+            AppError::ObservabilityConfig(err) => {
+                write!(f, "app observability config error: {err}")
+            }
             AppError::Observability(err) => write!(f, "app observability error: {err}"),
             AppError::Storage(err) => write!(f, "app storage error: {err}"),
             AppError::Serve(err) => write!(f, "app serve error: {err}"),
@@ -268,7 +274,10 @@ pub fn init_observability() -> Result<ObservabilityHandle, AppError> {
 
 pub fn build_repositories(config: &AppServiceConfig) -> Result<PostgresRepositories, AppError> {
     let pool_options = config.storage.pool_options().map_err(AppError::Storage)?;
-    let connect_options = config.storage.read_connect_options().map_err(AppError::Storage)?;
+    let connect_options = config
+        .storage
+        .read_connect_options()
+        .map_err(AppError::Storage)?;
     let pool = pool_options.connect_lazy_with(connect_options);
     Ok(PostgresRepositories::new(pool))
 }
@@ -323,8 +332,14 @@ fn build_router(state: AppUiState) -> Router {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/api/repos", get(api_list_repos_handler))
-        .route("/api/repos/{npub}/{identifier}", get(api_repo_detail_handler))
-        .route("/api/users/{npub}/repos", get(api_list_repos_by_owner_handler))
+        .route(
+            "/api/repos/{npub}/{identifier}",
+            get(api_repo_detail_handler),
+        )
+        .route(
+            "/api/users/{npub}/repos",
+            get(api_list_repos_by_owner_handler),
+        )
         .route(
             "/api/{*fn_name}",
             post({
@@ -401,8 +416,8 @@ async fn health_handler() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_router, AppApiError, AppError, AppServiceConfig, AppServiceConfigError, AppUiState,
-        StorageConfigError,
+        AppApiError, AppError, AppServiceConfig, AppServiceConfigError, AppUiState,
+        StorageConfigError, build_router,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -410,10 +425,12 @@ mod tests {
     use gittree_app_core::RepoListResponse;
     use gittree_app_ui::server::AppUiError;
     use gittree_config::{ConfigError, UiConfig};
-    use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
+    use gittree_observability::{
+        ObservabilityConfigError, ObservabilityError, ObservabilityHandle,
+    };
     use gittree_storage::{
-        InMemoryRepositories, ProfileRecord, ProfileRepository, ProfileVisibility, RepoMappingRecord,
-        RepoMappingRepository, StorageConfig, StorageError,
+        InMemoryRepositories, ProfileRecord, ProfileRepository, ProfileVisibility,
+        RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
     };
     use leptos::config::LeptosOptions;
     use std::error::Error;
@@ -503,7 +520,10 @@ mod tests {
         assert_eq!(format!("{invalid_env}"), "invalid env KEY: bad");
         assert!(invalid_env.source().is_none());
 
-        assert_eq!(format!("{}", StorageConfigError::MissingEnv("READ")), "missing env READ");
+        assert_eq!(
+            format!("{}", StorageConfigError::MissingEnv("READ")),
+            "missing env READ"
+        );
         assert_eq!(
             format!(
                 "{}",
@@ -515,7 +535,10 @@ mod tests {
             "invalid env MAX: bad"
         );
         assert_eq!(
-            format!("{}", StorageConfigError::InvalidConfig("invalid pool".to_string())),
+            format!(
+                "{}",
+                StorageConfigError::InvalidConfig("invalid pool".to_string())
+            ),
             "invalid pool"
         );
     }
@@ -526,12 +549,11 @@ mod tests {
         assert!(format!("{config}").contains("app error"));
         assert!(config.source().is_some());
 
-        let observability_config = AppError::ObservabilityConfig(
-            ObservabilityConfigError::InvalidEnv {
+        let observability_config =
+            AppError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv {
                 key: "KEY",
                 value: "bad".to_string(),
-            },
-        );
+            });
         assert!(format!("{observability_config}").contains("observability config error"));
         assert!(observability_config.source().is_some());
 
@@ -644,6 +666,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_router_serves_root_base_path_and_server_fn_route() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
+        let app = build_router(state);
+
+        let health_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(health_response.status(), StatusCode::OK);
+
+        let server_fn_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/unknown_server_fn")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_ne!(server_fn_response.status(), StatusCode::NOT_FOUND);
+        assert_ne!(server_fn_response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn build_leptos_options_uses_config_fields() {
+        let config = AppServiceConfig {
+            bind: "127.0.0.1:8091".parse().expect("bind"),
+            base_path: "/ui".to_string(),
+            site_root: PathBuf::from("/tmp/gittree-dist"),
+            site_pkg_dir: "pkg-assets".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let options = super::build_leptos_options(&config);
+        assert_eq!(options.site_addr, config.bind);
+        assert_eq!(options.site_pkg_dir.as_ref(), "pkg-assets");
+        assert_eq!(options.site_root.as_ref(), "/tmp/gittree-dist");
+    }
+
+    #[tokio::test]
     async fn health_endpoint_returns_ok() {
         let repositories = Arc::new(InMemoryRepositories::new());
         let profiles: Arc<dyn ProfileRepository> = repositories.clone();
@@ -651,7 +724,12 @@ mod tests {
         let state = test_state(repositories, profiles);
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -683,10 +761,7 @@ mod tests {
             10,
         )
         .expect("profile");
-        repositories
-            .upsert_profile(profile)
-            .await
-            .expect("profile");
+        repositories.upsert_profile(profile).await.expect("profile");
 
         let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;
@@ -818,10 +893,7 @@ mod tests {
             10,
         )
         .expect("profile");
-        repositories
-            .upsert_profile(profile)
-            .await
-            .expect("profile");
+        repositories.upsert_profile(profile).await.expect("profile");
 
         let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;
@@ -952,10 +1024,7 @@ mod tests {
             10,
         )
         .expect("profile");
-        repositories
-            .upsert_profile(profile)
-            .await
-            .expect("profile");
+        repositories.upsert_profile(profile).await.expect("profile");
 
         let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;
