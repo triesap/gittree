@@ -11,6 +11,7 @@ use gittree_storage::{
     PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
 };
 use serde::Serialize;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -218,9 +219,15 @@ impl<R> Clone for UiAppState<R> {
     }
 }
 
-async fn serve_with<InitFn, InitOut>(config: UiServiceConfig, init_fn: InitFn) -> Result<(), UiError>
+async fn serve_with<InitFn, InitOut, ServeFn, ServeFut>(
+    config: UiServiceConfig,
+    init_fn: InitFn,
+    serve_fn: ServeFn,
+) -> Result<(), UiError>
 where
     InitFn: FnOnce() -> Result<InitOut, UiError>,
+    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
+    ServeFut: Future<Output = Result<(), std::io::Error>>,
 {
     let _observability = init_fn()?;
     let repositories = build_repositories(&config)?;
@@ -233,14 +240,19 @@ where
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| UiError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
+    serve_fn(listener, router)
         .await
         .map_err(|err| UiError::Serve(err.to_string()))?;
     Ok(())
 }
 
 pub async fn serve(config: UiServiceConfig) -> Result<(), UiError> {
-    serve_with(config, init_observability).await
+    serve_with(
+        config,
+        init_observability,
+        |listener, router| async move { axum::serve(listener, router).await },
+    )
+    .await
 }
 
 fn build_router<R>(state: UiAppState<R>) -> Router
@@ -439,17 +451,13 @@ mod tests {
     use axum::response::IntoResponse;
     use gittree_config::{ConfigError, UiConfig};
     use gittree_core::RepoMapping;
-    use gittree_observability::{
-        ObservabilityConfigError, ObservabilityError, ObservabilityHandle,
-    };
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
         InMemoryRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
     };
     use std::error::Error;
     use std::sync::{Arc, Mutex, OnceLock};
     use tower::ServiceExt;
-
-    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_vars<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -794,10 +802,59 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let err = super::serve_with(config, || Ok(()))
+        let err = super::serve_with(config, || Ok(()), |listener, router| async move {
+            axum::serve(listener, router).await
+        })
             .await
             .expect_err("bind error");
         assert!(matches!(err, UiError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_server_errors() {
+        let config = UiServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let err = super::serve_with(config, || Ok(()), |_listener, _router| async {
+            Err(std::io::Error::other("boom"))
+        })
+        .await
+        .expect_err("serve error");
+        assert!(matches!(err, UiError::Serve(message) if message.contains("boom")));
+    }
+
+    #[tokio::test]
+    async fn serve_with_returns_ok_when_server_finishes_cleanly() {
+        let config = UiServiceConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let result = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn serve_wrapper_maps_errors() {
+        let config = UiServiceConfig {
+            bind: "not-a-bind".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let err = super::serve(config)
+            .await
+            .expect_err("expected serve error");
+        assert!(matches!(
+            err,
+            UiError::Serve(_) | UiError::Observability(_) | UiError::ObservabilityConfig(_)
+        ));
     }
 
     #[test]
@@ -811,8 +868,11 @@ mod tests {
     #[test]
     fn init_observability_returns_registry_once() {
         with_env_vars(&[], || {
-            let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
-            assert!(handle.prometheus_registry().is_some());
+            match init_observability() {
+                Ok(handle) => assert!(handle.prometheus_registry().is_some()),
+                Err(UiError::Observability(ObservabilityError::SubscriberInit(_))) => {}
+                Err(other) => panic!("unexpected observability result: {other}"),
+            }
         });
     }
 
