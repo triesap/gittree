@@ -2362,6 +2362,13 @@ WHERE datname = $1
         .await;
     }
 
+    #[tokio::test]
+    async fn with_test_db_with_provision_runs_closure_with_required_policy_when_available() {
+        let provisioned = TestDatabase::provision().await;
+        let require_db = provisioned.is_some();
+        with_test_db_with_provision_runs_closure_with_policy(provisioned, require_db).await;
+    }
+
     async fn with_test_db_with_provision_runs_closure_with_policy(
         provisioned: Option<TestDatabase>,
         require_db: bool,
