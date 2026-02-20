@@ -1851,6 +1851,14 @@ WHERE datname = $1
         assert!(matches!(err, StorageError::Database { .. }));
     }
 
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn assert_db_error_panics_for_non_database_error() {
+        assert_db_error(StorageError::Internal {
+            message: "not database".to_string(),
+        });
+    }
+
     fn select_row_query(columns: &[(&str, &str)]) -> String {
         let mut query = String::from("SELECT\n");
         for (index, (expr, alias)) in columns.iter().enumerate() {
@@ -3200,7 +3208,7 @@ WHERE datname = $1
 
                 let now = time::OffsetDateTime::now_utc();
                 let job = repositories
-                    .claim_relay_publish(now)
+                    .claim_relay_publish(now + time::Duration::minutes(1))
                     .await
                     .expect("claim")
                     .expect("job");
