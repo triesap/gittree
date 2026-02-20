@@ -764,6 +764,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provision_database_for_base_url_returns_none_when_create_database_statement_is_invalid()
+    {
+        assert!(
+            provision_database_for_base_url_with_name(
+                DEFAULT_TEST_DATABASE_URL,
+                "bad\"database".to_string(),
+            )
+            .await
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn provision_database_from_candidates_returns_first_available_database() {
         provision_database_executes_and_returns_option_with_value(
             provision_database_from_candidates(vec![
@@ -920,6 +933,13 @@ mod tests {
     }
 
     async fn provision_database_for_base_url(base_url: &str) -> Option<(sqlx::PgPool, String)> {
+        provision_database_for_base_url_with_name(base_url, unique_database_name()).await
+    }
+
+    async fn provision_database_for_base_url_with_name(
+        base_url: &str,
+        database_name: String,
+    ) -> Option<(sqlx::PgPool, String)> {
         let base_options = PgConnectOptions::from_str(base_url).ok()?;
         let mut admin_options = base_options.clone();
         admin_options = admin_options.database("postgres");
@@ -929,7 +949,6 @@ mod tests {
             .await
             .ok()?;
 
-        let database_name = unique_database_name();
         if !create_database(&admin_pool, &database_name).await {
             return None;
         }
