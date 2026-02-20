@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::process::exit;
 use std::{fmt, future::Future};
 
@@ -42,29 +43,43 @@ async fn main_result() -> Result<i64, MainError> {
     run_migrations(init_observability, gittree_migrate::run).await
 }
 
-#[tokio::main]
-async fn main() {
-    dotenvy::dotenv().ok();
-    match main_result().await {
+fn handle_main_outcome(
+    result: Result<i64, MainError>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> i32 {
+    match result {
         Ok(version) => {
             tracing::info!(version, "migrations complete");
-            println!("migrations complete: version {version}");
+            let _ = writeln!(stdout, "migrations complete: version {version}");
+            0
         }
         Err(MainError::Observability(message)) => {
-            eprintln!("migration observability failed: {message}");
-            exit(1);
+            let _ = writeln!(stderr, "migration observability failed: {message}");
+            1
         }
         Err(MainError::Migration(message)) => {
             tracing::error!(error = %message, "migration failed");
-            eprintln!("migration failed: {message}");
-            exit(1);
+            let _ = writeln!(stderr, "migration failed: {message}");
+            1
         }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    dotenvy::dotenv().ok();
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    let exit_code = handle_main_outcome(main_result().await, &mut stdout, &mut stderr);
+    if exit_code != 0 {
+        exit(exit_code);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MainError, run_migrations};
+    use super::{MainError, handle_main_outcome, run_migrations};
     use gittree_migrate::{MigrationConfigError, MigrationError};
 
     #[tokio::test]
@@ -100,6 +115,65 @@ mod tests {
         .expect_err("migration error");
         assert!(
             matches!(err, MainError::Migration(message) if message.contains("migration config error"))
+        );
+    }
+
+    #[test]
+    fn handle_main_outcome_writes_success() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let exit_code = handle_main_outcome(Ok(7), &mut out, &mut err);
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            String::from_utf8(out).expect("utf8"),
+            "migrations complete: version 7\n"
+        );
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn handle_main_outcome_writes_observability_error() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let exit_code = handle_main_outcome(
+            Err(MainError::Observability("observer down".to_string())),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(exit_code, 1);
+        assert!(out.is_empty());
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "migration observability failed: observer down\n"
+        );
+    }
+
+    #[test]
+    fn handle_main_outcome_writes_migration_error() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let exit_code = handle_main_outcome(
+            Err(MainError::Migration("db down".to_string())),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(exit_code, 1);
+        assert!(out.is_empty());
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "migration failed: db down\n"
+        );
+    }
+
+    #[test]
+    fn main_error_display_uses_inner_messages() {
+        assert_eq!(
+            MainError::Observability("o".to_string()).to_string(),
+            "o".to_string()
+        );
+        assert_eq!(
+            MainError::Migration("m".to_string()).to_string(),
+            "m".to_string()
         );
     }
 }
