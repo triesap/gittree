@@ -1851,12 +1851,34 @@ WHERE datname = $1
         assert!(matches!(err, StorageError::Database { .. }));
     }
 
+    fn assert_internal_error(err: StorageError) {
+        assert!(matches!(err, StorageError::Internal { .. }));
+    }
+
+    fn assert_schema_isolation(isolation: &TestIsolation) {
+        assert!(matches!(isolation, TestIsolation::Schema { .. }));
+    }
+
     #[test]
     #[should_panic(expected = "assertion failed")]
     fn assert_db_error_panics_for_non_database_error() {
         assert_db_error(StorageError::Internal {
             message: "not database".to_string(),
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn assert_internal_error_panics_for_non_internal_error() {
+        assert_internal_error(StorageError::Database {
+            source: std::io::Error::other("not internal").into(),
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn assert_schema_isolation_panics_for_database_isolation() {
+        assert_schema_isolation(&TestIsolation::Database("db".to_string()));
     }
 
     fn select_row_query(columns: &[(&str, &str)]) -> String {
@@ -2232,10 +2254,7 @@ WHERE datname = $1
                 let provisioned = TestDatabase::provision_from_base_url(role_url)
                     .await
                     .expect("schema fallback provision");
-                assert!(matches!(
-                    &provisioned.isolation,
-                    TestIsolation::Schema { .. }
-                ));
+                assert_schema_isolation(&provisioned.isolation);
                 provisioned.cleanup().await;
 
                 sqlx::query(&format!(
@@ -3852,10 +3871,7 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
                     .mark_relay_publish_succeeded(999_999)
                     .await
                     .expect_err("missing success id");
-                assert!(matches!(
-                    missing_mark_success,
-                    StorageError::Internal { .. }
-                ));
+                assert_internal_error(missing_mark_success);
 
                 let missing_mark_failed = repositories
                     .mark_relay_publish_failed(
@@ -3865,7 +3881,7 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, 0, now())
                     )
                     .await
                     .expect_err("missing failed id");
-                assert!(matches!(missing_mark_failed, StorageError::Internal { .. }));
+                assert_internal_error(missing_mark_failed);
 
                 test_db.cleanup().await;
             },
