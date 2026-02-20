@@ -9,7 +9,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY services ./services
 COPY migrations ./migrations
-COPY refs/mf2-i18n ./refs/mf2-i18n
 COPY refs/ui-primitives ./refs/ui-primitives
 RUN cargo build -p gittree-app --release
 WORKDIR /app/crates/app-ui

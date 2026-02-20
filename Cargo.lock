@@ -3704,10 +3704,12 @@ dependencies = [
 [[package]]
 name = "mf2-i18n-core"
 version = "0.1.0"
+source = "git+https://github.com/triesap/mf2-i18n?rev=989e5826fe235788e6c13418d248487db5c3aaca#989e5826fe235788e6c13418d248487db5c3aaca"
 
 [[package]]
 name = "mf2-i18n-embedded"
 version = "0.1.0"
+source = "git+https://github.com/triesap/mf2-i18n?rev=989e5826fe235788e6c13418d248487db5c3aaca#989e5826fe235788e6c13418d248487db5c3aaca"
 dependencies = [
  "mf2-i18n-core",
 ]
