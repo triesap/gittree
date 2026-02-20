@@ -327,6 +327,12 @@ mod tests {
         }
     }
 
+    fn assert_database_error(err: StorageError) {
+        if !matches!(err, StorageError::Database { .. }) {
+            panic!("expected database error, got {err:?}");
+        }
+    }
+
     #[test]
     fn runner_orders_migrations() {
         let migrations = vec![
@@ -574,6 +580,14 @@ mod tests {
     #[should_panic(expected = "expected migration error")]
     fn assert_migration_error_panics_for_non_migration_errors() {
         assert_migration_error(StorageError::Internal {
+            message: "wrong variant".to_string(),
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "expected database error")]
+    fn assert_database_error_panics_for_non_database_errors() {
+        assert_database_error(StorageError::Internal {
             message: "wrong variant".to_string(),
         });
     }
@@ -840,19 +854,19 @@ mod tests {
         };
 
         let current_err = backend.current_version().await.expect_err("current version error");
-        assert!(matches!(current_err, StorageError::Database { .. }));
+        assert_database_error(current_err);
 
         let record_err = backend
             .record_version(9_100_000_000)
             .await
             .expect_err("record version error");
-        assert!(matches!(record_err, StorageError::Database { .. }));
+        assert_database_error(record_err);
 
         let execute_err = backend
             .execute_sql("SELECT FROM")
             .await
             .expect_err("execute sql error");
-        assert!(matches!(execute_err, StorageError::Database { .. }));
+        assert_database_error(execute_err);
 
         sqlx::query("SET default_transaction_read_only = on")
             .execute(&mut *backend.connection)
@@ -862,7 +876,7 @@ mod tests {
             .ensure_migrations_table()
             .await
             .expect_err("ensure migrations error");
-        assert!(matches!(ensure_err, StorageError::Database { .. }));
+        assert_database_error(ensure_err);
         sqlx::query("SET default_transaction_read_only = off")
             .execute(&mut *backend.connection)
             .await
