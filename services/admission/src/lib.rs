@@ -6,9 +6,9 @@ use axum::{Json, Router};
 use gittree_config::{
     ConfigError, RelayCompatibilityConfig, RelayCompatibilityMode, ServicesConfig,
 };
+use gittree_core::kinds::KIND_GITTREE_CONTROL;
 use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{CoreError, EventFilter};
-use gittree_core::kinds::KIND_GITTREE_CONTROL;
 use gittree_observability::{
     ObservabilityConfigError, ObservabilityError, ObservabilityHandle, RelayCompatibilityMetrics,
 };
@@ -42,7 +42,8 @@ pub struct AdmissionConfig {
 
 impl AdmissionConfig {
     pub fn from_env() -> Result<Self, AdmissionConfigError> {
-        let services = ServicesConfig::from_env_validated().map_err(AdmissionConfigError::Config)?;
+        let services =
+            ServicesConfig::from_env_validated().map_err(AdmissionConfigError::Config)?;
         let compatibility =
             RelayCompatibilityConfig::from_env().map_err(AdmissionConfigError::Config)?;
         let storage = storage_from_env()?;
@@ -66,7 +67,9 @@ impl std::fmt::Display for AdmissionConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AdmissionConfigError::Config(err) => write!(f, "admission config error: {err}"),
-            AdmissionConfigError::Storage(err) => write!(f, "admission storage config error: {err}"),
+            AdmissionConfigError::Storage(err) => {
+                write!(f, "admission storage config error: {err}")
+            }
         }
     }
 }
@@ -681,14 +684,7 @@ pub async fn evaluate_request_cached<S>(
 where
     S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
 {
-    evaluate_request_cached_mode(
-        request,
-        storage,
-        cache,
-        RelayCompatibilityMode::Strict,
-        &[],
-    )
-    .await
+    evaluate_request_cached_mode(request, storage, cache, RelayCompatibilityMode::Strict, &[]).await
 }
 
 pub async fn evaluate_request_cached_mode<S>(
@@ -807,8 +803,13 @@ pub fn init_observability() -> Result<ObservabilityHandle, AdmissionError> {
 
 pub type AdmissionRepositories = CachedRepositories<PostgresRepositories>;
 
-pub fn build_repositories(config: &AdmissionConfig) -> Result<AdmissionRepositories, AdmissionError> {
-    let pool_options = config.storage.pool_options().map_err(AdmissionError::Storage)?;
+pub fn build_repositories(
+    config: &AdmissionConfig,
+) -> Result<AdmissionRepositories, AdmissionError> {
+    let pool_options = config
+        .storage
+        .pool_options()
+        .map_err(AdmissionError::Storage)?;
     let connect_options = config
         .storage
         .read_connect_options()
@@ -858,7 +859,12 @@ pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
 
 fn build_router<R>(state: AdmissionAppState<R>) -> Router
 where
-    R: AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync + 'static,
+    R: AnnouncementRepository
+        + RelayCompatibilityRepository
+        + StateRepository
+        + Send
+        + Sync
+        + 'static,
 {
     Router::new()
         .route("/health", get(health_handler))
@@ -950,7 +956,9 @@ impl From<AdmissionError> for AdmissionHttpError {
             AdmissionError::Core(err) => AdmissionHttpError::BadRequest(err.to_string()),
             AdmissionError::Storage(err) => AdmissionHttpError::Internal(err.to_string()),
             AdmissionError::Config(err) => AdmissionHttpError::Internal(err.to_string()),
-            AdmissionError::ObservabilityConfig(err) => AdmissionHttpError::Internal(err.to_string()),
+            AdmissionError::ObservabilityConfig(err) => {
+                AdmissionHttpError::Internal(err.to_string())
+            }
             AdmissionError::Observability(err) => AdmissionHttpError::Internal(err.to_string()),
             AdmissionError::Serve(err) => AdmissionHttpError::Internal(err),
         }
@@ -1000,47 +1008,162 @@ mod tests {
     use super::AdmissionCache;
     use super::AdmissionCacheConfig;
     use super::AdmissionConfig;
-    use super::AdmissionDecisionPayload;
+    use super::AdmissionConfigError;
     use super::AdmissionDecision;
-    use super::AdmissionRequestPayload;
+    use super::AdmissionDecisionError;
+    use super::AdmissionDecisionPayload;
+    use super::AdmissionError;
     use super::AdmissionRequest;
+    use super::AdmissionRequestError;
+    use super::AdmissionRequestPayload;
     use super::RateLimitConfig;
     use super::RateLimiter;
-    use axum::body::{Body, to_bytes};
+    use super::StorageConfigError;
     use super::evaluate_request;
     use super::evaluate_request_cached;
     use super::evaluate_request_with_admin_keys;
     use super::evaluate_request_with_storage;
     use super::evaluate_request_with_storage_mode;
     use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use axum::response::IntoResponse;
     use gittree_config::{RelayCompatibilityMode, ServicesConfig};
     use gittree_core::EventFilter;
     use gittree_core::RepoAnnouncement;
-    use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE, KIND_GITTREE_CONTROL};
+    use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRecord,
         RelayCompatibilityRepository, RepoAnnouncementRecord,
     };
     use gittree_storage::{RelayProbeMetadata, StateRepository, StorageError};
-    use axum::http::Request;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tower::ServiceExt;
 
     #[test]
     fn config_loads_from_env() {
-        with_env_var(super::ENV_STORAGE_READ_URL, "postgres://localhost/test", || {
-            with_env_var(super::ENV_CONTROL_ADMIN_KEYS, "alpha, beta", || {
-                let config = AdmissionConfig::from_env().expect("config");
-                let services = ServicesConfig::from_env_validated().expect("services");
-                assert_eq!(config.bind, services.admission.bind);
-                assert_eq!(
-                    config.control_admin_keys,
-                    vec!["alpha".to_string(), "beta".to_string()]
-                );
-            });
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://localhost/test",
+            || {
+                with_env_var(super::ENV_CONTROL_ADMIN_KEYS, "alpha, beta", || {
+                    let config = AdmissionConfig::from_env().expect("config");
+                    let services = ServicesConfig::from_env_validated().expect("services");
+                    assert_eq!(config.bind, services.admission.bind);
+                    assert_eq!(
+                        config.control_admin_keys,
+                        vec!["alpha".to_string(), "beta".to_string()]
+                    );
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_requires_storage_read_url() {
+        with_env_removed(super::ENV_STORAGE_READ_URL, || {
+            let err = AdmissionConfig::from_env().expect_err("missing read url");
+            assert!(matches!(
+                err,
+                AdmissionConfigError::Storage(StorageConfigError::MissingEnv(
+                    super::ENV_STORAGE_READ_URL
+                ))
+            ));
+            assert!(err.to_string().contains("admission storage config error"));
+            assert!(std::error::Error::source(&err).is_some());
         });
+    }
+
+    #[test]
+    fn config_rejects_invalid_numeric_env_values() {
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://localhost/test",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "not-a-number", || {
+                    let err = AdmissionConfig::from_env().expect_err("invalid max connections");
+                    assert!(matches!(
+                        err,
+                        AdmissionConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MAX_CONNECTIONS,
+                            ..
+                        })
+                    ));
+                });
+
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "NaN", || {
+                    let err = AdmissionConfig::from_env().expect_err("invalid idle timeout");
+                    assert!(matches!(
+                        err,
+                        AdmissionConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                            ..
+                        })
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_ignores_empty_numeric_values_and_missing_admin_keys() {
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://localhost/test",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "   ", || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, " ", || {
+                        with_env_removed(super::ENV_CONTROL_ADMIN_KEYS, || {
+                            let config = AdmissionConfig::from_env().expect("config");
+                            assert_eq!(config.storage.max_connections, 10);
+                            assert_eq!(config.storage.idle_timeout_secs, None);
+                            assert!(config.control_admin_keys.is_empty());
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_rejects_invalid_pool_bounds() {
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://localhost/test",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                        let err = AdmissionConfig::from_env().expect_err("invalid pool bounds");
+                        assert!(matches!(
+                            err,
+                            AdmissionConfigError::Storage(StorageConfigError::InvalidConfig(_))
+                        ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_error_display_and_source_cover_variants() {
+        let config_err = AdmissionConfigError::Config(gittree_config::ConfigError::MissingEnv(
+            "GITTREE_SERVICES_JSON",
+        ));
+        assert!(config_err.to_string().contains("admission config error"));
+        assert!(std::error::Error::source(&config_err).is_some());
+
+        let storage_err = AdmissionConfigError::Storage(StorageConfigError::InvalidConfig(
+            "pool bounds invalid".to_string(),
+        ));
+        assert!(
+            storage_err
+                .to_string()
+                .contains("admission storage config error")
+        );
+        assert!(std::error::Error::source(&storage_err).is_some());
     }
 
     #[tokio::test]
@@ -1054,7 +1177,12 @@ mod tests {
             control_admin_keys: Vec::new(),
         });
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -1090,10 +1218,47 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
-        let decision: AdmissionDecisionPayload =
-            serde_json::from_slice(&body).expect("decision");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let decision: AdmissionDecisionPayload = serde_json::from_slice(&body).expect("decision");
         assert!(matches!(decision, AdmissionDecisionPayload::Accept));
+    }
+
+    #[tokio::test]
+    async fn decide_endpoint_rejects_invalid_payload() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let cache = Arc::new(AdmissionCache::new(AdmissionCacheConfig::default()));
+        let app = super::build_router(super::AdmissionAppState {
+            repositories,
+            cache,
+            compatibility: RelayCompatibilityMode::Strict,
+            control_admin_keys: Vec::new(),
+        });
+        let payload = AdmissionRequestPayload {
+            kind: KIND_GIT_REPO_STATE.0 as u64,
+            pubkey: String::new(),
+            event_id: "event".to_string(),
+            tags: Vec::new(),
+            relay_url: None,
+            source_ip: None,
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8_lossy(&body).contains("missing admission field pubkey"));
     }
 
     #[test]
@@ -1161,8 +1326,8 @@ mod tests {
             None,
         )
         .expect("request");
-        let decision =
-            evaluate_request_with_admin_keys(&request, &["adminpub".to_string()]).expect("decision");
+        let decision = evaluate_request_with_admin_keys(&request, &["adminpub".to_string()])
+            .expect("decision");
         assert!(matches!(decision, AdmissionDecision::Accept));
     }
 
@@ -1177,8 +1342,8 @@ mod tests {
             None,
         )
         .expect("request");
-        let decision =
-            evaluate_request_with_admin_keys(&request, &["adminpub".to_string()]).expect("decision");
+        let decision = evaluate_request_with_admin_keys(&request, &["adminpub".to_string()])
+            .expect("decision");
         assert!(matches!(decision, AdmissionDecision::Reject { .. }));
     }
 
@@ -1186,6 +1351,15 @@ mod tests {
     fn decision_reject_requires_reason() {
         let err = AdmissionDecision::reject(" ").unwrap_err();
         assert!(matches!(err, super::AdmissionDecisionError::MissingReason));
+    }
+
+    #[test]
+    fn decision_reject_accepts_reason() {
+        let decision = AdmissionDecision::reject("denied").expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason } if reason == "denied"
+        ));
     }
 
     #[test]
@@ -1204,6 +1378,108 @@ mod tests {
             decision,
             AdmissionDecision::RequiresRelatedEvents { filters } if filters.len() == 1
         ));
+    }
+
+    #[test]
+    fn request_and_decision_error_display_messages_are_stable() {
+        assert_eq!(
+            AdmissionRequestError::MissingField("pubkey").to_string(),
+            "missing admission field pubkey"
+        );
+        assert_eq!(
+            AdmissionRequestError::InvalidTag.to_string(),
+            "invalid admission tag"
+        );
+        assert_eq!(
+            AdmissionRequestError::InvalidKind(999).to_string(),
+            "invalid admission kind 999"
+        );
+        assert_eq!(
+            AdmissionRequestError::InvalidRelayUrl.to_string(),
+            "invalid admission relay url"
+        );
+        assert_eq!(
+            AdmissionDecisionError::MissingReason.to_string(),
+            "missing admission rejection reason"
+        );
+        assert_eq!(
+            AdmissionDecisionError::MissingFilters.to_string(),
+            "missing related event filters"
+        );
+    }
+
+    #[test]
+    fn admission_error_display_and_source_are_stable() {
+        let request = AdmissionError::Request(AdmissionRequestError::InvalidTag);
+        assert_eq!(
+            request.to_string(),
+            "admission request error: invalid admission tag"
+        );
+        assert!(std::error::Error::source(&request).is_some());
+
+        let core = AdmissionError::Core(gittree_core::CoreError::MissingField("a"));
+        assert!(core.to_string().contains("admission core error"));
+        assert!(std::error::Error::source(&core).is_some());
+
+        let config = AdmissionError::Config(AdmissionConfigError::Storage(
+            StorageConfigError::InvalidConfig("bad".to_string()),
+        ));
+        assert!(
+            config
+                .to_string()
+                .contains("admission config error: admission storage config error")
+        );
+        assert!(std::error::Error::source(&config).is_some());
+
+        let storage = AdmissionError::Storage(StorageError::Internal {
+            message: "fail".to_string(),
+        });
+        assert!(storage.to_string().contains("admission storage error"));
+        assert!(std::error::Error::source(&storage).is_some());
+
+        let observability_config = AdmissionError::ObservabilityConfig(
+            gittree_observability::ObservabilityConfigError::InvalidEnv {
+                key: "GITTREE_LOG_JSON",
+                value: "wat".to_string(),
+            },
+        );
+        assert!(
+            observability_config
+                .to_string()
+                .contains("admission observability config error")
+        );
+        assert!(std::error::Error::source(&observability_config).is_some());
+
+        let observability = AdmissionError::Observability(
+            gittree_observability::ObservabilityError::SubscriberInit("dup".to_string()),
+        );
+        assert!(
+            observability
+                .to_string()
+                .contains("admission observability error")
+        );
+        assert!(std::error::Error::source(&observability).is_some());
+
+        let serve = AdmissionError::Serve("bind failed".to_string());
+        assert_eq!(serve.to_string(), "admission serve error: bind failed");
+        assert!(std::error::Error::source(&serve).is_none());
+    }
+
+    #[test]
+    fn admission_http_error_maps_status_codes() {
+        let bad_request_response = super::AdmissionHttpError::from(AdmissionError::Request(
+            AdmissionRequestError::InvalidTag,
+        ))
+        .into_response();
+        assert_eq!(bad_request_response.status(), StatusCode::BAD_REQUEST);
+
+        let internal_response =
+            super::AdmissionHttpError::from(AdmissionError::Serve("bind failed".to_string()))
+                .into_response();
+        assert_eq!(
+            internal_response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
@@ -1310,7 +1586,10 @@ mod tests {
 
     fn sample_compat_record(relay_url: &str, compatible: bool) -> RelayCompatibilityRecord {
         let (supported, missing_required) = if compatible {
-            (vec![RelayCapability::Nip01, RelayCapability::Nip34], Vec::new())
+            (
+                vec![RelayCapability::Nip01, RelayCapability::Nip34],
+                Vec::new(),
+            )
         } else {
             (vec![RelayCapability::Nip01], vec![RelayCapability::Nip34])
         };
@@ -1473,6 +1752,131 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn storage_integration_allows_incompatible_relay_in_allow_mode() {
+        let storage = InMemoryRepositories::new();
+        let record = sample_compat_record("wss://relay.example", false);
+        storage
+            .upsert_relay_compatibility(record)
+            .await
+            .expect("upsert");
+
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("wss://relay.example".to_string()),
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage_mode(
+            &request,
+            &storage,
+            RelayCompatibilityMode::Allow,
+            &[],
+        )
+        .await
+        .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_warns_on_missing_compatibility() {
+        let storage = InMemoryRepositories::new();
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("wss://relay.example".to_string()),
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage_mode(
+            &request,
+            &storage,
+            RelayCompatibilityMode::Warn,
+            &[],
+        )
+        .await
+        .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_rejects_missing_repo_address() {
+        let storage = InMemoryRepositories::new();
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            Vec::new(),
+            None,
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage(&request, &storage)
+            .await
+            .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason }
+                if reason.contains("missing repo address for related event checks")
+        ));
+    }
+
+    #[test]
+    fn repo_address_helpers_cover_edge_cases() {
+        let pubkey = hex_32(0x11);
+        let valid = format!("30617:{pubkey}:repo");
+
+        let address = super::repo_address_from_tags(&[
+            vec!["x".to_string(), "ignored".to_string()],
+            vec!["A".to_string(), valid.clone()],
+        ])
+        .expect("address");
+        assert_eq!(address.identifier, "repo");
+
+        let missing_value_err =
+            super::repo_address_from_tags(&[vec!["a".to_string()]]).expect_err("missing value");
+        assert!(matches!(
+            missing_value_err,
+            gittree_core::CoreError::InvalidTag { tag: "a", .. }
+        ));
+
+        let missing_err =
+            super::repo_address_from_tags(&[vec!["d".to_string(), "repo".to_string()]])
+                .expect_err("missing a tag");
+        assert!(matches!(
+            missing_err,
+            gittree_core::CoreError::MissingField("a")
+        ));
+
+        let mut valid_filter = EventFilter::new();
+        valid_filter.tags.insert("a".to_string(), vec![valid]);
+        let mut invalid_filter = EventFilter::new();
+        invalid_filter
+            .tags
+            .insert("a".to_string(), vec!["30617:nothex:repo".to_string()]);
+        let resolved =
+            super::repo_address_from_filters(&[invalid_filter, valid_filter]).expect("resolved");
+        assert_eq!(resolved.identifier, "repo");
+    }
+
     #[derive(Debug)]
     struct FailingStorage;
 
@@ -1572,6 +1976,64 @@ mod tests {
         assert!(matches!(
             decision,
             AdmissionDecision::Reject { reason } if reason.contains("storage error")
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_warns_on_compatibility_error() {
+        let storage = FailingStorage;
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("wss://relay.example".to_string()),
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage_mode(
+            &request,
+            &storage,
+            RelayCompatibilityMode::Warn,
+            &[],
+        )
+        .await
+        .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_allows_on_compatibility_error() {
+        let storage = FailingStorage;
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            Some("wss://relay.example".to_string()),
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage_mode(
+            &request,
+            &storage,
+            RelayCompatibilityMode::Allow,
+            &[],
+        )
+        .await
+        .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RequiresRelatedEvents { .. }
         ));
     }
 
@@ -1719,12 +2181,133 @@ mod tests {
         assert!(storage.calls.load(Ordering::SeqCst) >= 4);
     }
 
+    #[test]
+    fn cache_without_ttl_returns_fresh_entry() {
+        let cache = AdmissionCache::new(AdmissionCacheConfig::new(None, 2));
+        let key = "decision-key".to_string();
+        cache.insert(key.clone(), AdmissionDecision::Accept);
+        assert_eq!(cache.get(&key), Some(AdmissionDecision::Accept));
+    }
+
+    #[test]
+    fn cache_max_entries_zero_disables_storage() {
+        let cache =
+            AdmissionCache::new(AdmissionCacheConfig::new(Some(Duration::from_secs(30)), 0));
+        let key = "decision-key".to_string();
+        cache.insert(key.clone(), AdmissionDecision::Accept);
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn cache_evicts_oldest_entry_when_capacity_exceeded() {
+        let cache =
+            AdmissionCache::new(AdmissionCacheConfig::new(Some(Duration::from_secs(30)), 1));
+        cache.insert(
+            "old".to_string(),
+            AdmissionDecision::Reject {
+                reason: "old".to_string(),
+            },
+        );
+        cache.insert("new".to_string(), AdmissionDecision::Accept);
+
+        assert!(cache.get("old").is_none());
+        assert_eq!(cache.get("new"), Some(AdmissionDecision::Accept));
+    }
+
+    #[test]
+    fn rate_limit_defaults_are_stable() {
+        let config = RateLimitConfig::default();
+        assert_eq!(config.per_ip, 120);
+        assert_eq!(config.per_pubkey, 60);
+        assert_eq!(config.window, Duration::from_secs(60));
+
+        let limiter = RateLimiter::default();
+        let request =
+            AdmissionRequest::new(1, "pubkey", "event", Vec::new(), None, None).expect("request");
+        assert!(limiter.check(&request).is_none());
+    }
+
+    #[test]
+    fn rate_limiter_recovers_from_poisoned_lock() {
+        let limiter = Arc::new(RateLimiter::new(RateLimitConfig::new(
+            2,
+            0,
+            Duration::from_secs(60),
+        )));
+        let poison = Arc::clone(&limiter);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.ip_counters.write().expect("lock");
+            panic!("poison lock");
+        })
+        .join();
+
+        let request = AdmissionRequest::new(
+            1,
+            "pubkey",
+            "event",
+            Vec::new(),
+            None,
+            Some("127.0.0.1".to_string()),
+        )
+        .expect("request");
+        assert!(limiter.check(&request).is_none());
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
-        let previous = std::env::var(key).ok();
-        unsafe {
-            std::env::set_var(key, value);
+        with_env_scope(|| {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            f();
+            restore_env_var(key, previous);
+        });
+    }
+
+    fn with_env_removed<F: FnOnce()>(key: &str, f: F) {
+        with_env_scope(|| {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            f();
+            restore_env_var(key, previous);
+        });
+    }
+
+    fn with_env_scope<F: FnOnce()>(f: F) {
+        struct EnvDepthGuard;
+
+        impl Drop for EnvDepthGuard {
+            fn drop(&mut self) {
+                ENV_SCOPE_DEPTH.with(|depth| {
+                    depth.set(depth.get().saturating_sub(1));
+                });
+            }
         }
-        f();
+
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        thread_local! {
+            static ENV_SCOPE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+
+        let outermost = ENV_SCOPE_DEPTH.with(|depth| {
+            let current = depth.get();
+            depth.set(current + 1);
+            current == 0
+        });
+        let _depth_guard = EnvDepthGuard;
+
+        if outermost {
+            let lock = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+            let _env_guard = lock.lock().expect("env lock");
+            f();
+        } else {
+            f();
+        }
+    }
+
+    fn restore_env_var(key: &str, previous: Option<String>) {
         if let Some(value) = previous {
             unsafe {
                 std::env::set_var(key, value);
