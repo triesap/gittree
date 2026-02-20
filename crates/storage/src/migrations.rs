@@ -920,7 +920,8 @@ mod tests {
     }
 
     async fn provision_database_for_base_url(base_url: &str) -> Option<(sqlx::PgPool, String)> {
-        let mut admin_options = PgConnectOptions::from_str(&base_url).ok()?;
+        let base_options = PgConnectOptions::from_str(base_url).ok()?;
+        let mut admin_options = base_options.clone();
         admin_options = admin_options.database("postgres");
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -929,17 +930,17 @@ mod tests {
             .ok()?;
 
         let database_name = unique_database_name();
-        create_database(&admin_pool, &database_name)
-            .await
-            .then_some(())?;
+        if !create_database(&admin_pool, &database_name).await {
+            return None;
+        }
 
-        let mut test_options = PgConnectOptions::from_str(&base_url).ok()?;
+        let mut test_options = base_options;
         test_options = test_options.database(&database_name);
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect_with(test_options)
             .await
-            .ok()?;
+            .expect("connect isolated test database");
         Some((pool, database_name))
     }
 
