@@ -164,6 +164,88 @@ fn app_service_config_from_env_reports_invalid_numeric_storage_env() {
 }
 
 #[test]
+fn app_service_config_from_env_reports_invalid_u64_storage_env() {
+    with_env_overrides(
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+            ),
+            ("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", Some("not-a-number")),
+            ("GITTREE_UI_REPO_ROOT", Some("/tmp/gittree-ui")),
+            ("GITTREE_UI_PUBLIC_GIT_URL", Some("https://gittr.ee")),
+        ],
+        || {
+            let err = AppServiceConfig::from_env().expect_err("invalid storage u64");
+            assert!(matches!(
+                err,
+                AppServiceConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key: "GITTREE_STORAGE_IDLE_TIMEOUT_SECS",
+                    ..
+                })
+            ));
+        },
+    );
+}
+
+#[test]
+fn app_service_config_from_env_reports_invalid_pool_bounds() {
+    with_env_overrides(
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+            ),
+            ("GITTREE_STORAGE_MAX_CONNECTIONS", Some("1")),
+            ("GITTREE_STORAGE_MIN_CONNECTIONS", Some("2")),
+            ("GITTREE_UI_REPO_ROOT", Some("/tmp/gittree-ui")),
+            ("GITTREE_UI_PUBLIC_GIT_URL", Some("https://gittr.ee")),
+        ],
+        || {
+            let err = AppServiceConfig::from_env().expect_err("invalid pool bounds");
+            assert!(matches!(
+                err,
+                AppServiceConfigError::Storage(StorageConfigError::InvalidConfig(_))
+            ));
+        },
+    );
+}
+
+#[test]
+fn app_service_config_from_env_uses_defaults_for_empty_optional_values() {
+    with_env_overrides(
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+            ),
+            ("GITTREE_APP_BIND", Some(" ")),
+            ("GITTREE_APP_BASE_PATH", Some("   ")),
+            ("GITTREE_APP_SITE_ROOT", Some("")),
+            ("GITTREE_APP_SITE_PKG_DIR", Some(" ")),
+            ("GITTREE_STORAGE_MAX_CONNECTIONS", Some("   ")),
+            ("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", Some(" ")),
+            ("GITTREE_STORAGE_MAX_LIFETIME_SECS", Some("")),
+            ("GITTREE_STORAGE_APP_NAME", Some("")),
+            ("GITTREE_UI_REPO_ROOT", Some("/tmp/gittree-ui")),
+            ("GITTREE_UI_PUBLIC_GIT_URL", Some("https://gittr.ee")),
+        ],
+        || {
+            let config = AppServiceConfig::from_env().expect("config");
+            assert_eq!(config.bind.to_string(), "127.0.0.1:8090");
+            assert_eq!(config.base_path, "/ui");
+            assert_eq!(config.site_root, std::path::PathBuf::from("crates/app-ui/dist"));
+            assert_eq!(config.site_pkg_dir, "pkg");
+            assert_eq!(config.storage.max_connections, 10);
+            assert_eq!(config.storage.min_connections, 2);
+            assert_eq!(config.storage.idle_timeout_secs, None);
+            assert_eq!(config.storage.max_lifetime_secs, None);
+            assert_eq!(config.storage.application_name.as_deref(), Some(""));
+        },
+    );
+}
+
+#[test]
 fn app_service_config_from_env_reports_invalid_bind_env() {
     with_env_overrides(
         &[
