@@ -149,7 +149,9 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, MigrationConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MigrationConfig, MigrationConfigError};
+    use super::{MigrationConfig, MigrationConfigError, MigrationError, run, run_with_config};
+    use gittree_storage::{StorageConfig, StorageError};
+    use std::error::Error;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -260,5 +262,126 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn config_rejects_invalid_u64_numbers() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "nope", || {
+                    let err = MigrationConfig::from_env().unwrap_err();
+                    assert!(matches!(
+                        err,
+                        MigrationConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn migration_error_display_and_source_paths_are_stable() {
+        let config = MigrationConfigError::MissingEnv("READ_URL");
+        assert_eq!(format!("{config}"), "missing env READ_URL");
+
+        let invalid = MigrationConfigError::InvalidEnv {
+            key: "MAX",
+            value: "bad".to_string(),
+        };
+        assert_eq!(format!("{invalid}"), "invalid env MAX: bad");
+
+        let invalid_cfg = MigrationConfigError::InvalidConfig("invalid".to_string());
+        assert_eq!(format!("{invalid_cfg}"), "invalid");
+
+        let config_error = MigrationError::Config(MigrationConfigError::MissingEnv("READ_URL"));
+        assert!(format!("{config_error}").contains("migration config error"));
+        assert!(config_error.source().is_none());
+
+        let storage_error = MigrationError::Storage(StorageError::Internal {
+            message: "db".to_string(),
+        });
+        assert!(format!("{storage_error}").contains("migration storage error"));
+        assert!(storage_error.source().is_some());
+    }
+
+    #[tokio::test]
+    async fn run_maps_config_error_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::remove_var(super::ENV_STORAGE_READ_URL);
+        }
+        let err = run().await.expect_err("missing env");
+        assert!(matches!(
+            err,
+            MigrationError::Config(MigrationConfigError::MissingEnv(
+                super::ENV_STORAGE_READ_URL
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_with_config_maps_write_option_and_connect_errors() {
+        let invalid_options = MigrationConfig {
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@127.0.0.1:5432/gittree".to_string(),
+                write_connection: Some("://invalid".to_string()),
+                max_connections: 5,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let invalid_err = run_with_config(&invalid_options)
+            .await
+            .expect_err("invalid options");
+        assert!(matches!(invalid_err, MigrationError::Storage(_)));
+
+        let connect_error_config = MigrationConfig {
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@127.0.0.1:1/gittree".to_string(),
+                write_connection: None,
+                max_connections: 5,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let connect_err = run_with_config(&connect_error_config)
+            .await
+            .expect_err("connect failure");
+        assert!(matches!(connect_err, MigrationError::Storage(_)));
+    }
+
+    #[test]
+    fn with_env_var_restores_previous_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::set_var(super::ENV_STORAGE_READ_URL, "before");
+        }
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                assert_eq!(
+                    std::env::var(super::ENV_STORAGE_READ_URL).as_deref(),
+                    Ok("postgres://user:pass@localhost:5432/gittree")
+                );
+            },
+        );
+        assert_eq!(
+            std::env::var(super::ENV_STORAGE_READ_URL).as_deref(),
+            Ok("before")
+        );
+        unsafe {
+            std::env::remove_var(super::ENV_STORAGE_READ_URL);
+        }
     }
 }
