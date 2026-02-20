@@ -39,8 +39,20 @@ where
         .map_err(|err| MainError::Migration(err.to_string()))
 }
 
+async fn main_result_with<InitFn, InitOut, RunFn, RunFut>(
+    init_fn: InitFn,
+    run_fn: RunFn,
+) -> Result<i64, MainError>
+where
+    InitFn: FnOnce() -> Result<InitOut, String>,
+    RunFn: FnOnce() -> RunFut,
+    RunFut: Future<Output = Result<i64, gittree_migrate::MigrationError>>,
+{
+    run_migrations(init_fn, run_fn).await
+}
+
 async fn main_result() -> Result<i64, MainError> {
-    run_migrations(init_observability, gittree_migrate::run).await
+    main_result_with(init_observability, gittree_migrate::run).await
 }
 
 fn handle_main_outcome(
@@ -66,12 +78,38 @@ fn handle_main_outcome(
     }
 }
 
+async fn main_impl(stdout: &mut impl Write, stderr: &mut impl Write) -> i32 {
+    main_impl_with(
+        || {
+            dotenvy::dotenv().ok();
+        },
+        main_result,
+        stdout,
+        stderr,
+    )
+    .await
+}
+
+async fn main_impl_with<DotenvFn, ResultFn, ResultFut>(
+    load_dotenv: DotenvFn,
+    result_fn: ResultFn,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> i32
+where
+    DotenvFn: FnOnce(),
+    ResultFn: FnOnce() -> ResultFut,
+    ResultFut: Future<Output = Result<i64, MainError>>,
+{
+    load_dotenv();
+    handle_main_outcome(result_fn().await, stdout, stderr)
+}
+
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().ok();
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    let exit_code = handle_main_outcome(main_result().await, &mut stdout, &mut stderr);
+    let exit_code = main_impl(&mut stdout, &mut stderr).await;
     if exit_code != 0 {
         exit(exit_code);
     }
@@ -79,7 +117,9 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{MainError, handle_main_outcome, run_migrations};
+    use super::{
+        MainError, handle_main_outcome, main_impl_with, main_result_with, run_migrations,
+    };
     use gittree_migrate::{MigrationConfigError, MigrationError};
 
     #[tokio::test]
@@ -116,6 +156,25 @@ mod tests {
         assert!(
             matches!(err, MainError::Migration(message) if message.contains("migration config error"))
         );
+    }
+
+    #[tokio::test]
+    async fn main_result_with_delegates_success() {
+        let version = main_result_with(|| Ok(()), || async { Ok::<i64, MigrationError>(9) })
+            .await
+            .expect("version");
+        assert_eq!(version, 9);
+    }
+
+    #[tokio::test]
+    async fn main_result_with_delegates_errors() {
+        let err = main_result_with(
+            || Err::<(), String>("observer down".to_string()),
+            || async { Ok::<i64, MigrationError>(0) },
+        )
+        .await
+        .expect_err("error");
+        assert!(matches!(err, MainError::Observability(message) if message == "observer down"));
     }
 
     #[test]
@@ -174,6 +233,45 @@ mod tests {
         assert_eq!(
             MainError::Migration("m".to_string()).to_string(),
             "m".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn main_impl_with_executes_loader() {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loader_called = called.clone();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let _ = main_impl_with(
+            move || {
+                loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
+            },
+            || async { Ok::<i64, MainError>(3) },
+            &mut out,
+            &mut err,
+        )
+        .await;
+
+        assert!(called.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn main_impl_with_maps_result_to_output() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let exit_code = main_impl_with(
+            || {},
+            || async { Err::<i64, MainError>(MainError::Migration("db down".to_string())) },
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(exit_code, 1);
+        assert!(out.is_empty());
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "migration failed: db down\n"
         );
     }
 }
