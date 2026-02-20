@@ -735,6 +735,145 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn provision_database_for_base_url_returns_none_for_invalid_url() {
+        assert!(provision_database_for_base_url("not-a-url").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_database_for_base_url_returns_none_when_admin_connect_fails() {
+        assert!(
+            provision_database_for_base_url("postgres://gittree:gittree@127.0.0.1:1/gittree")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_database_from_candidates_returns_first_available_database() {
+        provision_database_executes_and_returns_option_with_value(
+            provision_database_from_candidates(vec![
+                "not-a-url".to_string(),
+                DEFAULT_TEST_DATABASE_URL.to_string(),
+            ])
+            .await,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pg_migration_backend_executes_queries_on_database() {
+        pg_migration_backend_executes_queries_with_provision(
+            provision_database().await,
+            require_db_tests(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pg_migration_backend_skips_without_database_when_not_required() {
+        pg_migration_backend_executes_queries_with_provision(None, false).await;
+    }
+
+    #[tokio::test]
+    async fn pg_migration_backend_reports_query_errors_on_database() {
+        pg_migration_backend_reports_query_errors_with_provision(
+            provision_database().await,
+            require_db_tests(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pg_migration_backend_error_paths_skip_without_database_when_not_required() {
+        pg_migration_backend_reports_query_errors_with_provision(None, false).await;
+    }
+
+    async fn pg_migration_backend_executes_queries_with_provision(
+        provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        let Some((pool, database_name, base_url)) = provisioned else {
+            skip_or_fail_without_db_with_policy(
+                "pg_migration_backend_executes_queries_on_database",
+                require_db,
+            );
+            return;
+        };
+
+        let mut connection = pool.acquire().await.expect("connection");
+        let mut backend = super::PgMigrationBackend {
+            connection: &mut connection,
+        };
+
+        backend
+            .ensure_migrations_table()
+            .await
+            .expect("ensure migrations table");
+        let _ = backend.current_version().await.expect("current version");
+        backend.execute_sql("SELECT 1").await.expect("execute sql");
+
+        let version = 9_000_000_000_i64 + TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed) as i64;
+        backend.record_version(version).await.expect("record version");
+
+        drop(backend);
+        drop(connection);
+        pool.close().await;
+        cleanup_database(&base_url, &database_name).await;
+    }
+
+    async fn pg_migration_backend_reports_query_errors_with_provision(
+        provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        let Some((pool, database_name, base_url)) = provisioned else {
+            skip_or_fail_without_db_with_policy(
+                "pg_migration_backend_reports_query_errors_on_database",
+                require_db,
+            );
+            return;
+        };
+
+        let mut connection = pool.acquire().await.expect("connection");
+        let mut backend = super::PgMigrationBackend {
+            connection: &mut connection,
+        };
+
+        let current_err = backend.current_version().await.expect_err("current version error");
+        assert!(matches!(current_err, StorageError::Database { .. }));
+
+        let record_err = backend
+            .record_version(9_100_000_000)
+            .await
+            .expect_err("record version error");
+        assert!(matches!(record_err, StorageError::Database { .. }));
+
+        let execute_err = backend
+            .execute_sql("SELECT FROM")
+            .await
+            .expect_err("execute sql error");
+        assert!(matches!(execute_err, StorageError::Database { .. }));
+
+        sqlx::query("SET default_transaction_read_only = on")
+            .execute(&mut *backend.connection)
+            .await
+            .expect("set read only");
+        let ensure_err = backend
+            .ensure_migrations_table()
+            .await
+            .expect_err("ensure migrations error");
+        assert!(matches!(ensure_err, StorageError::Database { .. }));
+        sqlx::query("SET default_transaction_read_only = off")
+            .execute(&mut *backend.connection)
+            .await
+            .expect("set read write");
+
+        drop(backend);
+        drop(connection);
+        pool.close().await;
+        cleanup_database(&base_url, &database_name).await;
+    }
+
     fn test_database_base_urls_from_value(value: Option<String>) -> Vec<String> {
         test_database_url_candidates(
             value,
