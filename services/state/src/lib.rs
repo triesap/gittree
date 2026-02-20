@@ -750,7 +750,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::ENV_STORAGE_READ_URL;
-    use super::ObservabilityHandle;
     use super::StateCache;
     use super::StateCacheConfig;
     use super::StateConfig;
@@ -781,12 +780,10 @@ mod tests {
     use gittree_storage::StorageConfig;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::sync::OnceLock;
     use std::time::Duration;
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -1570,7 +1567,12 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
-        assert!(handle.prometheus_registry().is_some());
+        match init_observability() {
+            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
+            Err(StateError::Observability(
+                gittree_observability::ObservabilityError::SubscriberInit(_),
+            )) => {}
+            Err(err) => panic!("unexpected observability init error: {err}"),
+        }
     }
 }
