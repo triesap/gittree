@@ -638,6 +638,17 @@ mod tests {
         };
         let err = super::build_repositories(&invalid_config).expect_err("invalid pool config");
         assert!(matches!(err, AppError::Storage(_)));
+
+        let invalid_connection = AppServiceConfig {
+            storage: StorageConfig {
+                read_connection: "not-a-connection".to_string(),
+                ..test_storage_config()
+            },
+            ..invalid_config
+        };
+        let err =
+            super::build_repositories(&invalid_connection).expect_err("invalid connect options");
+        assert!(matches!(err, AppError::Storage(_)));
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
-use gittree_app::{AppServiceConfig, AppServiceConfigError, StorageConfigError};
+use gittree_app::{AppError, AppServiceConfig, AppServiceConfigError, StorageConfigError};
 use std::sync::{Mutex, OnceLock};
 
-const ENV_KEYS: [&str; 15] = [
+const ENV_KEYS: [&str; 16] = [
     "GITTREE_APP_BIND",
     "GITTREE_APP_BASE_PATH",
     "GITTREE_APP_SITE_ROOT",
@@ -17,6 +17,7 @@ const ENV_KEYS: [&str; 15] = [
     "GITTREE_UI_PUBLIC_GIT_URL",
     "GITTREE_UI_AUTH_URL",
     "GITTREE_UI_CONTROL_URL",
+    "GITTREE_LOG_JSON",
 ];
 
 fn env_lock() -> &'static Mutex<()> {
@@ -295,4 +296,30 @@ fn app_service_config_from_env_reports_invalid_bind_env() {
             ));
         },
     );
+}
+
+#[test]
+fn app_service_config_from_env_maps_ui_config_errors() {
+    with_env_overrides(
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+            ),
+            ("GITTREE_UI_REPO_ROOT", Some("/tmp/gittree-ui")),
+            ("GITTREE_UI_PUBLIC_GIT_URL", Some("not-a-url")),
+        ],
+        || {
+            let err = AppServiceConfig::from_env().expect_err("invalid ui config");
+            assert!(matches!(err, AppServiceConfigError::Config(_)));
+        },
+    );
+}
+
+#[test]
+fn init_observability_reports_invalid_env() {
+    with_env_overrides(&[("GITTREE_LOG_JSON", Some("not-bool"))], || {
+        let err = gittree_app::init_observability().expect_err("invalid observability config");
+        assert!(matches!(err, AppError::ObservabilityConfig(_)));
+    });
 }
