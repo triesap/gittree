@@ -310,10 +310,10 @@ fn npub_from_hex(pubkey: &str) -> Result<String, SyncHttpError> {
     }
     let bytes =
         hex::decode(pubkey).map_err(|_| SyncHttpError::BadRequest("invalid pubkey".to_string()))?;
-    let hrp = Hrp::parse("npub")
-        .map_err(|_| SyncHttpError::Internal("npub hrp parse failed".to_string()))?;
-    bech32::encode::<Bech32>(hrp, &bytes)
-        .map_err(|_| SyncHttpError::Internal("npub encode failed".to_string()))
+    let hrp = Hrp::parse("npub").expect("static npub hrp");
+    let encoded = bech32::encode::<Bech32>(hrp, &bytes)
+        .map_err(|_| SyncHttpError::Internal("npub encode failed".to_string()))?;
+    Ok(encoded)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -921,6 +921,23 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_invalid_relay_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
+                    with_env_var("GITTREE_RELAY_URLS", "not-a-url", || {
+                        let err = SyncConfig::from_env().expect_err("invalid relay url");
+                        assert!(matches!(err, SyncConfigError::Config(_)));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn with_env_var_restores_previous_value() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         const KEY: &str = "GITTREE_SYNC_TEST_ENV_RESTORE";
@@ -1074,6 +1091,12 @@ mod tests {
             run_with_timeout(timeout, std::time::Duration::from_millis(20)).expect_err("timeout");
         assert!(matches!(timed_out, GitExecError::Timeout));
 
+        let missing_command = Command::new("/definitely/missing/command");
+        let spawn_err =
+            run_with_timeout(missing_command, std::time::Duration::from_millis(20))
+                .expect_err("spawn should fail");
+        assert!(matches!(spawn_err, GitExecError::Io(_)));
+
         let executor = CommandGitExecutor;
         let repo_path = std::path::Path::new("/definitely/missing/repo");
         let fetch_err = executor
@@ -1122,6 +1145,32 @@ mod tests {
         let path = PathBuf::from(value);
         let err = path_to_str(&path).expect_err("invalid utf8 path");
         assert!(matches!(err, GitExecError::InvalidPath(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_executor_rejects_non_utf8_repo_paths() {
+        let value = OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0xbc]);
+        let path = PathBuf::from(value);
+        let executor = CommandGitExecutor;
+        let fetch_err = executor
+            .fetch(
+                &path,
+                "https://gittr.ee/repo.git",
+                std::time::Duration::from_secs(1),
+            )
+            .expect_err("invalid path should fail fetch");
+        assert!(matches!(fetch_err, GitExecError::InvalidPath(_)));
+
+        let update_err = executor
+            .update_ref(&path, "refs/heads/main", &"11".repeat(20))
+            .expect_err("invalid path should fail update");
+        assert!(matches!(update_err, GitExecError::InvalidPath(_)));
+
+        let delete_err = executor
+            .delete_ref(&path, "refs/heads/main")
+            .expect_err("invalid path should fail delete");
+        assert!(matches!(delete_err, GitExecError::InvalidPath(_)));
     }
 
     #[tokio::test]
@@ -1280,6 +1329,30 @@ mod tests {
         let expected = repo_root.join(npub).join("repo.git");
         assert_eq!(ack.repo_path, expected.display().to_string());
         assert_eq!(ack.updates, 1);
+    }
+
+    #[tokio::test]
+    async fn post_receive_rejects_invalid_repo_address() {
+        let app = super::build_router(super::SyncAppState {
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        });
+        let payload = PostReceivePayload {
+            pubkey: "11".repeat(32),
+            identifier: "".to_string(),
+            updates: Vec::new(),
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -1565,7 +1638,10 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        let result = init_observability();
-        assert!(matches!(result, Ok(_) | Err(SyncError::Observability(_))));
+        match init_observability() {
+            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
+            Err(SyncError::Observability(_)) => {}
+            Err(other) => panic!("unexpected observability result: {other}"),
+        }
     }
 }
