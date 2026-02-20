@@ -37,7 +37,9 @@ impl ProbeCli {
         let mut timeout_secs: Option<u64> = None;
         let mut secret_key: Option<String> = None;
 
-        let mut iter = args.into_iter().map(|arg| arg.into().to_string_lossy().to_string());
+        let mut iter = args
+            .into_iter()
+            .map(|arg| arg.into().to_string_lossy().to_string());
         iter.next();
         while let Some(value) = iter.next() {
             match value.as_str() {
@@ -123,7 +125,19 @@ fn main() {
 }
 
 fn run() -> Result<(), ProbeCommandError> {
-    let cli = ProbeCli::parse(std::env::args_os()).map_err(ProbeCommandError::Cli)?;
+    run_with_args(std::env::args_os())
+}
+
+fn run_with_args<I, T>(args: I) -> Result<(), ProbeCommandError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString>,
+{
+    let cli = ProbeCli::parse(args).map_err(ProbeCommandError::Cli)?;
+    run_with_cli(cli)
+}
+
+fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
     let client = HttpRelayProbeClient::new().map_err(ProbeCommandError::Cli)?;
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|err| ProbeCommandError::Runtime(err.to_string()))?;
@@ -232,9 +246,10 @@ fn resolve_targets(cli: &ProbeCli) -> Result<Vec<String>, ProbeCommandError> {
         }
         return Ok(config.relay_urls);
     }
-    let relay = cli.relay.clone().ok_or_else(|| {
-        ProbeCommandError::MissingTargets("missing --relay value".to_string())
-    })?;
+    let relay = cli
+        .relay
+        .clone()
+        .ok_or_else(|| ProbeCommandError::MissingTargets("missing --relay value".to_string()))?;
     Ok(vec![relay])
 }
 
@@ -269,7 +284,9 @@ impl std::fmt::Display for ProbeCommandError {
             ProbeCommandError::Cli(err) => write!(f, "{err}"),
             ProbeCommandError::Config(err) => write!(f, "relay probe config error: {err}"),
             ProbeCommandError::MissingTargets(message) => write!(f, "{message}"),
-            ProbeCommandError::Runtime(message) => write!(f, "relay probe runtime error: {message}"),
+            ProbeCommandError::Runtime(message) => {
+                write!(f, "relay probe runtime error: {message}")
+            }
             ProbeCommandError::StorageConfig(err) => {
                 write!(f, "relay probe storage config error: {err}")
             }
@@ -373,10 +390,13 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, StorageConfigError> {
 mod tests {
     use super::{
         ProbeCli, ProbeCommandError, RelayProbeError, RelayProbeResult, StorageConfigError,
-        resolve_targets, storage_from_env, store_probe_result_with_repo,
+        now_unix_timestamp, print_help, resolve_targets, run_with_args, storage_from_env,
+        store_probe_result, store_probe_result_with_repo,
     };
+    use gittree_config::RelayProbeConfig;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
-    use gittree_storage::{InMemoryRepositories, RelayCompatibilityRepository};
+    use gittree_storage::{InMemoryRepositories, RelayCompatibilityRepository, StorageError};
+    use std::error::Error;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -400,13 +420,8 @@ mod tests {
 
     #[test]
     fn parse_accepts_store_flag() {
-        let cli = ProbeCli::parse([
-            "probe",
-            "--relay",
-            "wss://relay.example",
-            "--store",
-        ])
-        .expect("cli");
+        let cli =
+            ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--store"]).expect("cli");
         assert!(cli.store);
         assert!(!cli.all);
         assert_eq!(cli.relay.as_deref(), Some("wss://relay.example"));
@@ -421,8 +436,8 @@ mod tests {
 
     #[test]
     fn parse_accepts_active_flag() {
-        let cli = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--active"])
-            .expect("cli");
+        let cli =
+            ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--active"]).expect("cli");
         assert_eq!(cli.active, Some(true));
     }
 
@@ -440,10 +455,88 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_inline_relay_and_optional_flags() {
+        let cli = ProbeCli::parse([
+            "probe",
+            "--relay=wss://relay.example",
+            "--json",
+            "--no-active",
+            "--secret-key",
+            "00",
+        ])
+        .expect("cli");
+        assert_eq!(cli.relay.as_deref(), Some("wss://relay.example"));
+        assert!(cli.json);
+        assert_eq!(cli.active, Some(false));
+        assert_eq!(cli.secret_key.as_deref(), Some("00"));
+    }
+
+    #[test]
     fn parse_rejects_all_with_relay() {
-        let err = ProbeCli::parse(["probe", "--all", "--relay", "wss://relay.example"])
-            .unwrap_err();
+        let err =
+            ProbeCli::parse(["probe", "--all", "--relay", "wss://relay.example"]).unwrap_err();
         assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
+    }
+
+    #[test]
+    fn parse_rejects_missing_timeout_value() {
+        let err = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--timeout-secs"])
+            .expect_err("missing timeout");
+        assert!(
+            matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "missing timeout value")
+        );
+    }
+
+    #[test]
+    fn parse_rejects_invalid_timeout_value() {
+        let err = ProbeCli::parse([
+            "probe",
+            "--relay",
+            "wss://relay.example",
+            "--timeout-secs",
+            "invalid",
+        ])
+        .expect_err("invalid timeout");
+        assert!(
+            matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "invalid timeout value")
+        );
+    }
+
+    #[test]
+    fn parse_rejects_missing_secret_key() {
+        let err = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--secret-key"])
+            .expect_err("missing secret key");
+        assert!(
+            matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "missing secret key")
+        );
+    }
+
+    #[test]
+    fn parse_rejects_missing_relay_value() {
+        let err = ProbeCli::parse(["probe", "--relay"]).expect_err("missing relay value");
+        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "--relay"));
+    }
+
+    #[test]
+    fn parse_rejects_unknown_flag() {
+        let err = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--wat"])
+            .expect_err("unknown flag");
+        assert!(
+            matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "unknown flag --wat")
+        );
+    }
+
+    #[test]
+    fn parse_requires_relay_or_all() {
+        let err = ProbeCli::parse(["probe"]).expect_err("missing relay or all");
+        assert!(
+            matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "missing --relay or --all")
+        );
+    }
+
+    #[test]
+    fn print_help_smoke() {
+        print_help();
     }
 
     #[tokio::test]
@@ -493,6 +586,40 @@ mod tests {
     }
 
     #[test]
+    fn resolve_targets_returns_relay_for_single_mode() {
+        let cli = ProbeCli::parse(["probe", "--relay", "wss://relay.example"]).expect("cli");
+        let targets = resolve_targets(&cli).expect("targets");
+        assert_eq!(targets, vec!["wss://relay.example".to_string()]);
+    }
+
+    #[test]
+    fn resolve_targets_reads_env_for_all_mode() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            "GITTREE_RELAY_URLS",
+            "wss://relay.one,wss://relay.two",
+            || {
+                let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+                let targets = resolve_targets(&cli).expect("targets");
+                assert_eq!(
+                    targets,
+                    vec!["wss://relay.one".to_string(), "wss://relay.two".to_string()]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_targets_reports_invalid_relay_url_in_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_RELAY_URLS", "not-a-relay", || {
+            let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+            let err = resolve_targets(&cli).expect_err("invalid env relay url");
+            assert!(matches!(err, ProbeCommandError::Config(_)));
+        });
+    }
+
+    #[test]
     fn storage_config_requires_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         unsafe {
@@ -518,5 +645,237 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn storage_config_reads_optional_write_and_app_name() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(
+                    super::ENV_STORAGE_WRITE_URL,
+                    "postgres://user:pass@localhost:5432/gittree-write",
+                    || {
+                        with_env_var(super::ENV_STORAGE_APP_NAME, "relay-probe-tests", || {
+                            let config = storage_from_env().expect("config");
+                            assert_eq!(
+                                config.write_connection.as_deref(),
+                                Some("postgres://user:pass@localhost:5432/gittree-write")
+                            );
+                            assert_eq!(
+                                config.application_name.as_deref(),
+                                Some("relay-probe-tests")
+                            );
+                        });
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn storage_config_rejects_invalid_numeric_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "invalid", || {
+                    let err = storage_from_env().expect_err("invalid max connections");
+                    assert!(matches!(
+                        err,
+                        StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MAX_CONNECTIONS,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn storage_config_rejects_invalid_u64_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "invalid", || {
+                    let err = storage_from_env().expect_err("invalid idle timeout");
+                    assert!(matches!(
+                        err,
+                        StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn storage_config_rejects_invalid_pool_bounds() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                        let err = storage_from_env().expect_err("invalid pool bounds");
+                        assert!(matches!(err, StorageConfigError::InvalidConfig(_)));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn with_env_var_restores_previous_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_RELAY_PROBE_TEST_ENV";
+        // SAFETY: protected by ENV_LOCK and restored at the end of the test.
+        unsafe {
+            std::env::set_var(key, "original");
+        }
+        with_env_var(key, "temporary", || {
+            assert_eq!(std::env::var(key).ok().as_deref(), Some("temporary"));
+        });
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("original"));
+        // SAFETY: clean up test-only key.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn now_unix_timestamp_is_non_negative() {
+        assert!(now_unix_timestamp() >= 0);
+    }
+
+    fn sample_probe_result() -> RelayProbeResult {
+        let report = RelayCompatibilityReport {
+            relay_url: "wss://relay.example".to_string(),
+            supported: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            missing_required: Vec::new(),
+            missing_optional: Vec::new(),
+        };
+        RelayProbeResult {
+            relay_url: report.relay_url.clone(),
+            nip11_url: Some("https://relay.example/".to_string()),
+            nip11_available: true,
+            report,
+            observed_capabilities: vec![RelayCapability::Nip01, RelayCapability::Nip34],
+            nip11: None,
+            active_probe: Some(gittree_relay_probe::ActiveProbeResult {
+                ok: true,
+                error: None,
+            }),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn store_probe_result_reports_storage_config_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os(super::ENV_STORAGE_READ_URL);
+        // SAFETY: protected by ENV_LOCK and restored below.
+        unsafe {
+            std::env::remove_var(super::ENV_STORAGE_READ_URL);
+        }
+        let err = store_probe_result(&sample_probe_result())
+            .await
+            .expect_err("missing storage config");
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var(super::ENV_STORAGE_READ_URL, value);
+            },
+            None => unsafe {
+                std::env::remove_var(super::ENV_STORAGE_READ_URL);
+            },
+        }
+        assert!(matches!(err, ProbeCommandError::StorageConfig(_)));
+    }
+
+    #[test]
+    fn probe_command_error_display_and_source_cover_variants() {
+        let cli = ProbeCommandError::Cli(RelayProbeError::InvalidRelayUrl("bad relay".to_string()));
+        assert_eq!(cli.to_string(), "invalid relay url: bad relay");
+        assert!(cli.source().is_some());
+
+        let config_error = RelayProbeConfig::from_toml_str("timeout_secs = 0")
+            .expect_err("invalid relay probe config");
+        let config = ProbeCommandError::Config(config_error);
+        assert!(config.to_string().contains("relay probe config error"));
+        assert!(config.source().is_some());
+
+        let missing = ProbeCommandError::MissingTargets("missing".to_string());
+        assert_eq!(missing.to_string(), "missing");
+        assert!(missing.source().is_none());
+
+        let runtime = ProbeCommandError::Runtime("runtime down".to_string());
+        assert_eq!(
+            runtime.to_string(),
+            "relay probe runtime error: runtime down"
+        );
+        assert!(runtime.source().is_none());
+
+        let storage_cfg = ProbeCommandError::StorageConfig(StorageConfigError::MissingEnv("KEY"));
+        assert!(
+            storage_cfg
+                .to_string()
+                .contains("relay probe storage config error")
+        );
+        assert!(storage_cfg.source().is_some());
+
+        let storage = ProbeCommandError::Storage(StorageError::Internal {
+            message: "store failed".to_string(),
+        });
+        assert!(storage.to_string().contains("relay probe storage error"));
+        assert!(storage.source().is_some());
+    }
+
+    #[test]
+    fn storage_config_error_display_covers_all_variants() {
+        let missing = StorageConfigError::MissingEnv("KEY");
+        assert_eq!(missing.to_string(), "missing env KEY");
+
+        let invalid = StorageConfigError::InvalidEnv {
+            key: "KEY",
+            value: "bad".to_string(),
+        };
+        assert_eq!(invalid.to_string(), "invalid env KEY: bad");
+
+        let invalid_config = StorageConfigError::InvalidConfig("bounds".to_string());
+        assert_eq!(invalid_config.to_string(), "bounds");
+    }
+
+    #[test]
+    fn run_with_args_reports_cli_errors() {
+        let err = run_with_args(["probe"]).expect_err("missing args");
+        assert!(matches!(err, ProbeCommandError::Cli(_)));
+    }
+
+    #[test]
+    fn run_with_args_reports_probe_config_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "0", || {
+            let err = run_with_args(["probe", "--relay", "wss://relay.example"])
+                .expect_err("invalid relay probe config");
+            assert!(matches!(err, ProbeCommandError::Config(_)));
+        });
+    }
+
+    #[test]
+    fn run_with_args_reports_missing_targets_for_all_mode() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_RELAY_URLS", "", || {
+            let err = run_with_args(["probe", "--all"]).expect_err("missing targets");
+            assert!(matches!(err, ProbeCommandError::MissingTargets(_)));
+        });
     }
 }
