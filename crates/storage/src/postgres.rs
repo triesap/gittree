@@ -1992,6 +1992,84 @@ WHERE datname = $1
         .await;
     }
 
+    #[tokio::test]
+    async fn fetch_tags_reports_name_decode_error_db() {
+        with_test_db("fetch_tags_reports_name_decode_error_db", |test_db| async move {
+            let repositories = test_db.repositories();
+            let event = EventRecord::new(
+                "tenant-1",
+                &"aa".repeat(32),
+                &"bb".repeat(32),
+                200,
+                1,
+                "event-name-decode".to_string(),
+                &"cc".repeat(64),
+                vec![vec!["p".to_string(), "x".to_string()]],
+            )
+            .expect("event");
+            repositories
+                .insert_event(event.clone())
+                .await
+                .expect("insert event");
+
+            sqlx::query(
+                "ALTER TABLE nostr_tag ALTER COLUMN name TYPE bytea USING convert_to(name, 'UTF8')",
+            )
+            .execute(&repositories.pool)
+            .await
+            .expect("alter name to bytea");
+
+            assert_db_error(
+                repositories
+                    .fetch_tags("tenant-1", &event.id)
+                    .await
+                    .expect_err("decode error"),
+            );
+
+            test_db.cleanup().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fetch_tags_reports_value_decode_error_db() {
+        with_test_db("fetch_tags_reports_value_decode_error_db", |test_db| async move {
+            let repositories = test_db.repositories();
+            let event = EventRecord::new(
+                "tenant-1",
+                &"aa".repeat(32),
+                &"bb".repeat(32),
+                200,
+                1,
+                "event-value-decode".to_string(),
+                &"cc".repeat(64),
+                vec![vec!["p".to_string(), "x".to_string()]],
+            )
+            .expect("event");
+            repositories
+                .insert_event(event.clone())
+                .await
+                .expect("insert event");
+
+            sqlx::query(
+                "ALTER TABLE nostr_tag ALTER COLUMN value TYPE bytea USING convert_to(value, 'UTF8')",
+            )
+            .execute(&repositories.pool)
+            .await
+            .expect("alter value to bytea");
+
+            assert_db_error(
+                repositories
+                    .fetch_tags("tenant-1", &event.id)
+                    .await
+                    .expect_err("decode error"),
+            );
+
+            test_db.cleanup().await;
+        })
+        .await;
+    }
+
     #[test]
     fn test_database_base_urls_from_candidates_applies_precedence_and_fallbacks() {
         assert_eq!(
@@ -2459,6 +2537,54 @@ GITTREE_STORAGE_TEST_DATABASE_URL='postgres://quoted-test'
         let harness = TestDatabase {
             base_url: "not-a-postgres-url".to_string(),
             isolation: TestIsolation::Database(unique_database_name()),
+            pool,
+        };
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_database_cleanup_returns_when_admin_pool_connect_fails_for_database_isolation() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/invalid")
+            .expect("lazy pool");
+        let harness = TestDatabase {
+            base_url: UNREACHABLE_TEST_DATABASE_URL.to_string(),
+            isolation: TestIsolation::Database(unique_database_name()),
+            pool,
+        };
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_database_cleanup_returns_early_for_invalid_base_url_in_schema_mode() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/invalid")
+            .expect("lazy pool");
+        let harness = TestDatabase {
+            base_url: "not-a-postgres-url".to_string(),
+            isolation: TestIsolation::Schema {
+                database: "postgres".to_string(),
+                name: unique_schema_name(),
+            },
+            pool,
+        };
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_database_cleanup_returns_when_admin_pool_connect_fails_for_schema_isolation() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/invalid")
+            .expect("lazy pool");
+        let harness = TestDatabase {
+            base_url: UNREACHABLE_TEST_DATABASE_URL.to_string(),
+            isolation: TestIsolation::Schema {
+                database: "postgres".to_string(),
+                name: unique_schema_name(),
+            },
             pool,
         };
         harness.cleanup().await;
