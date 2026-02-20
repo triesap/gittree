@@ -1,7 +1,7 @@
 use gittree_config::{RelayProbeConfig, RelayTargetsConfig};
 use gittree_relay_adapter::{RelayAdapterConfig, WebsocketRelayAdapter};
 use gittree_relay_probe::{
-    HttpRelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay,
+    HttpRelayProbeClient, RelayProbeClient, RelayProbeError, RelayProbeResult, probe_relay,
     probe_relay_with_adapter_result,
 };
 use gittree_storage::{
@@ -152,11 +152,26 @@ fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
         probe_config.secret_key = Some(secret_key);
     }
     probe_config.validate().map_err(ProbeCommandError::Config)?;
-    let targets = resolve_targets(&cli)?;
+    let results = execute_probe_with_client(&cli, &probe_config, &runtime, &client)?;
+    let output = render_probe_output(&cli, &results);
+    if !output.is_empty() {
+        print!("{output}");
+    }
+
+    Ok(())
+}
+
+fn execute_probe_with_client<C: RelayProbeClient>(
+    cli: &ProbeCli,
+    probe_config: &RelayProbeConfig,
+    runtime: &tokio::runtime::Runtime,
+    client: &C,
+) -> Result<Vec<RelayProbeResult>, ProbeCommandError> {
+    let targets = resolve_targets(cli)?;
     let mut results = Vec::with_capacity(targets.len());
 
     for relay_url in targets {
-        let mut result = probe_relay(&relay_url, &client).map_err(ProbeCommandError::Cli)?;
+        let mut result = probe_relay(&relay_url, client).map_err(ProbeCommandError::Cli)?;
         if probe_config.active {
             let mut adapter_config = RelayAdapterConfig::new(&relay_url)
                 .with_timeout(Duration::from_secs(probe_config.timeout_secs));
@@ -174,28 +189,40 @@ fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
         results.push(result);
     }
 
+    Ok(results)
+}
+
+fn render_probe_output(cli: &ProbeCli, results: &[RelayProbeResult]) -> String {
     if cli.json {
         if cli.all {
-            let json = serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string());
-            println!("{json}");
-        } else if let Some(result) = results.first() {
+            let json = serde_json::to_string_pretty(results).unwrap_or_else(|_| "[]".to_string());
+            return format!("{json}\n");
+        }
+        if let Some(result) = results.first() {
             let json = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
-            println!("{json}");
+            return format!("{json}\n");
         }
-    } else {
-        for result in results {
-            println!("relay: {}", result.relay_url);
-            println!("compatible: {}", result.report.is_compatible());
-            if !result.report.missing_required.is_empty() {
-                println!("missing required: {:?}", result.report.missing_required);
-            }
-            if !result.report.missing_optional.is_empty() {
-                println!("missing optional: {:?}", result.report.missing_optional);
-            }
-        }
+        return String::new();
     }
 
-    Ok(())
+    let mut output = String::new();
+    for result in results {
+        output.push_str(&format!("relay: {}\n", result.relay_url));
+        output.push_str(&format!("compatible: {}\n", result.report.is_compatible()));
+        if !result.report.missing_required.is_empty() {
+            output.push_str(&format!(
+                "missing required: {:?}\n",
+                result.report.missing_required
+            ));
+        }
+        if !result.report.missing_optional.is_empty() {
+            output.push_str(&format!(
+                "missing optional: {:?}\n",
+                result.report.missing_optional
+            ));
+        }
+    }
+    output
 }
 
 async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeCommandError> {
@@ -390,11 +417,13 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, StorageConfigError> {
 mod tests {
     use super::{
         ProbeCli, ProbeCommandError, RelayProbeError, RelayProbeResult, StorageConfigError,
-        now_unix_timestamp, print_help, resolve_targets, run_with_args, storage_from_env,
-        store_probe_result, store_probe_result_with_repo,
+        execute_probe_with_client, now_unix_timestamp, print_help, render_probe_output,
+        resolve_targets, run_with_args, storage_from_env, store_probe_result,
+        store_probe_result_with_repo,
     };
     use gittree_config::RelayProbeConfig;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
+    use gittree_relay_probe::RelayProbeClient;
     use gittree_storage::{InMemoryRepositories, RelayCompatibilityRepository, StorageError};
     use std::error::Error;
     use std::sync::Mutex;
@@ -777,6 +806,124 @@ mod tests {
             }),
             warnings: Vec::new(),
         }
+    }
+
+    struct StubProbeClient {
+        response: Result<Option<String>, RelayProbeError>,
+    }
+
+    impl RelayProbeClient for StubProbeClient {
+        fn fetch_nip11(&self, _url: &str) -> Result<Option<String>, RelayProbeError> {
+            match &self.response {
+                Ok(body) => Ok(body.clone()),
+                Err(err) => Err(err.clone()),
+            }
+        }
+    }
+
+    #[test]
+    fn execute_probe_with_client_collects_single_result() {
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: Some(false),
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let probe_config = RelayProbeConfig {
+            active: false,
+            timeout_secs: 5,
+            secret_key: None,
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let client = StubProbeClient {
+            response: Ok(Some(
+                r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+            )),
+        };
+
+        let results =
+            execute_probe_with_client(&cli, &probe_config, &runtime, &client).expect("results");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].relay_url, "wss://relay.example");
+        assert!(results[0].nip11_available);
+    }
+
+    #[test]
+    fn execute_probe_with_client_maps_probe_errors() {
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: Some(false),
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let probe_config = RelayProbeConfig {
+            active: false,
+            timeout_secs: 5,
+            secret_key: None,
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let client = StubProbeClient {
+            response: Err(RelayProbeError::Http("boom".to_string())),
+        };
+
+        let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
+            .expect_err("probe failure");
+        assert!(matches!(
+            err,
+            ProbeCommandError::Cli(RelayProbeError::Http(_))
+        ));
+    }
+
+    #[test]
+    fn render_probe_output_covers_json_and_text_modes() {
+        let mut detailed = sample_probe_result();
+        detailed.report.missing_required = vec![RelayCapability::Nip34];
+        detailed.report.missing_optional = vec![RelayCapability::Nip11];
+
+        let text_cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: None,
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let text_output = render_probe_output(&text_cli, &[detailed.clone()]);
+        assert!(text_output.contains("relay: wss://relay.example"));
+        assert!(text_output.contains("missing required"));
+        assert!(text_output.contains("missing optional"));
+
+        let json_all_cli = ProbeCli {
+            relay: None,
+            all: true,
+            json: true,
+            store: false,
+            active: None,
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let json_all_output = render_probe_output(&json_all_cli, &[detailed.clone()]);
+        assert!(json_all_output.trim_start().starts_with('['));
+
+        let json_one_cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: true,
+            store: false,
+            active: None,
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let json_one_output = render_probe_output(&json_one_cli, &[detailed]);
+        assert!(json_one_output.trim_start().starts_with('{'));
+        assert!(render_probe_output(&json_one_cli, &[]).is_empty());
     }
 
     #[tokio::test]
