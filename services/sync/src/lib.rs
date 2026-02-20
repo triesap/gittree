@@ -291,9 +291,6 @@ fn npub_from_hex(pubkey: &str) -> Result<String, SyncHttpError> {
     }
     let bytes =
         hex::decode(pubkey).map_err(|_| SyncHttpError::BadRequest("invalid pubkey".to_string()))?;
-    if bytes.len() != 32 {
-        return Err(SyncHttpError::BadRequest("invalid pubkey".to_string()));
-    }
     let hrp = Hrp::parse("npub")
         .map_err(|_| SyncHttpError::Internal("npub hrp parse failed".to_string()))?;
     bech32::encode::<Bech32>(hrp, &bytes)
@@ -741,6 +738,21 @@ mod tests {
         }
     }
 
+    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        f();
+        match previous {
+            Some(old) => unsafe {
+                std::env::set_var(key, old);
+            },
+            None => {}
+        }
+    }
+
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -784,6 +796,119 @@ mod tests {
                 });
             },
         );
+    }
+
+    #[test]
+    fn config_requires_storage_read_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+            with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
+                without_env_var(ENV_STORAGE_READ_URL, || {
+                    let err = SyncConfig::from_env().expect_err("missing storage read url");
+                    assert!(matches!(
+                        err,
+                        SyncConfigError::Storage(StorageConfigError::MissingEnv(
+                            super::ENV_STORAGE_READ_URL
+                        ))
+                    ));
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_invalid_numeric_storage_values_and_repo_root() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
+                        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
+                            let err = SyncConfig::from_env().expect_err("invalid max connections");
+                            assert!(matches!(
+                                err,
+                                SyncConfigError::Storage(StorageConfigError::InvalidEnv {
+                                    key: super::ENV_STORAGE_MAX_CONNECTIONS,
+                                    ..
+                                })
+                            ));
+                        });
+
+                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+                            let err = SyncConfig::from_env().expect_err("invalid idle timeout");
+                            assert!(matches!(
+                                err,
+                                SyncConfigError::Storage(StorageConfigError::InvalidEnv {
+                                    key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                                    ..
+                                })
+                            ));
+                        });
+                    });
+                });
+            },
+        );
+
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "   ", || {
+                        let err = SyncConfig::from_env().expect_err("blank repo root");
+                        assert!(matches!(
+                            err,
+                            SyncConfigError::InvalidEnv {
+                                key: super::ENV_SYNC_REPO_ROOT,
+                                ..
+                            }
+                        ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_rejects_invalid_pool_bounds() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
+                        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                                let err = SyncConfig::from_env().expect_err("invalid pool bounds");
+                                assert!(matches!(
+                                    err,
+                                    SyncConfigError::Storage(StorageConfigError::InvalidConfig(_))
+                                ));
+                            });
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn with_env_var_restores_previous_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        const KEY: &str = "GITTREE_SYNC_TEST_ENV_RESTORE";
+        unsafe {
+            std::env::set_var(KEY, "before");
+        }
+        with_env_var(KEY, "during", || {
+            assert_eq!(std::env::var(KEY).ok().as_deref(), Some("during"));
+        });
+        assert_eq!(std::env::var(KEY).ok().as_deref(), Some("before"));
+        unsafe {
+            std::env::remove_var(KEY);
+        }
     }
 
     #[test]
@@ -907,6 +1032,35 @@ mod tests {
             )
             .expect_err("missing repo should fail");
         assert!(matches!(fetch_err, GitExecError::CommandFailed(_)));
+
+        let update_err = executor
+            .update_ref(repo_path, "refs/heads/main", &"11".repeat(20))
+            .expect_err("missing repo should fail update");
+        assert!(matches!(update_err, GitExecError::CommandFailed(_)));
+
+        let delete_err = executor
+            .delete_ref(repo_path, "refs/heads/main")
+            .expect_err("missing repo should fail delete");
+        assert!(matches!(delete_err, GitExecError::CommandFailed(_)));
+    }
+
+    #[test]
+    fn git_exec_error_display_and_source_cover_variants() {
+        let io = GitExecError::Io(std::io::Error::new(std::io::ErrorKind::Other, "boom"));
+        assert!(io.to_string().contains("git io error"));
+        assert!(io.source().is_some());
+
+        let timeout = GitExecError::Timeout;
+        assert_eq!(timeout.to_string(), "git command timed out");
+        assert!(timeout.source().is_none());
+
+        let invalid_path = GitExecError::InvalidPath("bad path".to_string());
+        assert_eq!(invalid_path.to_string(), "bad path");
+        assert!(invalid_path.source().is_none());
+
+        let failed = GitExecError::CommandFailed("failed".to_string());
+        assert_eq!(failed.to_string(), "failed");
+        assert!(failed.source().is_none());
     }
 
     #[cfg(unix)]
@@ -1043,6 +1197,26 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn plan_builder_keeps_head_out_of_deletions() {
+        let mut state_map = HashMap::new();
+        state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state_map.insert("refs/heads/main".to_string(), "11".repeat(20));
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+
+        let mut local_refs = HashMap::new();
+        local_refs.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        local_refs.insert("refs/heads/main".to_string(), "11".repeat(20));
+        local_refs.insert("refs/heads/old".to_string(), "22".repeat(20));
+
+        let plan = build_sync_plan(&state, &local_refs, &[], &[]);
+        assert!(!plan.deletions.contains(&"HEAD".to_string()));
+        assert!(plan.deletions.contains(&"refs/heads/old".to_string()));
+    }
+
     struct MockGitExecutor {
         fetch_fail: Vec<String>,
         update_fail: Vec<String>,
@@ -1142,6 +1316,46 @@ mod tests {
     }
 
     #[test]
+    fn executor_records_update_success_and_delete_failure() {
+        let plan = SyncPlan {
+            identifier: "repo".to_string(),
+            clone_urls: vec!["https://good".to_string()],
+            updates: vec![RefUpdatePlan {
+                reference: "refs/heads/main".to_string(),
+                target: "11".repeat(20),
+            }],
+            deletions: vec!["refs/heads/old".to_string()],
+        };
+        let executor = MockGitExecutor {
+            fetch_fail: Vec::new(),
+            update_fail: Vec::new(),
+            delete_fail: vec!["refs/heads/old".to_string()],
+        };
+        let report = execute_sync_plan(
+            &executor,
+            std::path::Path::new("/tmp"),
+            &plan,
+            std::time::Duration::from_secs(1),
+        );
+        assert_eq!(
+            report.update_results,
+            vec![RefChangeResult {
+                reference: "refs/heads/main".to_string(),
+                success: true,
+                error: None,
+            }]
+        );
+        assert_eq!(
+            report.delete_results,
+            vec![RefChangeResult {
+                reference: "refs/heads/old".to_string(),
+                success: false,
+                error: Some("delete failed".to_string()),
+            }]
+        );
+    }
+
+    #[test]
     fn scheduler_backoff_increases_and_caps() {
         let mut scheduler = SyncScheduler::new(SyncScheduleConfig {
             interval: std::time::Duration::from_secs(10),
@@ -1170,6 +1384,14 @@ mod tests {
         assert!(!scheduler.try_start_repo("repo-b"));
         scheduler.finish_repo("repo-a");
         assert!(scheduler.try_start_repo("repo-b"));
+    }
+
+    #[test]
+    fn scheduler_default_values_are_stable() {
+        let defaults = SyncScheduleConfig::default();
+        assert_eq!(defaults.interval, std::time::Duration::from_secs(60));
+        assert_eq!(defaults.max_backoff, std::time::Duration::from_secs(300));
+        assert_eq!(defaults.max_concurrent, 4);
     }
 
     #[test]
@@ -1210,12 +1432,13 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        match init_observability() {
-            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
-            Err(SyncError::Observability(err)) => {
-                assert!(err.to_string().contains("already been set"));
-            }
-            Err(other) => panic!("unexpected observability init error: {other}"),
+        let result = init_observability();
+        if let Ok(handle) = &result {
+            assert!(handle.prometheus_registry().is_some());
         }
+        if let Err(SyncError::Observability(err)) = &result {
+            assert!(err.to_string().contains("already been set"));
+        }
+        assert!(matches!(result, Ok(_) | Err(SyncError::Observability(_))));
     }
 }
