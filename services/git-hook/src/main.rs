@@ -1,5 +1,6 @@
 use clap::Parser;
 use gittree_git_hook::{HookServiceError, run_hook};
+use std::path::Path;
 
 mod cli;
 
@@ -13,21 +14,108 @@ fn init_observability() -> Result<gittree_observability::ObservabilityHandle, St
 
 fn main() {
     dotenvy::dotenv().ok();
-    let _observability = match init_observability() {
-        Ok(handle) => handle,
-        Err(err) => {
-            eprintln!("git hook observability failed: {err}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(err) = run() {
-        eprintln!("git hook failed: {err}");
+    if let Err(err) = try_main(init_observability, run) {
+        eprintln!("{err}");
         std::process::exit(1);
     }
 }
 
 fn run() -> Result<(), HookServiceError> {
-    let cli = HookCli::parse();
+    run_with_cli(HookCli::parse(), run_hook)
+}
+
+fn run_with_cli<F>(cli: HookCli, run_hook_fn: F) -> Result<(), HookServiceError>
+where
+    F: FnOnce(gittree_git_hook::HookConfig, Option<&Path>) -> Result<(), HookServiceError>,
+{
     let config = HookRunConfig::from_env(cli).map_err(HookServiceError::Config)?;
-    run_hook(config.hook, config.stdin_file.as_deref())
+    run_hook_fn(config.hook, config.stdin_file.as_deref())
+}
+
+fn try_main<FInit, FRun, T>(init_observability_fn: FInit, run_fn: FRun) -> Result<(), String>
+where
+    FInit: FnOnce() -> Result<T, String>,
+    FRun: FnOnce() -> Result<(), HookServiceError>,
+{
+    let _observability =
+        init_observability_fn().map_err(|err| format!("git hook observability failed: {err}"))?;
+    run_fn().map_err(|err| format!("git hook failed: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HookCli, HookServiceError, run_with_cli, try_main};
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn try_main_reports_observability_error() {
+        let err = try_main(
+            || Err::<(), _>("obs boom".to_string()),
+            || Ok::<(), HookServiceError>(()),
+        )
+        .expect_err("expected error");
+        assert!(err.contains("git hook observability failed"));
+    }
+
+    #[test]
+    fn try_main_reports_hook_error() {
+        let err = try_main(
+            || Ok::<(), String>(()),
+            || Err(HookServiceError::Core("hook boom".to_string())),
+        )
+        .expect_err("expected error");
+        assert!(err.contains("git hook failed"));
+    }
+
+    #[test]
+    fn try_main_returns_ok_on_success() {
+        let result = try_main(|| Ok::<(), String>(()), || Ok::<(), HookServiceError>(()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_with_cli_propagates_runner_error() {
+        let cli = HookCli::try_parse_from([
+            "gittree-git-hook",
+            "--mode",
+            "pre-receive",
+            "--state-url",
+            "http://127.0.0.1:8082",
+            "--sync-url",
+            "http://127.0.0.1:8088",
+        ])
+        .expect("parse");
+        let err = run_with_cli(cli, |_, _| {
+            Err(HookServiceError::Core("runner boom".to_string()))
+        })
+        .expect_err("runner should fail");
+        assert!(matches!(err, HookServiceError::Core(_)));
+    }
+
+    #[test]
+    fn run_with_cli_passes_stdin_file_to_runner() {
+        let cli = HookCli::try_parse_from([
+            "gittree-git-hook",
+            "--mode",
+            "pre-receive",
+            "--state-url",
+            "http://127.0.0.1:8082",
+            "--sync-url",
+            "http://127.0.0.1:8088",
+            "--stdin-file",
+            "updates.txt",
+        ])
+        .expect("parse");
+        let mut seen_path: Option<PathBuf> = None;
+        run_with_cli(cli, |_, stdin_file| {
+            seen_path = stdin_file.map(|path| path.to_path_buf());
+            Ok(())
+        })
+        .expect("runner");
+        assert_eq!(
+            seen_path.as_deref(),
+            Some(std::path::Path::new("updates.txt"))
+        );
+    }
 }
