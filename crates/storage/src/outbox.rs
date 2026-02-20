@@ -192,6 +192,10 @@ mod tests {
         let mut request = valid_request();
         request.event_id = "aa".repeat(31);
         assert!(request.decode().is_err());
+
+        request = valid_request();
+        request.pubkey = "bb".repeat(31);
+        assert!(request.decode().is_err());
     }
 
     #[test]
