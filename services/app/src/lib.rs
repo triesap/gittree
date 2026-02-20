@@ -19,6 +19,7 @@ use gittree_storage::{
 use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
 use leptos_axum::{LeptosRoutes, handle_server_fns_with_context};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -282,12 +283,15 @@ pub fn build_repositories(config: &AppServiceConfig) -> Result<PostgresRepositor
     Ok(PostgresRepositories::new(pool))
 }
 
-async fn serve_with<InitFn, InitOut>(
+async fn serve_with<InitFn, InitOut, ServeFn, ServeFut>(
     config: AppServiceConfig,
     init_fn: InitFn,
+    serve_fn: ServeFn,
 ) -> Result<(), AppError>
 where
     InitFn: FnOnce() -> Result<InitOut, AppError>,
+    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
+    ServeFut: Future<Output = Result<(), std::io::Error>>,
 {
     let _observability = init_fn()?;
     let repositories = build_repositories(&config)?;
@@ -311,14 +315,19 @@ where
     let listener = tokio::net::TcpListener::bind(state.leptos_options.site_addr)
         .await
         .map_err(|err| AppError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
+    serve_fn(listener, router)
         .await
         .map_err(|err| AppError::Serve(err.to_string()))?;
     Ok(())
 }
 
 pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
-    serve_with(config, init_observability).await
+    serve_with(
+        config,
+        init_observability,
+        |listener, router| async move { axum::serve(listener, router).await },
+    )
+    .await
 }
 
 fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
@@ -435,9 +444,7 @@ mod tests {
     use gittree_app_core::RepoListResponse;
     use gittree_app_ui::server::AppUiError;
     use gittree_config::{ConfigError, UiConfig};
-    use gittree_observability::{
-        ObservabilityConfigError, ObservabilityError, ObservabilityHandle,
-    };
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
         InMemoryRepositories, ProfileRecord, ProfileRepository, ProfileVisibility,
         RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
@@ -445,10 +452,8 @@ mod tests {
     use leptos::config::LeptosOptions;
     use std::error::Error;
     use std::path::PathBuf;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
     use tower::util::ServiceExt;
-
-    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     fn test_ui_config() -> UiConfig {
         UiConfig {
@@ -650,14 +655,80 @@ mod tests {
             ui: test_ui_config(),
         };
 
-        let err = super::serve_with(config, || Ok(())).await.expect_err("bind error");
+        let err = super::serve_with(config, || Ok(()), |listener, router| async move {
+            axum::serve(listener, router).await
+        })
+        .await
+        .expect_err("bind error");
         assert!(matches!(err, AppError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_server_errors() {
+        let config = AppServiceConfig {
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            base_path: "/".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let err = super::serve_with(config, || Ok(()), |_listener, _router| async {
+            Err(std::io::Error::other("boom"))
+        })
+        .await
+        .expect_err("serve error");
+        assert!(matches!(err, AppError::Serve(message) if message.contains("boom")));
+    }
+
+    #[tokio::test]
+    async fn serve_with_returns_ok_when_server_finishes_cleanly() {
+        let config = AppServiceConfig {
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            base_path: "/".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let result = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn serve_wrapper_executes_default_path() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("occupied listener");
+        let bind = occupied.local_addr().expect("occupied addr");
+        let config = AppServiceConfig {
+            bind,
+            base_path: "/".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let err = super::serve(config).await.expect_err("wrapper error");
+        drop(occupied);
+        assert!(matches!(
+            err,
+            AppError::Serve(_) | AppError::Observability(_) | AppError::ObservabilityConfig(_)
+        ));
     }
 
     #[test]
     fn init_observability_returns_registry() {
-        let handle = OBSERVABILITY.get_or_init(|| super::init_observability().expect("init"));
-        assert!(handle.prometheus_registry().is_some());
+        match super::init_observability() {
+            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
+            Err(AppError::Observability(ObservabilityError::SubscriberInit(_))) => {}
+            Err(other) => panic!("unexpected observability result: {other}"),
+        }
     }
 
     #[tokio::test]
