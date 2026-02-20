@@ -309,7 +309,7 @@ where
         .map_err(|err| UiHttpError::Storage(err.to_string()))?;
     let mut items = Vec::with_capacity(mappings.len());
     for mapping in mappings {
-        items.push(repo_list_item(&state.public_git_url, mapping)?);
+        items.push(repo_list_item(&state.public_git_url, mapping));
     }
     Ok(Html(render_index(&items)))
 }
@@ -328,22 +328,21 @@ where
         .join(format!("{identifier}.git"));
     let parsed =
         parse_repo_path(&repo_path).map_err(|err| UiHttpError::BadRequest(err.to_string()))?;
-    let pubkey_bytes = hex::decode(&parsed.pubkey)
-        .map_err(|_| UiHttpError::BadRequest("invalid pubkey".to_string()))?;
+    let pubkey_bytes = hex::decode(&parsed.pubkey).expect("repo path parser outputs hex pubkeys");
     let mapping = state
         .repositories
         .mapping_by_repo(&pubkey_bytes, &parsed.identifier)
         .await
         .map_err(|err| UiHttpError::Storage(err.to_string()))?
         .ok_or_else(|| UiHttpError::NotFound("missing repo mapping".to_string()))?;
-    let item = repo_list_item(&state.public_git_url, mapping)?;
+    let item = repo_list_item(&state.public_git_url, mapping);
     Ok(Html(render_repo(&item)))
 }
 
 fn repo_list_item(
     public_git_url: &str,
     mapping: RepoMappingRecord,
-) -> Result<RepoListItem, UiHttpError> {
+) -> RepoListItem {
     let npub = npub_from_bytes(&mapping.pubkey);
     let forgejo = mapping.forgejo_full_name();
     let identifier = mapping.identifier;
@@ -352,12 +351,12 @@ fn repo_list_item(
         public_git_url.trim_end_matches('/'),
         identifier
     );
-    Ok(RepoListItem {
+    RepoListItem {
         npub,
         identifier,
         forgejo,
         clone_url,
-    })
+    }
 }
 
 fn npub_from_bytes(bytes: &[u8]) -> String {
@@ -621,6 +620,18 @@ mod tests {
                 assert_eq!(config.storage.idle_timeout_secs, None);
             },
         );
+
+        with_minimum_config_env(
+            &[
+                ("GITTREE_STORAGE_MIN_CONNECTIONS", None),
+                ("GITTREE_STORAGE_MAX_LIFETIME_SECS", None),
+            ],
+            || {
+                let config = UiServiceConfig::from_env().expect("config");
+                assert_eq!(config.storage.min_connections, 2);
+                assert_eq!(config.storage.max_lifetime_secs, None);
+            },
+        );
     }
 
     #[test]
@@ -736,7 +747,7 @@ mod tests {
 
         let mapping = RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
-        let item = repo_list_item("http://localhost:8085/", record).expect("item");
+        let item = repo_list_item("http://localhost:8085/", record);
         assert_eq!(
             item.clone_url,
             "http://localhost:8085".to_string() + "/" + &item.npub + "/repo.git"
@@ -802,11 +813,13 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let err = super::serve_with(config, || Ok(()), |listener, router| async move {
-            axum::serve(listener, router).await
-        })
-            .await
-            .expect_err("bind error");
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
+        )
+        .await
+        .expect_err("bind error");
         assert!(matches!(err, UiError::Serve(_)));
     }
 
