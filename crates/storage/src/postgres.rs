@@ -2065,6 +2065,15 @@ WHERE datname = $1
             "postgres://reader:secret@127.0.0.1:5432/postgres?sslmode=disable"
         );
         assert!(rewrite_database_url("not-a-url", "reader", "secret", "postgres").is_none());
+        assert!(
+            rewrite_database_url(
+                "postgres://gittree:gittree@127.0.0.1:5432",
+                "reader",
+                "secret",
+                "postgres"
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2096,6 +2105,12 @@ WHERE datname = $1
     async fn provision_from_base_url_returns_none_when_admin_connection_fails() {
         let provisioned =
             TestDatabase::provision_from_base_url(UNREACHABLE_TEST_DATABASE_URL.to_string()).await;
+        assert!(provisioned.is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_from_base_url_returns_none_for_invalid_base_url() {
+        let provisioned = TestDatabase::provision_from_base_url("not-a-url".to_string()).await;
         assert!(provisioned.is_none());
     }
 
@@ -2143,6 +2158,21 @@ WHERE datname = $1
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn provision_from_candidates_returns_first_available_database() {
+        with_test_db_with_provision(
+            "provision_from_candidates_returns_first_available_database",
+            TestDatabase::provision_from_candidates(vec![
+                "not-a-url".to_string(),
+                primary_test_database_base_url(),
+            ])
+            .await,
+            require_db_tests(),
+            noop_test_db,
+        )
+        .await;
     }
 
     #[tokio::test]
