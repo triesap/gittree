@@ -48,6 +48,10 @@ mod tests {
     use gittree_git_http::{GitHttpConfig, GitHttpError};
     use std::time::Duration;
 
+    async fn serve_ok(_: GitHttpConfig) -> Result<(), GitHttpError> {
+        Ok(())
+    }
+
     fn test_config() -> GitHttpConfig {
         GitHttpConfig {
             bind: "127.0.0.1:8085".to_string(),
@@ -77,7 +81,7 @@ mod tests {
                     gittree_git_http::GitHttpConfigError::MissingEnv("ENV"),
                 ))
             },
-            |_| async { Ok(()) },
+            serve_ok,
         )
         .await
         .expect_err("config error");
@@ -97,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(|| Ok(test_config()), |_| async { Ok(()) }).await;
+        let result = run_with(|| Ok(test_config()), serve_ok).await;
         assert!(result.is_ok());
     }
 
