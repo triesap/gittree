@@ -498,8 +498,13 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AdminError> {
 #[cfg(test)]
 mod tests {
     use super::AdminError;
+    use super::ControlClient;
     use super::ControlClientConfig;
     use super::ControlConfigError;
+    use super::ControlCreateOrg;
+    use super::ControlCreatePull;
+    use super::ControlCreateRepo;
+    use super::ControlCreateUser;
     use super::DEFAULT_CONTROL_URL;
     use super::ENV_CONTROL_TOKEN;
     use super::ENV_CONTROL_URL;
@@ -513,7 +518,10 @@ mod tests {
     use super::env_u32;
     use super::env_u64;
     use super::storage_from_env;
+    use serde::{Deserialize, Serialize};
     use std::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -718,5 +726,194 @@ mod tests {
                 .contains("admin control response error")
         );
         assert!(control_resp.source().is_none());
+    }
+
+    fn start_mock_http_server(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind server");
+        let addr = listener.local_addr().expect("addr");
+        let status = status.to_string();
+        let content_type = content_type.to_string();
+        let body = body.to_string();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[derive(Debug, Serialize)]
+    struct TestPostReq {
+        a: u32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TestPostResp {
+        ok: bool,
+    }
+
+    #[test]
+    fn control_client_endpoint_trims_trailing_slash() {
+        let client = ControlClient::new(ControlClientConfig {
+            base_url: "http://localhost:8088/".to_string(),
+            token: "token".to_string(),
+        })
+        .expect("client");
+        assert_eq!(
+            client.endpoint("/control/users"),
+            "http://localhost:8088/control/users"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_client_post_handles_success_and_error_statuses() {
+        let (base_url, ok_handle) =
+            start_mock_http_server("200 OK", "application/json", "{\"ok\":true}");
+        let ok_client = ControlClient::new(ControlClientConfig {
+            base_url,
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let ok: TestPostResp = ok_client
+            .post("/control/test", &TestPostReq { a: 1 })
+            .await
+            .expect("post ok");
+        assert!(ok.ok);
+        ok_handle.join().expect("server join");
+
+        let (base_url, err_handle) =
+            start_mock_http_server("401 Unauthorized", "text/plain", "bad token");
+        let err_client = ControlClient::new(ControlClientConfig {
+            base_url,
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let err = err_client
+            .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
+            .await
+            .expect_err("post should fail");
+        assert!(matches!(err, AdminError::ControlResponse(_)));
+        err_handle.join().expect("server join");
+    }
+
+    #[tokio::test]
+    async fn control_client_post_reports_invalid_json() {
+        let (base_url, handle) = start_mock_http_server("200 OK", "application/json", "{");
+        let client = ControlClient::new(ControlClientConfig {
+            base_url,
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let err = client
+            .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
+            .await
+            .expect_err("invalid json");
+        assert!(matches!(err, AdminError::ControlRequest(_)));
+        handle.join().expect("server join");
+    }
+
+    #[tokio::test]
+    async fn control_client_create_helpers_use_expected_paths() {
+        let (user_url, user_handle) =
+            start_mock_http_server("200 OK", "application/json", "{\"username\":\"alice\"}");
+        let user_client = ControlClient::new(ControlClientConfig {
+            base_url: user_url,
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let user = user_client
+            .create_user(ControlCreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret".to_string(),
+                full_name: None,
+                must_change_password: None,
+                send_notify: None,
+            })
+            .await
+            .expect("create user");
+        assert_eq!(user.username, "alice");
+        user_handle.join().expect("server join");
+
+        let (org_url, org_handle) = start_mock_http_server(
+            "200 OK",
+            "application/json",
+            "{\"name\":\"acme\",\"full_name\":\"Acme\"}",
+        );
+        let org_client = ControlClient::new(ControlClientConfig {
+            base_url: org_url,
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let org = org_client
+            .create_org(ControlCreateOrg {
+                owner: "alice".to_string(),
+                name: "acme".to_string(),
+                full_name: None,
+                description: None,
+                visibility: None,
+            })
+            .await
+            .expect("create org");
+        assert_eq!(org.name, "acme");
+        org_handle.join().expect("server join");
+
+        let (repo_url, repo_handle) = start_mock_http_server(
+            "200 OK",
+            "application/json",
+            "{\"owner\":\"alice\",\"name\":\"repo\"}",
+        );
+        let repo_client = ControlClient::new(ControlClientConfig {
+            base_url: repo_url,
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let repo = repo_client
+            .create_repo(ControlCreateRepo {
+                owner: "alice".to_string(),
+                name: "repo".to_string(),
+                description: None,
+                private: None,
+                auto_init: None,
+            })
+            .await
+            .expect("create repo");
+        assert_eq!(repo.name, "repo");
+        repo_handle.join().expect("server join");
+
+        let (pull_url, pull_handle) = start_mock_http_server(
+            "200 OK",
+            "application/json",
+            "{\"number\":1,\"url\":\"http://example.test/pr/1\"}",
+        );
+        let pull_client = ControlClient::new(ControlClientConfig {
+            base_url: pull_url,
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let pull = pull_client
+            .create_pull(ControlCreatePull {
+                owner: "alice".to_string(),
+                repo: "repo".to_string(),
+                head: "feature".to_string(),
+                base: "main".to_string(),
+                title: "title".to_string(),
+                body: None,
+            })
+            .await
+            .expect("create pull");
+        assert_eq!(pull.number, 1);
+        pull_handle.join().expect("server join");
     }
 }
