@@ -51,6 +51,11 @@ impl AdminCli {
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
     {
+        let args = args.into_iter().map(Into::into).collect();
+        Self::parse_from_os(args)
+    }
+
+    fn parse_from_os(args: Vec<OsString>) -> Result<Self, AdminCliError> {
         let mut help = false;
         let mut command = None;
         let mut iter = args.into_iter();
@@ -111,34 +116,29 @@ impl std::fmt::Display for AdminCliError {
 
 impl std::error::Error for AdminCliError {}
 
-fn parse_map<I, T>(iter: &mut I) -> Result<AdminCommand, AdminCliError>
-where
-    I: Iterator<Item = T>,
-    T: Into<OsString>,
-{
+fn parse_map(iter: &mut std::vec::IntoIter<OsString>) -> Result<AdminCommand, AdminCliError> {
     let mut forgejo = None;
     let mut pubkey = None;
     let mut identifier = None;
 
     while let Some(arg) = iter.next() {
-        let arg: OsString = arg.into();
         let value = arg.to_string_lossy();
         match value.as_ref() {
             "--forgejo" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--forgejo"))?;
-                forgejo = Some(next.into().to_string_lossy().to_string());
+                forgejo = Some(next.to_string_lossy().to_string());
             }
             "--pubkey" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--pubkey"))?;
-                pubkey = Some(next.into().to_string_lossy().to_string());
+                pubkey = Some(next.to_string_lossy().to_string());
             }
             "--identifier" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--identifier"))?;
-                identifier = Some(next.into().to_string_lossy().to_string());
+                identifier = Some(next.to_string_lossy().to_string());
             }
             _ if value.starts_with("--forgejo=") => {
                 let value = value.trim_start_matches("--forgejo=");
@@ -176,11 +176,9 @@ where
     })
 }
 
-fn parse_create_user<I, T>(iter: &mut I) -> Result<AdminCommand, AdminCliError>
-where
-    I: Iterator<Item = T>,
-    T: Into<OsString>,
-{
+fn parse_create_user(
+    iter: &mut std::vec::IntoIter<OsString>,
+) -> Result<AdminCommand, AdminCliError> {
     let mut username = None;
     let mut email = None;
     let mut password = None;
@@ -189,30 +187,29 @@ where
     let mut send_notify = None;
 
     while let Some(arg) = iter.next() {
-        let arg: OsString = arg.into();
         let value = arg.to_string_lossy();
         match value.as_ref() {
             "--username" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--username"))?;
-                username = Some(next.into().to_string_lossy().to_string());
+                username = Some(next.to_string_lossy().to_string());
             }
             "--email" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--email"))?;
-                email = Some(next.into().to_string_lossy().to_string());
+                email = Some(next.to_string_lossy().to_string());
             }
             "--password" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--password"))?;
-                password = Some(next.into().to_string_lossy().to_string());
+                password = Some(next.to_string_lossy().to_string());
             }
             "--full-name" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--full-name"))?;
-                full_name = Some(next.into().to_string_lossy().to_string());
+                full_name = Some(next.to_string_lossy().to_string());
             }
             "--must-change-password" => {
                 must_change_password = Some(true);
@@ -266,11 +263,9 @@ where
     })
 }
 
-fn parse_create_org<I, T>(iter: &mut I) -> Result<AdminCommand, AdminCliError>
-where
-    I: Iterator<Item = T>,
-    T: Into<OsString>,
-{
+fn parse_create_org(
+    iter: &mut std::vec::IntoIter<OsString>,
+) -> Result<AdminCommand, AdminCliError> {
     let mut owner = None;
     let mut name = None;
     let mut full_name = None;
@@ -278,34 +273,33 @@ where
     let mut visibility = None;
 
     while let Some(arg) = iter.next() {
-        let arg: OsString = arg.into();
         let value = arg.to_string_lossy();
         match value.as_ref() {
             "--owner" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--owner"))?;
-                owner = Some(next.into().to_string_lossy().to_string());
+                owner = Some(next.to_string_lossy().to_string());
             }
             "--name" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--name"))?;
-                name = Some(next.into().to_string_lossy().to_string());
+                name = Some(next.to_string_lossy().to_string());
             }
             "--full-name" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--full-name"))?;
-                full_name = Some(next.into().to_string_lossy().to_string());
+                full_name = Some(next.to_string_lossy().to_string());
             }
             "--description" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--description"))?;
-                description = Some(next.into().to_string_lossy().to_string());
+                description = Some(next.to_string_lossy().to_string());
             }
             "--visibility" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--visibility"))?;
-                visibility = Some(next.into().to_string_lossy().to_string());
+                visibility = Some(next.to_string_lossy().to_string());
             }
             _ if value.starts_with("--owner=") => {
                 let value = value.trim_start_matches("--owner=");
@@ -358,11 +352,9 @@ where
     })
 }
 
-fn parse_create_repo<I, T>(iter: &mut I) -> Result<AdminCommand, AdminCliError>
-where
-    I: Iterator<Item = T>,
-    T: Into<OsString>,
-{
+fn parse_create_repo(
+    iter: &mut std::vec::IntoIter<OsString>,
+) -> Result<AdminCommand, AdminCliError> {
     let mut owner = None;
     let mut name = None;
     let mut description = None;
@@ -370,22 +362,21 @@ where
     let mut auto_init = None;
 
     while let Some(arg) = iter.next() {
-        let arg: OsString = arg.into();
         let value = arg.to_string_lossy();
         match value.as_ref() {
             "--owner" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--owner"))?;
-                owner = Some(next.into().to_string_lossy().to_string());
+                owner = Some(next.to_string_lossy().to_string());
             }
             "--name" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--name"))?;
-                name = Some(next.into().to_string_lossy().to_string());
+                name = Some(next.to_string_lossy().to_string());
             }
             "--description" => {
                 let next = iter
                     .next()
                     .ok_or(AdminCliError::MissingValue("--description"))?;
-                description = Some(next.into().to_string_lossy().to_string());
+                description = Some(next.to_string_lossy().to_string());
             }
             "--private" => {
                 private = Some(true);
@@ -430,11 +421,9 @@ where
     })
 }
 
-fn parse_create_pull<I, T>(iter: &mut I) -> Result<AdminCommand, AdminCliError>
-where
-    I: Iterator<Item = T>,
-    T: Into<OsString>,
-{
+fn parse_create_pull(
+    iter: &mut std::vec::IntoIter<OsString>,
+) -> Result<AdminCommand, AdminCliError> {
     let mut owner = None;
     let mut repo = None;
     let mut head = None;
@@ -443,32 +432,31 @@ where
     let mut body = None;
 
     while let Some(arg) = iter.next() {
-        let arg: OsString = arg.into();
         let value = arg.to_string_lossy();
         match value.as_ref() {
             "--owner" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--owner"))?;
-                owner = Some(next.into().to_string_lossy().to_string());
+                owner = Some(next.to_string_lossy().to_string());
             }
             "--repo" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--repo"))?;
-                repo = Some(next.into().to_string_lossy().to_string());
+                repo = Some(next.to_string_lossy().to_string());
             }
             "--head" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--head"))?;
-                head = Some(next.into().to_string_lossy().to_string());
+                head = Some(next.to_string_lossy().to_string());
             }
             "--base" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--base"))?;
-                base = Some(next.into().to_string_lossy().to_string());
+                base = Some(next.to_string_lossy().to_string());
             }
             "--title" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--title"))?;
-                title = Some(next.into().to_string_lossy().to_string());
+                title = Some(next.to_string_lossy().to_string());
             }
             "--body" => {
                 let next = iter.next().ok_or(AdminCliError::MissingValue("--body"))?;
-                body = Some(next.into().to_string_lossy().to_string());
+                body = Some(next.to_string_lossy().to_string());
             }
             _ if value.starts_with("--owner=") => {
                 let value = value.trim_start_matches("--owner=");
