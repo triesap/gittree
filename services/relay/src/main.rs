@@ -38,7 +38,10 @@ async fn run_and_capture_error(run_future: RelayFuture) -> Option<String> {
     }
 }
 
-async fn run_with_args_and_serve(args: Vec<OsString>, serve_fn: &ServeFn) -> Result<(), RelayError> {
+async fn run_with_args_and_serve(
+    args: Vec<OsString>,
+    serve_fn: &ServeFn,
+) -> Result<(), RelayError> {
     let cli = RelayCli::parse(args).map_err(RelayError::Cli)?;
     if cli.help {
         println!("{}", RelayCli::help_text());
@@ -324,16 +327,20 @@ bind = "127.0.0.1:9123"
 
     #[tokio::test]
     async fn run_and_capture_error_formats_error_for_failure() {
-        let result =
-            run_and_capture_error(Box::pin(async { Err(RelayError::Serve("boom".to_string())) }))
-                .await
-                .expect("error message");
+        let result = run_and_capture_error(Box::pin(async {
+            Err(RelayError::Serve("boom".to_string()))
+        }))
+        .await
+        .expect("error message");
         assert_eq!(result, "relay service failed: relay serve error: boom");
     }
 
     #[test]
     fn exit_code_from_error_message_maps_none_and_some() {
-        assert_eq!(exit_code_from_error_message(None), std::process::ExitCode::SUCCESS);
+        assert_eq!(
+            exit_code_from_error_message(None),
+            std::process::ExitCode::SUCCESS
+        );
         assert_eq!(
             exit_code_from_error_message(Some("relay service failed: boom".to_string())),
             std::process::ExitCode::FAILURE

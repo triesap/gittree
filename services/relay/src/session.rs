@@ -1404,22 +1404,13 @@ mod tests {
     }
 
     fn assert_ok_accepted(message: &ServerMessage) {
-        assert!(matches!(
-            message,
-            ServerMessage::Ok {
-                accepted: true,
-                ..
-            }
-        ));
+        assert!(matches!(message, ServerMessage::Ok { accepted: true, .. }));
     }
 
     fn assert_some_ok_accepted(message: Option<&ServerMessage>) {
         assert!(matches!(
             message,
-            Some(ServerMessage::Ok {
-                accepted: true,
-                ..
-            })
+            Some(ServerMessage::Ok { accepted: true, .. })
         ));
     }
 
@@ -4549,8 +4540,9 @@ mod tests {
         let tenant_id = "tenant-arc-membership-branches";
         let membership = Arc::new(InMemoryRepositories::new());
 
-        let mut missing_tenant = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
-            .with_membership(None, Some(membership.clone()));
+        let mut missing_tenant =
+            Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+                .with_membership(None, Some(membership.clone()));
         authenticate_session(&mut missing_tenant).await;
         let missing_tenant_err = missing_tenant
             .require_membership()
@@ -4558,16 +4550,16 @@ mod tests {
             .expect_err("tenant is required");
         assert!(missing_tenant_err.contains("relay does not support membership"));
 
-        let missing_auth =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        let missing_auth = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
         let missing_auth_err = missing_auth
             .require_membership()
             .await
             .expect_err("auth is required");
         assert_eq!(missing_auth_err, super::AUTH_REQUIRED_REASON);
 
-        let mut invalid_auth_pubkey =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        let mut invalid_auth_pubkey = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
         invalid_auth_pubkey.auth = Some(super::AuthState {
             challenge: "arc-invalid-pubkey".to_string(),
             authenticated_pubkey: Some("zz".to_string()),
@@ -4578,8 +4570,9 @@ mod tests {
             .expect_err("pubkey must decode");
         assert!(invalid_auth_pubkey_err.contains("invalid pubkey"));
 
-        let mut missing_member = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
-            .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
+        let mut missing_member =
+            Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+                .with_membership(Some(tenant_id.to_string()), Some(membership.clone()));
         authenticate_session(&mut missing_member).await;
         let missing_member_err = missing_member
             .require_membership()
@@ -4588,8 +4581,9 @@ mod tests {
         assert!(missing_member_err.contains("membership required"));
 
         let lookup_error_membership = Arc::new(ScriptedMembership::new("membership_by_pubkey"));
-        let mut lookup_error = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
-            .with_membership(Some(tenant_id.to_string()), Some(lookup_error_membership));
+        let mut lookup_error =
+            Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+                .with_membership(Some(tenant_id.to_string()), Some(lookup_error_membership));
         authenticate_session(&mut lookup_error).await;
         let lookup_error_message = lookup_error
             .require_membership()
@@ -4598,7 +4592,8 @@ mod tests {
         assert!(lookup_error_message.contains("membership_by_pubkey failure"));
 
         let inactive_membership = Arc::new(InMemoryRepositories::new());
-        let inactive_pubkey = hex::decode(&signed_event("arc-inactive-member").pubkey).expect("pubkey");
+        let inactive_pubkey =
+            hex::decode(&signed_event("arc-inactive-member").pubkey).expect("pubkey");
         inactive_membership
             .upsert_membership(RelayMembershipRecord {
                 tenant_id: tenant_id.to_string(),
@@ -4638,7 +4633,8 @@ mod tests {
 
         let tenant_id = "tenant-arc-virtual-branches";
         let virtual_membership = Arc::new(InMemoryRepositories::new());
-        let virtual_pubkey = hex::decode(&signed_event("arc-virtual-member").pubkey).expect("pubkey");
+        let virtual_pubkey =
+            hex::decode(&signed_event("arc-virtual-member").pubkey).expect("pubkey");
         virtual_membership
             .upsert_membership(RelayMembershipRecord {
                 tenant_id: tenant_id.to_string(),
@@ -4651,13 +4647,17 @@ mod tests {
             .await
             .expect("membership insert");
 
-        let mut non_matching_virtual = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
-            .with_membership(Some(tenant_id.to_string()), Some(virtual_membership.clone()))
-            .with_relay_signer(
-                relay_pubkey.serialize().to_vec(),
-                relay_secret.secret_bytes().to_vec(),
-            )
-            .with_relay_url(Some("wss://relay.example".to_string()));
+        let mut non_matching_virtual =
+            Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+                .with_membership(
+                    Some(tenant_id.to_string()),
+                    Some(virtual_membership.clone()),
+                )
+                .with_relay_signer(
+                    relay_pubkey.serialize().to_vec(),
+                    relay_secret.secret_bytes().to_vec(),
+                )
+                .with_relay_url(Some("wss://relay.example".to_string()));
         authenticate_session(&mut non_matching_virtual).await;
         let non_matching_filters = vec![crate::Filter {
             ids: Vec::new(),
@@ -4735,7 +4735,8 @@ mod tests {
             })
             .await;
         assert!(
-            closed_reason(&req_membership_response[0]).contains("relay does not support membership")
+            closed_reason(&req_membership_response[0])
+                .contains("relay does not support membership")
         );
 
         let mut req_limit = Session::with_policy(
@@ -4780,7 +4781,10 @@ mod tests {
         let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
         let list_error_membership = Arc::new(ScriptedMembership::new("list_memberships"));
         let mut req_virtual_error = Session::new(store.clone())
-            .with_membership(Some("tenant-arc-req-virtual".to_string()), Some(list_error_membership))
+            .with_membership(
+                Some("tenant-arc-req-virtual".to_string()),
+                Some(list_error_membership),
+            )
             .with_relay_signer(
                 relay_pubkey.serialize().to_vec(),
                 relay_secret.secret_bytes().to_vec(),
@@ -4815,14 +4819,8 @@ mod tests {
         assert_notice(&count_rate_limited_response[0]);
 
         let (auth_tx, _) = tokio::sync::broadcast::channel(4);
-        let mut count_auth_required = Session::with_broadcast(
-            store.clone(),
-            Policy::default(),
-            None,
-            auth_tx,
-            true,
-            false,
-        );
+        let mut count_auth_required =
+            Session::with_broadcast(store.clone(), Policy::default(), None, auth_tx, true, false);
         let count_auth_required_response = count_auth_required
             .handle_message(ClientMessage::Count {
                 subscription_id: "arc-count-auth".to_string(),
@@ -4843,7 +4841,8 @@ mod tests {
             })
             .await;
         assert!(
-            closed_reason(&count_membership_response[0]).contains("relay does not support membership")
+            closed_reason(&count_membership_response[0])
+                .contains("relay does not support membership")
         );
 
         let mut count_parse_error = Session::new(store.clone());
@@ -4873,8 +4872,9 @@ mod tests {
         };
         assert!(count_filter_ok.validate_filter_limits(&[filter]).is_none());
 
-        let mut auth_session = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
-            .with_relay_url(Some("wss://relay.example".to_string()));
+        let mut auth_session =
+            Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+                .with_relay_url(Some("wss://relay.example".to_string()));
         let challenge = auth_session.auth_challenge().expect("challenge");
         let invalid_kind = signed_event_with_tags_at(
             "arc-auth-invalid-kind",
@@ -5036,7 +5036,9 @@ mod tests {
             .await;
 
         let mut related_filter = EventFilter::new();
-        related_filter.tags.insert("ab".to_string(), vec!["1".to_string()]);
+        related_filter
+            .tags
+            .insert("ab".to_string(), vec!["1".to_string()]);
         let admission = Arc::new(StubAdmission {
             decision: AdmissionDecision::RequiresRelatedEvents {
                 filters: vec![related_filter],
@@ -5089,12 +5091,8 @@ mod tests {
         assert_ok_rejected(&invalid_signature_response[0]);
 
         let mut policy_violation = Session::new(store.clone());
-        let future_event = signed_event_with_tags_at(
-            "arc-event-future",
-            1,
-            Vec::new(),
-            now.saturating_add(120),
-        );
+        let future_event =
+            signed_event_with_tags_at("arc-event-future", 1, Vec::new(), now.saturating_add(120));
         let policy_violation_response = policy_violation
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(future_event).expect("event"),
@@ -5129,7 +5127,8 @@ mod tests {
         });
         let auth_pubkey_mismatch_response = auth_pubkey_mismatch
             .handle_message(ClientMessage::Event(
-                serde_json::to_value(signed_event("arc-event-auth-pubkey-mismatch")).expect("event"),
+                serde_json::to_value(signed_event("arc-event-auth-pubkey-mismatch"))
+                    .expect("event"),
             ))
             .await;
         assert_ok_rejected(&auth_pubkey_mismatch_response[0]);
@@ -5200,16 +5199,20 @@ mod tests {
         assert_ok_accepted(&related_present_response[0]);
 
         let mut related_query_filter = EventFilter::new();
-        related_query_filter.tags.insert("ab".to_string(), vec!["1".to_string()]);
+        related_query_filter
+            .tags
+            .insert("ab".to_string(), vec!["1".to_string()]);
         let admission_related_query = Arc::new(StubAdmission {
             decision: AdmissionDecision::RequiresRelatedEvents {
                 filters: vec![related_query_filter],
             },
         });
-        let mut related_query_error = Session::with_admission(store.clone(), admission_related_query);
+        let mut related_query_error =
+            Session::with_admission(store.clone(), admission_related_query);
         let related_query_error_response = related_query_error
             .handle_message(ClientMessage::Event(
-                serde_json::to_value(signed_event("arc-admission-related-query-error")).expect("event"),
+                serde_json::to_value(signed_event("arc-admission-related-query-error"))
+                    .expect("event"),
             ))
             .await;
         assert_ok_rejected(&related_query_error_response[0]);
@@ -5253,15 +5256,18 @@ mod tests {
         assert_ok_rejected(&no_membership_response[0]);
 
         let membership_backend = Arc::new(InMemoryRepositories::new());
-        let mut no_tenant = Session::new(store.clone()).with_membership(None, Some(membership_backend.clone()));
+        let mut no_tenant =
+            Session::new(store.clone()).with_membership(None, Some(membership_backend.clone()));
         let no_tenant_response = no_tenant
             .handle_membership_event(&join_with_tag, now)
             .await
             .expect("membership response");
         assert_ok_rejected(&no_tenant_response[0]);
 
-        let mut missing_nip70 = Session::new(store.clone())
-            .with_membership(Some("tenant-arc-membership".to_string()), Some(membership_backend.clone()));
+        let mut missing_nip70 = Session::new(store.clone()).with_membership(
+            Some("tenant-arc-membership".to_string()),
+            Some(membership_backend.clone()),
+        );
         let missing_nip70_event = signed_event_with_tags(
             "arc-join-missing-tag",
             super::NIP43_JOIN_KIND,
@@ -5321,8 +5327,10 @@ mod tests {
             vec![vec!["-".to_string()]],
         );
 
-        let mut membership_path = Session::new(store.clone())
-            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(InMemoryRepositories::new())));
+        let mut membership_path = Session::new(store.clone()).with_membership(
+            Some(tenant_id.to_string()),
+            Some(Arc::new(InMemoryRepositories::new())),
+        );
         let membership_path_response = membership_path
             .handle_message(ClientMessage::Event(
                 serde_json::to_value(join_event.clone()).expect("event"),
@@ -5358,7 +5366,8 @@ mod tests {
         assert_ok_rejected(&missing_related_response[0]);
 
         let virtual_membership = Arc::new(InMemoryRepositories::new());
-        let virtual_pubkey = hex::decode(&signed_event("arc-virtual-member-matrix").pubkey).expect("pubkey");
+        let virtual_pubkey =
+            hex::decode(&signed_event("arc-virtual-member-matrix").pubkey).expect("pubkey");
         virtual_membership
             .upsert_membership(RelayMembershipRecord {
                 tenant_id: tenant_id.to_string(),
@@ -5374,12 +5383,13 @@ mod tests {
         let relay_secret = SecretKey::from_slice(&[0x79; 32]).expect("relay secret");
         let relay_keypair = Keypair::from_secret_key(&secp, &relay_secret);
         let (relay_pubkey, _) = secp256k1::XOnlyPublicKey::from_keypair(&relay_keypair);
-        let mut virtual_session = Session::with_policy_and_auth(store.clone(), Policy::default(), true)
-            .with_membership(Some(tenant_id.to_string()), Some(virtual_membership))
-            .with_relay_signer(
-                relay_pubkey.serialize().to_vec(),
-                relay_secret.secret_bytes().to_vec(),
-            );
+        let mut virtual_session =
+            Session::with_policy_and_auth(store.clone(), Policy::default(), true)
+                .with_membership(Some(tenant_id.to_string()), Some(virtual_membership))
+                .with_relay_signer(
+                    relay_pubkey.serialize().to_vec(),
+                    relay_secret.secret_bytes().to_vec(),
+                );
         authenticate_session(&mut virtual_session).await;
         let non_matching_filters = vec![crate::Filter {
             ids: Vec::new(),
@@ -5414,16 +5424,20 @@ mod tests {
             )
             .await
             .expect("invite insert");
-        let mut invite_lookup_error_session = Session::new(store.clone())
-            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(invite_lookup_error)));
+        let mut invite_lookup_error_session = Session::new(store.clone()).with_membership(
+            Some(tenant_id.to_string()),
+            Some(Arc::new(invite_lookup_error)),
+        );
         let invite_lookup_error_response = invite_lookup_error_session
             .handle_membership_event(&join_event, now)
             .await
             .expect("membership response");
         assert_notice(&invite_lookup_error_response[0]);
 
-        let mut invite_missing_session = Session::new(store.clone())
-            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(InMemoryRepositories::new())));
+        let mut invite_missing_session = Session::new(store.clone()).with_membership(
+            Some(tenant_id.to_string()),
+            Some(Arc::new(InMemoryRepositories::new())),
+        );
         let invite_missing_response = invite_missing_session
             .handle_membership_event(&join_event, now)
             .await
@@ -5447,8 +5461,8 @@ mod tests {
             )
             .await
             .expect("invite insert");
-        let mut expired_session =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(expired_membership));
+        let mut expired_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(expired_membership));
         let expired_response = expired_session
             .handle_membership_event(&join_event, now)
             .await
@@ -5471,8 +5485,8 @@ mod tests {
             )
             .await
             .expect("invite insert");
-        let mut mismatch_session =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(mismatch_membership));
+        let mut mismatch_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(mismatch_membership));
         let mismatch_response = mismatch_session
             .handle_membership_event(&join_event, now)
             .await
@@ -5496,8 +5510,10 @@ mod tests {
             )
             .await
             .expect("invite insert");
-        let mut membership_lookup_error_session = Session::new(store.clone())
-            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(membership_lookup_error)));
+        let mut membership_lookup_error_session = Session::new(store.clone()).with_membership(
+            Some(tenant_id.to_string()),
+            Some(Arc::new(membership_lookup_error)),
+        );
         let membership_lookup_error_response = membership_lookup_error_session
             .handle_membership_event(&join_event, now)
             .await
@@ -5531,8 +5547,8 @@ mod tests {
             })
             .await
             .expect("membership insert");
-        let mut already_active_session =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(already_active));
+        let mut already_active_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(already_active));
         let already_active_response = already_active_session
             .handle_membership_event(&join_event, now)
             .await
@@ -5556,8 +5572,8 @@ mod tests {
             )
             .await
             .expect("invite insert");
-        let mut upsert_error_session =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(Arc::new(upsert_error)));
+        let mut upsert_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(upsert_error)));
         let upsert_error_response = upsert_error_session
             .handle_membership_event(&join_event, now)
             .await
@@ -5581,8 +5597,10 @@ mod tests {
             )
             .await
             .expect("invite insert");
-        let mut delete_invite_error_session = Session::new(store.clone())
-            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(delete_invite_error)));
+        let mut delete_invite_error_session = Session::new(store.clone()).with_membership(
+            Some(tenant_id.to_string()),
+            Some(Arc::new(delete_invite_error)),
+        );
         let delete_invite_error_response = delete_invite_error_session
             .handle_membership_event(&join_event, now)
             .await
@@ -5590,8 +5608,8 @@ mod tests {
         assert_notice(&delete_invite_error_response[0]);
 
         let leave_lookup_error = Arc::new(ScriptedMembership::new("membership_by_pubkey"));
-        let mut leave_lookup_error_session =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(leave_lookup_error));
+        let mut leave_lookup_error_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(leave_lookup_error));
         let leave_lookup_error_response = leave_lookup_error_session
             .handle_membership_event(&leave_event, now)
             .await
@@ -5599,8 +5617,8 @@ mod tests {
         assert_notice(&leave_lookup_error_response[0]);
 
         let leave_missing = Arc::new(InMemoryRepositories::new());
-        let mut leave_missing_session =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(leave_missing));
+        let mut leave_missing_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(leave_missing));
         let leave_missing_response = leave_missing_session
             .handle_membership_event(&leave_event, now)
             .await
@@ -5619,8 +5637,8 @@ mod tests {
             })
             .await
             .expect("membership insert");
-        let mut leave_inactive_session =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(leave_inactive));
+        let mut leave_inactive_session = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(leave_inactive));
         let leave_inactive_response = leave_inactive_session
             .handle_membership_event(&leave_event, now)
             .await
@@ -5640,8 +5658,10 @@ mod tests {
             })
             .await
             .expect("membership insert");
-        let mut leave_upsert_error_session = Session::new(store.clone())
-            .with_membership(Some(tenant_id.to_string()), Some(Arc::new(leave_upsert_error)));
+        let mut leave_upsert_error_session = Session::new(store.clone()).with_membership(
+            Some(tenant_id.to_string()),
+            Some(Arc::new(leave_upsert_error)),
+        );
         let leave_upsert_error_response = leave_upsert_error_session
             .handle_membership_event(&leave_event, now)
             .await
@@ -5658,8 +5678,8 @@ mod tests {
                 .expect("membership list")
                 .is_none()
         );
-        let no_signer_membership_event =
-            Session::new(store.clone()).with_membership(Some(tenant_id.to_string()), Some(membership_only.clone()));
+        let no_signer_membership_event = Session::new(store.clone())
+            .with_membership(Some(tenant_id.to_string()), Some(membership_only.clone()));
         assert!(
             no_signer_membership_event
                 .build_membership_list_event(now)
@@ -5697,7 +5717,10 @@ mod tests {
             .await
             .expect("membership insert");
         let mut inactive_invite_session = Session::new(store.clone())
-            .with_membership(Some(tenant_id.to_string()), Some(inactive_invite_membership.clone()))
+            .with_membership(
+                Some(tenant_id.to_string()),
+                Some(inactive_invite_membership.clone()),
+            )
             .with_relay_signer(
                 relay_pubkey.serialize().to_vec(),
                 relay_secret.secret_bytes().to_vec(),
@@ -5766,7 +5789,10 @@ mod tests {
                 ..Policy::default()
             },
         );
-        retention_zero.apply_retention(now).await.expect("retention");
+        retention_zero
+            .apply_retention(now)
+            .await
+            .expect("retention");
 
         let retention_positive = Session::with_policy(
             store.clone(),
@@ -5780,8 +5806,9 @@ mod tests {
             .await
             .expect("retention");
 
-        let mut auth_invalid_relay_tag = Session::with_policy_and_auth(store, Policy::default(), true)
-            .with_relay_url(Some("wss://relay.example".to_string()));
+        let mut auth_invalid_relay_tag =
+            Session::with_policy_and_auth(store, Policy::default(), true)
+                .with_relay_url(Some("wss://relay.example".to_string()));
         let auth_challenge = auth_invalid_relay_tag.auth_challenge().expect("challenge");
         let invalid_relay_tag_event = signed_event_with_tags_at(
             "arc-auth-invalid-relay-tag",

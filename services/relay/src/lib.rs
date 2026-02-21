@@ -401,8 +401,8 @@ mod tests {
     use super::ENV_ADMISSION_TIMEOUT_SECS;
     use super::ENV_ADMISSION_URL;
     use super::ENV_STORAGE_APP_NAME;
-    use super::ENV_STORAGE_MAX_LIFETIME_SECS;
     use super::ENV_STORAGE_MAX_CONNECTIONS;
+    use super::ENV_STORAGE_MAX_LIFETIME_SECS;
     use super::ENV_STORAGE_MIN_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
     use super::Policy;
@@ -797,7 +797,10 @@ bind = "127.0.0.1:9010"
             || {
                 with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
                     let err = RelayConfig::from_env().expect_err("invalid timeout");
-                    assert!(err.to_string().contains(super::ENV_STORAGE_IDLE_TIMEOUT_SECS));
+                    assert!(
+                        err.to_string()
+                            .contains(super::ENV_STORAGE_IDLE_TIMEOUT_SECS)
+                    );
                 });
                 with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
                     with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {

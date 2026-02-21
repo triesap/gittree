@@ -120,12 +120,12 @@ fn build_state(config: RelayConfig) -> Result<RelayState, RelayError> {
     let (broadcast, _) = broadcast::channel(1024);
     let policy = Policy::from_config(&config.policy);
     let metrics = Arc::new(RelayMetrics::new());
-    let admission = match &config.admission {
-        Some(config) => {
-            Some(Arc::new(AdmissionHookClient::new_http(config.clone())) as Arc<dyn AdmissionDecider>)
-        }
-        None => None,
-    };
+    let admission =
+        match &config.admission {
+            Some(config) => Some(Arc::new(AdmissionHookClient::new_http(config.clone()))
+                as Arc<dyn AdmissionDecider>),
+            None => None,
+        };
     Ok(RelayState {
         config: config.clone(),
         policy,
@@ -306,12 +306,7 @@ fn tenant_auth_requirements(
                 write_membership_required,
             )
         }
-        None => (
-            default_auth_required,
-            default_auth_required,
-            false,
-            false,
-        ),
+        None => (default_auth_required, default_auth_required, false, false),
     }
 }
 
@@ -388,10 +383,7 @@ async fn handle_socket_with_pump(
         write_auth_required,
         read_membership_required,
         write_membership_required,
-    ) = tenant_auth_requirements(
-        tenant.tenant.as_ref(),
-        state.config.policy.auth_required,
-    );
+    ) = tenant_auth_requirements(tenant.tenant.as_ref(), state.config.policy.auth_required);
     let relay_url = tenant
         .tenant
         .as_ref()
@@ -1639,7 +1631,9 @@ mod tests {
         let _ = crate::init_observability();
         let mut config = sample_config();
         config.bind = "127.0.0.1:99999".to_string();
-        let err = super::serve(config).await.expect_err("expected serve error");
+        let err = super::serve(config)
+            .await
+            .expect_err("expected serve error");
         assert!(err.to_string().contains("relay observability error"));
     }
 

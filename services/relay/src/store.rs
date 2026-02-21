@@ -1589,10 +1589,7 @@ mod tests {
         repo.insert_event(delete_target_record())
             .await
             .expect("insert");
-        let event = repo
-            .get_event("default", &[0xAA; 4])
-            .await
-            .expect("get");
+        let event = repo.get_event("default", &[0xAA; 4]).await.expect("get");
         assert!(event.is_none());
         let deleted = repo
             .delete_event("default", &[0xAA; 4])
