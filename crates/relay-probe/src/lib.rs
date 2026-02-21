@@ -58,8 +58,12 @@ pub struct HttpRelayProbeClient {
 
 impl HttpRelayProbeClient {
     pub fn new() -> Result<Self, RelayProbeError> {
+        Self::with_user_agent("gittree-relay-probe/0.1")
+    }
+
+    fn with_user_agent(user_agent: &str) -> Result<Self, RelayProbeError> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent("gittree-relay-probe/0.1")
+            .user_agent(user_agent)
             .build()
             .map_err(|err| RelayProbeError::Http(err.to_string()))?;
         Ok(Self { client })
@@ -98,12 +102,10 @@ pub fn resolve_nip11_url(relay_url: &str) -> Result<String, RelayProbeError> {
         .map_err(|_| RelayProbeError::InvalidRelayUrl(relay_url.to_string()))?;
     match url.scheme() {
         "wss" => {
-            url.set_scheme("https")
-                .map_err(|_| RelayProbeError::InvalidRelayUrl(relay_url.to_string()))?;
+            let _ = url.set_scheme("https");
         }
         "ws" => {
-            url.set_scheme("http")
-                .map_err(|_| RelayProbeError::InvalidRelayUrl(relay_url.to_string()))?;
+            let _ = url.set_scheme("http");
         }
         "https" | "http" => {}
         _ => return Err(RelayProbeError::InvalidRelayUrl(relay_url.to_string())),
@@ -243,6 +245,56 @@ mod tests {
         (format!("http://{address}/"), handle)
     }
 
+    fn spawn_raw_http_server(response: &[u8]) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("addr");
+        let response = response.to_vec();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request_buf = [0_u8; 1024];
+            let _ = stream.read(&mut request_buf);
+            stream.write_all(&response).expect("write response");
+            stream.flush().expect("flush response");
+        });
+        (format!("http://{address}/"), handle)
+    }
+
+    fn assert_invalid_relay_url(err: RelayProbeError) {
+        if !matches!(err, RelayProbeError::InvalidRelayUrl(_)) {
+            panic!("expected invalid relay url error, got {err}");
+        }
+    }
+
+    fn assert_parse_error(err: RelayProbeError) {
+        if !matches!(err, RelayProbeError::Parse(_)) {
+            panic!("expected parse error, got {err}");
+        }
+    }
+
+    fn assert_http_error(err: RelayProbeError) {
+        if !matches!(err, RelayProbeError::Http(_)) {
+            panic!("expected http error, got {err}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected invalid relay url error")]
+    fn assert_invalid_relay_url_panics_for_non_invalid_variant() {
+        assert_invalid_relay_url(RelayProbeError::Http("boom".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "expected parse error")]
+    fn assert_parse_error_panics_for_non_parse_variant() {
+        assert_parse_error(RelayProbeError::Http("boom".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "expected http error")]
+    fn assert_http_error_panics_for_non_http_variant() {
+        assert_http_error(RelayProbeError::Parse("boom".to_string()));
+    }
+
     #[test]
     fn resolve_nip11_url_converts_ws_scheme() {
         let url = resolve_nip11_url("wss://relay.example/path").expect("url");
@@ -260,12 +312,9 @@ mod tests {
             "https://relay.example/"
         );
         let invalid_scheme = resolve_nip11_url("ftp://relay.example").expect_err("invalid");
-        assert!(matches!(
-            invalid_scheme,
-            RelayProbeError::InvalidRelayUrl(_)
-        ));
+        assert_invalid_relay_url(invalid_scheme);
         let invalid_url = resolve_nip11_url("::not-a-url::").expect_err("invalid");
-        assert!(matches!(invalid_url, RelayProbeError::InvalidRelayUrl(_)));
+        assert_invalid_relay_url(invalid_url);
     }
 
     #[test]
@@ -311,10 +360,10 @@ mod tests {
             response: Some("{bad-json"),
         };
         let parse_err = probe_relay("wss://relay.example", &parse_err_client).expect_err("parse");
-        assert!(matches!(parse_err, RelayProbeError::Parse(_)));
+        assert_parse_error(parse_err);
 
         let fetch_err = probe_relay("wss://relay.example", &ErrorProbeClient).expect_err("http");
-        assert!(matches!(fetch_err, RelayProbeError::Http(_)));
+        assert_http_error(fetch_err);
     }
 
     #[test]
@@ -323,7 +372,7 @@ mod tests {
             response: Some(&NIP11_BODY),
         };
         let err = probe_relay("::invalid::", &client).expect_err("invalid relay url");
-        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
+        assert_invalid_relay_url(err);
     }
 
     #[test]
@@ -367,6 +416,23 @@ mod tests {
         let error = client.fetch_nip11(&error_url).expect_err("status error");
         error_handle.join().expect("join");
         assert!(matches!(error, RelayProbeError::Http(message) if message.contains("status 500")));
+    }
+
+    #[test]
+    fn http_relay_probe_client_new_rejects_invalid_user_agent() {
+        let err = HttpRelayProbeClient::with_user_agent("gittree-relay-probe\n")
+            .expect_err("invalid user-agent should fail");
+        assert_http_error(err);
+    }
+
+    #[test]
+    fn http_relay_probe_client_fetch_nip11_maps_body_read_errors() {
+        let client = HttpRelayProbeClient::new().expect("client");
+        let raw = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\nzz\r\nbody\r\n0\r\n\r\n";
+        let (url, handle) = spawn_raw_http_server(raw);
+        let err = client.fetch_nip11(&url).expect_err("invalid chunked body");
+        handle.join().expect("join");
+        assert_http_error(err);
     }
 
     struct OkAdapter;
@@ -448,7 +514,7 @@ mod tests {
         let err = probe_relay_with_adapter("::invalid::", &client, &OkAdapter)
             .await
             .expect_err("invalid relay url");
-        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
+        assert_invalid_relay_url(err);
     }
 
     #[tokio::test]
