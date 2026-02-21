@@ -237,7 +237,7 @@ mod tests {
                 with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
                     with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
                         let err = MigrationConfig::from_env().unwrap_err();
-                        assert!(matches!(err, MigrationConfigError::InvalidConfig(_)));
+                        assert!(err.to_string().contains("min_connections"));
                     });
                 });
             },
@@ -342,7 +342,7 @@ mod tests {
         let invalid_err = run_with_config(&invalid_options)
             .await
             .expect_err("invalid options");
-        assert!(matches!(invalid_err, MigrationError::Storage(_)));
+        assert!(invalid_err.to_string().contains("migration storage error"));
 
         let connect_error_config = MigrationConfig {
             storage: StorageConfig {
@@ -358,40 +358,89 @@ mod tests {
         let connect_err = run_with_config(&connect_error_config)
             .await
             .expect_err("connect failure");
-        assert!(matches!(connect_err, MigrationError::Storage(_)));
+        assert!(connect_err.to_string().contains("migration storage error"));
+    }
+
+    fn push_unique_candidate(candidates: &mut Vec<String>, value: Option<String>) {
+        if let Some(value) = value {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            if candidates.iter().any(|candidate| candidate == trimmed) {
+                return;
+            }
+            candidates.push(trimmed.to_string());
+        }
     }
 
     fn migration_test_database_candidates() -> Vec<String> {
         let mut candidates = Vec::new();
-        let mut push_unique = |value: Option<String>| {
-            if let Some(value) = value {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    return;
-                }
-                if candidates.iter().any(|candidate| candidate == trimmed) {
-                    return;
-                }
-                candidates.push(trimmed.to_string());
-            }
-        };
-        push_unique(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok());
-        push_unique(std::env::var(super::ENV_STORAGE_WRITE_URL).ok());
-        push_unique(std::env::var(super::ENV_STORAGE_READ_URL).ok());
-        push_unique(Some(
-            "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
-        ));
+        push_unique_candidate(
+            &mut candidates,
+            std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok(),
+        );
+        push_unique_candidate(
+            &mut candidates,
+            std::env::var(super::ENV_STORAGE_WRITE_URL).ok(),
+        );
+        push_unique_candidate(
+            &mut candidates,
+            std::env::var(super::ENV_STORAGE_READ_URL).ok(),
+        );
+        push_unique_candidate(
+            &mut candidates,
+            Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string()),
+        );
         candidates
     }
 
     async fn first_reachable_migration_database_url() -> Option<String> {
-        for candidate in migration_test_database_candidates() {
+        first_reachable_migration_database_url_with(migration_test_database_candidates()).await
+    }
+
+    async fn first_reachable_migration_database_url_with(
+        candidates: Vec<String>,
+    ) -> Option<String> {
+        for candidate in candidates {
             if let Ok(connection) = PgConnection::connect(&candidate).await {
                 let _ = connection.close().await;
                 return Some(candidate);
             }
         }
         None
+    }
+
+    #[test]
+    fn migration_test_database_candidates_dedupes_and_skips_empty_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_STORAGE_TEST_DATABASE_URL", " ", || {
+            with_env_var(
+                super::ENV_STORAGE_WRITE_URL,
+                "postgres://gittree:gittree@127.0.0.1:5432/gittree",
+                || {
+                    with_env_var(
+                        super::ENV_STORAGE_READ_URL,
+                        "postgres://gittree:gittree@127.0.0.1:5432/gittree",
+                        || {
+                            let candidates = migration_test_database_candidates();
+                            assert_eq!(candidates.len(), 1);
+                            assert_eq!(
+                                candidates[0],
+                                "postgres://gittree:gittree@127.0.0.1:5432/gittree"
+                            );
+                        },
+                    );
+                },
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn first_reachable_migration_database_url_with_returns_none_for_unreachable_candidates() {
+        let candidates = vec!["postgres://gittree:gittree@127.0.0.1:1/gittree".to_string()];
+        let reachable = first_reachable_migration_database_url_with(candidates).await;
+        assert!(reachable.is_none());
     }
 
     #[tokio::test]
