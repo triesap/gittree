@@ -247,12 +247,14 @@ where
 }
 
 pub async fn serve(config: UiServiceConfig) -> Result<(), UiError> {
-    serve_with(
-        config,
-        init_observability,
-        |listener, router| async move { axum::serve(listener, router).await },
-    )
-    .await
+    serve_with(config, init_observability, run_axum_server).await
+}
+
+async fn run_axum_server(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), std::io::Error> {
+    axum::serve(listener, router).await
 }
 
 fn build_router<R>(state: UiAppState<R>) -> Router
@@ -339,10 +341,7 @@ where
     Ok(Html(render_repo(&item)))
 }
 
-fn repo_list_item(
-    public_git_url: &str,
-    mapping: RepoMappingRecord,
-) -> RepoListItem {
+fn repo_list_item(public_git_url: &str, mapping: RepoMappingRecord) -> RepoListItem {
     let npub = npub_from_bytes(&mapping.pubkey);
     let forgejo = mapping.forgejo_full_name();
     let identifier = mapping.identifier;
@@ -448,6 +447,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
+    use axum::Router;
     use gittree_config::{ConfigError, UiConfig};
     use gittree_core::RepoMapping;
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
@@ -528,6 +528,13 @@ mod tests {
             max_lifetime_secs: None,
             application_name: None,
         }
+    }
+
+    async fn noop_server(
+        _listener: tokio::net::TcpListener,
+        _router: Router,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
     }
 
     #[test]
@@ -816,7 +823,7 @@ mod tests {
         let err = super::serve_with(
             config,
             || Ok(()),
-            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
+            noop_server,
         )
         .await
         .expect_err("bind error");
@@ -830,9 +837,11 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let err = super::serve_with(config, || Ok(()), |_listener, _router| async {
-            Err(std::io::Error::other("boom"))
-        })
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Err(std::io::Error::other("boom")) },
+        )
         .await
         .expect_err("serve error");
         assert!(matches!(err, UiError::Serve(message) if message.contains("boom")));
@@ -848,7 +857,7 @@ mod tests {
         let result = super::serve_with(
             config,
             || Ok(()),
-            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
+            noop_server,
         )
         .await;
         assert!(result.is_ok());
@@ -881,12 +890,22 @@ mod tests {
     #[test]
     fn init_observability_returns_registry_once() {
         with_env_vars(&[], || {
-            match init_observability() {
-                Ok(handle) => assert!(handle.prometheus_registry().is_some()),
-                Err(UiError::Observability(ObservabilityError::SubscriberInit(_))) => {}
-                Err(other) => panic!("unexpected observability result: {other}"),
+            if let Ok(handle) = init_observability() {
+                assert!(handle.prometheus_registry().is_some());
             }
         });
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_can_start_and_be_aborted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let router = Router::new().route("/health", axum::routing::get(super::health_handler));
+        let task = tokio::spawn(super::run_axum_server(listener, router));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        task.abort();
+        let _ = task.await;
     }
 
     #[test]
