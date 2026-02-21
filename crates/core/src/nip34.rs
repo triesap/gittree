@@ -1139,7 +1139,9 @@ mod tests {
             identifier: "repo".to_string(),
             state: head_hash_state,
         };
-        head_hash_repo_state.validate().expect("head hash should validate");
+        head_hash_repo_state
+            .validate()
+            .expect("head hash should validate");
 
         let mut direct_ref_state = HashMap::new();
         direct_ref_state.insert("HEAD".to_string(), "refs/heads/main".to_string());

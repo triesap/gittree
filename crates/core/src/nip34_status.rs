@@ -330,9 +330,24 @@ mod tests {
     fn status_from_tags_allows_duplicate_same_root_and_ignores_unknown_tags() {
         let root = hex_of(0x11, 64);
         let tags = vec![
-            vec!["e".to_string(), root.clone(), "".to_string(), "root".to_string()],
-            vec!["e".to_string(), root.clone(), "".to_string(), "root".to_string()],
-            vec!["e".to_string(), hex_of(0x22, 64), "".to_string(), "unknown".to_string()],
+            vec![
+                "e".to_string(),
+                root.clone(),
+                "".to_string(),
+                "root".to_string(),
+            ],
+            vec![
+                "e".to_string(),
+                root.clone(),
+                "".to_string(),
+                "root".to_string(),
+            ],
+            vec![
+                "e".to_string(),
+                hex_of(0x22, 64),
+                "".to_string(),
+                "unknown".to_string(),
+            ],
             vec!["x-unknown".to_string(), "ignored".to_string()],
         ];
 

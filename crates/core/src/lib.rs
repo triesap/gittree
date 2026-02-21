@@ -39,8 +39,8 @@ pub mod nip34_issues;
 pub mod nip34_patches;
 pub mod nip34_proposals;
 pub mod nip34_status;
-pub mod relay_compat;
 pub mod refs;
+pub mod relay_compat;
 pub mod repo_events;
 pub mod repo_mapping;
 pub mod repo_path;
@@ -62,8 +62,8 @@ pub use grasp::{
 pub use kinds::{
     KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PULL_REQUEST, KIND_GIT_PULL_REQUEST_UPDATE,
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_APPLIED,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_USER_GRASP_LIST,
-    KIND_GITTREE_CONTROL, NostrKind, is_nip34_kind, nip34_required_kinds, status_kinds,
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_OPEN, KIND_GITTREE_CONTROL,
+    KIND_USER_GRASP_LIST, NostrKind, is_nip34_kind, nip34_required_kinds, status_kinds,
 };
 pub use nip11::RelayInfoDocument;
 pub use nip34::RepoAnnouncement;
@@ -74,11 +74,11 @@ pub use nip34_issues::Issue;
 pub use nip34_patches::{CommitterTag, Patch};
 pub use nip34_proposals::{PullRequest, PullRequestUpdate};
 pub use nip34_status::{StatusAppliedRef, StatusEvent};
+pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use relay_compat::{
     ActiveProbeEvidence, RelayCapability, RelayCapabilitySet, RelayCompatibilityReport,
     capabilities_from_nip11, merge_active_probe_evidence,
 };
-pub use refs::{is_nostr_ref_name, parse_nostr_ref};
 pub use repo_events::{
     NostrEvent, collect_clone_urls, collect_maintainers, find_repo_announcement,
     latest_state_from_maintainers,

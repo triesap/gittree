@@ -130,8 +130,7 @@ mod tests {
     #[test]
     fn repo_mapping_accepts_valid_fields() {
         let pubkey = "11".repeat(32);
-        let mapping = RepoMapping::new("owner", "repo", pubkey.clone(), "repo")
-            .expect("mapping");
+        let mapping = RepoMapping::new("owner", "repo", pubkey.clone(), "repo").expect("mapping");
         assert_eq!(mapping.pubkey, pubkey);
         assert_eq!(mapping.identifier, "repo");
         assert_eq!(mapping.forgejo.full_name(), "owner/repo");

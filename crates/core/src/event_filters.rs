@@ -252,10 +252,7 @@ mod tests {
 
     #[test]
     fn ignores_invalid_address_pointer_shapes() {
-        let tags = vec![vec![
-            "a".to_string(),
-            "30617:author:repo:extra".to_string(),
-        ]];
+        let tags = vec![vec!["a".to_string(), "30617:author:repo:extra".to_string()]];
         let filters = build_related_event_filters(1617, "pubkey", "eventid", &tags);
         assert!(filters.iter().all(|filter| filter.kinds.is_empty()));
     }

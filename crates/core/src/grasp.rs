@@ -235,8 +235,9 @@ mod tests {
 
     #[test]
     fn format_grasp_server_url_as_clone_url_handles_https() {
-        let clone = format_grasp_server_url_as_clone_url("https://gittr.ee", SAMPLE_NPUB, "repo")
-            .expect("format clone url");
+        let clone =
+            format_grasp_server_url_as_clone_url("https://gittr.ee", SAMPLE_NPUB, "repo")
+                .expect("format clone url");
         assert_eq!(
             clone,
             format!("https://gittr.ee/{SAMPLE_NPUB}/repo.git")
@@ -245,8 +246,9 @@ mod tests {
 
     #[test]
     fn format_grasp_server_url_as_clone_url_handles_http() {
-        let clone = format_grasp_server_url_as_clone_url("http://localhost:8080", SAMPLE_NPUB, "repo")
-            .expect("format clone url");
+        let clone =
+            format_grasp_server_url_as_clone_url("http://localhost:8080", SAMPLE_NPUB, "repo")
+                .expect("format clone url");
         assert_eq!(
             clone,
             format!("http://localhost:8080/{SAMPLE_NPUB}/repo.git")
@@ -428,19 +430,37 @@ mod tests {
     #[test]
     fn normalize_grasp_server_url_rejects_invalid_url() {
         let err = normalize_grasp_server_url(" ");
-        assert!(matches!(err, Err(CoreError::InvalidField { field: "grasp_url", .. })));
+        assert!(matches!(
+            err,
+            Err(CoreError::InvalidField {
+                field: "grasp_url",
+                ..
+            })
+        ));
     }
 
     #[test]
     fn normalize_grasp_server_url_rejects_hostless_urls_with_unparseable_fallback() {
         let err = normalize_grasp_server_url("data:text/plain,hello world");
-        assert!(matches!(err, Err(CoreError::InvalidField { field: "grasp_url", .. })));
+        assert!(matches!(
+            err,
+            Err(CoreError::InvalidField {
+                field: "grasp_url",
+                ..
+            })
+        ));
     }
 
     #[test]
     fn normalize_grasp_server_url_rejects_path_only_input() {
         let err = normalize_grasp_server_url("/");
-        assert!(matches!(err, Err(CoreError::InvalidField { field: "grasp_url", .. })));
+        assert!(matches!(
+            err,
+            Err(CoreError::InvalidField {
+                field: "grasp_url",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -465,6 +485,9 @@ mod tests {
         )
         .expect("encode nsec");
         let err = format_grasp_server_url_as_clone_url("gittr.ee", &nsec, "repo");
-        assert!(matches!(err, Err(CoreError::InvalidField { field: "npub", .. })));
+        assert!(matches!(
+            err,
+            Err(CoreError::InvalidField { field: "npub", .. })
+        ));
     }
 }

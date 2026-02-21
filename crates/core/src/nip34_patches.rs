@@ -412,7 +412,10 @@ mod tests {
         };
 
         let tags = patch.to_tags();
-        assert_eq!(tags, vec![vec!["a".to_string(), format!("30617:{pubkey}:repo")]]);
+        assert_eq!(
+            tags,
+            vec![vec!["a".to_string(), format!("30617:{pubkey}:repo")]]
+        );
     }
 
     #[test]
@@ -504,10 +507,7 @@ mod tests {
         };
         assert!(matches!(
             patch.validate(),
-            Err(crate::CoreError::InvalidField {
-                field: "a",
-                ..
-            })
+            Err(crate::CoreError::InvalidField { field: "a", .. })
         ));
     }
 }

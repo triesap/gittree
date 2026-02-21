@@ -132,7 +132,9 @@ mod tests {
     #[test]
     fn parse_repo_path_rejects_non_utf8_repo_name() {
         let invalid = OsString::from_vec(vec![0xff, 0x2e, 0x67, 0x69, 0x74]);
-        let path = Path::new("/var/lib/gittree").join(SAMPLE_NPUB).join(invalid);
+        let path = Path::new("/var/lib/gittree")
+            .join(SAMPLE_NPUB)
+            .join(invalid);
         assert!(parse_repo_path(&path).is_err());
     }
 

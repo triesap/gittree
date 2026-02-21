@@ -434,11 +434,17 @@ mod tests {
             vec!["E".to_string(), hex_of(0x44, 64)],
             vec!["P".to_string(), hex_of(0x55, 64)],
             vec!["c".to_string(), hex_of(0x66, 40)],
-            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+            vec![
+                "clone".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ],
             vec!["x-unknown".to_string(), "ignored".to_string()],
         ];
         let parsed = PullRequestUpdate::from_tags(&tags).expect("parse");
-        assert_eq!(parsed.clone, vec!["https://git.example/repo.git".to_string()]);
+        assert_eq!(
+            parsed.clone,
+            vec!["https://git.example/repo.git".to_string()]
+        );
     }
 
     #[test]
@@ -491,7 +497,10 @@ mod tests {
         bad_subject.subject = Some("   ".to_string());
         assert!(matches!(
             bad_subject.validate(),
-            Err(CoreError::InvalidField { field: "subject", .. })
+            Err(CoreError::InvalidField {
+                field: "subject",
+                ..
+            })
         ));
 
         let mut bad_branch = valid.clone();
@@ -529,7 +538,10 @@ mod tests {
             vec!["a".to_string(), format!("30617:{pubkey}:repo")],
             vec!["E".to_string(), hex_of(0x22, 64)],
             vec!["c".to_string(), hex_of(0x33, 40)],
-            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+            vec![
+                "clone".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ],
         ])
         .expect_err("missing root author should fail");
         assert!(matches!(missing_root_author, CoreError::MissingField("P")));
@@ -589,10 +601,7 @@ mod tests {
         bad_clone_entry.clone = vec![" ".to_string()];
         assert!(matches!(
             bad_clone_entry.validate(),
-            Err(CoreError::InvalidField {
-                field: "clone",
-                ..
-            })
+            Err(CoreError::InvalidField { field: "clone", .. })
         ));
 
         let mut bad_merge_base = valid.clone();
@@ -632,7 +641,10 @@ mod tests {
         assert_eq!(parsed.repo_refs, vec![ref_commit]);
         assert_eq!(parsed.mentions, vec![mention]);
         assert_eq!(parsed.labels, vec!["bug".to_string()]);
-        assert_eq!(parsed.clone, vec!["https://git.example/repo.git".to_string()]);
+        assert_eq!(
+            parsed.clone,
+            vec!["https://git.example/repo.git".to_string()]
+        );
     }
 
     #[test]
@@ -652,11 +664,31 @@ mod tests {
         };
 
         let tags = pr.to_tags();
-        assert!(!tags.iter().any(|tag| tag.first().is_some_and(|name| name == "subject")));
-        assert!(!tags.iter().any(|tag| tag.first().is_some_and(|name| name == "clone")));
-        assert!(!tags.iter().any(|tag| tag.first().is_some_and(|name| name == "branch-name")));
-        assert!(!tags.iter().any(|tag| tag.first().is_some_and(|name| name == "e")));
-        assert!(!tags.iter().any(|tag| tag.first().is_some_and(|name| name == "merge-base")));
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "subject"))
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "clone"))
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "branch-name"))
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "e"))
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "merge-base"))
+        );
     }
 
     #[test]
@@ -731,10 +763,7 @@ mod tests {
         bad_clone_entry.clone = vec!["   ".to_string()];
         assert!(matches!(
             bad_clone_entry.validate(),
-            Err(CoreError::InvalidField {
-                field: "clone",
-                ..
-            })
+            Err(CoreError::InvalidField { field: "clone", .. })
         ));
     }
 
@@ -745,7 +774,10 @@ mod tests {
             vec!["E".to_string(), hex_of(0x22, 64)],
             vec!["P".to_string(), pubkey.clone()],
             vec!["c".to_string(), hex_of(0x33, 40)],
-            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+            vec![
+                "clone".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ],
         ])
         .expect_err("missing repo should fail");
         assert!(matches!(missing_repo, CoreError::MissingField("a")));
@@ -754,7 +786,10 @@ mod tests {
             vec!["a".to_string(), format!("30617:{pubkey}:repo")],
             vec!["P".to_string(), pubkey.clone()],
             vec!["c".to_string(), hex_of(0x33, 40)],
-            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+            vec![
+                "clone".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ],
         ])
         .expect_err("missing root event should fail");
         assert!(matches!(missing_root_event, CoreError::MissingField("E")));
@@ -763,7 +798,10 @@ mod tests {
             vec!["a".to_string(), format!("30617:{pubkey}:repo")],
             vec!["E".to_string(), hex_of(0x22, 64)],
             vec!["P".to_string(), pubkey],
-            vec!["clone".to_string(), "https://git.example/repo.git".to_string()],
+            vec![
+                "clone".to_string(),
+                "https://git.example/repo.git".to_string(),
+            ],
         ])
         .expect_err("missing tip commit should fail");
         assert!(matches!(missing_tip, CoreError::MissingField("c")));
@@ -784,8 +822,16 @@ mod tests {
         };
 
         let tags = update.to_tags();
-        assert!(!tags.iter().any(|tag| tag.first().is_some_and(|name| name == "clone")));
-        assert!(!tags.iter().any(|tag| tag.first().is_some_and(|name| name == "merge-base")));
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "clone"))
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "merge-base"))
+        );
     }
 
     #[test]

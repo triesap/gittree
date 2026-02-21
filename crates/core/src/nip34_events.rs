@@ -42,9 +42,9 @@ impl Nip34Event {
                 kind: NostrKind(k),
                 event: StatusEvent::from_tags(tags)?,
             }),
-            k if k == KIND_USER_GRASP_LIST.0 => {
-                Ok(Nip34Event::UserGraspList(UserGraspList::from_tags_lossy(tags)))
-            }
+            k if k == KIND_USER_GRASP_LIST.0 => Ok(Nip34Event::UserGraspList(
+                UserGraspList::from_tags_lossy(tags),
+            )),
             _ => Err(CoreError::InvalidField {
                 field: "kind",
                 value: kind.to_string(),
@@ -356,10 +356,12 @@ mod tests {
             merge_commit: None,
             applied_as_commits: Vec::new(),
         };
-        let err =
-            Nip34Event::parse_validated(KIND_GIT_STATUS_OPEN.0, &invalid_status.to_tags())
-                .expect_err("invalid status");
-        assert!(matches!(err, crate::CoreError::InvalidField { field: "e", .. }));
+        let err = Nip34Event::parse_validated(KIND_GIT_STATUS_OPEN.0, &invalid_status.to_tags())
+            .expect_err("invalid status");
+        assert!(matches!(
+            err,
+            crate::CoreError::InvalidField { field: "e", .. }
+        ));
     }
 
     #[test]
