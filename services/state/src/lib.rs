@@ -11,6 +11,7 @@ use gittree_storage::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -214,7 +215,20 @@ impl<R> Clone for StateAppState<R> {
 }
 
 pub async fn serve(config: StateConfig) -> Result<(), StateError> {
-    let _observability = init_observability()?;
+    serve_with(config, init_observability, run_axum_server).await
+}
+
+async fn serve_with<InitFn, InitValue, ServerFn, ServerFut>(
+    config: StateConfig,
+    init_observability_fn: InitFn,
+    run_server: ServerFn,
+) -> Result<(), StateError>
+where
+    InitFn: FnOnce() -> Result<InitValue, StateError>,
+    ServerFn: FnOnce(tokio::net::TcpListener, Router) -> ServerFut,
+    ServerFut: Future<Output = Result<(), std::io::Error>>,
+{
+    let _observability = init_observability_fn()?;
     let repositories = build_repositories(&config)?;
     let cache = Arc::new(StateCache::new(StateCacheConfig::default()));
     let state = StateAppState {
@@ -225,10 +239,17 @@ pub async fn serve(config: StateConfig) -> Result<(), StateError> {
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| StateError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
+    run_server(listener, router)
         .await
         .map_err(|err| StateError::Serve(err.to_string()))?;
     Ok(())
+}
+
+async fn run_axum_server(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), std::io::Error> {
+    axum::serve(listener, router).await
 }
 
 fn build_router<R>(state: StateAppState<R>) -> Router
@@ -408,19 +429,12 @@ impl StateCache {
         K: Clone + Eq + std::hash::Hash,
     {
         let max_entries = self.config.max_entries;
-        if max_entries == 0 {
-            map.clear();
-            return;
-        }
-
         while map.len() > max_entries {
-            let Some(oldest) = map
+            let oldest = map
                 .iter()
                 .min_by_key(|(_, entry)| entry.stored_at)
                 .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
+                .expect("map has entries while len exceeds max");
             map.remove(&oldest);
         }
     }
@@ -764,6 +778,7 @@ mod tests {
     use super::relay_compatibility_cached;
     use super::resolve_maintainers;
     use super::resolve_maintainers_cached;
+    use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
@@ -833,6 +848,155 @@ mod tests {
         RelayCompatibilityRecord::new(&report, 123, &metadata).expect("record")
     }
 
+    async fn noop_server(
+        _listener: tokio::net::TcpListener,
+        _router: Router,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    #[derive(Debug, Default)]
+    struct ErrorRepositories;
+
+    #[async_trait::async_trait]
+    impl StateRepository for ErrorRepositories {
+        async fn insert_state(
+            &self,
+            _record: gittree_storage::RepoStateRecord,
+        ) -> Result<(), gittree_storage::StorageError> {
+            Ok(())
+        }
+
+        async fn latest_state(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<gittree_storage::RepoStateRecord>, gittree_storage::StorageError>
+        {
+            Err(gittree_storage::StorageError::Internal {
+                message: "state backend error".to_string(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AnnouncementRepository for ErrorRepositories {
+        async fn insert_announcement(
+            &self,
+            _record: RepoAnnouncementRecord,
+        ) -> Result<(), gittree_storage::StorageError> {
+            Ok(())
+        }
+
+        async fn list_announcements(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Vec<RepoAnnouncementRecord>, gittree_storage::StorageError> {
+            Err(gittree_storage::StorageError::Internal {
+                message: "announcement backend error".to_string(),
+            })
+        }
+
+        async fn latest_announcement(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoAnnouncementRecord>, gittree_storage::StorageError> {
+            Err(gittree_storage::StorageError::Internal {
+                message: "announcement backend error".to_string(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RelayCompatibilityRepository for ErrorRepositories {
+        async fn upsert_relay_compatibility(
+            &self,
+            _record: RelayCompatibilityRecord,
+        ) -> Result<(), gittree_storage::StorageError> {
+            Ok(())
+        }
+
+        async fn relay_compatibility(
+            &self,
+            _relay_url: &str,
+        ) -> Result<Option<RelayCompatibilityRecord>, gittree_storage::StorageError> {
+            Err(gittree_storage::StorageError::Internal {
+                message: "relay compatibility backend error".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn error_repositories_trait_methods_cover_branches() {
+        let repo = ErrorRepositories;
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: HashMap::new(),
+        };
+        let state_record =
+            gittree_storage::RepoStateRecord::new(&"11".repeat(32), &"22".repeat(32), 1, &state)
+                .expect("state record");
+        repo.insert_state(state_record).await.expect("insert state");
+        let state_err = repo
+            .latest_state(&[0u8; 32], "repo")
+            .await
+            .expect_err("latest state error");
+        assert!(matches!(
+            state_err,
+            gittree_storage::StorageError::Internal { .. }
+        ));
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &"11".repeat(32), 1, &announcement)
+                .expect("announcement record");
+        repo.insert_announcement(announcement_record)
+            .await
+            .expect("insert announcement");
+        let list_err = repo
+            .list_announcements(&[0u8; 32], "repo")
+            .await
+            .expect_err("list error");
+        assert!(matches!(
+            list_err,
+            gittree_storage::StorageError::Internal { .. }
+        ));
+        let latest_err = repo
+            .latest_announcement(&[0u8; 32], "repo")
+            .await
+            .expect_err("latest error");
+        assert!(matches!(
+            latest_err,
+            gittree_storage::StorageError::Internal { .. }
+        ));
+
+        let compat_record = sample_compat_record("wss://relay.example");
+        repo.upsert_relay_compatibility(compat_record)
+            .await
+            .expect("upsert compatibility");
+        let compat_err = repo
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect_err("compatibility error");
+        assert!(matches!(
+            compat_err,
+            gittree_storage::StorageError::Internal { .. }
+        ));
+    }
+
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -879,12 +1043,14 @@ mod tests {
     fn config_requires_storage_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
-            without_env_var(ENV_STORAGE_READ_URL, || {
-                let err = StateConfig::from_env().unwrap_err();
-                assert!(matches!(
-                    err,
-                    super::StateConfigError::Storage(StorageConfigError::MissingEnv(_))
-                ));
+            with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                without_env_var(ENV_STORAGE_READ_URL, || {
+                    let err = StateConfig::from_env().unwrap_err();
+                    assert!(matches!(
+                        err,
+                        super::StateConfigError::Storage(StorageConfigError::MissingEnv(_))
+                    ));
+                });
             });
         });
     }
@@ -916,6 +1082,68 @@ mod tests {
                                 ..
                             })
                         ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_rejects_invalid_storage_bounds() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                            let err = StateConfig::from_env().expect_err("invalid bounds");
+                            assert!(matches!(
+                                err,
+                                StateConfigError::Storage(StorageConfigError::InvalidConfig(_))
+                            ));
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_uses_default_min_connections_when_empty() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
+                        let config = StateConfig::from_env().expect("config");
+                        assert_eq!(config.storage.min_connections, 2);
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_maps_services_and_relay_target_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    with_env_var("GITTREE_STATE_BIND", "invalid-bind", || {
+                        let err = StateConfig::from_env().expect_err("invalid bind");
+                        assert!(matches!(err, StateConfigError::Config(_)));
+                    });
+                });
+                with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
+                    with_env_var("GITTREE_RELAY_URLS", "not-a-url", || {
+                        let err = StateConfig::from_env().expect_err("invalid relay targets");
+                        assert!(matches!(err, StateConfigError::Config(_)));
                     });
                 });
             },
@@ -1004,6 +1232,19 @@ mod tests {
         });
         assert!(storage.to_string().contains("storage error"));
         assert!(std::error::Error::source(&storage).is_some());
+
+        let invalid_storage_env = StorageConfigError::InvalidEnv {
+            key: "GITTREE_STORAGE_MAX_CONNECTIONS",
+            value: "bad".to_string(),
+        };
+        assert_eq!(
+            invalid_storage_env.to_string(),
+            "invalid env GITTREE_STORAGE_MAX_CONNECTIONS: bad"
+        );
+        assert_eq!(
+            StorageConfigError::MissingEnv("GITTREE_STORAGE_READ_URL").to_string(),
+            "missing env GITTREE_STORAGE_READ_URL"
+        );
     }
 
     #[tokio::test]
@@ -1054,6 +1295,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_state_rejects_invalid_pubkey_hex() {
+        let repo = InMemoryRepositories::default();
+        let err = latest_state(&repo, "not-hex", "repo")
+            .await
+            .expect_err("invalid pubkey");
+        assert!(matches!(err, StateServiceError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn latest_state_cached_propagates_lookup_errors() {
+        let repo = ErrorRepositories;
+        let cache = StateCache::new(StateCacheConfig::new(None, 10));
+        let err = latest_state_cached(&repo, &cache, &"11".repeat(32), "repo")
+            .await
+            .expect_err("cached error");
+        assert!(matches!(err, StateServiceError::Storage(_)));
+    }
+
+    #[tokio::test]
     async fn relay_compatibility_returns_record() {
         let repo = InMemoryRepositories::default();
         let record = sample_compat_record("wss://relay.example");
@@ -1093,6 +1353,15 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn relay_compatibility_maps_repository_errors() {
+        let repo = ErrorRepositories;
+        let err = relay_compatibility(&repo, "wss://relay.example")
+            .await
+            .expect_err("storage error");
+        assert!(matches!(err, StateServiceError::Storage(_)));
     }
 
     #[tokio::test]
@@ -1172,6 +1441,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn resolve_maintainers_rejects_invalid_pubkey_hex() {
+        let repo = InMemoryRepositories::default();
+        let err = resolve_maintainers(&repo, "not-hex", "repo")
+            .await
+            .expect_err("invalid pubkey");
+        assert!(matches!(err, StateServiceError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_maintainers_cached_propagates_lookup_errors() {
+        let repo = ErrorRepositories;
+        let cache = StateCache::new(StateCacheConfig::new(None, 10));
+        let err = resolve_maintainers_cached(&repo, &cache, &"11".repeat(32), "repo")
+            .await
+            .expect_err("cached error");
+        assert!(matches!(err, StateServiceError::Storage(_)));
     }
 
     #[tokio::test]
@@ -1293,6 +1581,92 @@ mod tests {
         };
         cache.insert_state(key.clone(), response);
         assert!(cache.get_state(&key).is_none());
+
+        let maintainers_key = StateCache::key("aa", "repo");
+        cache.insert_maintainers(
+            maintainers_key.clone(),
+            super::MaintainersResponse {
+                identifier: "repo".to_string(),
+                maintainers: vec!["aa".to_string()],
+            },
+        );
+        assert!(cache.get_maintainers(&maintainers_key).is_none());
+
+        let relay_key = StateCache::relay_key("wss://relay.example");
+        cache.insert_relay_compatibility(
+            relay_key.clone(),
+            super::RelayCompatibilityResponse {
+                relay_url: "wss://relay.example".to_string(),
+                compatible: true,
+                supported_capabilities: vec!["nip01".to_string()],
+                missing_required: Vec::new(),
+                missing_optional: Vec::new(),
+                nip11_url: None,
+                nip11_available: true,
+                active_probe_ok: Some(true),
+                active_probe_error: None,
+                checked_at: 1,
+            },
+        );
+        assert!(cache.get_relay_compatibility(&relay_key).is_none());
+    }
+
+    #[test]
+    fn cache_handles_poisoned_locks() {
+        let cache = StateCache::new(StateCacheConfig::new(None, 10));
+        let key = StateCache::key("aa", "repo");
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = cache.state_entries.write().expect("lock");
+            panic!("poison state");
+        });
+        assert!(cache.get_state(&key).is_none());
+        cache.insert_state(
+            key.clone(),
+            super::StateResponse {
+                event_id: "aa".to_string(),
+                pubkey: "aa".to_string(),
+                identifier: "repo".to_string(),
+                created_at: 1,
+                state: HashMap::new(),
+            },
+        );
+        assert!(cache.get_state(&key).is_none());
+
+        let maintainers_key = StateCache::key("bb", "repo");
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = cache.maintainer_entries.write().expect("lock");
+            panic!("poison maintainers");
+        });
+        assert!(cache.get_maintainers(&maintainers_key).is_none());
+        cache.insert_maintainers(
+            maintainers_key,
+            super::MaintainersResponse {
+                identifier: "repo".to_string(),
+                maintainers: vec!["bb".to_string()],
+            },
+        );
+
+        let relay_key = StateCache::relay_key("wss://relay.example");
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = cache.relay_entries.write().expect("lock");
+            panic!("poison relay");
+        });
+        assert!(cache.get_relay_compatibility(&relay_key).is_none());
+        cache.insert_relay_compatibility(
+            relay_key,
+            super::RelayCompatibilityResponse {
+                relay_url: "wss://relay.example".to_string(),
+                compatible: true,
+                supported_capabilities: Vec::new(),
+                missing_required: Vec::new(),
+                missing_optional: Vec::new(),
+                nip11_url: None,
+                nip11_available: false,
+                active_probe_ok: None,
+                active_probe_error: None,
+                checked_at: 1,
+            },
+        );
     }
 
     #[test]
@@ -1488,6 +1862,13 @@ mod tests {
         .into_response();
         assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
 
+        let state_not_found = super::StateHttpError::from(StateServiceError::NotFound {
+            pubkey: "aa".to_string(),
+            identifier: "repo".to_string(),
+        })
+        .into_response();
+        assert_eq!(state_not_found.status(), StatusCode::NOT_FOUND);
+
         let storage = super::StateHttpError::from(StateServiceError::Storage(
             gittree_storage::StorageError::Internal {
                 message: "fail".to_string(),
@@ -1517,6 +1898,25 @@ mod tests {
         let _ = repos;
     }
 
+    #[test]
+    fn build_repositories_rejects_invalid_connection() {
+        let config = StateConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "not-a-postgres-url".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: Vec::new(),
+        };
+        let err = super::build_repositories(&config).expect_err("invalid connection");
+        assert!(matches!(err, StateError::Storage(_)));
+    }
+
     #[tokio::test]
     async fn serve_reports_bind_error() {
         let config = StateConfig {
@@ -1540,6 +1940,94 @@ mod tests {
                 | StateError::Observability(_)
                 | StateError::ObservabilityConfig(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_observability_errors() {
+        let config = StateConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: Vec::new(),
+        };
+        let err = super::serve_with(
+            config,
+            || {
+                Err::<(), StateError>(StateError::ObservabilityConfig(
+                    gittree_observability::ObservabilityConfigError::InvalidEnv {
+                        key: "GITTREE_LOG_JSON",
+                        value: "bad".to_string(),
+                    },
+                ))
+            },
+            noop_server,
+        )
+        .await
+        .expect_err("observability error");
+        assert!(matches!(err, StateError::ObservabilityConfig(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_server_errors() {
+        let config = StateConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: Vec::new(),
+        };
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Err(std::io::Error::other("boom")) },
+        )
+        .await
+        .expect_err("server error");
+        assert!(matches!(err, StateError::Serve(message) if message.contains("boom")));
+    }
+
+    #[tokio::test]
+    async fn serve_with_returns_ok_when_server_returns_ok() {
+        let config = StateConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: Vec::new(),
+        };
+        let result = super::serve_with(config, || Ok(()), noop_server).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_can_start_and_be_aborted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let router = Router::new().route("/health", axum::routing::get(super::health_handler));
+        let task = tokio::spawn(super::run_axum_server(listener, router));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        task.abort();
+        let _ = task.await;
     }
 
     #[test]
@@ -1566,13 +2054,11 @@ mod tests {
     }
 
     #[test]
-    fn observability_init_returns_registry() {
-        match init_observability() {
-            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
-            Err(StateError::Observability(
-                gittree_observability::ObservabilityError::SubscriberInit(_),
-            )) => {}
-            Err(err) => panic!("unexpected observability init error: {err}"),
-        }
+    fn observability_init_reports_config_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_STDOUT", "invalid-bool", || {
+            let err = init_observability().expect_err("invalid observability config");
+            assert!(matches!(err, StateError::ObservabilityConfig(_)));
+        });
     }
 }
