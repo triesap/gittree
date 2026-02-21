@@ -444,14 +444,11 @@ impl StateFetcher for HttpStateFetcher {
     }
 }
 
-pub fn evaluate_pre_receive<F>(
-    fetcher: &F,
+pub fn evaluate_pre_receive(
+    fetcher: &dyn StateFetcher,
     repo_path: impl AsRef<Path>,
     updates: &[RefUpdate],
-) -> Result<UpdateDecision, HookServiceError>
-where
-    F: StateFetcher,
-{
+) -> Result<UpdateDecision, HookServiceError> {
     let repo = gittree_core::parse_repo_path(repo_path)
         .map_err(|err| HookServiceError::Core(err.to_string()))?;
     let core_updates: Vec<gittree_core::RefUpdate<'_>> = updates
@@ -548,14 +545,11 @@ impl PostReceiveNotifier for HttpPostReceiveNotifier {
     }
 }
 
-pub fn handle_post_receive<N>(
-    notifier: &N,
+pub fn handle_post_receive(
+    notifier: &dyn PostReceiveNotifier,
     repo_path: impl AsRef<Path>,
     updates: &[RefUpdate],
-) -> Result<(), HookServiceError>
-where
-    N: PostReceiveNotifier,
-{
+) -> Result<(), HookServiceError> {
     let repo = gittree_core::parse_repo_path(repo_path)
         .map_err(|err| HookServiceError::Core(err.to_string()))?;
     let payload = PostReceivePayload {
@@ -566,15 +560,11 @@ where
     notifier.notify(payload)
 }
 
-pub fn handle_forgejo_push<R, N>(
-    resolver: &R,
-    notifier: &N,
+pub fn handle_forgejo_push(
+    resolver: &dyn MappingResolver,
+    notifier: &dyn PostReceiveNotifier,
     payload: &str,
-) -> Result<(), HookServiceError>
-where
-    R: MappingResolver,
-    N: PostReceiveNotifier,
-{
+) -> Result<(), HookServiceError> {
     let event = parse_forgejo_push(payload).map_err(HookServiceError::Parse)?;
     let mapping = resolver
         .resolve_mapping(&event.owner, &event.repo)?
