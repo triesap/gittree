@@ -644,7 +644,7 @@ mod tests {
             }
         }
 
-        run();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
 
         match previous {
             Some(value) => {
@@ -655,6 +655,10 @@ mod tests {
                 // SAFETY: tests serialize environment mutation with a process-wide mutex.
                 unsafe { std::env::remove_var(key) };
             }
+        }
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -680,7 +684,7 @@ mod tests {
             }
         }
 
-        let result = run();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
 
         for (key, previous) in previous {
             match previous {
@@ -694,7 +698,11 @@ mod tests {
                 }
             }
         }
-        result
+
+        match result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     fn write_updates_file(contents: &str) -> std::path::PathBuf {
@@ -1352,22 +1360,25 @@ mod tests {
             sync_url: None,
             mode: HookMode::PreReceive,
         };
-        let original_dir = std::env::current_dir().expect("current dir");
-        let temp = std::env::temp_dir().join(format!(
-            "gittree-hook-cwd-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).expect("create temp dir");
-        std::env::set_current_dir(&temp).expect("set current dir");
-        std::fs::remove_dir_all(&temp).expect("remove temp dir");
         let result = with_env_vars(
             &[(super::ENV_HOOK_REPO_PATH, None), ("GIT_DIR", None)],
-            || super::run_hook(config, Some(&updates_path)),
+            || {
+                let original_dir = std::env::current_dir().expect("current dir");
+                let temp = std::env::temp_dir().join(format!(
+                    "gittree-hook-cwd-{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("time")
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&temp).expect("create temp dir");
+                std::env::set_current_dir(&temp).expect("set current dir");
+                std::fs::remove_dir_all(&temp).expect("remove temp dir");
+                let outcome = super::run_hook(config, Some(&updates_path));
+                std::env::set_current_dir(&original_dir).expect("restore current dir");
+                outcome
+            },
         );
-        std::env::set_current_dir(&original_dir).expect("restore current dir");
         let err = result.expect_err("expected current dir failure");
         assert!(matches!(err, HookServiceError::Core(_)));
         let _ = std::fs::remove_file(updates_path);
