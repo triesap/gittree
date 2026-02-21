@@ -962,12 +962,84 @@ mod tests {
         with_env_var(super::ENV_STORAGE_READ_URL, "", || {
             let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
                 .expect_err("store mode should fail without storage env");
+            assert!(matches!(
+                err,
+                ProbeCommandError::StorageConfig(_) | ProbeCommandError::Storage(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn execute_probe_with_client_store_mode_maps_storage_database_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: true,
+            active: Some(false),
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let probe_config = RelayProbeConfig {
+            active: false,
+            timeout_secs: 5,
+            secret_key: None,
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let client = StubProbeClient {
+            response: Ok(Some(
+                r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+            )),
+        };
+
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://gittree:gittree@127.0.0.1:1/gittree",
+            || {
+                let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
+                    .expect_err("store mode should fail when database is unreachable");
+                assert!(matches!(err, ProbeCommandError::Storage(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn run_with_args_reports_storage_error_when_store_database_unreachable() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://gittree:gittree@127.0.0.1:1/gittree",
+            || {
+                let result = run_with_args([
+                    "probe",
+                    "--relay",
+                    "wss://relay.example",
+                    "--store",
+                    "--no-active",
+                ]);
+                assert!(
+                    result.is_err(),
+                    "store mode should fail without reachable database"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn run_with_args_reports_storage_config_error_when_store_read_url_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(super::ENV_STORAGE_READ_URL, "", || {
+            let result = run_with_args([
+                "probe",
+                "--relay",
+                "wss://relay.example",
+                "--store",
+                "--no-active",
+            ]);
             assert!(
-                matches!(
-                    err,
-                    ProbeCommandError::StorageConfig(_) | ProbeCommandError::Storage(_)
-                ),
-                "unexpected store error: {err:?}"
+                result.is_err(),
+                "store mode should fail without storage config"
             );
         });
     }
@@ -1049,6 +1121,14 @@ mod tests {
     #[tokio::test]
     async fn store_probe_result_reports_storage_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
+        let original = std::env::var_os(super::ENV_STORAGE_READ_URL);
+        // SAFETY: protected by ENV_LOCK and restored below.
+        unsafe {
+            std::env::set_var(
+                super::ENV_STORAGE_READ_URL,
+                "postgres://gittree:gittree@127.0.0.1:5432/gittree",
+            );
+        }
         let previous = std::env::var_os(super::ENV_STORAGE_READ_URL);
         // SAFETY: protected by ENV_LOCK and restored below.
         unsafe {
@@ -1064,6 +1144,10 @@ mod tests {
             None => unsafe {
                 std::env::remove_var(super::ENV_STORAGE_READ_URL);
             },
+        }
+        match original {
+            Some(value) => unsafe { std::env::set_var(super::ENV_STORAGE_READ_URL, value) },
+            None => unsafe { std::env::remove_var(super::ENV_STORAGE_READ_URL) },
         }
         assert!(matches!(err, ProbeCommandError::StorageConfig(_)));
     }
