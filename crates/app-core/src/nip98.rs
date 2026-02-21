@@ -64,15 +64,18 @@ pub fn nip98_sign_event(
     payload_sha256: Option<&str>,
     created_at: i64,
 ) -> Result<Nip98Event, AppCoreError> {
-    let signing_key =
-        SigningKey::from_bytes(secret_key).map_err(|_| AppCoreError::InvalidSecretKey)?;
+    let signing_key = match SigningKey::from_bytes(secret_key) {
+        Ok(key) => key,
+        Err(_) => return Err(AppCoreError::InvalidSecretKey),
+    };
     let verifying_key = signing_key.verifying_key();
     let pubkey_hex = hex::encode(verifying_key.to_bytes());
     let unsigned = nip98_unsigned_event(pubkey_hex, method, url, payload_sha256, created_at);
     let id_bytes = nip98_event_id_bytes(&unsigned)?;
-    let sig = signing_key
-        .sign_prehash(&id_bytes)
-        .map_err(|_| AppCoreError::InvalidSignature)?;
+    let sig = match signing_key.sign_prehash(&id_bytes) {
+        Ok(signature) => signature,
+        Err(_) => return Err(AppCoreError::InvalidSignature),
+    };
     Ok(Nip98Event {
         id: hex::encode(id_bytes),
         pubkey: unsigned.pubkey,
@@ -104,8 +107,10 @@ fn nip98_event_id_bytes(unsigned: &Nip98UnsignedEvent) -> Result<[u8; 32], AppCo
         unsigned.tags,
         unsigned.content,
     ]);
-    let serialized = serde_json::to_string(&payload)
-        .map_err(|err| AppCoreError::InvalidEventEncoding(err.to_string()))?;
+    let serialized = match serde_json::to_string(&payload) {
+        Ok(serialized) => serialized,
+        Err(err) => return Err(AppCoreError::InvalidEventEncoding(err.to_string())),
+    };
     let mut hasher = sha2::Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
