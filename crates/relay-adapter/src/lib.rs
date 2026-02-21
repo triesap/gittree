@@ -1,20 +1,21 @@
 use async_trait::async_trait;
 use futures_util::{SinkExt, Stream, StreamExt};
 use gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT;
-use gittree_core::{RepoAnnouncement, RelayInfoDocument};
+use gittree_core::{RelayInfoDocument, RepoAnnouncement};
 use rand::rngs::OsRng;
 use secp256k1::{All, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::{timeout, Instant};
+use tokio::time::{Instant, timeout};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use url::Url;
 
 const DEFAULT_ADAPTER_TIMEOUT_SECS: u64 = 5;
 const PROBE_SUB_PREFIX: &str = "gittree-probe";
-type WsStream = dyn Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Send + Unpin;
+type WsStream =
+    dyn Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Send + Unpin;
 type BuildEventIdFn = fn(&str, i64, u32, &[Vec<String>], &str) -> Result<String, RelayAdapterError>;
 type SignEventIdFn = fn(&Secp256k1<All>, &Keypair, &str) -> Result<String, RelayAdapterError>;
 
@@ -350,7 +351,7 @@ fn normalize_ws_url(input: &str) -> Result<Url, RelayAdapterError> {
         _ => {
             return Err(RelayAdapterError::InvalidConfig(
                 "unsupported relay scheme".to_string(),
-            ))
+            ));
         }
     }
     Ok(url)
@@ -477,7 +478,9 @@ async fn wait_for_event(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(RelayAdapterError::Transport("probe event timeout".to_string()));
+            return Err(RelayAdapterError::Transport(
+                "probe event timeout".to_string(),
+            ));
         }
         let msg = timeout(remaining, read.next())
             .await
@@ -512,15 +515,19 @@ fn parse_ok_message(
     let WsMessage::Text(text) = message else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
     let Some(array) = value.as_array() else {
         return Ok(None);
     };
     if array.len() < 3 || array.first().and_then(|v| v.as_str()) != Some("OK") {
         return Ok(None);
     }
-    let event_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let event_id = array
+        .get(1)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let ok = array.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
     let reason = array.get(3).and_then(|v| v.as_str()).map(|v| v.to_string());
     Ok(Some((event_id, ok, reason)))
@@ -532,15 +539,19 @@ fn parse_event_message(
     let WsMessage::Text(text) = message else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
     let Some(array) = value.as_array() else {
         return Ok(None);
     };
     if array.len() < 3 || array.first().and_then(|v| v.as_str()) != Some("EVENT") {
         return Ok(None);
     }
-    let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let sub_id = array
+        .get(1)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let event = array[2].clone();
     Ok(Some((sub_id, event)))
 }
@@ -549,15 +560,19 @@ fn parse_eose_message(message: &WsMessage) -> Result<Option<String>, RelayAdapte
     let WsMessage::Text(text) = message else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| RelayAdapterError::Protocol(err.to_string()))?;
     let Some(array) = value.as_array() else {
         return Ok(None);
     };
     if array.len() < 2 || array.first().and_then(|v| v.as_str()) != Some("EOSE") {
         return Ok(None);
     }
-    let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let sub_id = array
+        .get(1)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     Ok(Some(sub_id))
 }
 
@@ -569,11 +584,11 @@ mod tests {
         parse_eose_message, parse_event_message, parse_ok_message, sign_event_id, wait_for_event,
         wait_for_ok,
     };
-    use futures_util::{SinkExt, StreamExt};
     use futures_util::stream;
+    use futures_util::{SinkExt, StreamExt};
     use gittree_core::RepoAnnouncement;
-    use serde_json::json;
     use secp256k1::{Message, Secp256k1, SecretKey, XOnlyPublicKey};
+    use serde_json::json;
     use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -616,10 +631,12 @@ mod tests {
         let announcement = sample_announcement();
         let secret_key = SecretKey::from_slice(&[3u8; 32]).expect("secret");
 
-        let event =
-            SignedNostrEvent::from_announcement(&announcement, &secret_key).expect("event");
+        let event = SignedNostrEvent::from_announcement(&announcement, &secret_key).expect("event");
 
-        assert_eq!(event.kind, gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT.0);
+        assert_eq!(
+            event.kind,
+            gittree_core::kinds::KIND_GIT_REPO_ANNOUNCEMENT.0
+        );
         assert!(event.created_at > 0);
         assert!(!event.id.is_empty());
         assert!(!event.sig.is_empty());
@@ -702,7 +719,8 @@ mod tests {
 
     #[tokio::test]
     async fn nostr_rs_adapter_methods_return_unsupported() {
-        let adapter = super::NostrRsRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
+        let adapter =
+            super::NostrRsRelayAdapter::new(RelayAdapterConfig::new("wss://relay.example"));
         assert_eq!(adapter.relay_url(), "wss://relay.example");
         assert_unsupported_error(&adapter.relay_info().await.unwrap_err());
         assert_unsupported_error(&adapter.probe_write_read().await.unwrap_err());
@@ -720,7 +738,8 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_adapter_methods_return_unsupported() {
-        let adapter = super::WebhookRelayAdapter::new(RelayAdapterConfig::new("https://relay.example"));
+        let adapter =
+            super::WebhookRelayAdapter::new(RelayAdapterConfig::new("https://relay.example"));
         assert_eq!(adapter.relay_url(), "https://relay.example");
         assert_unsupported_error(&adapter.relay_info().await.unwrap_err());
         assert_unsupported_error(&adapter.probe_write_read().await.unwrap_err());
@@ -803,18 +822,17 @@ mod tests {
         let secret_key = SecretKey::from_slice(&[7u8; 32]).expect("secret");
         let mut announcement = sample_announcement();
         announcement.clone.clear();
-        let err = SignedNostrEvent::from_announcement_with_created_at(&announcement, &secret_key, 1)
-            .unwrap_err();
+        let err =
+            SignedNostrEvent::from_announcement_with_created_at(&announcement, &secret_key, 1)
+                .unwrap_err();
         assert_invalid_config_error(&err);
     }
 
     #[test]
     fn build_event_id_is_deterministic() {
         let tags = vec![vec!["d".to_string(), "repo".to_string()]];
-        let first =
-            build_event_id("abcd", 100, 30617, &tags, "").expect("event id");
-        let second =
-            build_event_id("abcd", 100, 30617, &tags, "").expect("event id");
+        let first = build_event_id("abcd", 100, 30617, &tags, "").expect("event id");
+        let second = build_event_id("abcd", 100, 30617, &tags, "").expect("event id");
         assert_eq!(first, second);
     }
 
@@ -884,20 +902,29 @@ mod tests {
 
     #[test]
     fn parse_event_message_parses_event() {
-        let message = WsMessage::Text(
-            json!(["EVENT", "sub-1", {"id":"evt-1","kind":1}]).to_string(),
-        );
-        let parsed = parse_event_message(&message).expect("parsed").expect("event");
+        let message =
+            WsMessage::Text(json!(["EVENT", "sub-1", {"id":"evt-1","kind":1}]).to_string());
+        let parsed = parse_event_message(&message)
+            .expect("parsed")
+            .expect("event");
         assert_eq!(parsed.0, "sub-1");
-        assert_eq!(parsed.1.get("id").and_then(|value| value.as_str()), Some("evt-1"));
+        assert_eq!(
+            parsed.1.get("id").and_then(|value| value.as_str()),
+            Some("evt-1")
+        );
     }
 
     #[test]
     fn parse_event_message_defaults_non_string_sub_id_to_empty_string() {
         let message = WsMessage::Text(json!(["EVENT", 123, {"id":"evt-1"}]).to_string());
-        let parsed = parse_event_message(&message).expect("parsed").expect("event");
+        let parsed = parse_event_message(&message)
+            .expect("parsed")
+            .expect("event");
         assert_eq!(parsed.0, "");
-        assert_eq!(parsed.1.get("id").and_then(|value| value.as_str()), Some("evt-1"));
+        assert_eq!(
+            parsed.1.get("id").and_then(|value| value.as_str()),
+            Some("evt-1")
+        );
     }
 
     #[test]
@@ -964,8 +991,7 @@ mod tests {
     #[test]
     fn load_secret_key_rejects_zero_secret_key() {
         let adapter = WebsocketRelayAdapter::new(
-            RelayAdapterConfig::new("wss://relay.example")
-                .with_secret_key("00".repeat(32)),
+            RelayAdapterConfig::new("wss://relay.example").with_secret_key("00".repeat(32)),
         );
         let err = adapter.load_secret_key().expect_err("invalid secret");
         assert_invalid_config_error(&err);
@@ -1009,7 +1035,10 @@ mod tests {
             content: String::new(),
             sig: "33".repeat(64),
         };
-        let publish_err = adapter.publish_event(&event).await.expect_err("connect error");
+        let publish_err = adapter
+            .publish_event(&event)
+            .await
+            .expect_err("connect error");
         assert_transport_error(&publish_err);
     }
 
@@ -1024,7 +1053,9 @@ mod tests {
         let server = tokio::spawn(async move {
             for connection_index in 0..2 {
                 let (tcp, _) = listener.accept().await.expect("accept");
-                let ws = tokio_tungstenite::accept_async(tcp).await.expect("handshake");
+                let ws = tokio_tungstenite::accept_async(tcp)
+                    .await
+                    .expect("handshake");
                 let (mut write, mut read) = ws.split();
 
                 let msg = read
@@ -1118,25 +1149,31 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_ok_handles_success_and_rejection() {
-        let mut accepted = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text("[\"OK\",\"evt\",true,\"accepted\"]".to_string()),
-        )]);
+        let mut accepted = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"OK\",\"evt\",true,\"accepted\"]".to_string(),
+            )),
+        ]);
         wait_for_ok(&mut accepted, "evt", Duration::from_secs(1))
             .await
             .expect("ok");
 
-        let mut rejected = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text("[\"OK\",\"evt\",false,\"denied\"]".to_string()),
-        )]);
+        let mut rejected = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"OK\",\"evt\",false,\"denied\"]".to_string(),
+            )),
+        ]);
         let err = wait_for_ok(&mut rejected, "evt", Duration::from_secs(1))
             .await
             .expect_err("rejected");
         assert_protocol_error(&err);
 
-        let mut rejected_unknown =
-            stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-                WsMessage::Text("[\"OK\",\"evt\",false]".to_string()),
-            )]);
+        let mut rejected_unknown = stream::iter(vec![Ok::<
+            WsMessage,
+            tokio_tungstenite::tungstenite::Error,
+        >(WsMessage::Text(
+            "[\"OK\",\"evt\",false]".to_string(),
+        ))]);
         let err = wait_for_ok(&mut rejected_unknown, "evt", Duration::from_secs(1))
             .await
             .expect_err("rejected");
@@ -1178,9 +1215,11 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_ok_reports_protocol_error_for_invalid_json() {
-        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text("{".to_string()),
-        )]);
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "{".to_string(),
+            )),
+        ]);
         let err = wait_for_ok(&mut stream, "evt", Duration::from_secs(1))
             .await
             .expect_err("invalid json");
@@ -1189,15 +1228,19 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_ok_reports_closed_stream() {
-        let mut empty = stream::iter(Vec::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>::new());
+        let mut empty = stream::iter(Vec::<
+            Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
+        >::new());
         let err = wait_for_ok(&mut empty, "evt", Duration::from_secs(1))
             .await
             .expect_err("closed");
         assert_transport_error(&err);
 
-        let mut failed = stream::iter(vec![Err::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            tokio_tungstenite::tungstenite::Error::ConnectionClosed,
-        )]);
+        let mut failed = stream::iter(vec![
+            Err::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+                tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+            ),
+        ]);
         let err = wait_for_ok(&mut failed, "evt", Duration::from_secs(1))
             .await
             .expect_err("stream error");
@@ -1206,7 +1249,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_ok_times_out_when_stream_never_yields() {
-        let mut pending = stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
+        let mut pending =
+            stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
         let err = wait_for_ok(&mut pending, "evt", Duration::from_millis(20))
             .await
             .expect_err("timeout");
@@ -1218,9 +1262,11 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_ok_with_zero_timeout_returns_immediately() {
-        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text("[\"OK\",\"evt\",true]".to_string()),
-        )]);
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"OK\",\"evt\",true]".to_string(),
+            )),
+        ]);
         let err = wait_for_ok(&mut stream, "evt", Duration::ZERO)
             .await
             .expect_err("timeout");
@@ -1232,16 +1278,20 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_event_handles_match_and_eose() {
-        let mut found = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text(json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string()),
-        )]);
+        let mut found = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string(),
+            )),
+        ]);
         wait_for_event(&mut found, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect("event");
 
-        let mut eose = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text("[\"EOSE\",\"sub-1\"]".to_string()),
-        )]);
+        let mut eose = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "[\"EOSE\",\"sub-1\"]".to_string(),
+            )),
+        ]);
         let err = wait_for_event(&mut eose, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect_err("missing event");
@@ -1286,9 +1336,11 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_event_reports_protocol_error_for_invalid_json() {
-        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text("{".to_string()),
-        )]);
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                "{".to_string(),
+            )),
+        ]);
         let err = wait_for_event(&mut stream, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect_err("invalid json");
@@ -1297,7 +1349,9 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_event_reports_closed_and_timeout_paths() {
-        let mut empty = stream::iter(Vec::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>::new());
+        let mut empty = stream::iter(Vec::<
+            Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
+        >::new());
         let closed = wait_for_event(&mut empty, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect_err("closed");
@@ -1306,15 +1360,18 @@ mod tests {
             RelayAdapterError::Transport(message) if message == "relay closed"
         ));
 
-        let mut failed = stream::iter(vec![Err::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            tokio_tungstenite::tungstenite::Error::ConnectionClosed,
-        )]);
+        let mut failed = stream::iter(vec![
+            Err::<WsMessage, tokio_tungstenite::tungstenite::Error>(
+                tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+            ),
+        ]);
         let err = wait_for_event(&mut failed, "sub-1", "evt-1", Duration::from_secs(1))
             .await
             .expect_err("stream error");
         assert!(err.to_string().starts_with("transport error:"));
 
-        let mut pending = stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
+        let mut pending =
+            stream::pending::<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>();
         let timeout_err = wait_for_event(&mut pending, "sub-1", "evt-1", Duration::from_millis(20))
             .await
             .expect_err("timeout");
@@ -1326,9 +1383,11 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_event_with_zero_timeout_returns_immediately() {
-        let mut stream = stream::iter(vec![Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(
-            WsMessage::Text(json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string()),
-        )]);
+        let mut stream = stream::iter(vec![
+            Ok::<WsMessage, tokio_tungstenite::tungstenite::Error>(WsMessage::Text(
+                json!(["EVENT", "sub-1", {"id":"evt-1"}]).to_string(),
+            )),
+        ]);
         let err = wait_for_event(&mut stream, "sub-1", "evt-1", Duration::ZERO)
             .await
             .expect_err("timeout");
