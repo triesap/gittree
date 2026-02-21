@@ -73,9 +73,9 @@ impl Default for ObservabilityConfig {
 }
 
 impl ObservabilityConfig {
-    pub fn from_env(service_name: impl Into<String>) -> Result<Self, ObservabilityConfigError> {
+    pub fn from_env(service_name: &str) -> Result<Self, ObservabilityConfigError> {
         let mut config = ObservabilityConfig::default();
-        config.service_name = service_name.into();
+        config.service_name = service_name.to_string();
         config.otlp_endpoint = env_string(ENV_OTLP_ENDPOINT);
         config.log_json = env_bool(ENV_LOG_JSON)?.unwrap_or(config.log_json);
         config.log_stdout = env_bool(ENV_LOG_STDOUT)?.unwrap_or(config.log_stdout);
