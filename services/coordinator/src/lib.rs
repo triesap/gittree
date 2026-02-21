@@ -274,7 +274,14 @@ where
 }
 
 pub async fn serve(config: CoordinatorConfig) -> Result<(), CoordinatorError> {
-    let _observability = init_observability()?;
+    serve_with_init(config, init_observability).await
+}
+
+async fn serve_with_init<I, O>(config: CoordinatorConfig, init: I) -> Result<(), CoordinatorError>
+where
+    I: FnOnce() -> Result<O, CoordinatorError>,
+{
+    let _observability = init()?;
     let repositories = build_repositories(&config)?;
     let forgejo = ForgejoClient::new(config.forgejo).map_err(CoordinatorError::Forgejo)?;
     let state = CoordinatorAppState {
@@ -322,7 +329,21 @@ where
         + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
-    let poll_delay = StdDuration::from_secs(OUTBOX_POLL_SECS);
+    publish_outbox_loop_with_delay(state, StdDuration::from_secs(OUTBOX_POLL_SECS)).await;
+}
+
+async fn publish_outbox_loop_with_delay<R, T>(
+    state: CoordinatorAppState<R, T>,
+    poll_delay: StdDuration,
+) where
+    R: RelayPublishRepository
+        + AnnouncementRepository
+        + RepoMappingRepository
+        + Send
+        + Sync
+        + 'static,
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
     loop {
         let now = OffsetDateTime::now_utc();
         let job = match state.repositories.claim_relay_publish(now).await {
@@ -994,13 +1015,14 @@ mod tests {
     };
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
-        AnnouncementRepository, InMemoryRepositories, RelayPublishJob, RepoMappingRepository,
-        StorageConfig, StorageError,
+        AnnouncementRepository, InMemoryRepositories, RelayPublishJob, RelayPublishRepository,
+        RelayPublishRequest, RepoMappingRepository, StorageConfig, StorageError,
     };
     use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration as StdDuration;
     use time::{Duration as TimeDuration, OffsetDateTime};
     use tower::ServiceExt;
 
@@ -1123,6 +1145,26 @@ mod tests {
             identifier: identifier.to_string(),
             attempt_count: 1,
             publish_after: OffsetDateTime::from_unix_timestamp(0).expect("ts"),
+        }
+    }
+
+    fn sample_publish_request(
+        relay_url: &str,
+        kind: u32,
+        tags: Vec<Vec<String>>,
+    ) -> RelayPublishRequest {
+        RelayPublishRequest {
+            relay_url: relay_url.to_string(),
+            event_id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 42,
+            kind,
+            tags,
+            content: "content".to_string(),
+            sig: "33".repeat(64),
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            identifier: "repo".to_string(),
         }
     }
 
@@ -2150,6 +2192,93 @@ mod tests {
         let _ = fs::remove_dir_all(temp_dir);
     }
 
+    #[tokio::test]
+    async fn serve_with_init_returns_bind_error_after_state_setup() {
+        let mut config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        config.bind = "invalid-bind".to_string();
+        let err = super::serve_with_init(config, || Ok(()))
+            .await
+            .expect_err("bind error");
+        assert!(matches!(err, super::CoordinatorError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_handles_empty_queue() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-publish-loop-empty");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories: repositories.clone(),
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay(
+            state,
+            StdDuration::from_millis(1),
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+
+        let pending = repositories
+            .pending_relay_publishes(&hex::decode("22".repeat(32)).expect("pubkey"), "repo", 1)
+            .await
+            .expect("pending");
+        assert_eq!(pending, 0);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_marks_failed_publish_for_invalid_relay_url() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        repositories
+            .enqueue_relay_publish(sample_publish_request(
+                "not-a-url",
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                vec![vec!["d".to_string(), "repo".to_string()]],
+            ))
+            .await
+            .expect("enqueue");
+
+        let temp_dir = temp_dir("gittree-publish-loop-failed");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories: repositories.clone(),
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay(
+            state,
+            StdDuration::from_millis(1),
+        ));
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        task.abort();
+        let _ = task.await;
+
+        let claim_time =
+            OffsetDateTime::now_utc() + TimeDuration::seconds(super::OUTBOX_RETRY_BASE_SECS + 5);
+        let claimed = repositories
+            .claim_relay_publish(claim_time)
+            .await
+            .expect("claim after retry");
+        let claimed = claimed.expect("failed publish should be re-queued");
+        assert!(claimed.attempt_count >= 2);
+        assert_eq!(claimed.relay_url, "not-a-url");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     #[test]
     fn env_helpers_restore_previous_values_for_set_and_unset_paths() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -2380,8 +2509,11 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
-        assert!(handle.prometheus_registry().is_some());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_unset_env_var("GITTREE_LOG_JSON", || {
+            let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+            assert!(handle.prometheus_registry().is_some());
+        });
     }
 
     #[test]
