@@ -411,6 +411,16 @@ mod tests {
         None
     }
 
+    fn database_url_or_skip_message(database_url: Option<String>) -> Option<String> {
+        match database_url {
+            Some(database_url) => Some(database_url),
+            None => {
+                eprintln!("skipping migrate db-backed run_with_config test: postgres unavailable");
+                None
+            }
+        }
+    }
+
     #[test]
     fn migration_test_database_candidates_dedupes_and_skips_empty_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -445,25 +455,35 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_config_applies_core_migrations_when_database_is_reachable() {
-        let Some(database_url) = first_reachable_migration_database_url().await else {
-            eprintln!("skipping migrate db-backed run_with_config test: postgres unavailable");
-            return;
-        };
-        let config = MigrationConfig {
-            storage: StorageConfig {
-                read_connection: database_url.clone(),
-                write_connection: Some(database_url),
-                max_connections: 5,
-                min_connections: 1,
-                idle_timeout_secs: None,
-                max_lifetime_secs: None,
-                application_name: Some("gittree-migrate-test".to_string()),
-            },
-        };
-        let version = run_with_config(&config)
-            .await
-            .expect("run migrations against reachable postgres");
-        assert!(version >= 0);
+        if let Some(database_url) =
+            database_url_or_skip_message(first_reachable_migration_database_url().await)
+        {
+            let config = MigrationConfig {
+                storage: StorageConfig {
+                    read_connection: database_url.clone(),
+                    write_connection: Some(database_url),
+                    max_connections: 5,
+                    min_connections: 1,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: Some("gittree-migrate-test".to_string()),
+                },
+            };
+            let version = run_with_config(&config)
+                .await
+                .expect("run migrations against reachable postgres");
+            assert!(version >= 0);
+        }
+    }
+
+    #[test]
+    fn database_url_or_skip_message_covers_some_and_none_paths() {
+        let database_url = "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string();
+        assert_eq!(
+            database_url_or_skip_message(Some(database_url.clone())),
+            Some(database_url)
+        );
+        assert!(database_url_or_skip_message(None).is_none());
     }
 
     #[test]
