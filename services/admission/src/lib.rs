@@ -1018,6 +1018,7 @@ mod tests {
     use super::AdmissionRequestPayload;
     use super::RateLimitConfig;
     use super::RateLimiter;
+    use super::RepoAddress;
     use super::StorageConfigError;
     use super::evaluate_request;
     use super::evaluate_request_cached;
@@ -1028,16 +1029,16 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
-    use gittree_config::{RelayCompatibilityMode, ServicesConfig};
+    use gittree_config::{RelayCompatibilityConfig, RelayCompatibilityMode, ServicesConfig};
     use gittree_core::EventFilter;
     use gittree_core::RepoAnnouncement;
     use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE, KIND_GITTREE_CONTROL};
-    use gittree_core::{RelayCapability, RelayCompatibilityReport};
+    use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoState};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRecord,
         RelayCompatibilityRepository, RepoAnnouncementRecord,
     };
-    use gittree_storage::{RelayProbeMetadata, StateRepository, StorageError};
+    use gittree_storage::{RelayProbeMetadata, StateRepository, StorageConfig, StorageError};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -1164,6 +1165,12 @@ mod tests {
                 .contains("admission storage config error")
         );
         assert!(std::error::Error::source(&storage_err).is_some());
+
+        let invalid_env = StorageConfigError::InvalidEnv {
+            key: "KEY",
+            value: "bad".to_string(),
+        };
+        assert_eq!(invalid_env.to_string(), "invalid env KEY: bad");
     }
 
     #[tokio::test]
@@ -1480,6 +1487,114 @@ mod tests {
             internal_response.status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+
+        let internal_from_core = super::AdmissionHttpError::from(AdmissionError::Core(
+            gittree_core::CoreError::InvalidTag {
+                tag: "a",
+                value: "bad".to_string(),
+            },
+        ))
+        .into_response();
+        assert_eq!(internal_from_core.status(), StatusCode::BAD_REQUEST);
+
+        let internal_from_storage =
+            super::AdmissionHttpError::from(AdmissionError::Storage(StorageError::Internal {
+                message: "boom".to_string(),
+            }))
+            .into_response();
+        assert_eq!(
+            internal_from_storage.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let internal_from_config = super::AdmissionHttpError::from(AdmissionError::Config(
+            AdmissionConfigError::Storage(StorageConfigError::MissingEnv("MISSING")),
+        ))
+        .into_response();
+        assert_eq!(
+            internal_from_config.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let internal_from_obs_config =
+            super::AdmissionHttpError::from(AdmissionError::ObservabilityConfig(
+                gittree_observability::ObservabilityConfigError::InvalidEnv {
+                    key: "GITTREE_LOG_JSON",
+                    value: "invalid".to_string(),
+                },
+            ))
+            .into_response();
+        assert_eq!(
+            internal_from_obs_config.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let internal_from_obs = super::AdmissionHttpError::from(AdmissionError::Observability(
+            gittree_observability::ObservabilityError::SubscriberInit("dup".to_string()),
+        ))
+        .into_response();
+        assert_eq!(
+            internal_from_obs.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn build_repositories_covers_success_and_invalid_pool_settings() {
+        let mut config = AdmissionConfig {
+            bind: "127.0.0.1:0".to_string(),
+            compatibility: RelayCompatibilityConfig::default(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 4,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            control_admin_keys: Vec::new(),
+        };
+        let _ = super::build_repositories(&config).expect("repositories");
+
+        config.storage.max_connections = 1;
+        config.storage.min_connections = 2;
+        let err = super::build_repositories(&config).expect_err("invalid pool settings");
+        assert!(matches!(err, AdmissionError::Storage(_)));
+    }
+
+    #[test]
+    fn init_observability_reports_invalid_env() {
+        with_env_var("GITTREE_LOG_JSON", "not-bool", || {
+            let err = super::init_observability().expect_err("invalid observability env");
+            assert!(matches!(err, AdmissionError::ObservabilityConfig(_)));
+        });
+    }
+
+    #[test]
+    fn serve_returns_bind_error_for_invalid_bind() {
+        with_env_removed("GITTREE_LOG_JSON", || {
+            let config = AdmissionConfig {
+                bind: "invalid-bind".to_string(),
+                compatibility: RelayCompatibilityConfig::default(),
+                storage: StorageConfig {
+                    read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                    write_connection: None,
+                    max_connections: 4,
+                    min_connections: 2,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: None,
+                },
+                control_admin_keys: Vec::new(),
+            };
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let result = runtime.block_on(super::serve(config));
+            assert!(matches!(
+                result,
+                Err(AdmissionError::Serve(_)) | Err(AdmissionError::Observability(_))
+            ));
+        });
     }
 
     #[test]
@@ -1875,6 +1990,51 @@ mod tests {
         let resolved =
             super::repo_address_from_filters(&[invalid_filter, valid_filter]).expect("resolved");
         assert_eq!(resolved.identifier, "repo");
+
+        let address_with_empty_tag = super::repo_address_from_tags(&[
+            Vec::new(),
+            vec!["a".to_string(), format!("30617:{}:repo", hex_32(0x22))],
+        ])
+        .expect("address with empty tag ignored");
+        assert_eq!(address_with_empty_tag.identifier, "repo");
+    }
+
+    #[tokio::test]
+    async fn repo_exists_covers_invalid_hex_and_state_lookup_paths() {
+        let storage = InMemoryRepositories::new();
+        let invalid = RepoAddress {
+            pubkey: "nothex".to_string(),
+            identifier: "repo".to_string(),
+        };
+        let err = super::repo_exists(&storage, &invalid)
+            .await
+            .expect_err("invalid pubkey");
+        assert!(matches!(
+            err,
+            StorageError::InvalidHex {
+                field: "pubkey",
+                ..
+            }
+        ));
+
+        let pubkey = hex_32(0x33);
+        let address = RepoAddress {
+            pubkey: pubkey.clone(),
+            identifier: "repo".to_string(),
+        };
+        let exists = super::repo_exists(&storage, &address)
+            .await
+            .expect("repo exists");
+        assert!(!exists);
+
+        let announcement = sample_announcement("repo");
+        let record = RepoAnnouncementRecord::new(&hex_32(0x34), &pubkey, 1, &announcement)
+            .expect("announcement");
+        storage.insert_announcement(record).await.expect("insert");
+        let exists = super::repo_exists(&storage, &address)
+            .await
+            .expect("repo exists after insert");
+        assert!(exists);
     }
 
     #[derive(Debug)]
@@ -1953,6 +2113,58 @@ mod tests {
                 message: "fail".to_string(),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn failing_storage_trait_methods_return_internal_errors() {
+        let storage = FailingStorage;
+        let pubkey = vec![0u8; 32];
+        let announcement = RepoAnnouncementRecord::new(
+            &hex_32(0x41),
+            &hex_32(0x42),
+            1,
+            &sample_announcement("repo"),
+        )
+        .expect("announcement");
+        assert!(matches!(
+            storage.insert_announcement(announcement).await,
+            Err(StorageError::Internal { .. })
+        ));
+        assert!(matches!(
+            storage.list_announcements(&pubkey, "repo").await,
+            Err(StorageError::Internal { .. })
+        ));
+        assert!(matches!(
+            storage.latest_announcement(&pubkey, "repo").await,
+            Err(StorageError::Internal { .. })
+        ));
+
+        let mut state_map = std::collections::HashMap::new();
+        state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state_map.insert(
+            "refs/heads/main".to_string(),
+            "1111111111111111111111111111111111111111".to_string(),
+        );
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+        let state = gittree_storage::RepoStateRecord::new(&hex_32(0x43), &hex_32(0x42), 1, &state)
+            .expect("state");
+        assert!(matches!(
+            storage.insert_state(state).await,
+            Err(StorageError::Internal { .. })
+        ));
+        assert!(matches!(
+            storage.latest_state(&pubkey, "repo").await,
+            Err(StorageError::Internal { .. })
+        ));
+
+        let compat = sample_compat_record("wss://relay.example", true);
+        assert!(matches!(
+            storage.upsert_relay_compatibility(compat).await,
+            Err(StorageError::Internal { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2105,6 +2317,133 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.inner.relay_compatibility(relay_url).await
         }
+    }
+
+    #[tokio::test]
+    async fn counting_storage_trait_methods_cover_passthrough_paths() {
+        let storage = CountingStorage::default();
+        let pubkey_hex = hex_32(0x51);
+        let pubkey_bytes = hex::decode(&pubkey_hex).expect("pubkey bytes");
+        let announcement = RepoAnnouncementRecord::new(
+            &hex_32(0x52),
+            &pubkey_hex,
+            1,
+            &sample_announcement("repo"),
+        )
+        .expect("announcement");
+        storage
+            .insert_announcement(announcement.clone())
+            .await
+            .expect("insert announcement");
+        let announcements = storage
+            .list_announcements(&pubkey_bytes, "repo")
+            .await
+            .expect("list announcements");
+        assert_eq!(announcements.len(), 1);
+
+        let mut state_map = std::collections::HashMap::new();
+        state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state_map.insert(
+            "refs/heads/main".to_string(),
+            "1111111111111111111111111111111111111111".to_string(),
+        );
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+        let state = gittree_storage::RepoStateRecord::new(&hex_32(0x53), &pubkey_hex, 1, &state)
+            .expect("state");
+        storage.insert_state(state).await.expect("insert state");
+        let _ = storage
+            .latest_state(&pubkey_bytes, "repo")
+            .await
+            .expect("latest state");
+        assert!(storage.calls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn admission_filter_and_decision_payload_conversion_cover_all_variants() {
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert("a".to_string(), vec!["30617:11:repo".to_string()]);
+        let admission_filter = super::AdmissionFilter {
+            ids: vec!["id".to_string()],
+            kinds: vec![1],
+            authors: vec!["author".to_string()],
+            tags: tags.clone(),
+            limit: Some(10),
+        };
+        let event_filter: EventFilter = admission_filter.clone().into();
+        assert_eq!(event_filter.ids, vec!["id".to_string()]);
+        let round_trip = super::AdmissionFilter::from(&event_filter);
+        assert_eq!(round_trip.tags, tags);
+
+        assert!(matches!(
+            super::AdmissionDecisionPayload::from(AdmissionDecision::Accept),
+            super::AdmissionDecisionPayload::Accept
+        ));
+        assert!(matches!(
+            super::AdmissionDecisionPayload::from(AdmissionDecision::Reject {
+                reason: "nope".to_string()
+            }),
+            super::AdmissionDecisionPayload::Reject { .. }
+        ));
+        assert!(matches!(
+            super::AdmissionDecisionPayload::from(AdmissionDecision::RequiresRelatedEvents {
+                filters: vec![event_filter]
+            }),
+            super::AdmissionDecisionPayload::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[test]
+    fn rate_limiter_hit_limit_resets_after_window_rollover() {
+        let limiter = RateLimiter::new(RateLimitConfig::new(1, 1, Duration::from_secs(60)));
+        {
+            let mut counters = limiter
+                .pubkey_counters
+                .write()
+                .expect("pubkey counter lock");
+            counters.insert(
+                "pubkey".to_string(),
+                super::RateLimitCounter {
+                    count: 1,
+                    window_start: std::time::Instant::now() - Duration::from_secs(120),
+                },
+            );
+        }
+        assert!(!limiter.hit_limit(&limiter.pubkey_counters, "pubkey", 1));
+        assert!(limiter.hit_limit(&limiter.pubkey_counters, "pubkey", 1));
+    }
+
+    #[test]
+    fn admission_cache_evict_if_needed_clears_when_disabled() {
+        let cache = AdmissionCache::new(AdmissionCacheConfig {
+            ttl: None,
+            max_entries: 0,
+        });
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "repo".to_string(),
+            super::AdmissionCacheEntry {
+                value: AdmissionDecision::Accept,
+                stored_at: std::time::Instant::now(),
+            },
+        );
+        cache.evict_if_needed(&mut map);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn restore_env_var_covers_some_and_none_paths() {
+        with_env_scope(|| {
+            restore_env_var("GITTREE_ADMISSION_TEST_ENV", Some("value".to_string()));
+            assert_eq!(
+                std::env::var("GITTREE_ADMISSION_TEST_ENV").ok().as_deref(),
+                Some("value")
+            );
+            restore_env_var("GITTREE_ADMISSION_TEST_ENV", None);
+            assert!(std::env::var("GITTREE_ADMISSION_TEST_ENV").is_err());
+        });
     }
 
     #[tokio::test]
