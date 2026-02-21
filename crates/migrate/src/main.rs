@@ -69,13 +69,13 @@ fn handle_main_outcome(
             let _ = writeln!(stdout, "migrations complete: version {version}");
             0
         }
-        Err(MainError::Observability(message)) => {
-            let _ = writeln!(stderr, "migration observability failed: {message}");
+        Err(err @ MainError::Observability(_)) => {
+            let _ = writeln!(stderr, "migration observability failed: {err}");
             1
         }
-        Err(MainError::Migration(message)) => {
-            tracing::error!(error = %message, "migration failed");
-            let _ = writeln!(stderr, "migration failed: {message}");
+        Err(err @ MainError::Migration(_)) => {
+            tracing::error!(error = %err, "migration failed");
+            let _ = writeln!(stderr, "migration failed: {err}");
             1
         }
     }
