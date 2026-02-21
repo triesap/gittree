@@ -150,8 +150,8 @@ impl std::error::Error for HookServiceError {
 }
 
 pub fn run_hook_from_env(mode: HookMode) -> Result<(), HookServiceError> {
-    let config =
-        HookConfig::from_env_with_overrides(Some(mode), None, None).map_err(HookServiceError::Config)?;
+    let config = HookConfig::from_env_with_overrides(Some(mode), None, None)
+        .map_err(HookServiceError::Config)?;
     let stdin_file = env_path(ENV_HOOK_STDIN_FILE);
     run_hook(config, stdin_file.as_deref())
 }
@@ -170,12 +170,13 @@ pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), Hoo
             return Err(HookServiceError::Parse(err));
         }
     };
-    let repo_path = std::env::var_os(ENV_HOOK_REPO_PATH)
-        .or_else(|| std::env::var_os("GIT_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir().map_err(|err| {
-            HookServiceError::Core(format!("failed to read repo path: {err}"))
-        })?);
+    let repo_path =
+        std::env::var_os(ENV_HOOK_REPO_PATH)
+            .or_else(|| std::env::var_os("GIT_DIR"))
+            .map(PathBuf::from)
+            .unwrap_or(std::env::current_dir().map_err(|err| {
+                HookServiceError::Core(format!("failed to read repo path: {err}"))
+            })?);
     match config.mode {
         HookMode::PreReceive => {
             let fetcher = HttpStateFetcher::new(config.state_url, Duration::from_secs(5))?;
@@ -208,7 +209,10 @@ fn env_path(key: &str) -> Option<PathBuf> {
 fn read_input(stdin_file: Option<&Path>) -> Result<String, HookServiceError> {
     if let Some(path) = stdin_file {
         std::fs::read_to_string(path).map_err(|err| {
-            HookServiceError::Core(format!("failed to read stdin file {}: {err}", path.display()))
+            HookServiceError::Core(format!(
+                "failed to read stdin file {}: {err}",
+                path.display()
+            ))
         })
     } else {
         let mut input = String::new();
@@ -297,12 +301,17 @@ pub fn parse_forgejo_push(payload: &str) -> Result<ForgejoPushEvent, HookError> 
     ensure_non_empty("before", &parsed.before)?;
     ensure_non_empty("after", &parsed.after)?;
     ensure_non_empty("repository.name", &parsed.repository.name)?;
-    ensure_non_empty("repository.owner.username", &parsed.repository.owner.username)?;
+    ensure_non_empty(
+        "repository.owner.username",
+        &parsed.repository.owner.username,
+    )?;
 
-    let full_name = parsed
-        .repository
-        .full_name
-        .unwrap_or_else(|| format!("{}/{}", parsed.repository.owner.username, parsed.repository.name));
+    let full_name = parsed.repository.full_name.unwrap_or_else(|| {
+        format!(
+            "{}/{}",
+            parsed.repository.owner.username, parsed.repository.name
+        )
+    });
 
     if !full_name.contains('/') {
         return Err(HookError::InvalidPayload(format!(
@@ -348,18 +357,14 @@ pub fn verify_forgejo_signature(
     let signature = signature_header
         .strip_prefix("sha256=")
         .unwrap_or(signature_header);
-    let provided = hex::decode(signature).map_err(|_| {
-        HookError::InvalidSignature("invalid signature encoding".to_string())
-    })?;
+    let provided = hex::decode(signature)
+        .map_err(|_| HookError::InvalidSignature("invalid signature encoding".to_string()))?;
 
-    let mut mac =
-        hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| {
-            HookError::InvalidSignature("invalid signature secret".to_string())
-        })?;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| HookError::InvalidSignature("invalid signature secret".to_string()))?;
     mac.update(payload);
-    mac.verify_slice(&provided).map_err(|_| {
-        HookError::InvalidSignature("signature mismatch".to_string())
-    })?;
+    mac.verify_slice(&provided)
+        .map_err(|_| HookError::InvalidSignature("signature mismatch".to_string()))?;
     Ok(())
 }
 
@@ -588,9 +593,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::read_input;
-    use super::env_path;
-    use super::validate_input_source;
     use super::HookConfigError;
     use super::HookError;
     use super::HookMode;
@@ -599,20 +601,26 @@ mod tests {
     use super::PostReceiveNotifier;
     use super::PostReceivePayload;
     use super::StateFetcher;
+    use super::env_path;
     use super::evaluate_pre_receive;
     use super::handle_forgejo_push;
     use super::handle_post_receive;
     use super::parse_forgejo_push;
     use super::parse_updates;
+    use super::read_input;
+    use super::validate_input_source;
     use super::verify_forgejo_signature;
-    use hmac::Mac;
     use gittree_core::RepoMapping;
     use gittree_core::RepoState;
+    use hmac::Mac;
     use std::collections::HashMap;
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const SAMPLE_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -648,7 +656,57 @@ mod tests {
         }
     }
 
-    fn start_mock_http_server(status: &str, content_type: &str, body: &str) -> (String, std::thread::JoinHandle<()>) {
+    fn with_env_vars(vars: &[(&str, Option<&str>)], run: impl FnOnce()) {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous: Vec<(&str, Option<std::ffi::OsString>)> = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+
+        for (key, value) in vars {
+            match value {
+                Some(value) => {
+                    // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                    unsafe { std::env::set_var(key, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                    unsafe { std::env::remove_var(key) };
+                }
+            }
+        }
+
+        run();
+
+        for (key, previous) in previous {
+            match previous {
+                Some(value) => {
+                    // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                    unsafe { std::env::set_var(key, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                    unsafe { std::env::remove_var(key) };
+                }
+            }
+        }
+    }
+
+    fn write_updates_file(contents: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("gittree-hook-updates-{nanos}.txt"));
+        std::fs::write(&path, contents).expect("write updates file");
+        path
+    }
+
+    fn start_mock_http_server(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (String, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("server addr");
         let status = status.to_string();
@@ -751,14 +809,21 @@ mod tests {
 
         let config_wrapped =
             HookConfigError::Config(gittree_config::ConfigError::MissingEnv("STATE"));
+        assert!(config_wrapped.to_string().contains("hook config error:"));
         assert!(config_wrapped.source().is_some());
 
         let config_service = HookServiceError::Config(HookConfigError::MissingEnv("STATE"));
-        assert_eq!(config_service.to_string(), "hook config error: missing env STATE");
+        assert_eq!(
+            config_service.to_string(),
+            "hook config error: missing env STATE"
+        );
         assert!(config_service.source().is_some());
 
         let parse_service = HookServiceError::Parse(HookError::InvalidPayload("bad".to_string()));
-        assert_eq!(parse_service.to_string(), "hook parse error: invalid payload: bad");
+        assert_eq!(
+            parse_service.to_string(),
+            "hook parse error: invalid payload: bad"
+        );
         assert!(parse_service.source().is_some());
 
         let core_service = HookServiceError::Core("boom".to_string());
@@ -772,6 +837,59 @@ mod tests {
         let reject_service = HookServiceError::Reject("nope".to_string());
         assert_eq!(reject_service.to_string(), "nope");
         assert!(reject_service.source().is_none());
+    }
+
+    #[test]
+    fn with_env_var_restores_existing_values() {
+        // SAFETY: dedicated test key avoids collisions with non-test code.
+        unsafe { std::env::set_var("GITTREE_TEST_RESTORE", "before") };
+        with_env_var("GITTREE_TEST_RESTORE", Some("after"), || {
+            assert_eq!(
+                std::env::var("GITTREE_TEST_RESTORE").ok().as_deref(),
+                Some("after")
+            );
+        });
+        assert_eq!(
+            std::env::var("GITTREE_TEST_RESTORE").ok().as_deref(),
+            Some("before")
+        );
+        // SAFETY: dedicated test key cleanup.
+        unsafe { std::env::remove_var("GITTREE_TEST_RESTORE") };
+    }
+
+    #[test]
+    fn hook_config_from_env_uses_defaults_and_overrides() {
+        with_env_vars(
+            &[
+                (super::ENV_STATE_URL, Some("http://127.0.0.1:8082")),
+                (super::ENV_HOOK_MODE, Some("pre-receive")),
+                (super::ENV_SYNC_URL, None),
+            ],
+            || {
+                let config = super::HookConfig::from_env().expect("config");
+                assert_eq!(config.state_url, "http://127.0.0.1:8082");
+                assert_eq!(config.mode, HookMode::PreReceive);
+                assert!(config.sync_url.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn hook_config_post_receive_requires_sync_url() {
+        with_env_vars(
+            &[
+                (super::ENV_STATE_URL, Some("http://127.0.0.1:8082")),
+                (super::ENV_HOOK_MODE, Some("post-receive")),
+                (super::ENV_SYNC_URL, None),
+            ],
+            || {
+                let err = super::HookConfig::from_env().expect_err("missing sync url");
+                assert!(matches!(
+                    err,
+                    HookConfigError::MissingEnv(super::ENV_SYNC_URL)
+                ));
+            },
+        );
     }
 
     #[test]
@@ -819,6 +937,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_forgejo_push_derives_full_name_when_absent() {
+        let payload = r#"
+        {
+            "ref": "refs/heads/main",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "1111111111111111111111111111111111111111",
+            "repository": {
+                "name": "repo",
+                "owner": { "username": "owner" }
+            }
+        }
+        "#;
+        let event = parse_forgejo_push(payload).expect("event");
+        assert_eq!(event.full_name, "owner/repo");
+    }
+
+    #[test]
     fn parse_forgejo_push_rejects_missing_fields() {
         let payload = r#"
         {
@@ -857,8 +992,7 @@ mod tests {
     fn verify_forgejo_signature_accepts_valid() {
         let secret = "secret";
         let payload = b"{\"ok\":true}";
-        let mut mac =
-            hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("mac");
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("mac");
         mac.update(payload);
         let signature = hex::encode(mac.finalize().into_bytes());
         let header = format!("sha256={signature}");
@@ -967,8 +1101,9 @@ mod tests {
         let updates = vec![super::RefUpdate {
             old: "0".repeat(40),
             new: "1".repeat(40),
-            reference: "refs/nostr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_string(),
+            reference:
+                "refs/nostr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
         }];
         let repo_path = std::path::Path::new("/tmp")
             .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
@@ -993,10 +1128,120 @@ mod tests {
     }
 
     #[test]
+    fn run_hook_from_env_pre_receive_accepts_nostr_updates() {
+        let updates = format!(
+            "{} {} refs/nostr/{}\n",
+            "0".repeat(40),
+            "1".repeat(40),
+            "a".repeat(64)
+        );
+        let updates_path = write_updates_file(&updates);
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        with_env_vars(
+            &[
+                (super::ENV_STATE_URL, Some("http://127.0.0.1:8082")),
+                (
+                    super::ENV_HOOK_REPO_PATH,
+                    Some(repo_path.to_str().expect("repo path")),
+                ),
+                (
+                    super::ENV_HOOK_STDIN_FILE,
+                    Some(updates_path.to_str().expect("updates path")),
+                ),
+            ],
+            || {
+                super::run_hook_from_env(HookMode::PreReceive).expect("run hook");
+            },
+        );
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_post_receive_requires_sync_url() {
+        let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let updates_path = write_updates_file(&updates);
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: None,
+            mode: HookMode::PostReceive,
+        };
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            || {
+                let err = super::run_hook(config, Some(&updates_path)).expect_err("missing sync");
+                assert!(matches!(
+                    err,
+                    HookServiceError::Config(HookConfigError::MissingEnv(super::ENV_SYNC_URL))
+                ));
+            },
+        );
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_post_receive_ignores_notifier_errors() {
+        let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let updates_path = write_updates_file(&updates);
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let (sync_url, handle) =
+            start_mock_http_server("500 Internal Server Error", "text/plain", "nope");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: Some(sync_url),
+            mode: HookMode::PostReceive,
+        };
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            || {
+                super::run_hook(config, Some(&updates_path)).expect("run hook");
+            },
+        );
+        handle.join().expect("server join");
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_uses_current_dir_when_repo_env_missing() {
+        let updates = format!(
+            "{} {} refs/nostr/{}\n",
+            "0".repeat(40),
+            "1".repeat(40),
+            "a".repeat(64)
+        );
+        let updates_path = write_updates_file(&updates);
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: None,
+            mode: HookMode::PreReceive,
+        };
+        with_env_vars(
+            &[(super::ENV_HOOK_REPO_PATH, None), ("GIT_DIR", None)],
+            || {
+                let err = super::run_hook(config, Some(&updates_path)).expect_err("invalid cwd");
+                assert!(matches!(err, HookServiceError::Core(_)));
+            },
+        );
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
     fn http_state_fetcher_returns_none_for_not_found() {
         let (base_url, handle) = start_mock_http_server("404 Not Found", "text/plain", "missing");
-        let fetcher =
-            super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1)).expect("fetcher");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
+            .expect("fetcher");
         let state = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect("state fetch");
@@ -1008,8 +1253,8 @@ mod tests {
     fn http_state_fetcher_returns_error_on_non_success() {
         let (base_url, handle) =
             start_mock_http_server("500 Internal Server Error", "text/plain", "boom");
-        let fetcher =
-            super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1)).expect("fetcher");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
+            .expect("fetcher");
         let err = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect_err("state should fail");
@@ -1024,17 +1269,14 @@ mod tests {
             "11".repeat(20)
         );
         let (base_url, handle) = start_mock_http_server("200 OK", "application/json", &body);
-        let fetcher =
-            super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1)).expect("fetcher");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
+            .expect("fetcher");
         let state = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect("state fetch")
             .expect("state payload");
         assert_eq!(state.identifier, "repo");
-        assert_eq!(
-            state.state.get("refs/heads/main"),
-            Some(&"11".repeat(20))
-        );
+        assert_eq!(state.state.get("refs/heads/main"), Some(&"11".repeat(20)));
         handle.join().expect("server join");
     }
 
@@ -1042,8 +1284,9 @@ mod tests {
     fn http_post_receive_notifier_reports_error_status() {
         let (endpoint, handle) =
             start_mock_http_server("500 Internal Server Error", "text/plain", "nope");
-        let notifier = super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
-            .expect("notifier");
+        let notifier =
+            super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
+                .expect("notifier");
         let payload = PostReceivePayload {
             pubkey: "11".repeat(32),
             identifier: "repo".to_string(),
@@ -1061,8 +1304,9 @@ mod tests {
     #[test]
     fn http_post_receive_notifier_accepts_success_status() {
         let (endpoint, handle) = start_mock_http_server("200 OK", "application/json", "{}");
-        let notifier = super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
-            .expect("notifier");
+        let notifier =
+            super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
+                .expect("notifier");
         let payload = PostReceivePayload {
             pubkey: "11".repeat(32),
             identifier: "repo".to_string(),
