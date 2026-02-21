@@ -151,6 +151,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, MigrationConfigError> {
 mod tests {
     use super::{MigrationConfig, MigrationConfigError, MigrationError, run, run_with_config};
     use gittree_storage::{StorageConfig, StorageError};
+    use sqlx::{Connection, PgConnection};
     use std::error::Error;
     use std::sync::Mutex;
 
@@ -358,6 +359,62 @@ mod tests {
             .await
             .expect_err("connect failure");
         assert!(matches!(connect_err, MigrationError::Storage(_)));
+    }
+
+    fn migration_test_database_candidates() -> Vec<String> {
+        let mut candidates = Vec::new();
+        let mut push_unique = |value: Option<String>| {
+            if let Some(value) = value {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                if candidates.iter().any(|candidate| candidate == trimmed) {
+                    return;
+                }
+                candidates.push(trimmed.to_string());
+            }
+        };
+        push_unique(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok());
+        push_unique(std::env::var(super::ENV_STORAGE_WRITE_URL).ok());
+        push_unique(std::env::var(super::ENV_STORAGE_READ_URL).ok());
+        push_unique(Some(
+            "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+        ));
+        candidates
+    }
+
+    async fn first_reachable_migration_database_url() -> Option<String> {
+        for candidate in migration_test_database_candidates() {
+            if let Ok(connection) = PgConnection::connect(&candidate).await {
+                let _ = connection.close().await;
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn run_with_config_applies_core_migrations_when_database_is_reachable() {
+        let Some(database_url) = first_reachable_migration_database_url().await else {
+            eprintln!("skipping migrate db-backed run_with_config test: postgres unavailable");
+            return;
+        };
+        let config = MigrationConfig {
+            storage: StorageConfig {
+                read_connection: database_url.clone(),
+                write_connection: Some(database_url),
+                max_connections: 5,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: Some("gittree-migrate-test".to_string()),
+            },
+        };
+        let version = run_with_config(&config)
+            .await
+            .expect("run migrations against reachable postgres");
+        assert!(version >= 0);
     }
 
     #[test]
