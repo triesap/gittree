@@ -1159,6 +1159,53 @@ mod tests {
     }
 
     #[test]
+    fn run_hook_pre_receive_returns_parse_errors() {
+        let updates_path = write_updates_file("invalid\n");
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: None,
+            mode: HookMode::PreReceive,
+        };
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            || {
+                let err = super::run_hook(config, Some(&updates_path)).expect_err("parse error");
+                assert!(matches!(err, HookServiceError::Parse(_)));
+            },
+        );
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_post_receive_ignores_parse_errors() {
+        let updates_path = write_updates_file("invalid\n");
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: Some("http://127.0.0.1:8088".to_string()),
+            mode: HookMode::PostReceive,
+        };
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            || {
+                super::run_hook(config, Some(&updates_path)).expect("post receive parse errors");
+            },
+        );
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
     fn run_hook_post_receive_requires_sync_url() {
         let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
         let updates_path = write_updates_file(&updates);
@@ -1207,6 +1254,37 @@ mod tests {
             )],
             || {
                 super::run_hook(config, Some(&updates_path)).expect("run hook");
+            },
+        );
+        handle.join().expect("server join");
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_pre_receive_surfaces_reject_reason() {
+        let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let updates_path = write_updates_file(&updates);
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let body = format!(
+            "{{\"identifier\":\"repo\",\"state\":{{\"HEAD\":\"ref: refs/heads/main\",\"refs/heads/main\":\"{}\"}}}}",
+            "f".repeat(40)
+        );
+        let (state_url, handle) = start_mock_http_server("200 OK", "application/json", &body);
+        let config = super::HookConfig {
+            state_url,
+            sync_url: None,
+            mode: HookMode::PreReceive,
+        };
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            || {
+                let err = super::run_hook(config, Some(&updates_path)).expect_err("reject");
+                assert!(matches!(err, HookServiceError::Reject(_)));
             },
         );
         handle.join().expect("server join");
