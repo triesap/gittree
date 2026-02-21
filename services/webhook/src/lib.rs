@@ -6,7 +6,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gittree_config::{ConfigError, ServicesConfig};
-use gittree_git_hook::{PostReceivePayload, RefUpdatePayload, parse_forgejo_push, verify_forgejo_signature};
+use gittree_git_hook::{
+    PostReceivePayload, RefUpdatePayload, parse_forgejo_push, verify_forgejo_signature,
+};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{PostgresRepositories, RepoMappingRepository, StorageConfig, StorageError};
 use serde::{Deserialize, Serialize};
@@ -38,8 +40,7 @@ pub struct WebhookConfig {
 
 impl WebhookConfig {
     pub fn from_env() -> Result<Self, WebhookConfigError> {
-        let services =
-            ServicesConfig::from_env_validated().map_err(WebhookConfigError::Config)?;
+        let services = ServicesConfig::from_env_validated().map_err(WebhookConfigError::Config)?;
         let storage = storage_from_env()?;
         let sync_url = env_required_string(ENV_SYNC_URL)?;
         let forgejo_secret = env_required_string(ENV_FORGEJO_WEBHOOK_SECRET)?;
@@ -293,8 +294,7 @@ where
 pub async fn serve(config: WebhookConfig) -> Result<(), WebhookError> {
     let _observability = init_observability()?;
     let repositories = build_repositories(&config)?;
-    let notifier = HttpSyncNotifier::new(config.sync_url.clone())
-        .map_err(WebhookError::Notify)?;
+    let notifier = HttpSyncNotifier::new(config.sync_url.clone()).map_err(WebhookError::Notify)?;
     let state = WebhookAppState {
         repositories: Arc::new(repositories),
         notifier,
@@ -347,9 +347,7 @@ impl IntoResponse for WebhookHttpError {
             WebhookHttpError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
             WebhookHttpError::NotFound(message) => (StatusCode::NOT_FOUND, message),
             WebhookHttpError::Upstream(message) => (StatusCode::BAD_GATEWAY, message),
-            WebhookHttpError::Internal(message) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, message)
-            }
+            WebhookHttpError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
         };
         (status, message).into_response()
     }
@@ -369,8 +367,8 @@ where
         .map_err(|err| WebhookHttpError::Unauthorized(err.to_string()))?;
     let payload = std::str::from_utf8(&body)
         .map_err(|_| WebhookHttpError::BadRequest("invalid payload".to_string()))?;
-    let event = parse_forgejo_push(payload)
-        .map_err(|err| WebhookHttpError::BadRequest(err.to_string()))?;
+    let event =
+        parse_forgejo_push(payload).map_err(|err| WebhookHttpError::BadRequest(err.to_string()))?;
     let mapping = state
         .repositories
         .mapping_by_forgejo(&event.owner, &event.repo)
@@ -432,15 +430,16 @@ mod tests {
     use gittree_core::RepoMapping;
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
-        InMemoryRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig,
-        StorageError,
+        InMemoryRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
     };
     use hmac::Mac;
+    use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::error::Error;
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Clone, Default)]
     struct MockNotifier {
@@ -529,11 +528,7 @@ mod tests {
         hex::encode(mac.finalize().into_bytes())
     }
 
-    fn signed_request(
-        payload: &[u8],
-        signature_header: &str,
-        signature: &str,
-    ) -> Request<Body> {
+    fn signed_request(payload: &[u8], signature_header: &str, signature: &str) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri("/")
@@ -596,8 +591,24 @@ mod tests {
         }
     }
 
+    fn with_removed_env_var<F: FnOnce()>(key: &str, f: F) {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        f();
+        if let Some(old) = previous {
+            // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+            unsafe {
+                std::env::set_var(key, old);
+            }
+        }
+    }
+
     #[test]
     fn config_loads_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
@@ -616,6 +627,109 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_reports_missing_and_invalid_required_env_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_removed_env_var("GITTREE_STORAGE_READ_URL", || {
+            let err = WebhookConfig::from_env().expect_err("missing read url");
+            assert!(matches!(
+                err,
+                WebhookConfigError::Storage(StorageConfigError::MissingEnv(
+                    "GITTREE_STORAGE_READ_URL"
+                ))
+            ));
+        });
+
+        with_env_var(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_SYNC_URL", "   ", || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                        let err = WebhookConfig::from_env().expect_err("invalid sync url");
+                        assert!(matches!(
+                            err,
+                            WebhookConfigError::InvalidEnv {
+                                key: "GITTREE_SYNC_URL",
+                                ..
+                            }
+                        ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_reports_invalid_storage_numeric_and_bounds() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "nope", || {
+                            let err =
+                                WebhookConfig::from_env().expect_err("invalid max connections");
+                            assert!(matches!(
+                                err,
+                                WebhookConfigError::Storage(StorageConfigError::InvalidEnv {
+                                    key: "GITTREE_STORAGE_MAX_CONNECTIONS",
+                                    ..
+                                })
+                            ));
+                        });
+                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", || {
+                            with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", || {
+                                let err =
+                                    WebhookConfig::from_env().expect_err("invalid pool bounds");
+                                assert!(matches!(
+                                    err,
+                                    WebhookConfigError::Storage(StorageConfigError::InvalidConfig(
+                                        _
+                                    ))
+                                ));
+                            });
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn with_env_var_restores_existing_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+        unsafe {
+            std::env::set_var("GITTREE_WEBHOOK_TEST_RESTORE", "before");
+        }
+        with_env_var("GITTREE_WEBHOOK_TEST_RESTORE", "during", || {
+            assert_eq!(
+                std::env::var("GITTREE_WEBHOOK_TEST_RESTORE").expect("during value"),
+                "during"
+            );
+        });
+        assert_eq!(
+            std::env::var("GITTREE_WEBHOOK_TEST_RESTORE").expect("restored value"),
+            "before"
+        );
+        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+        unsafe {
+            std::env::remove_var("GITTREE_WEBHOOK_TEST_RESTORE");
+        }
+    }
+
+    #[test]
+    fn init_observability_maps_config_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+            let err = super::init_observability().expect_err("invalid observability env");
+            assert!(matches!(err, WebhookError::ObservabilityConfig(_)));
+        });
+    }
+
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
         let repositories = Arc::new(InMemoryRepositories::new());
@@ -627,7 +741,12 @@ mod tests {
         };
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -636,13 +755,7 @@ mod tests {
     #[tokio::test]
     async fn forgejo_webhook_forwards_payload() {
         let repositories = Arc::new(InMemoryRepositories::new());
-        let mapping = RepoMapping::new(
-            "owner",
-            "repo",
-            "11".repeat(32),
-            "repo",
-        )
-        .expect("mapping");
+        let mapping = RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
         repositories
             .upsert_mapping(record)
@@ -661,7 +774,11 @@ mod tests {
         let signature = sign_payload(b"secret", payload.as_bytes());
 
         let response = app
-            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
+            .oneshot(signed_request(
+                payload.as_bytes(),
+                "x-gitea-signature",
+                &signature,
+            ))
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -693,7 +810,11 @@ mod tests {
         let signature = sign_payload(b"secret", payload.as_bytes());
 
         let response = app
-            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
+            .oneshot(signed_request(
+                payload.as_bytes(),
+                "x-gitea-signature",
+                &signature,
+            ))
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
@@ -718,7 +839,11 @@ mod tests {
         let payload = forgejo_push_payload();
         let signature = sign_payload(b"secret", payload.as_bytes());
         let response = app
-            .oneshot(signed_request(payload.as_bytes(), "x-forgejo-signature", &signature))
+            .oneshot(signed_request(
+                payload.as_bytes(),
+                "x-forgejo-signature",
+                &signature,
+            ))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -821,7 +946,11 @@ mod tests {
         let payload = forgejo_push_payload();
         let signature = sign_payload(b"secret", payload.as_bytes());
         let response = app
-            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
+            .oneshot(signed_request(
+                payload.as_bytes(),
+                "x-gitea-signature",
+                &signature,
+            ))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -838,7 +967,11 @@ mod tests {
         let payload = forgejo_push_payload();
         let signature = sign_payload(b"secret", payload.as_bytes());
         let response = app
-            .oneshot(signed_request(payload.as_bytes(), "x-gitea-signature", &signature))
+            .oneshot(signed_request(
+                payload.as_bytes(),
+                "x-gitea-signature",
+                &signature,
+            ))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -864,15 +997,12 @@ mod tests {
         assert!(format!("{config_variant}").contains("webhook error"));
         assert!(config_variant.source().is_some());
 
-        let observability_config_variant = WebhookError::ObservabilityConfig(
-            ObservabilityConfigError::InvalidEnv {
+        let observability_config_variant =
+            WebhookError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv {
                 key: "KEY",
                 value: "bad".to_string(),
-            },
-        );
-        assert!(
-            format!("{observability_config_variant}").contains("observability config error")
-        );
+            });
+        assert!(format!("{observability_config_variant}").contains("observability config error"));
         assert!(observability_config_variant.source().is_some());
 
         let observability_variant =
@@ -904,8 +1034,7 @@ mod tests {
         assert!(format!("{config_error}").contains("webhook config error"));
         assert!(config_error.source().is_some());
 
-        let storage_error =
-            WebhookConfigError::Storage(StorageConfigError::MissingEnv("READ_URL"));
+        let storage_error = WebhookConfigError::Storage(StorageConfigError::MissingEnv("READ_URL"));
         assert!(format!("{storage_error}").contains("webhook storage config error"));
         assert!(storage_error.source().is_some());
 
@@ -1004,5 +1133,99 @@ mod tests {
             .expect_err("should fail");
         assert!(err.contains("sync error"));
         handle.join().expect("server join");
+    }
+
+    #[tokio::test]
+    async fn http_sync_notifier_reports_transport_error() {
+        let notifier = HttpSyncNotifier::new("http://127.0.0.1:1").expect("notifier");
+        let err = notifier
+            .notify(sample_sync_payload())
+            .await
+            .expect_err("transport error");
+        assert!(!err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn error_repo_mapping_repository_methods_are_callable() {
+        let repo = ErrorRepoMappingRepository;
+        let mapping = RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
+        let record = RepoMappingRecord::new(&mapping).expect("record");
+        repo.upsert_mapping(record).await.expect("upsert");
+        assert!(
+            repo.mapping_by_repo(&[1u8; 32], "repo")
+                .await
+                .expect("mapping by repo")
+                .is_none()
+        );
+        assert!(repo.list_mappings().await.expect("list").is_empty());
+    }
+
+    #[test]
+    fn webhook_app_state_clone_copies_fields() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let state = WebhookAppState {
+            repositories: Arc::clone(&repositories),
+            notifier: MockNotifier::default(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let cloned = state.clone();
+        assert_eq!(cloned.forgejo_secret, "secret");
+        assert!(Arc::ptr_eq(&cloned.repositories, &repositories));
+    }
+
+    #[tokio::test]
+    async fn serve_returns_serve_error_for_invalid_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous_log_stdout = std::env::var_os("GITTREE_LOG_STDOUT");
+        let previous_metrics_enabled = std::env::var_os("GITTREE_METRICS_ENABLED");
+        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+        unsafe {
+            std::env::set_var("GITTREE_LOG_STDOUT", "false");
+            std::env::set_var("GITTREE_METRICS_ENABLED", "false");
+        }
+        let config = WebhookConfig {
+            bind: "invalid-bind".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            sync_url: "http://localhost:8084".to_string(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let err = super::serve(config).await.expect_err("serve error");
+        assert!(matches!(err, WebhookError::Serve(_)));
+        match previous_log_stdout {
+            Some(value) => {
+                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+                unsafe {
+                    std::env::set_var("GITTREE_LOG_STDOUT", value);
+                }
+            }
+            None => {
+                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+                unsafe {
+                    std::env::remove_var("GITTREE_LOG_STDOUT");
+                }
+            }
+        }
+        match previous_metrics_enabled {
+            Some(value) => {
+                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+                unsafe {
+                    std::env::set_var("GITTREE_METRICS_ENABLED", value);
+                }
+            }
+            None => {
+                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+                unsafe {
+                    std::env::remove_var("GITTREE_METRICS_ENABLED");
+                }
+            }
+        }
     }
 }
