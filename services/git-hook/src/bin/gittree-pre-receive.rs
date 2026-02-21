@@ -1,4 +1,5 @@
 use gittree_git_hook::{HookMode, run_hook_from_env};
+use std::io::Write;
 
 fn init_observability(service: &str) -> Result<gittree_observability::ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env(service)
@@ -7,16 +8,22 @@ fn init_observability(service: &str) -> Result<gittree_observability::Observabil
 }
 
 fn main() {
+    let mut stderr = std::io::stderr();
+    let exit_code = main_impl(&mut stderr);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+fn main_impl(stderr: &mut impl Write) -> i32 {
     dotenvy::dotenv().ok();
-    if let Err(err) = run_with(
+    let result = run_with(
         "gittree-pre-receive",
         HookMode::PreReceive,
         init_observability,
         run_hook_from_env,
-    ) {
-        eprintln!("{err}");
-        std::process::exit(1);
-    }
+    );
+    handle_main_result(result, stderr)
 }
 
 fn run_with<T, FInit, FHook>(
@@ -34,9 +41,23 @@ where
     run_hook_fn(mode).map_err(|err| format!("git hook failed: {err}"))
 }
 
+fn handle_main_result(result: Result<(), String>, stderr: &mut impl Write) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(err) => {
+            let _ = writeln!(stderr, "{err}");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{HookMode, run_with};
+    use super::{HookMode, handle_main_result, run_with};
+
+    fn noop_hook(_mode: HookMode) -> Result<(), gittree_git_hook::HookServiceError> {
+        Ok(())
+    }
 
     #[test]
     fn run_with_returns_ok_on_success() {
@@ -44,7 +65,7 @@ mod tests {
             "svc",
             HookMode::PreReceive,
             |_| Ok::<(), String>(()),
-            |_| Ok(()),
+            noop_hook,
         );
         assert!(result.is_ok());
     }
@@ -55,7 +76,7 @@ mod tests {
             "svc",
             HookMode::PreReceive,
             |_| Err::<(), _>("obs boom".to_string()),
-            |_| Ok(()),
+            noop_hook,
         )
         .expect_err("expected error");
         assert!(err.contains("git hook observability failed"));
@@ -75,5 +96,21 @@ mod tests {
         )
         .expect_err("expected error");
         assert!(err.contains("git hook failed"));
+    }
+
+    #[test]
+    fn handle_main_result_returns_zero_on_success() {
+        let mut stderr = Vec::new();
+        let exit_code = handle_main_result(Ok(()), &mut stderr);
+        assert_eq!(exit_code, 0);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn handle_main_result_writes_error_on_failure() {
+        let mut stderr = Vec::new();
+        let exit_code = handle_main_result(Err("boom".to_string()), &mut stderr);
+        assert_eq!(exit_code, 1);
+        assert_eq!(String::from_utf8(stderr).expect("utf8"), "boom\n");
     }
 }
