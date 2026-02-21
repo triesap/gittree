@@ -1,6 +1,8 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::net::TcpStream;
 use std::process::Command;
+use std::time::Duration;
 
 fn start_mock_http_server(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind server");
@@ -51,12 +53,33 @@ fn run_admin(
     command.args(args).output().expect("run admin binary")
 }
 
+fn storage_database_url() -> Option<String> {
+    if let Ok(url) = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL") {
+        if !url.trim().is_empty() {
+            return Some(url);
+        }
+    }
+    let addr = "127.0.0.1:5432".parse().expect("socket addr");
+    if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
+        return Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string());
+    }
+    None
+}
+
 #[test]
 fn admin_binary_help_exits_successfully() {
     let output = run_admin(&["--help"], None, &[]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("gittree-admin <command> [options]"));
+}
+
+#[test]
+fn admin_binary_reports_observability_init_error() {
+    let output = run_admin(&["--help"], None, &[("GITTREE_LOG_JSON", "invalid-bool")]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("admin observability failed:"));
 }
 
 #[test]
@@ -193,4 +216,28 @@ fn admin_binary_map_reports_invalid_write_connection_before_db_connect() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("gittree-admin failed: admin storage error:"));
+}
+
+#[test]
+fn admin_binary_map_stores_mapping_when_database_available() {
+    let Some(database_url) = storage_database_url() else {
+        return;
+    };
+    let output = run_admin(
+        &[
+            "map",
+            "--forgejo",
+            "alice/repo",
+            "--pubkey",
+            "11f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871a",
+            "--identifier",
+            "repo",
+        ],
+        None,
+        &[
+            ("GITTREE_STORAGE_READ_URL", &database_url),
+            ("GITTREE_STORAGE_WRITE_URL", &database_url),
+        ],
+    );
+    assert!(output.status.success());
 }

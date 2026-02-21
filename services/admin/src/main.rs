@@ -747,6 +747,22 @@ mod tests {
         assert_eq!(invalid_cfg.to_string(), "bad config");
     }
 
+    #[tokio::test]
+    async fn admin_error_control_request_display_and_source_are_stable() {
+        let request_error = reqwest::Client::new()
+            .get("http://127.0.0.1:1/control/test")
+            .send()
+            .await
+            .expect_err("request should fail");
+        let admin_error = AdminError::ControlRequest(request_error);
+        assert!(
+            admin_error
+                .to_string()
+                .contains("admin control request error:")
+        );
+        assert!(admin_error.source().is_some());
+    }
+
     #[test]
     fn with_env_helpers_restore_existing_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
