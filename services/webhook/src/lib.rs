@@ -293,7 +293,14 @@ where
 }
 
 pub async fn serve(config: WebhookConfig) -> Result<(), WebhookError> {
-    let _observability = init_observability()?;
+    serve_with_init(config, init_observability).await
+}
+
+async fn serve_with_init<I, O>(config: WebhookConfig, init: I) -> Result<(), WebhookError>
+where
+    I: FnOnce() -> Result<O, WebhookError>,
+{
+    let _observability = init()?;
     let repositories = build_repositories(&config)?;
     let notifier = HttpSyncNotifier::new(config.sync_url.clone()).map_err(WebhookError::Notify)?;
     let state = WebhookAppState {
@@ -427,6 +434,7 @@ fn extract_signature(headers: &HeaderMap) -> Result<&str, WebhookHttpError> {
 #[cfg(test)]
 mod tests {
     use super::HttpSyncNotifier;
+    use super::ObservabilityHandle;
     use super::StorageConfigError;
     use super::SyncNotifier;
     use super::WebhookAckPayload;
@@ -450,10 +458,11 @@ mod tests {
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
     #[derive(Clone, Default)]
     struct MockNotifier {
@@ -818,6 +827,44 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
             let err = super::init_observability().expect_err("invalid observability env");
+            assert!(matches!(err, WebhookError::ObservabilityConfig(_)));
+        });
+    }
+
+    #[test]
+    fn init_observability_succeeds_once() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_STDOUT", "false", || {
+            with_env_var("GITTREE_METRICS_ENABLED", "false", || {
+                let _ = OBSERVABILITY.get_or_init(|| {
+                    super::init_observability().expect("observability should initialize once")
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn serve_maps_observability_config_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+            let config = WebhookConfig {
+                bind: "127.0.0.1:0".to_string(),
+                storage: StorageConfig {
+                    read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                    write_connection: None,
+                    max_connections: 10,
+                    min_connections: 1,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: None,
+                },
+                sync_url: "http://localhost:8084".to_string(),
+                forgejo_secret: "secret".to_string(),
+            };
+            let err = runtime
+                .block_on(super::serve(config))
+                .expect_err("observability config error");
             assert!(matches!(err, WebhookError::ObservabilityConfig(_)));
         });
     }
@@ -1267,14 +1314,6 @@ mod tests {
 
     #[tokio::test]
     async fn serve_returns_serve_error_for_invalid_bind() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let previous_log_stdout = std::env::var_os("GITTREE_LOG_STDOUT");
-        let previous_metrics_enabled = std::env::var_os("GITTREE_METRICS_ENABLED");
-        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-        unsafe {
-            std::env::set_var("GITTREE_LOG_STDOUT", "false");
-            std::env::set_var("GITTREE_METRICS_ENABLED", "false");
-        }
         let config = WebhookConfig {
             bind: "invalid-bind".to_string(),
             storage: StorageConfig {
@@ -1289,10 +1328,32 @@ mod tests {
             sync_url: "http://localhost:8084".to_string(),
             forgejo_secret: "secret".to_string(),
         };
-        let err = super::serve(config).await.expect_err("serve error");
+        let err = super::serve_with_init(config, || Ok(()))
+            .await
+            .expect_err("serve error");
         assert!(matches!(err, WebhookError::Serve(_)));
-        restore_env_var("GITTREE_LOG_STDOUT", previous_log_stdout);
-        restore_env_var("GITTREE_METRICS_ENABLED", previous_metrics_enabled);
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_runs_until_cancelled() {
+        let config = WebhookConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            sync_url: "http://localhost:8084".to_string(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let task = tokio::spawn(super::serve_with_init(config, || Ok(())));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
     }
 
     #[tokio::test]
