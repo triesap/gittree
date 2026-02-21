@@ -170,13 +170,21 @@ pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), Hoo
             return Err(HookServiceError::Parse(err));
         }
     };
-    let repo_path =
-        std::env::var_os(ENV_HOOK_REPO_PATH)
-            .or_else(|| std::env::var_os("GIT_DIR"))
-            .map(PathBuf::from)
-            .unwrap_or(std::env::current_dir().map_err(|err| {
-                HookServiceError::Core(format!("failed to read repo path: {err}"))
-            })?);
+    let repo_path = if let Some(path) = std::env::var_os(ENV_HOOK_REPO_PATH)
+        .or_else(|| std::env::var_os("GIT_DIR"))
+        .map(PathBuf::from)
+    {
+        path
+    } else {
+        match std::env::current_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(HookServiceError::Core(format!(
+                    "failed to read repo path: {err}"
+                )));
+            }
+        }
+    };
     match config.mode {
         HookMode::PreReceive => {
             let fetcher = HttpStateFetcher::new(config.state_url, Duration::from_secs(5))?;
@@ -208,17 +216,23 @@ fn env_path(key: &str) -> Option<PathBuf> {
 
 fn read_input(stdin_file: Option<&Path>) -> Result<String, HookServiceError> {
     if let Some(path) = stdin_file {
-        std::fs::read_to_string(path).map_err(|err| {
-            HookServiceError::Core(format!(
+        match std::fs::read_to_string(path) {
+            Ok(value) => Ok(value),
+            Err(err) => Err(HookServiceError::Core(format!(
                 "failed to read stdin file {}: {err}",
                 path.display()
-            ))
-        })
+            ))),
+        }
     } else {
         let mut input = String::new();
-        std::io::stdin()
-            .read_to_string(&mut input)
-            .map_err(|err| HookServiceError::Core(format!("failed to read stdin: {err}")))?;
+        match std::io::stdin().read_to_string(&mut input) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(HookServiceError::Core(format!(
+                    "failed to read stdin: {err}"
+                )));
+            }
+        }
         Ok(input)
     }
 }
@@ -294,8 +308,10 @@ struct ForgejoUserPayload {
 }
 
 pub fn parse_forgejo_push(payload: &str) -> Result<ForgejoPushEvent, HookError> {
-    let parsed: ForgejoPushPayload =
-        serde_json::from_str(payload).map_err(|err| HookError::InvalidPayload(err.to_string()))?;
+    let parsed: ForgejoPushPayload = match serde_json::from_str(payload) {
+        Ok(parsed) => parsed,
+        Err(err) => return Err(HookError::InvalidPayload(err.to_string())),
+    };
 
     ensure_non_empty("ref", &parsed.reference)?;
     ensure_non_empty("before", &parsed.before)?;
@@ -357,14 +373,29 @@ pub fn verify_forgejo_signature(
     let signature = signature_header
         .strip_prefix("sha256=")
         .unwrap_or(signature_header);
-    let provided = hex::decode(signature)
-        .map_err(|_| HookError::InvalidSignature("invalid signature encoding".to_string()))?;
+    let provided = match hex::decode(signature) {
+        Ok(decoded) => decoded,
+        Err(_) => {
+            return Err(HookError::InvalidSignature(
+                "invalid signature encoding".to_string(),
+            ));
+        }
+    };
 
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
-        .map_err(|_| HookError::InvalidSignature("invalid signature secret".to_string()))?;
+    let mut mac = match hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => {
+            return Err(HookError::InvalidSignature(
+                "invalid signature secret".to_string(),
+            ));
+        }
+    };
     mac.update(payload);
-    mac.verify_slice(&provided)
-        .map_err(|_| HookError::InvalidSignature("signature mismatch".to_string()))?;
+    if mac.verify_slice(&provided).is_err() {
+        return Err(HookError::InvalidSignature(
+            "signature mismatch".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -384,10 +415,13 @@ pub struct HttpStateFetcher {
 
 impl HttpStateFetcher {
     pub fn new(base_url: impl Into<String>, timeout: Duration) -> Result<Self, HookServiceError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = match reqwest::blocking::Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(|err| HookServiceError::State(err.to_string()))?;
+        {
+            Ok(client) => client,
+            Err(err) => return Err(HookServiceError::State(err.to_string())),
+        };
         Ok(Self {
             base_url: base_url.into(),
             client,
@@ -415,11 +449,10 @@ impl StateFetcher for HttpStateFetcher {
         identifier: &str,
     ) -> Result<Option<RepoState>, HookServiceError> {
         let url = self.state_endpoint(pubkey, identifier);
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .map_err(|err| HookServiceError::State(err.to_string()))?;
+        let response = match self.client.get(url).send() {
+            Ok(response) => response,
+            Err(err) => return Err(HookServiceError::State(err.to_string())),
+        };
 
         if response.status().as_u16() == 404 {
             return Ok(None);
@@ -433,9 +466,10 @@ impl StateFetcher for HttpStateFetcher {
             )));
         }
 
-        let state = response
-            .json::<StateResponse>()
-            .map_err(|err| HookServiceError::State(err.to_string()))?;
+        let state = match response.json::<StateResponse>() {
+            Ok(state) => state,
+            Err(err) => return Err(HookServiceError::State(err.to_string())),
+        };
 
         Ok(Some(RepoState {
             identifier: state.identifier,
@@ -449,8 +483,10 @@ pub fn evaluate_pre_receive(
     repo_path: impl AsRef<Path>,
     updates: &[RefUpdate],
 ) -> Result<UpdateDecision, HookServiceError> {
-    let repo = gittree_core::parse_repo_path(repo_path)
-        .map_err(|err| HookServiceError::Core(err.to_string()))?;
+    let repo = match gittree_core::parse_repo_path(repo_path) {
+        Ok(repo) => repo,
+        Err(err) => return Err(HookServiceError::Core(err.to_string())),
+    };
     let core_updates: Vec<gittree_core::RefUpdate<'_>> = updates
         .iter()
         .map(|update| gittree_core::RefUpdate::new(&update.old, &update.new, &update.reference))
@@ -513,10 +549,13 @@ pub struct HttpPostReceiveNotifier {
 
 impl HttpPostReceiveNotifier {
     pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Result<Self, HookServiceError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = match reqwest::blocking::Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(|err| HookServiceError::State(err.to_string()))?;
+        {
+            Ok(client) => client,
+            Err(err) => return Err(HookServiceError::State(err.to_string())),
+        };
         Ok(Self {
             endpoint: endpoint.into(),
             client,
@@ -526,12 +565,10 @@ impl HttpPostReceiveNotifier {
 
 impl PostReceiveNotifier for HttpPostReceiveNotifier {
     fn notify(&self, payload: PostReceivePayload) -> Result<(), HookServiceError> {
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .json(&payload)
-            .send()
-            .map_err(|err| HookServiceError::State(err.to_string()))?;
+        let response = match self.client.post(&self.endpoint).json(&payload).send() {
+            Ok(response) => response,
+            Err(err) => return Err(HookServiceError::State(err.to_string())),
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -550,8 +587,10 @@ pub fn handle_post_receive(
     repo_path: impl AsRef<Path>,
     updates: &[RefUpdate],
 ) -> Result<(), HookServiceError> {
-    let repo = gittree_core::parse_repo_path(repo_path)
-        .map_err(|err| HookServiceError::Core(err.to_string()))?;
+    let repo = match gittree_core::parse_repo_path(repo_path) {
+        Ok(repo) => repo,
+        Err(err) => return Err(HookServiceError::Core(err.to_string())),
+    };
     let payload = PostReceivePayload {
         pubkey: repo.pubkey,
         identifier: repo.identifier,
@@ -565,7 +604,10 @@ pub fn handle_forgejo_push(
     notifier: &dyn PostReceiveNotifier,
     payload: &str,
 ) -> Result<(), HookServiceError> {
-    let event = parse_forgejo_push(payload).map_err(HookServiceError::Parse)?;
+    let event = match parse_forgejo_push(payload) {
+        Ok(event) => event,
+        Err(err) => return Err(HookServiceError::Parse(err)),
+    };
     let mapping = resolver
         .resolve_mapping(&event.owner, &event.repo)?
         .ok_or_else(|| HookServiceError::Reject("missing repo mapping".to_string()))?;

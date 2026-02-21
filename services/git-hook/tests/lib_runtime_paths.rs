@@ -1,9 +1,9 @@
 use gittree_core::{RepoMapping, UpdateDecision};
 use gittree_git_hook::{
-    HookConfig, HookMode, HookServiceError, HttpPostReceiveNotifier, HttpStateFetcher,
-    MappingResolver, PostReceiveNotifier, PostReceivePayload, RefUpdate, evaluate_pre_receive,
-    handle_forgejo_push, handle_post_receive, parse_forgejo_push, parse_updates, run_hook_from_env,
-    verify_forgejo_signature,
+    HookConfig, HookConfigError, HookError, HookMode, HookServiceError, HttpPostReceiveNotifier,
+    HttpStateFetcher, MappingResolver, PostReceiveNotifier, PostReceivePayload, RefUpdate,
+    StateFetcher, evaluate_pre_receive, handle_forgejo_push, handle_post_receive,
+    parse_forgejo_push, parse_updates, run_hook_from_env, verify_forgejo_signature,
 };
 use hmac::Mac;
 use std::error::Error;
@@ -239,4 +239,63 @@ fn integration_error_variants_expose_expected_sources() {
 
     let core_err = HookServiceError::Core("boom".to_string());
     assert!(core_err.source().is_none());
+}
+
+#[test]
+fn integration_state_fetcher_covers_runtime_latest_state_path() {
+    let (base_url, handle) = start_mock_http_server(
+        "200 OK",
+        "application/json",
+        r#"{"identifier":"repo","state":{"refs/heads/main":"abc"}}"#,
+    );
+    let fetcher = HttpStateFetcher::new(base_url, Duration::from_secs(1)).expect("fetcher");
+    let state = fetcher
+        .latest_state("pubkey", "repo")
+        .expect("latest state call")
+        .expect("state present");
+    assert_eq!(state.identifier, "repo");
+    assert_eq!(
+        state.state.get("refs/heads/main").expect("state entry"),
+        "abc"
+    );
+    handle.join().expect("server join");
+}
+
+#[test]
+fn integration_error_traits_cover_runtime_paths() {
+    let rendered = format!("{}", HookError::InvalidSignature("bad".to_string()));
+    assert_eq!(rendered, "invalid signature: bad");
+
+    with_env_vars(&[("GITTREE_STATE_BIND", Some("bad bind"))], || {
+        let err = HookConfig::from_env_with_overrides(
+            Some(HookMode::PreReceive),
+            Some("http://127.0.0.1:8082".to_string()),
+            None,
+        )
+        .expect_err("config error");
+        assert!(matches!(err, HookConfigError::Config(_)));
+        assert!(err.source().is_some());
+    });
+}
+
+#[test]
+fn integration_parse_forgejo_push_rejects_empty_owner_username() {
+    let payload = r#"
+    {
+        "ref": "refs/heads/main",
+        "before": "0000000000000000000000000000000000000000",
+        "after": "1111111111111111111111111111111111111111",
+        "repository": {
+            "name": "repo",
+            "owner": { "username": "" }
+        }
+    }
+    "#;
+    let err = parse_forgejo_push(payload).expect_err("invalid payload");
+    match err {
+        HookError::InvalidPayload(message) => {
+            assert!(message.contains("repository.owner.username"));
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }
