@@ -948,6 +948,21 @@ mod tests {
         Ok(())
     }
 
+    fn init_ok_handle() -> Result<(), GitHttpError> {
+        Ok(())
+    }
+
+    async fn fail_server(
+        _listener: tokio::net::TcpListener,
+        _router: Router,
+    ) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("boom"))
+    }
+
+    fn init_observability_for_test() -> ObservabilityHandle {
+        init_observability().expect("init")
+    }
+
     fn start_mock_http_server(
         status: &str,
         content_type: &str,
@@ -1884,13 +1899,13 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        let handle = OBSERVABILITY.get_or_init(init_observability_for_test);
         assert!(handle.prometheus_registry().is_some());
     }
 
     #[test]
     fn metrics_record_accepts_requests() {
-        let _handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        let _handle = OBSERVABILITY.get_or_init(init_observability_for_test);
         let metrics = GitHttpMetrics::new();
         let route = GitHttpRoute::NotFound;
         metrics.record(&route, 200, Duration::from_millis(5));
@@ -1941,7 +1956,7 @@ mod tests {
                 application_name: None,
             },
         };
-        let bind_err = super::serve_with(config, || Ok(()), noop_server)
+        let bind_err = super::serve_with(config, init_ok_handle, noop_server)
             .await
             .expect_err("bind error");
         assert!(matches!(bind_err, GitHttpError::Serve(_)));
@@ -1961,13 +1976,9 @@ mod tests {
                 application_name: None,
             },
         };
-        let serve_err = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Err(std::io::Error::other("boom")) },
-        )
-        .await
-        .expect_err("serve error");
+        let serve_err = super::serve_with(config, init_ok_handle, fail_server)
+            .await
+            .expect_err("serve error");
         assert!(matches!(serve_err, GitHttpError::Serve(message) if message.contains("boom")));
     }
 
@@ -1988,7 +1999,7 @@ mod tests {
                 application_name: None,
             },
         };
-        let result = super::serve_with(config, || Ok(()), noop_server).await;
+        let result = super::serve_with(config, init_ok_handle, noop_server).await;
         assert!(result.is_ok());
     }
 
