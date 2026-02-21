@@ -72,11 +72,15 @@ mod tests {
     use super::{handle_main_result, main_impl_with, run_with};
     use gittree_webhook::WebhookError;
 
+    async fn serve_ok(_: ()) -> Result<(), WebhookError> {
+        Ok(())
+    }
+
     #[tokio::test]
     async fn run_with_returns_config_errors() {
         let err = run_with(
             || Err::<(), WebhookError>(WebhookError::Serve("config failed".to_string())),
-            |_| async { Ok::<(), WebhookError>(()) },
+            serve_ok,
         )
         .await
         .expect_err("config error");

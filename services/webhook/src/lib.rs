@@ -12,6 +12,7 @@ use gittree_git_hook::{
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{PostgresRepositories, RepoMappingRepository, StorageConfig, StorageError};
 use serde::{Deserialize, Serialize};
+use std::future::{Future, pending};
 use std::sync::Arc;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
@@ -304,7 +305,19 @@ pub async fn serve(config: WebhookConfig) -> Result<(), WebhookError> {
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| WebhookError::Serve(err.to_string()))?;
+    run_http_server_with_shutdown(listener, router, pending()).await
+}
+
+async fn run_http_server_with_shutdown<Shutdown>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: Shutdown,
+) -> Result<(), WebhookError>
+where
+    Shutdown: Future<Output = ()> + Send + 'static,
+{
     axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|err| WebhookError::Serve(err.to_string()))?;
     Ok(())
@@ -423,6 +436,7 @@ mod tests {
     use super::WebhookError;
     use super::build_router;
     use async_trait::async_trait;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
     use axum::response::IntoResponse;
@@ -581,6 +595,10 @@ mod tests {
             std::env::set_var(key, value);
         }
         f();
+        restore_env_var(key, previous);
+    }
+
+    fn restore_env_var(key: &str, previous: Option<std::ffi::OsString>) {
         match previous {
             Some(old) => unsafe {
                 std::env::set_var(key, old);
@@ -722,6 +740,28 @@ mod tests {
                                 let config = WebhookConfig::from_env().expect("config");
                                 assert_eq!(config.storage.idle_timeout_secs, None);
                                 assert_eq!(config.storage.max_lifetime_secs, None);
+                            });
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_ignores_empty_storage_pool_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", " ", || {
+                            with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "", || {
+                                let config = WebhookConfig::from_env().expect("config");
+                                assert_eq!(config.storage.max_connections, 10);
+                                assert_eq!(config.storage.min_connections, 2);
                             });
                         });
                     });
@@ -1228,13 +1268,6 @@ mod tests {
     #[tokio::test]
     async fn serve_returns_serve_error_for_invalid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let original_log_stdout = std::env::var_os("GITTREE_LOG_STDOUT");
-        let original_metrics_enabled = std::env::var_os("GITTREE_METRICS_ENABLED");
-        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-        unsafe {
-            std::env::set_var("GITTREE_LOG_STDOUT", "before");
-            std::env::set_var("GITTREE_METRICS_ENABLED", "before");
-        }
         let previous_log_stdout = std::env::var_os("GITTREE_LOG_STDOUT");
         let previous_metrics_enabled = std::env::var_os("GITTREE_METRICS_ENABLED");
         // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
@@ -1258,61 +1291,16 @@ mod tests {
         };
         let err = super::serve(config).await.expect_err("serve error");
         assert!(matches!(err, WebhookError::Serve(_)));
-        match previous_log_stdout {
-            Some(value) => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::set_var("GITTREE_LOG_STDOUT", value);
-                }
-            }
-            None => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::remove_var("GITTREE_LOG_STDOUT");
-                }
-            }
-        }
-        match previous_metrics_enabled {
-            Some(value) => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::set_var("GITTREE_METRICS_ENABLED", value);
-                }
-            }
-            None => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::remove_var("GITTREE_METRICS_ENABLED");
-                }
-            }
-        }
-        match original_log_stdout {
-            Some(value) => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::set_var("GITTREE_LOG_STDOUT", value);
-                }
-            }
-            None => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::remove_var("GITTREE_LOG_STDOUT");
-                }
-            }
-        }
-        match original_metrics_enabled {
-            Some(value) => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::set_var("GITTREE_METRICS_ENABLED", value);
-                }
-            }
-            None => {
-                // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
-                unsafe {
-                    std::env::remove_var("GITTREE_METRICS_ENABLED");
-                }
-            }
-        }
+        restore_env_var("GITTREE_LOG_STDOUT", previous_log_stdout);
+        restore_env_var("GITTREE_METRICS_ENABLED", previous_metrics_enabled);
+    }
+
+    #[tokio::test]
+    async fn run_http_server_with_shutdown_returns_ok() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let result = super::run_http_server_with_shutdown(listener, Router::new(), async {}).await;
+        assert!(result.is_ok());
     }
 }
