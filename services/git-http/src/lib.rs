@@ -18,7 +18,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 use sha2::Digest;
 use std::collections::HashSet;
-use std::future::{Future, pending};
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -274,33 +274,20 @@ impl GitHttpMetrics {
             route = route_name,
             status,
             duration_ms,
-            "git-http request handled"
+            event = "git-http request handled"
         );
     }
 }
 
 pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
-    serve_with(config, init_observability, run_axum_server_with_pending).await
+    serve_with(config, init_observability, run_axum_server).await
 }
 
-async fn run_axum_server_with_pending(
+fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
-) -> Result<(), std::io::Error> {
-    run_axum_server_with_shutdown(listener, router, pending::<()>()).await
-}
-
-async fn run_axum_server_with_shutdown<Shutdown>(
-    listener: tokio::net::TcpListener,
-    router: Router,
-    shutdown: Shutdown,
-) -> Result<(), std::io::Error>
-where
-    Shutdown: Future<Output = ()> + Send + 'static,
-{
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await
+) -> impl Future<Output = Result<(), std::io::Error>> + Send + 'static {
+    async move { axum::serve(listener, router).await }
 }
 
 async fn serve_with<Obs, InitObs, ServeFn, ServeFut>(
@@ -1920,20 +1907,10 @@ mod tests {
             .await
             .expect("bind");
         let router = Router::new().route("/health", get(super::health_handler));
-        let task = tokio::spawn(super::run_axum_server_with_pending(listener, router));
+        let task = tokio::spawn(super::run_axum_server(listener, router));
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         task.abort();
         let _ = task.await;
-    }
-
-    #[tokio::test]
-    async fn run_axum_server_with_shutdown_returns_ok() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let router = Router::new().route("/health", get(super::health_handler));
-        let result = super::run_axum_server_with_shutdown(listener, router, async {}).await;
-        assert!(result.is_ok());
     }
 
     #[test]
