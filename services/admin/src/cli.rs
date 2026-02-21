@@ -542,106 +542,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_accepts_map_command() {
-        let pubkey = "11".repeat(32);
-        let args = vec![
-            "gittree-admin".to_string(),
-            "map".to_string(),
-            "--forgejo".to_string(),
-            "owner/repo".to_string(),
-            "--pubkey".to_string(),
-            pubkey,
-            "--identifier".to_string(),
-            "repo".to_string(),
-        ];
-        let cli = AdminCli::parse(args).expect("parse");
-        assert!(matches!(cli.command, Some(AdminCommand::Map { .. })));
-    }
-
-    #[test]
-    fn parse_rejects_unknown_command() {
-        let err = AdminCli::parse(["gittree-admin", "nope"]).unwrap_err();
-        assert!(matches!(err, AdminCliError::UnknownCommand(_)));
-    }
-
-    #[test]
-    fn parse_rejects_missing_values() {
-        let err = AdminCli::parse(["gittree-admin", "map", "--forgejo"]).unwrap_err();
-        assert!(matches!(err, AdminCliError::MissingValue(_)));
-    }
-
-    #[test]
-    fn parse_accepts_create_user_command() {
-        let args = vec![
-            "gittree-admin".to_string(),
-            "create-user".to_string(),
-            "--username".to_string(),
-            "alice".to_string(),
-            "--email".to_string(),
-            "alice@example.com".to_string(),
-            "--password".to_string(),
-            "secret".to_string(),
-        ];
-        let cli = AdminCli::parse(args).expect("parse");
-        assert!(matches!(cli.command, Some(AdminCommand::CreateUser { .. })));
-    }
-
-    #[test]
-    fn parse_accepts_create_org_command() {
-        let args = vec![
-            "gittree-admin".to_string(),
-            "create-org".to_string(),
-            "--owner".to_string(),
-            "root".to_string(),
-            "--name".to_string(),
-            "acme".to_string(),
-        ];
-        let cli = AdminCli::parse(args).expect("parse");
-        assert!(matches!(cli.command, Some(AdminCommand::CreateOrg { .. })));
-    }
-
-    #[test]
-    fn parse_accepts_create_repo_command() {
-        let args = vec![
-            "gittree-admin".to_string(),
-            "create-repo".to_string(),
-            "--owner".to_string(),
-            "alice".to_string(),
-            "--name".to_string(),
-            "demo".to_string(),
-            "--auto-init".to_string(),
-        ];
-        let cli = AdminCli::parse(args).expect("parse");
-        assert!(matches!(cli.command, Some(AdminCommand::CreateRepo { .. })));
-    }
-
-    #[test]
-    fn parse_accepts_create_pull_command() {
-        let args = vec![
-            "gittree-admin".to_string(),
-            "create-pull".to_string(),
-            "--owner".to_string(),
-            "alice".to_string(),
-            "--repo".to_string(),
-            "demo".to_string(),
-            "--head".to_string(),
-            "feature".to_string(),
-            "--base".to_string(),
-            "main".to_string(),
-            "--title".to_string(),
-            "Update".to_string(),
-        ];
-        let cli = AdminCli::parse(args).expect("parse");
-        assert!(matches!(cli.command, Some(AdminCommand::CreatePull { .. })));
-    }
-
-    #[test]
     fn parse_help_and_help_text_are_available() {
         let cli = AdminCli::parse(["gittree-admin", "--help"]).expect("parse");
         assert!(cli.help);
         assert!(cli.command.is_none());
         assert!(AdminCli::help_text().contains("create-user"));
         assert!(AdminCli::help_text().contains("--help"));
+    }
+
+    #[test]
+    fn parse_rejects_unknown_command_and_missing_split_value() {
+        let unknown = AdminCli::parse(["gittree-admin", "nope"]).expect_err("unknown command");
+        assert!(matches!(unknown, AdminCliError::UnknownCommand(_)));
+
+        let missing = AdminCli::parse(["gittree-admin", "map", "--forgejo"])
+            .expect_err("missing split value");
+        assert!(matches!(missing, AdminCliError::MissingValue("--forgejo")));
     }
 
     #[test]
@@ -705,6 +621,35 @@ mod tests {
             empty_identifier,
             AdminCliError::MissingValue("--identifier")
         ));
+
+        let split_missing_cases = [
+            (
+                vec![
+                    "gittree-admin",
+                    "map",
+                    "--forgejo",
+                    "owner/repo",
+                    "--pubkey",
+                ],
+                "--pubkey",
+            ),
+            (
+                vec![
+                    "gittree-admin",
+                    "map",
+                    "--forgejo",
+                    "owner/repo",
+                    "--pubkey",
+                    "aa",
+                    "--identifier",
+                ],
+                "--identifier",
+            ),
+        ];
+        for (args, flag) in split_missing_cases {
+            let err = AdminCli::parse(args).expect_err("missing split flag value");
+            assert!(matches!(err, AdminCliError::MissingValue(missing) if missing == flag));
+        }
     }
 
     #[test]
@@ -833,6 +778,36 @@ mod tests {
         ])
         .expect_err("unknown flag");
         assert!(matches!(unknown, AdminCliError::UnknownFlag(flag) if flag == "--nope"));
+
+        let split_missing_cases = [
+            (
+                vec!["gittree-admin", "create-user", "--username"],
+                "--username",
+            ),
+            (
+                vec![
+                    "gittree-admin",
+                    "create-user",
+                    "--username=alice",
+                    "--email",
+                ],
+                "--email",
+            ),
+            (
+                vec![
+                    "gittree-admin",
+                    "create-user",
+                    "--username=alice",
+                    "--email=alice@example.com",
+                    "--password",
+                ],
+                "--password",
+            ),
+        ];
+        for (args, flag) in split_missing_cases {
+            let err = AdminCli::parse(args).expect_err("missing split flag value");
+            assert!(matches!(err, AdminCliError::MissingValue(missing) if missing == flag));
+        }
     }
 
     #[test]
@@ -976,6 +951,18 @@ mod tests {
         ])
         .expect_err("unknown flag");
         assert!(matches!(unknown, AdminCliError::UnknownFlag(flag) if flag == "--nope"));
+
+        let split_missing_cases = [
+            (vec!["gittree-admin", "create-org", "--owner"], "--owner"),
+            (
+                vec!["gittree-admin", "create-org", "--owner=root", "--name"],
+                "--name",
+            ),
+        ];
+        for (args, flag) in split_missing_cases {
+            let err = AdminCli::parse(args).expect_err("missing split flag value");
+            assert!(matches!(err, AdminCliError::MissingValue(missing) if missing == flag));
+        }
     }
 
     #[test]
@@ -1078,6 +1065,18 @@ mod tests {
         ])
         .expect_err("unknown flag");
         assert!(matches!(unknown, AdminCliError::UnknownFlag(flag) if flag == "--nope"));
+
+        let split_missing_cases = [
+            (vec!["gittree-admin", "create-repo", "--owner"], "--owner"),
+            (
+                vec!["gittree-admin", "create-repo", "--owner=alice", "--name"],
+                "--name",
+            ),
+        ];
+        for (args, flag) in split_missing_cases {
+            let err = AdminCli::parse(args).expect_err("missing split flag value");
+            assert!(matches!(err, AdminCliError::MissingValue(missing) if missing == flag));
+        }
     }
 
     #[test]
@@ -1257,6 +1256,51 @@ mod tests {
         ])
         .expect_err("unknown flag");
         assert!(matches!(unknown, AdminCliError::UnknownFlag(flag) if flag == "--nope"));
+
+        let split_missing_cases = [
+            (vec!["gittree-admin", "create-pull", "--owner"], "--owner"),
+            (
+                vec!["gittree-admin", "create-pull", "--owner=alice", "--repo"],
+                "--repo",
+            ),
+            (
+                vec![
+                    "gittree-admin",
+                    "create-pull",
+                    "--owner=alice",
+                    "--repo=demo",
+                    "--head",
+                ],
+                "--head",
+            ),
+            (
+                vec![
+                    "gittree-admin",
+                    "create-pull",
+                    "--owner=alice",
+                    "--repo=demo",
+                    "--head=feature",
+                    "--base",
+                ],
+                "--base",
+            ),
+            (
+                vec![
+                    "gittree-admin",
+                    "create-pull",
+                    "--owner=alice",
+                    "--repo=demo",
+                    "--head=feature",
+                    "--base=main",
+                    "--title",
+                ],
+                "--title",
+            ),
+        ];
+        for (args, flag) in split_missing_cases {
+            let err = AdminCli::parse(args).expect_err("missing split flag value");
+            assert!(matches!(err, AdminCliError::MissingValue(missing) if missing == flag));
+        }
     }
 
     #[test]
