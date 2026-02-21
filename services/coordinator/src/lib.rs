@@ -310,7 +310,11 @@ where
         + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
-    tokio::spawn(publish_outbox_loop(state))
+    tokio::spawn(publish_outbox_loop_with_delay_and_publish(
+        state,
+        StdDuration::from_secs(OUTBOX_POLL_SECS),
+        publish_to_relay,
+    ))
 }
 
 async fn run_http_server_with_shutdown<Shutdown>(
@@ -343,22 +347,18 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-async fn publish_outbox_loop<R, T>(state: CoordinatorAppState<R, T>)
-where
-    R: RelayPublishRepository
-        + AnnouncementRepository
-        + RepoMappingRepository
-        + Send
-        + Sync
-        + 'static,
-    T: ForgejoTransport + Clone + Send + Sync + 'static,
-{
-    publish_outbox_loop_with_delay(state, StdDuration::from_secs(OUTBOX_POLL_SECS)).await;
+async fn publish_to_relay(relay_url: String, event: SignedNostrEvent) -> Result<(), String> {
+    let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new(relay_url));
+    adapter
+        .publish_event(&event)
+        .await
+        .map_err(|err| err.to_string())
 }
 
-async fn publish_outbox_loop_with_delay<R, T>(
+async fn publish_outbox_loop_with_delay_and_publish<R, T, Publish, PublishFut>(
     state: CoordinatorAppState<R, T>,
     poll_delay: StdDuration,
+    publish: Publish,
 ) where
     R: RelayPublishRepository
         + AnnouncementRepository
@@ -367,6 +367,8 @@ async fn publish_outbox_loop_with_delay<R, T>(
         + Sync
         + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
+    Publish: Fn(String, SignedNostrEvent) -> PublishFut + Send + Sync + 'static,
+    PublishFut: Future<Output = Result<(), String>> + Send,
 {
     loop {
         let now = OffsetDateTime::now_utc();
@@ -384,9 +386,8 @@ async fn publish_outbox_loop_with_delay<R, T>(
             continue;
         };
 
-        let adapter = WebsocketRelayAdapter::new(RelayAdapterConfig::new(job.relay_url.clone()));
         let event = signed_event_from_job(&job);
-        match adapter.publish_event(&event).await {
+        match publish(job.relay_url.clone(), event).await {
             Ok(()) => {
                 if let Err(err) = state
                     .repositories
@@ -402,9 +403,9 @@ async fn publish_outbox_loop_with_delay<R, T>(
                     .await
                 {
                     Ok(0) => {
-                        if let Err(err) = finalize_outbox_job(&state, &job).await {
-                            tracing::error!(error = %err, "outbox finalize failed");
-                        }
+                        let _ = finalize_outbox_job(&state, &job)
+                            .await
+                            .map_err(|err| tracing::error!(error = %err, "outbox finalize failed"));
                     }
                     Ok(_) => {}
                     Err(err) => {
@@ -416,7 +417,7 @@ async fn publish_outbox_loop_with_delay<R, T>(
                 let retry_at = retry_after(now, job.attempt_count);
                 if let Err(storage_err) = state
                     .repositories
-                    .mark_relay_publish_failed(job.id, &err.to_string(), retry_at)
+                    .mark_relay_publish_failed(job.id, &err, retry_at)
                     .await
                 {
                     tracing::error!(error = %storage_err, "outbox mark failed failed");
@@ -1041,7 +1042,8 @@ mod tests {
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayPublishJob, RelayPublishRepository,
-        RelayPublishRequest, RepoMappingRepository, StorageConfig, StorageError,
+        RelayPublishRequest, RepoAnnouncementRecord, RepoMappingRecord, RepoMappingRepository,
+        StorageConfig, StorageError,
     };
     use std::collections::VecDeque;
     use std::fs;
@@ -1071,6 +1073,156 @@ mod tests {
         fn requests(&self) -> Vec<ForgejoRequest> {
             self.requests.lock().expect("requests").clone()
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct ScriptedOutboxRepositories {
+        inner: Arc<InMemoryRepositories>,
+        fail_claim: bool,
+        fail_mark_succeeded: bool,
+        fail_pending: bool,
+        fail_mark_failed: bool,
+    }
+
+    impl ScriptedOutboxRepositories {
+        fn with_flags(
+            fail_claim: bool,
+            fail_mark_succeeded: bool,
+            fail_pending: bool,
+            fail_mark_failed: bool,
+        ) -> Self {
+            Self {
+                inner: Arc::new(InMemoryRepositories::new()),
+                fail_claim,
+                fail_mark_succeeded,
+                fail_pending,
+                fail_mark_failed,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AnnouncementRepository for ScriptedOutboxRepositories {
+        async fn insert_announcement(
+            &self,
+            record: RepoAnnouncementRecord,
+        ) -> Result<(), StorageError> {
+            self.inner.insert_announcement(record).await
+        }
+
+        async fn list_announcements(
+            &self,
+            pubkey: &[u8],
+            identifier: &str,
+        ) -> Result<Vec<RepoAnnouncementRecord>, StorageError> {
+            self.inner.list_announcements(pubkey, identifier).await
+        }
+
+        async fn latest_announcement(
+            &self,
+            pubkey: &[u8],
+            identifier: &str,
+        ) -> Result<Option<RepoAnnouncementRecord>, StorageError> {
+            self.inner.latest_announcement(pubkey, identifier).await
+        }
+    }
+
+    #[async_trait]
+    impl RepoMappingRepository for ScriptedOutboxRepositories {
+        async fn upsert_mapping(&self, record: RepoMappingRecord) -> Result<(), StorageError> {
+            self.inner.upsert_mapping(record).await
+        }
+
+        async fn mapping_by_forgejo(
+            &self,
+            owner: &str,
+            repo: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            self.inner.mapping_by_forgejo(owner, repo).await
+        }
+
+        async fn mapping_by_repo(
+            &self,
+            pubkey: &[u8],
+            identifier: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            self.inner.mapping_by_repo(pubkey, identifier).await
+        }
+
+        async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
+            self.inner.list_mappings().await
+        }
+    }
+
+    #[async_trait]
+    impl RelayPublishRepository for ScriptedOutboxRepositories {
+        async fn enqueue_relay_publish(
+            &self,
+            request: RelayPublishRequest,
+        ) -> Result<(), StorageError> {
+            self.inner.enqueue_relay_publish(request).await
+        }
+
+        async fn claim_relay_publish(
+            &self,
+            now: OffsetDateTime,
+        ) -> Result<Option<RelayPublishJob>, StorageError> {
+            if self.fail_claim {
+                return Err(StorageError::Internal {
+                    message: "claim failure".to_string(),
+                });
+            }
+            self.inner.claim_relay_publish(now).await
+        }
+
+        async fn mark_relay_publish_succeeded(&self, id: i64) -> Result<(), StorageError> {
+            if self.fail_mark_succeeded {
+                return Err(StorageError::Internal {
+                    message: "mark succeeded failure".to_string(),
+                });
+            }
+            self.inner.mark_relay_publish_succeeded(id).await
+        }
+
+        async fn mark_relay_publish_failed(
+            &self,
+            id: i64,
+            error: &str,
+            retry_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            if self.fail_mark_failed {
+                return Err(StorageError::Internal {
+                    message: "mark failed failure".to_string(),
+                });
+            }
+            self.inner
+                .mark_relay_publish_failed(id, error, retry_at)
+                .await
+        }
+
+        async fn pending_relay_publishes(
+            &self,
+            pubkey: &[u8],
+            identifier: &str,
+            kind: u32,
+        ) -> Result<i64, StorageError> {
+            if self.fail_pending {
+                return Err(StorageError::Internal {
+                    message: "pending failure".to_string(),
+                });
+            }
+            self.inner
+                .pending_relay_publishes(pubkey, identifier, kind)
+                .await
+        }
+    }
+
+    async fn publish_ok(_: String, _: super::SignedNostrEvent) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn publish_err(_: String, _: super::SignedNostrEvent) -> Result<(), String> {
+        Err("publish failed".to_string())
     }
 
     #[async_trait]
@@ -1171,6 +1323,76 @@ mod tests {
             attempt_count: 1,
             publish_after: OffsetDateTime::from_unix_timestamp(0).expect("ts"),
         }
+    }
+
+    #[tokio::test]
+    async fn scripted_outbox_repositories_delegate_announcement_and_mapping_methods() {
+        let repositories = ScriptedOutboxRepositories::default();
+        let mapping =
+            super::RepoMapping::new("owner", "repo", "11".repeat(32), "repo").expect("mapping");
+        let mapping_record = RepoMappingRecord::new(&mapping).expect("mapping record");
+        repositories
+            .upsert_mapping(mapping_record)
+            .await
+            .expect("upsert mapping");
+        let pubkey = hex::decode("11".repeat(32)).expect("pubkey");
+        assert!(
+            repositories
+                .mapping_by_forgejo("owner", "repo")
+                .await
+                .expect("mapping by forgejo")
+                .is_some()
+        );
+        assert!(
+            repositories
+                .mapping_by_repo(&pubkey, "repo")
+                .await
+                .expect("mapping by repo")
+                .is_some()
+        );
+        assert_eq!(
+            repositories
+                .list_mappings()
+                .await
+                .expect("list mappings")
+                .len(),
+            1
+        );
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://example.com/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &"11".repeat(32), 42, &announcement)
+                .expect("announcement record");
+        repositories
+            .insert_announcement(announcement_record)
+            .await
+            .expect("insert announcement");
+        assert_eq!(
+            repositories
+                .list_announcements(&pubkey, "repo")
+                .await
+                .expect("list announcements")
+                .len(),
+            1
+        );
+        assert!(
+            repositories
+                .latest_announcement(&pubkey, "repo")
+                .await
+                .expect("latest announcement")
+                .is_some()
+        );
     }
 
     fn sample_publish_request(
@@ -2229,6 +2451,18 @@ mod tests {
         assert!(matches!(err, super::CoordinatorError::Serve(_)));
     }
 
+    #[tokio::test]
+    async fn serve_with_init_runs_server_until_cancelled() {
+        let mut config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        config.bind = "127.0.0.1:0".to_string();
+        let task = tokio::spawn(super::serve_with_init(config, || Ok(())));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+    }
+
     #[test]
     fn serve_maps_observability_config_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -2279,6 +2513,277 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_outbox_loop_with_delay_and_publish_handles_claim_errors() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::with_flags(
+            true, false, false, false,
+        ));
+        let temp_dir = temp_dir("gittree-publish-loop-claim-error");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
+            state,
+            StdDuration::from_millis(1),
+            publish_ok,
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_and_publish_handles_mark_succeeded_errors() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::with_flags(
+            false, true, false, false,
+        ));
+        repositories
+            .enqueue_relay_publish(sample_publish_request(
+                "wss://relay.example",
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                vec![vec!["d".to_string(), "repo".to_string()]],
+            ))
+            .await
+            .expect("enqueue");
+        let temp_dir = temp_dir("gittree-publish-loop-mark-succeeded-error");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
+            state,
+            StdDuration::from_millis(1),
+            publish_ok,
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_and_publish_handles_pending_count_errors() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::with_flags(
+            false, false, true, false,
+        ));
+        repositories
+            .enqueue_relay_publish(sample_publish_request(
+                "wss://relay.example",
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                vec![vec!["d".to_string(), "repo".to_string()]],
+            ))
+            .await
+            .expect("enqueue");
+        let temp_dir = temp_dir("gittree-publish-loop-pending-error");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
+            state,
+            StdDuration::from_millis(1),
+            publish_ok,
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_and_publish_handles_mark_failed_errors() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::with_flags(
+            false, false, false, true,
+        ));
+        repositories
+            .enqueue_relay_publish(sample_publish_request(
+                "wss://relay.example",
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                vec![vec!["d".to_string(), "repo".to_string()]],
+            ))
+            .await
+            .expect("enqueue");
+        let temp_dir = temp_dir("gittree-publish-loop-mark-failed-error");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
+            state,
+            StdDuration::from_millis(1),
+            publish_err,
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_and_publish_handles_pending_jobs() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::default());
+        let request = sample_publish_request(
+            "wss://relay.example",
+            KIND_GIT_REPO_ANNOUNCEMENT.0,
+            vec![vec!["d".to_string(), "repo".to_string()]],
+        );
+        repositories
+            .enqueue_relay_publish(request.clone())
+            .await
+            .expect("enqueue first");
+        repositories
+            .enqueue_relay_publish(request)
+            .await
+            .expect("enqueue second");
+        let temp_dir = temp_dir("gittree-publish-loop-pending-jobs");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories: repositories.clone(),
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
+            state,
+            StdDuration::from_millis(1),
+            publish_ok,
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_and_publish_handles_finalize_errors() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::default());
+        repositories
+            .enqueue_relay_publish(sample_publish_request(
+                "wss://relay.example",
+                KIND_GIT_REPO_ANNOUNCEMENT.0,
+                vec![vec!["invalid".to_string()]],
+            ))
+            .await
+            .expect("enqueue");
+        let temp_dir = temp_dir("gittree-publish-loop-finalize-error");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
+            state,
+            StdDuration::from_millis(1),
+            publish_ok,
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_with_delay_and_publish_handles_finalize_success() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::default());
+        repositories
+            .enqueue_relay_publish(sample_publish_request(
+                "wss://relay.example",
+                1,
+                vec![vec!["d".to_string(), "repo".to_string()]],
+            ))
+            .await
+            .expect("enqueue");
+        let temp_dir = temp_dir("gittree-publish-loop-finalize-ok");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
+            state,
+            StdDuration::from_millis(1),
+            publish_ok,
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_outbox_loop_runs_until_cancelled() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-publish-loop-wrapper");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let result = tokio::time::timeout(
+            StdDuration::from_millis(20),
+            super::publish_outbox_loop_with_delay_and_publish(
+                state,
+                StdDuration::from_secs(super::OUTBOX_POLL_SECS),
+                super::publish_to_relay,
+            ),
+        )
+        .await;
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
     async fn publish_outbox_loop_with_delay_handles_empty_queue() {
         let repositories = Arc::new(InMemoryRepositories::new());
         let temp_dir = temp_dir("gittree-publish-loop-empty");
@@ -2293,13 +2798,16 @@ mod tests {
             hooks,
             forgejo,
         };
-        let task = tokio::spawn(super::publish_outbox_loop_with_delay(
-            state,
-            StdDuration::from_millis(1),
-        ));
-        tokio::time::sleep(StdDuration::from_millis(20)).await;
-        task.abort();
-        let _ = task.await;
+        let result = tokio::time::timeout(
+            StdDuration::from_millis(20),
+            super::publish_outbox_loop_with_delay_and_publish(
+                state,
+                StdDuration::from_millis(1),
+                super::publish_to_relay,
+            ),
+        )
+        .await;
+        assert!(result.is_err());
 
         let pending = repositories
             .pending_relay_publishes(&hex::decode("22".repeat(32)).expect("pubkey"), "repo", 1)
@@ -2333,9 +2841,10 @@ mod tests {
             hooks,
             forgejo,
         };
-        let task = tokio::spawn(super::publish_outbox_loop_with_delay(
+        let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
+            super::publish_to_relay,
         ));
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         task.abort();
