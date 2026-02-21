@@ -118,9 +118,23 @@ fn print_help() {
 
 fn main() {
     dotenvy::dotenv().ok();
-    if let Err(err) = run() {
-        eprintln!("relay probe failed: {err}");
-        exit(1);
+    exit(handle_main_result(run()));
+}
+
+fn handle_main_result(result: Result<(), ProbeCommandError>) -> i32 {
+    handle_main_result_with(result, |message| eprintln!("{message}"))
+}
+
+fn handle_main_result_with<F>(result: Result<(), ProbeCommandError>, mut write_error: F) -> i32
+where
+    F: FnMut(&str),
+{
+    match result {
+        Ok(()) => 0,
+        Err(err) => {
+            write_error(&format!("relay probe failed: {err}"));
+            1
+        }
     }
 }
 
@@ -424,9 +438,9 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, StorageConfigError> {
 mod tests {
     use super::{
         ProbeCli, ProbeCommandError, RelayProbeError, RelayProbeResult, StorageConfigError,
-        execute_probe_with_client, now_unix_timestamp, print_help, render_probe_output,
-        resolve_targets, run_with_args, run_with_cli_with_client, storage_from_env,
-        store_probe_result, store_probe_result_with_repo,
+        execute_probe_with_client, handle_main_result_with, now_unix_timestamp, print_help,
+        render_probe_output, resolve_targets, run_with_args, run_with_cli_with_client,
+        storage_from_env, store_probe_result, store_probe_result_with_repo,
     };
     use gittree_config::RelayProbeConfig;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
@@ -1018,10 +1032,7 @@ mod tests {
                     "--store",
                     "--no-active",
                 ]);
-                assert!(
-                    result.is_err(),
-                    "store mode should fail without reachable database"
-                );
+                assert!(result.is_err());
             },
         );
     }
@@ -1037,10 +1048,7 @@ mod tests {
                 "--store",
                 "--no-active",
             ]);
-            assert!(
-                result.is_err(),
-                "store mode should fail without storage config"
-            );
+            assert!(result.is_err());
         });
     }
 
@@ -1152,6 +1160,37 @@ mod tests {
         assert!(matches!(err, ProbeCommandError::StorageConfig(_)));
     }
 
+    fn assert_store_result_or_skip_database_error(result: Result<(), ProbeCommandError>) {
+        if matches!(
+            result,
+            Err(ProbeCommandError::Storage(StorageError::Database { .. }))
+        ) {
+            return;
+        }
+        result.expect("store");
+    }
+
+    #[test]
+    fn assert_store_result_or_skip_database_error_covers_all_paths() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        assert_store_result_or_skip_database_error(Ok(()));
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://gittree:gittree@127.0.0.1:1/gittree",
+            || {
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                let db_error_result = runtime.block_on(store_probe_result(&sample_probe_result()));
+                assert_store_result_or_skip_database_error(db_error_result);
+            },
+        );
+        let panic = std::panic::catch_unwind(|| {
+            assert_store_result_or_skip_database_error(Err(ProbeCommandError::Runtime(
+                "unexpected failure".to_string(),
+            )));
+        });
+        assert!(panic.is_err());
+    }
+
     #[test]
     fn store_probe_result_writes_to_database_when_available() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -1164,15 +1203,30 @@ mod tests {
             with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
                 let runtime = tokio::runtime::Runtime::new().expect("runtime");
                 let result = runtime.block_on(store_probe_result(&sample_probe_result()));
-                if matches!(
-                    result,
-                    Err(ProbeCommandError::Storage(StorageError::Database { .. }))
-                ) {
-                    return;
-                }
-                result.expect("store");
+                assert_store_result_or_skip_database_error(result);
             });
         });
+    }
+
+    #[test]
+    fn handle_main_result_with_maps_success_and_error_exit_codes() {
+        let mut messages = Vec::new();
+        let ok_code = handle_main_result_with(Ok(()), |message| {
+            messages.push(message.to_string());
+        });
+        assert_eq!(ok_code, 0);
+        assert!(messages.is_empty());
+
+        let err_code = handle_main_result_with(
+            Err(ProbeCommandError::Runtime("runtime down".to_string())),
+            |message| messages.push(message.to_string()),
+        );
+        assert_eq!(err_code, 1);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0],
+            "relay probe failed: relay probe runtime error: runtime down"
+        );
     }
 
     #[test]
