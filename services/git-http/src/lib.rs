@@ -18,6 +18,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 use sha2::Digest;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -277,7 +278,27 @@ impl GitHttpMetrics {
 }
 
 pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
-    let _observability = init_observability()?;
+    serve_with(config, init_observability, run_axum_server).await
+}
+
+async fn run_axum_server(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<(), std::io::Error> {
+    axum::serve(listener, router).await
+}
+
+async fn serve_with<Obs, InitObs, ServeFn, ServeFut>(
+    config: GitHttpConfig,
+    init_observability_fn: InitObs,
+    serve_fn: ServeFn,
+) -> Result<(), GitHttpError>
+where
+    InitObs: FnOnce() -> Result<Obs, GitHttpError>,
+    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
+    ServeFut: Future<Output = Result<(), std::io::Error>>,
+{
+    let _observability = init_observability_fn()?;
     let metrics = Arc::new(GitHttpMetrics::new());
     let repositories = build_repositories(&config)?;
     let upstream = ReqwestUpstreamClient::new(config.timeout)?;
@@ -293,7 +314,7 @@ pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| GitHttpError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
+    serve_fn(listener, router)
         .await
         .map_err(|err| GitHttpError::Serve(err.to_string()))?;
     Ok(())
@@ -833,7 +854,9 @@ mod tests {
     use super::AUTH_HEADER;
     use super::AuthConfig;
     use super::BASE64_STANDARD;
+    use super::ENV_STORAGE_IDLE_TIMEOUT_SECS;
     use super::ENV_STORAGE_MAX_CONNECTIONS;
+    use super::ENV_STORAGE_MAX_LIFETIME_SECS;
     use super::ENV_STORAGE_MIN_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
     use super::ENV_TIMEOUT_SECS;
@@ -845,6 +868,7 @@ mod tests {
     use super::GitHttpMetrics;
     use super::GitHttpRequest;
     use super::GitHttpRoute;
+    use super::GitHttpRouter;
     use super::GitHttpService;
     use super::ObservabilityHandle;
     use super::ReqwestUpstreamClient;
@@ -857,9 +881,11 @@ mod tests {
     use super::payload_hash;
     use super::route_request;
     use async_trait::async_trait;
+    use axum::Router;
     use axum::body::{Body, Bytes, to_bytes};
     use axum::http::{HeaderMap, Method, Request, StatusCode};
     use axum::response::IntoResponse;
+    use axum::routing::get;
     use base64::Engine;
     use gittree_config::ConfigError;
     use gittree_core::{RepoAnnouncement, RepoMapping};
@@ -900,6 +926,26 @@ mod tests {
                 std::env::remove_var(key);
             },
         }
+    }
+
+    fn with_env_value<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        f();
+        match previous {
+            Some(old) => unsafe { std::env::set_var(key, old) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    async fn noop_server(
+        _listener: tokio::net::TcpListener,
+        _router: Router,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
     }
 
     fn start_mock_http_server(
@@ -1058,6 +1104,48 @@ mod tests {
     }
 
     #[test]
+    fn config_requires_storage_read_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_value(ENV_STORAGE_READ_URL, None, || {
+            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                let err = GitHttpConfig::from_env().expect_err("missing read url");
+                assert!(matches!(
+                    err,
+                    GitHttpConfigError::Storage(StorageConfigError::MissingEnv(
+                        ENV_STORAGE_READ_URL
+                    ))
+                ));
+            });
+        });
+    }
+
+    #[test]
+    fn config_handles_empty_storage_optional_env_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "", || {
+                        with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "", || {
+                            with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                                with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                                    let config = GitHttpConfig::from_env().expect("config");
+                                    assert_eq!(config.storage.max_connections, 10);
+                                    assert_eq!(config.storage.min_connections, 2);
+                                    assert_eq!(config.storage.idle_timeout_secs, None);
+                                    assert_eq!(config.storage.max_lifetime_secs, None);
+                                });
+                            });
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn route_request_handles_info_refs() {
         let request = GitHttpRequest::new(
             "GET",
@@ -1124,6 +1212,44 @@ mod tests {
             None,
         );
         assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+    }
+
+    #[test]
+    fn router_and_route_helpers_cover_all_labels_and_edge_paths() {
+        let router = GitHttpRouter::new();
+        let request = GitHttpRequest::new(
+            "POST",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/git-upload-pack",
+            None,
+        );
+        let upload_route = router.route(&request);
+        assert!(matches!(upload_route, GitHttpRoute::UploadPack { .. }));
+        assert_eq!(super::route_label(&upload_route), "upload_pack");
+
+        let receive_request = GitHttpRequest::new(
+            "POST",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/git-receive-pack",
+            None,
+        );
+        let receive_route = router.route(&receive_request);
+        assert_eq!(super::route_label(&receive_route), "receive_pack");
+
+        let info_request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
+            Some("other=1&service=git-upload-pack"),
+        );
+        let info_route = router.route(&info_request);
+        assert_eq!(super::route_label(&info_route), "info_refs");
+
+        let not_found_request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git",
+            None,
+        );
+        let not_found_route = router.route(&not_found_request);
+        assert!(matches!(not_found_route, GitHttpRoute::NotFound));
+        assert_eq!(super::route_label(&not_found_route), "not_found");
     }
 
     fn test_auth() -> AuthConfig {
@@ -1415,6 +1541,69 @@ mod tests {
         assert_eq!(calls.len(), 1);
     }
 
+    #[tokio::test]
+    async fn receive_pack_rejects_unauthorized_pubkey() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
+            .expect("parse");
+        let mapping =
+            RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo").expect("mapping");
+        let record = RepoMappingRecord::new(&mapping).expect("record");
+        repositories.upsert_mapping(record).await.expect("mapping");
+
+        let body = Bytes::from_static(b"payload");
+        let url = format!("http://localhost/{npub}/repo.git/git-receive-pack");
+        let event = signed_event(&url, "POST", &body, super::unix_timestamp());
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec!["11".repeat(32)],
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &parsed.pubkey, 1, &announcement)
+                .expect("announcement");
+        repositories
+            .insert_announcement(announcement_record)
+            .await
+            .expect("announcement");
+
+        let upstream = Arc::new(MockUpstreamClient::new(UpstreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"upstream"),
+        }));
+        let app = super::build_router(GitHttpAppState {
+            auth: test_auth(),
+            repositories: Arc::clone(&repositories),
+            upstream: Arc::clone(&upstream),
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        });
+
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/{npub}/repo.git/git-receive-pack"))
+                    .header("host", "localhost")
+                    .header(AUTH_HEADER, format!("Nostr {token}"))
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[test]
     fn observability_init_returns_registry() {
         let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
@@ -1427,6 +1616,114 @@ mod tests {
         let metrics = GitHttpMetrics::new();
         let route = GitHttpRoute::NotFound;
         metrics.record(&route, 200, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn upstream_error_and_service_build_paths_are_stable() {
+        let upstream = UpstreamError::Request("failed".to_string());
+        assert_eq!(upstream.to_string(), "failed");
+
+        let config = GitHttpConfig {
+            bind: "127.0.0.1:8085".to_string(),
+            upstream_url: "https://git.example".to_string(),
+            timeout: Duration::from_secs(1),
+            auth: test_auth(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 0,
+                min_connections: 0,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = super::build_repositories(&config).expect_err("invalid pool");
+        assert!(matches!(err, GitHttpError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_with_covers_bind_and_server_error_paths() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("occupied listener");
+        let bind = occupied.local_addr().expect("occupied addr");
+        let config = GitHttpConfig {
+            bind: bind.to_string(),
+            upstream_url: "https://git.example".to_string(),
+            timeout: Duration::from_secs(1),
+            auth: test_auth(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let bind_err = super::serve_with(config, || Ok(()), noop_server)
+            .await
+            .expect_err("bind error");
+        assert!(matches!(bind_err, GitHttpError::Serve(_)));
+
+        let config = GitHttpConfig {
+            bind: "127.0.0.1:0".to_string(),
+            upstream_url: "https://git.example".to_string(),
+            timeout: Duration::from_secs(1),
+            auth: test_auth(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let serve_err = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Err(std::io::Error::other("boom")) },
+        )
+        .await
+        .expect_err("serve error");
+        assert!(matches!(serve_err, GitHttpError::Serve(message) if message.contains("boom")));
+    }
+
+    #[tokio::test]
+    async fn serve_with_returns_ok_when_server_finishes_cleanly() {
+        let config = GitHttpConfig {
+            bind: "127.0.0.1:0".to_string(),
+            upstream_url: "https://git.example".to_string(),
+            timeout: Duration::from_secs(1),
+            auth: test_auth(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let result = super::serve_with(config, || Ok(()), noop_server).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_can_start_and_be_aborted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let router = Router::new().route("/health", get(super::health_handler));
+        let task = tokio::spawn(super::run_axum_server(listener, router));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        task.abort();
+        let _ = task.await;
     }
 
     #[test]
