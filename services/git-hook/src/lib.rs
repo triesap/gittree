@@ -879,6 +879,25 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "with_env_var panic path")]
+    fn with_env_var_resumes_panics() {
+        with_env_var("GITTREE_TEST_RESTORE_PANIC", Some("during"), || {
+            panic!("with_env_var panic path");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "with_env_vars panic path")]
+    fn with_env_vars_resumes_panics() {
+        with_env_vars(
+            &[("GITTREE_TEST_RESTORE_VARS_PANIC", Some("during"))],
+            || {
+                panic!("with_env_vars panic path");
+            },
+        );
+    }
+
+    #[test]
     fn hook_config_from_env_uses_defaults_and_overrides() {
         with_env_vars(
             &[
