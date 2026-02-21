@@ -1,8 +1,30 @@
+use sqlx::Connection;
+use sqlx::postgres::PgConnection;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
+
+fn ensure_core_migrations(database_url: &str) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| err.to_string())?;
+    runtime.block_on(async {
+        let mut connection = PgConnection::connect(database_url)
+            .await
+            .map_err(|err| err.to_string())?;
+        let runner =
+            gittree_storage::MigrationRunner::new(gittree_storage::migrations::core_migrations())
+                .map_err(|err| err.to_string())?;
+        runner
+            .run(&mut connection)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    })
+}
 
 fn start_mock_http_server(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind server");
@@ -223,6 +245,7 @@ fn admin_binary_map_stores_mapping_when_database_available() {
     let Some(database_url) = storage_database_url() else {
         return;
     };
+    ensure_core_migrations(&database_url).expect("run core migrations");
     let output = run_admin(
         &[
             "map",
