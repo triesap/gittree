@@ -8,9 +8,10 @@ use std::io::Write;
 async fn main() {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr).await;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
+    let mut exit_process = |code| {
+        std::process::exit(code);
+    };
+    exit_if_needed(exit_code, &mut exit_process);
 }
 
 async fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -69,16 +70,28 @@ fn handle_main_result(result: Result<(), AppError>, stderr: &mut impl Write) -> 
     }
 }
 
+fn exit_if_needed(exit_code: i32, exit: &mut dyn FnMut(i32)) {
+    if exit_code != 0 {
+        exit(exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, main_impl_with, run_with};
+    use super::{exit_if_needed, handle_main_result, main_impl_with, run_with};
     use gittree_app::AppError;
+
+    async fn serve_should_not_run(_: ()) -> Result<(), AppError> {
+        panic!("serve should not run when config loading fails");
+    }
+
+    fn noop_exit(_: i32) {}
 
     #[tokio::test]
     async fn run_with_returns_config_errors() {
         let err = run_with(
             || Err::<(), AppError>(AppError::Serve("config failed".to_string())),
-            |_| async { Ok::<(), AppError>(()) },
+            serve_should_not_run,
         )
         .await
         .expect_err("config error");
@@ -139,6 +152,26 @@ mod tests {
         assert_eq!(exit_code, 1);
         let message = String::from_utf8(stderr).expect("utf8");
         assert!(message.contains("app serve error: boom"));
+    }
+
+    #[test]
+    fn exit_if_needed_skips_zero_exit_code() {
+        let mut exit = noop_exit;
+        exit_if_needed(0, &mut exit);
+    }
+
+    #[test]
+    fn exit_if_needed_forwards_non_zero_exit_code() {
+        let mut observed = None;
+        let mut exit = |code| observed = Some(code);
+        exit_if_needed(7, &mut exit);
+        assert_eq!(observed, Some(7));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "serve should not run when config loading fails")]
+    async fn serve_should_not_run_panics_when_called() {
+        let _ = serve_should_not_run(()).await;
     }
 
     #[tokio::test]
