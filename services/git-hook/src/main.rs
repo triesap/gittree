@@ -147,9 +147,7 @@ mod tests {
             Err(HookServiceError::Core("runner boom".to_string()))
         })
         .expect_err("runner should fail");
-        if !matches!(err, HookServiceError::Core(_)) {
-            panic!("expected core error");
-        }
+        assert!(matches!(err, HookServiceError::Core(_)));
     }
 
     #[test]
@@ -192,6 +190,11 @@ mod tests {
         let exit_code = handle_main_result(Err("boom".to_string()), &mut stderr);
         assert_eq!(exit_code, 1);
         assert_eq!(String::from_utf8(stderr).expect("utf8"), "boom\n");
+    }
+
+    #[test]
+    fn noop_exit_is_noop() {
+        noop_exit(0);
     }
 
     #[test]

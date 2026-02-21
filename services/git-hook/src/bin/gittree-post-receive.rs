@@ -152,6 +152,11 @@ mod tests {
     }
 
     #[test]
+    fn noop_exit_is_noop() {
+        noop_exit(0);
+    }
+
+    #[test]
     fn init_observability_reports_invalid_log_env() {
         with_env_var("GITTREE_LOG_JSON", Some("invalid-bool"), || {
             let result = init_observability("gittree-post-receive");
