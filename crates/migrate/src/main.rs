@@ -120,6 +120,16 @@ mod tests {
     use super::{MainError, handle_main_outcome, main_impl_with, main_result_with, run_migrations};
     use gittree_migrate::{MigrationConfigError, MigrationError};
 
+    async fn noop_migration_runner() -> Result<i64, MigrationError> {
+        Ok(0)
+    }
+
+    #[tokio::test]
+    async fn noop_migration_runner_returns_zero() {
+        let version = noop_migration_runner().await.expect("version");
+        assert_eq!(version, 0);
+    }
+
     #[tokio::test]
     async fn run_migrations_returns_version_on_success() {
         let version = run_migrations(|| Ok(()), || async { Ok::<i64, MigrationError>(12) })
@@ -130,12 +140,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_migrations_maps_observability_errors() {
-        let err = run_migrations(
-            || Err::<(), String>("observer down".to_string()),
-            || async { Ok::<i64, MigrationError>(0) },
-        )
-        .await
-        .expect_err("observability error");
+        let migrate = || noop_migration_runner();
+        let err = run_migrations(|| Err::<(), String>("observer down".to_string()), migrate)
+            .await
+            .expect_err("observability error");
         assert!(matches!(err, MainError::Observability(message) if message == "observer down"));
     }
 
@@ -166,12 +174,10 @@ mod tests {
 
     #[tokio::test]
     async fn main_result_with_delegates_errors() {
-        let err = main_result_with(
-            || Err::<(), String>("observer down".to_string()),
-            || async { Ok::<i64, MigrationError>(0) },
-        )
-        .await
-        .expect_err("error");
+        let migrate = || noop_migration_runner();
+        let err = main_result_with(|| Err::<(), String>("observer down".to_string()), migrate)
+            .await
+            .expect_err("error");
         assert!(matches!(err, MainError::Observability(message) if message == "observer down"));
     }
 
