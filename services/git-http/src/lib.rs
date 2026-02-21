@@ -18,7 +18,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 use sha2::Digest;
 use std::collections::HashSet;
-use std::future::Future;
+use std::future::{Future, pending};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -268,24 +268,39 @@ impl GitHttpMetrics {
         self.request_duration
             .record(duration.as_secs_f64(), &labels);
         self.request_total.add(1, &labels);
+        let route_name = route_label(route);
+        let duration_ms = duration.as_millis();
         tracing::info!(
-            route = route_label(route),
+            route = route_name,
             status,
-            duration_ms = duration.as_millis(),
+            duration_ms,
             "git-http request handled"
         );
     }
 }
 
 pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
-    serve_with(config, init_observability, run_axum_server).await
+    serve_with(config, init_observability, run_axum_server_with_pending).await
 }
 
-async fn run_axum_server(
+async fn run_axum_server_with_pending(
     listener: tokio::net::TcpListener,
     router: Router,
 ) -> Result<(), std::io::Error> {
-    axum::serve(listener, router).await
+    run_axum_server_with_shutdown(listener, router, pending::<()>()).await
+}
+
+async fn run_axum_server_with_shutdown<Shutdown>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: Shutdown,
+) -> Result<(), std::io::Error>
+where
+    Shutdown: Future<Output = ()> + Send + 'static,
+{
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown)
+        .await
 }
 
 async fn serve_with<Obs, InitObs, ServeFn, ServeFut>(
@@ -403,9 +418,7 @@ impl ReqwestUpstreamClient {
 #[async_trait]
 impl UpstreamClient for ReqwestUpstreamClient {
     async fn send(&self, request: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-        let method = reqwest::Method::from_bytes(request.method.as_str().as_bytes())
-            .map_err(|err| UpstreamError::Request(err.to_string()))?;
-        let mut builder = self.client.request(method, request.url);
+        let mut builder = self.client.request(request.method, request.url);
         builder = builder.headers(request.headers);
         builder = builder.body(request.body);
         let response = builder
@@ -967,6 +980,21 @@ mod tests {
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn start_raw_http_server(response: &[u8]) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let response = response.to_vec();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(&response);
                 let _ = stream.flush();
             }
         });
@@ -1892,10 +1920,47 @@ mod tests {
             .await
             .expect("bind");
         let router = Router::new().route("/health", get(super::health_handler));
-        let task = tokio::spawn(super::run_axum_server(listener, router));
+        let task = tokio::spawn(super::run_axum_server_with_pending(listener, router));
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         task.abort();
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_with_shutdown_returns_ok() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let router = Router::new().route("/health", get(super::health_handler));
+        let result = super::run_axum_server_with_shutdown(listener, router, async {}).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn serve_maps_observability_config_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+            let config = GitHttpConfig {
+                bind: "127.0.0.1:0".to_string(),
+                upstream_url: "https://git.example".to_string(),
+                timeout: Duration::from_secs(1),
+                auth: test_auth(),
+                storage: super::StorageConfig {
+                    read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                    write_connection: None,
+                    max_connections: 10,
+                    min_connections: 2,
+                    idle_timeout_secs: None,
+                    max_lifetime_secs: None,
+                    application_name: None,
+                },
+            };
+            let err = runtime
+                .block_on(super::serve(config))
+                .expect_err("observability config error");
+            assert!(matches!(err, GitHttpError::ObservabilityConfig(_)));
+        });
     }
 
     #[test]
@@ -2089,5 +2154,23 @@ mod tests {
             .await
             .expect_err("expected transport error");
         assert!(matches!(err, UpstreamError::Request(_)));
+    }
+
+    #[tokio::test]
+    async fn reqwest_upstream_client_maps_body_read_errors() {
+        let raw = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\nzz\r\nbody\r\n0\r\n\r\n";
+        let (base_url, handle) = start_raw_http_server(raw);
+        let client = ReqwestUpstreamClient::new(Duration::from_secs(1)).expect("client");
+        let err = client
+            .send(UpstreamRequest {
+                method: Method::GET,
+                url: base_url,
+                headers: HeaderMap::new(),
+                body: Bytes::new(),
+            })
+            .await
+            .expect_err("expected body read error");
+        assert!(matches!(err, UpstreamError::Request(_)));
+        handle.join().expect("server join");
     }
 }
