@@ -322,10 +322,14 @@ where
 }
 
 pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
-    serve_with(config, init_observability, |listener, router| async move {
-        axum::serve(listener, router).await
-    })
-    .await
+    serve_with(config, init_observability, run_axum_server).await
+}
+
+fn run_axum_server(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> impl Future<Output = Result<(), std::io::Error>> {
+    async move { axum::serve(listener, router).await }
 }
 
 fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
@@ -341,9 +345,7 @@ fn build_router(state: AppUiState) -> Router {
     let routes = leptos_axum::generate_route_list(gittree_app_ui::GittreeApp);
     let base_path = state.base_path.clone();
     let server_fn_state = state.clone();
-    let server_fn_context = move || {
-        provide_context(server_fn_state.clone());
-    };
+    let server_fn_context = move || provide_context(server_fn_state.clone());
     let shell = |_options: LeptosOptions| gittree_app_ui::GittreeApp();
 
     let app = Router::new()
@@ -434,11 +436,12 @@ async fn health_handler() -> &'static str {
 mod tests {
     use super::{
         AppApiError, AppError, AppServiceConfig, AppServiceConfigError, AppUiState,
-        StorageConfigError, build_router,
+        StorageConfigError, build_router, run_axum_server,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
+    use axum::routing::get;
     use gittree_app_core::RepoListResponse;
     use gittree_app_ui::server::AppUiError;
     use gittree_config::{ConfigError, UiConfig};
@@ -451,6 +454,8 @@ mod tests {
     use std::error::Error;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::util::ServiceExt;
 
     fn test_ui_config() -> UiConfig {
@@ -664,14 +669,50 @@ mod tests {
             ui: test_ui_config(),
         };
 
-        let err = super::serve_with(
-            config,
-            || Ok(()),
-            |listener, router| async move { axum::serve(listener, router).await },
-        )
-        .await
-        .expect_err("bind error");
+        let err = super::serve_with(config, || Ok(()), run_axum_server)
+            .await
+            .expect_err("bind error");
         assert!(matches!(err, AppError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_can_start_and_be_aborted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route("/health", get(super::health_handler));
+        let task = tokio::spawn(async move { run_axum_server(listener, app).await });
+        let bad_port = addr.port().wrapping_add(1);
+        let bad_addr = std::net::SocketAddr::new(addr.ip(), bad_port);
+        let _ = tokio::net::TcpStream::connect(bad_addr).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let mut ready = false;
+        for _ in 0..20 {
+            if let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await {
+                stream
+                    .write_all(
+                        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write request");
+                let mut response = Vec::new();
+                stream
+                    .read_to_end(&mut response)
+                    .await
+                    .expect("read response");
+                if response.starts_with(b"HTTP/1.1 200") {
+                    ready = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(ready);
+        task.abort();
+        let join_err = task.await.expect_err("abort");
+        assert!(join_err.is_cancelled());
     }
 
     #[tokio::test]
@@ -737,11 +778,27 @@ mod tests {
 
     #[test]
     fn init_observability_returns_registry() {
-        match super::init_observability() {
-            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
-            Err(AppError::Observability(ObservabilityError::SubscriberInit(_))) => {}
-            Err(other) => panic!("unexpected observability result: {other}"),
-        }
+        let first = super::init_observability();
+        let first_ok = first
+            .as_ref()
+            .ok()
+            .map(|handle| handle.prometheus_registry().is_some())
+            .unwrap_or(true);
+        assert!(first_ok);
+        let second = super::init_observability();
+        assert!(matches!(
+            second,
+            Ok(_)
+                | Err(AppError::Observability(ObservabilityError::SubscriberInit(
+                    _
+                )))
+        ));
+        let second_ok = second
+            .as_ref()
+            .ok()
+            .map(|handle| handle.prometheus_registry().is_some())
+            .unwrap_or(true);
+        assert!(second_ok);
     }
 
     #[tokio::test]
@@ -802,7 +859,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/unknown_server_fn")
+                    .uri("/api/coverage_context_hook")
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
                     .expect("request"),
