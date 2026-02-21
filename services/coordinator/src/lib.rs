@@ -9,12 +9,12 @@ use gittree_core::{
 };
 use gittree_forgejo::{ForgejoClient, ForgejoError, ForgejoTransport};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
+use gittree_relay_adapter::{
+    RelayAdapter, RelayAdapterConfig, SignedNostrEvent, WebsocketRelayAdapter,
+};
 use gittree_storage::{
     AnnouncementRepository, PostgresRepositories, RelayPublishJob, RelayPublishRepository,
     RepoAnnouncementRecord, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
-};
-use gittree_relay_adapter::{
-    RelayAdapter, RelayAdapterConfig, SignedNostrEvent, WebsocketRelayAdapter,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -183,8 +183,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, CoordinatorConfigError> {
 }
 
 fn env_path(key: &'static str) -> Result<PathBuf, CoordinatorConfigError> {
-    let value =
-        std::env::var(key).map_err(|_| CoordinatorConfigError::MissingEnv(key))?;
+    let value = std::env::var(key).map_err(|_| CoordinatorConfigError::MissingEnv(key))?;
     if value.trim().is_empty() {
         return Err(CoordinatorConfigError::InvalidEnv { key, value });
     }
@@ -241,7 +240,10 @@ pub fn init_observability() -> Result<ObservabilityHandle, CoordinatorError> {
 pub fn build_repositories(
     config: &CoordinatorConfig,
 ) -> Result<PostgresRepositories, CoordinatorError> {
-    let pool_options = config.storage.pool_options().map_err(CoordinatorError::Storage)?;
+    let pool_options = config
+        .storage
+        .pool_options()
+        .map_err(CoordinatorError::Storage)?;
     let connect_options = config
         .storage
         .read_connect_options()
@@ -274,8 +276,7 @@ where
 pub async fn serve(config: CoordinatorConfig) -> Result<(), CoordinatorError> {
     let _observability = init_observability()?;
     let repositories = build_repositories(&config)?;
-    let forgejo =
-        ForgejoClient::new(config.forgejo).map_err(CoordinatorError::Forgejo)?;
+    let forgejo = ForgejoClient::new(config.forgejo).map_err(CoordinatorError::Forgejo)?;
     let state = CoordinatorAppState {
         repositories: Arc::new(repositories),
         repo_root: config.repo_root,
@@ -313,7 +314,12 @@ async fn health_handler() -> &'static str {
 
 async fn publish_outbox_loop<R, T>(state: CoordinatorAppState<R, T>)
 where
-    R: RelayPublishRepository + AnnouncementRepository + RepoMappingRepository + Send + Sync + 'static,
+    R: RelayPublishRepository
+        + AnnouncementRepository
+        + RepoMappingRepository
+        + Send
+        + Sync
+        + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
     let poll_delay = StdDuration::from_secs(OUTBOX_POLL_SECS);
@@ -337,7 +343,11 @@ where
         let event = signed_event_from_job(&job);
         match adapter.publish_event(&event).await {
             Ok(()) => {
-                if let Err(err) = state.repositories.mark_relay_publish_succeeded(job.id).await {
+                if let Err(err) = state
+                    .repositories
+                    .mark_relay_publish_succeeded(job.id)
+                    .await
+                {
                     tracing::error!(error = %err, "outbox mark succeeded failed");
                     continue;
                 }
@@ -391,11 +401,9 @@ pub enum CoordinatorActionPayload {
 impl From<CoordinatorAction> for CoordinatorActionPayload {
     fn from(action: CoordinatorAction) -> Self {
         match action {
-            CoordinatorAction::Provisioned { repo_path } => {
-                CoordinatorActionPayload::Provisioned {
-                    repo_path: repo_path.display().to_string(),
-                }
-            }
+            CoordinatorAction::Provisioned { repo_path } => CoordinatorActionPayload::Provisioned {
+                repo_path: repo_path.display().to_string(),
+            },
             CoordinatorAction::SkippedExisting { repo_path } => {
                 CoordinatorActionPayload::SkippedExisting {
                     repo_path: repo_path.display().to_string(),
@@ -433,9 +441,7 @@ impl IntoResponse for CoordinatorHttpError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             CoordinatorHttpError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            CoordinatorHttpError::Internal(message) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, message)
-            }
+            CoordinatorHttpError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
         };
         (status, message).into_response()
     }
@@ -961,19 +967,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::CoordinatorAction;
+    use super::CoordinatorActionPayload;
     use super::CoordinatorConfig;
+    use super::CoordinatorEventPayload;
     use super::ENV_STORAGE_READ_URL;
     use super::HookInstallConfig;
     use super::ObservabilityHandle;
     use super::RelayEvent;
-    use super::handle_announcement_event_with_storage;
     use super::RepoAnnouncement;
     use super::build_provision_plan;
     use super::handle_announcement_event;
+    use super::handle_announcement_event_with_storage;
     use super::init_observability;
     use super::init_repo;
-    use super::CoordinatorActionPayload;
-    use super::CoordinatorEventPayload;
     use super::install_hooks;
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
@@ -1032,9 +1038,7 @@ mod tests {
                 .expect("responses")
                 .pop_front()
                 .ok_or_else(|| {
-                    gittree_forgejo::ForgejoError::Request(
-                        "missing mock response".to_string(),
-                    )
+                    gittree_forgejo::ForgejoError::Request("missing mock response".to_string())
                 })
         }
     }
@@ -1158,9 +1162,13 @@ mod tests {
         with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
             with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
                 with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
-                    with_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:8090/", || {
-                        with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", f);
-                    });
+                    with_env_var(
+                        "GITTREE_FORGEJO_WEBHOOK_URL",
+                        "http://localhost:8090/",
+                        || {
+                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", f);
+                        },
+                    );
                 });
             });
         });
@@ -1173,21 +1181,25 @@ mod tests {
             || {
                 with_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091", || {
                     with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                        with_env_var(super::ENV_COORDINATOR_REPO_ROOT, "/tmp/gittree-repos", || {
-                            with_env_var(
-                                super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
-                                "/tmp/gittree-pre-receive",
-                                || {
-                                    with_env_var(
-                                        super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
-                                        "/tmp/gittree-post-receive",
-                                        || {
-                                            with_forgejo_envs(f);
-                                        },
-                                    );
-                                },
-                            );
-                        });
+                        with_env_var(
+                            super::ENV_COORDINATOR_REPO_ROOT,
+                            "/tmp/gittree-repos",
+                            || {
+                                with_env_var(
+                                    super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
+                                    "/tmp/gittree-pre-receive",
+                                    || {
+                                        with_env_var(
+                                            super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
+                                            "/tmp/gittree-post-receive",
+                                            || {
+                                                with_forgejo_envs(f);
+                                            },
+                                        );
+                                    },
+                                );
+                            },
+                        );
                     });
                 });
             },
@@ -1211,10 +1223,10 @@ mod tests {
                                     super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
                                     "/tmp/gittree-pre-receive",
                                     || {
-                                    with_env_var(
-                                        super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
-                                        "/tmp/gittree-post-receive",
-                                        || {
+                                        with_env_var(
+                                            super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
+                                            "/tmp/gittree-post-receive",
+                                            || {
                                                 with_forgejo_envs(|| {
                                                     let config = CoordinatorConfig::from_env()
                                                         .expect("config");
@@ -1264,22 +1276,40 @@ mod tests {
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
             || {
-                with_env_var(super::ENV_COORDINATOR_REPO_ROOT, "/tmp/gittree-repos", || {
-                    with_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, "/tmp/pre", || {
-                        with_env_var(super::ENV_COORDINATOR_POST_RECEIVE_HOOK, "/tmp/post", || {
-                            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
-                                    with_forgejo_envs(|| {
-                                        let config =
-                                            CoordinatorConfig::from_env().expect("config");
-                                        assert_eq!(config.storage.idle_timeout_secs, None);
-                                        assert_eq!(config.storage.max_lifetime_secs, None);
+                with_env_var(
+                    super::ENV_COORDINATOR_REPO_ROOT,
+                    "/tmp/gittree-repos",
+                    || {
+                        with_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, "/tmp/pre", || {
+                            with_env_var(
+                                super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
+                                "/tmp/post",
+                                || {
+                                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                                        with_env_var(
+                                            super::ENV_STORAGE_MAX_LIFETIME_SECS,
+                                            "",
+                                            || {
+                                                with_forgejo_envs(|| {
+                                                    let config = CoordinatorConfig::from_env()
+                                                        .expect("config");
+                                                    assert_eq!(
+                                                        config.storage.idle_timeout_secs,
+                                                        None
+                                                    );
+                                                    assert_eq!(
+                                                        config.storage.max_lifetime_secs,
+                                                        None
+                                                    );
+                                                });
+                                            },
+                                        );
                                     });
-                                });
-                            });
+                                },
+                            );
                         });
-                    });
-                });
+                    },
+                );
             },
         );
     }
@@ -1376,9 +1406,9 @@ mod tests {
         );
         assert!(std::error::Error::source(&config).is_some());
 
-        let storage = super::CoordinatorConfigError::Storage(super::StorageConfigError::InvalidConfig(
-            "invalid storage config".to_string(),
-        ));
+        let storage = super::CoordinatorConfigError::Storage(
+            super::StorageConfigError::InvalidConfig("invalid storage config".to_string()),
+        );
         assert_eq!(
             format!("{storage}"),
             "coordinator storage config error: invalid storage config"
@@ -1402,28 +1432,28 @@ mod tests {
             key: "STORAGE_KEY",
             value: "NaN".to_string(),
         };
-        assert_eq!(
-            format!("{storage_invalid}"),
-            "invalid env STORAGE_KEY: NaN"
-        );
+        assert_eq!(format!("{storage_invalid}"), "invalid env STORAGE_KEY: NaN");
     }
 
     #[test]
     fn coordinator_error_display_and_source() {
-        let config = super::CoordinatorError::Config(
-            super::CoordinatorConfigError::MissingEnv("CFG_MISSING"),
+        let config = super::CoordinatorError::Config(super::CoordinatorConfigError::MissingEnv(
+            "CFG_MISSING",
+        ));
+        assert_eq!(
+            format!("{config}"),
+            "coordinator error: missing env CFG_MISSING"
         );
-        assert_eq!(format!("{config}"), "coordinator error: missing env CFG_MISSING");
         assert!(std::error::Error::source(&config).is_some());
 
-        let observability_config = super::CoordinatorError::ObservabilityConfig(
-            ObservabilityConfigError::InvalidEnv {
+        let observability_config =
+            super::CoordinatorError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv {
                 key: "OTEL_METRICS_ENABLED",
                 value: "wat".to_string(),
-            },
+            });
+        assert!(
+            format!("{observability_config}").contains("coordinator observability config error")
         );
-        assert!(format!("{observability_config}")
-            .contains("coordinator observability config error"));
         assert!(std::error::Error::source(&observability_config).is_some());
 
         let observability =
@@ -1689,7 +1719,9 @@ mod tests {
         for (error, expected_status, expected_body_fragment) in cases {
             let response = super::CoordinatorHttpError::from(error).into_response();
             assert_eq!(response.status(), expected_status);
-            let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
             let text = String::from_utf8(body.to_vec()).expect("utf8");
             assert!(
                 text.contains(expected_body_fragment),
@@ -1732,7 +1764,9 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         let text = String::from_utf8(body.to_vec()).expect("utf8");
         assert!(text.contains("invalid kind"));
         let _ = fs::remove_dir_all(temp_dir);
@@ -1779,15 +1813,10 @@ mod tests {
         };
         let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
         let storage = InMemoryRepositories::new();
-        let action = handle_announcement_event_with_storage(
-            &temp_dir,
-            &hooks,
-            &storage,
-            &forgejo,
-            &event,
-        )
-        .await
-        .expect("ignored");
+        let action =
+            handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
+                .await
+                .expect("ignored");
         assert!(matches!(action, CoordinatorAction::Ignored));
         assert!(transport.requests().is_empty());
         let _ = fs::remove_dir_all(temp_dir);
@@ -1809,7 +1838,10 @@ mod tests {
         };
         let parse_error = handle_announcement_event(&temp_dir, &hooks, &invalid)
             .expect_err("parse error expected");
-        assert!(matches!(parse_error, super::CoordinatorEventError::Parse(_)));
+        assert!(matches!(
+            parse_error,
+            super::CoordinatorEventError::Parse(_)
+        ));
 
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
@@ -1846,12 +1878,18 @@ mod tests {
         fs::write(&repo_path, "not a dir").expect("repo file");
         let plan = sample_plan(repo_path.clone());
         let non_dir_error = super::init_repo(&plan).expect_err("non-directory should fail");
-        assert!(matches!(non_dir_error, super::RepoInitError::InvalidRepo(_)));
+        assert!(matches!(
+            non_dir_error,
+            super::RepoInitError::InvalidRepo(_)
+        ));
 
         fs::remove_file(&repo_path).expect("remove file");
         fs::create_dir_all(&repo_path).expect("repo dir");
         let missing_head_error = super::init_repo(&plan).expect_err("missing head should fail");
-        assert!(matches!(missing_head_error, super::RepoInitError::InvalidRepo(_)));
+        assert!(matches!(
+            missing_head_error,
+            super::RepoInitError::InvalidRepo(_)
+        ));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -1900,7 +1938,10 @@ mod tests {
         assert!(std::error::Error::source(&hook_io).is_some());
 
         let hook_missing = super::HookInstallError::MissingSource("/tmp/missing".to_string());
-        assert_eq!(format!("{hook_missing}"), "missing hook source: /tmp/missing");
+        assert_eq!(
+            format!("{hook_missing}"),
+            "missing hook source: /tmp/missing"
+        );
         assert!(std::error::Error::source(&hook_missing).is_none());
 
         let plan_error = super::ProvisionPlanError::InvalidRepo("invalid plan".to_string());
@@ -1921,8 +1962,9 @@ mod tests {
         assert_eq!(format!("{plan}"), "plan");
         assert!(std::error::Error::source(&plan).is_some());
 
-        let init =
-            super::CoordinatorEventError::Init(super::RepoInitError::InvalidRepo("init".to_string()));
+        let init = super::CoordinatorEventError::Init(super::RepoInitError::InvalidRepo(
+            "init".to_string(),
+        ));
         assert_eq!(format!("{init}"), "init");
         assert!(std::error::Error::source(&init).is_some());
 
@@ -1935,12 +1977,15 @@ mod tests {
         let storage = super::CoordinatorEventError::Storage(StorageError::Internal {
             message: "storage".to_string(),
         });
-        assert_eq!(format!("{storage}"), "storage error: internal error: storage");
+        assert_eq!(
+            format!("{storage}"),
+            "storage error: internal error: storage"
+        );
         assert!(std::error::Error::source(&storage).is_some());
 
-        let forgejo = super::CoordinatorEventError::Forgejo(gittree_forgejo::ForgejoError::Request(
-            "forgejo".to_string(),
-        ));
+        let forgejo = super::CoordinatorEventError::Forgejo(
+            gittree_forgejo::ForgejoError::Request("forgejo".to_string()),
+        );
         assert_eq!(format!("{forgejo}"), "forgejo request error: forgejo");
         assert!(std::error::Error::source(&forgejo).is_some());
 
@@ -1960,7 +2005,10 @@ mod tests {
             post_receive_source: temp_dir.join("missing-post"),
         };
         let hook_error = super::install_hooks(&plan, &config).expect_err("missing source");
-        assert!(matches!(hook_error, super::HookInstallError::MissingSource(_)));
+        assert!(matches!(
+            hook_error,
+            super::HookInstallError::MissingSource(_)
+        ));
 
         let transport = MockTransport::default();
         let request = ForgejoRequest {
@@ -2107,7 +2155,10 @@ mod tests {
             with_unset_env_var(key, || {
                 assert!(std::env::var_os(key).is_none());
             });
-            assert_eq!(std::env::var(key).expect("restored after unset"), "original");
+            assert_eq!(
+                std::env::var(key).expect("restored after unset"),
+                "original"
+            );
         });
     }
 
@@ -2166,15 +2217,10 @@ mod tests {
             post_receive_source: post_source,
         };
         let repo_root = temp_dir.join("repos");
-        let action = handle_announcement_event_with_storage(
-            &repo_root,
-            &hooks,
-            &storage,
-            &forgejo,
-            &event,
-        )
-        .await
-        .expect("handle");
+        let action =
+            handle_announcement_event_with_storage(&repo_root, &hooks, &storage, &forgejo, &event)
+                .await
+                .expect("handle");
         assert!(matches!(action, CoordinatorAction::Provisioned { .. }));
         assert_eq!(transport.requests().len(), 4);
         let pubkey_bytes = hex::decode(&event.pubkey).expect("decode");
@@ -2210,7 +2256,12 @@ mod tests {
             forgejo,
         });
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -2293,10 +2344,14 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
-        let action: CoordinatorActionPayload =
-            serde_json::from_slice(&body).expect("action");
-        assert!(matches!(action, CoordinatorActionPayload::Provisioned { .. }));
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let action: CoordinatorActionPayload = serde_json::from_slice(&body).expect("action");
+        assert!(matches!(
+            action,
+            CoordinatorActionPayload::Provisioned { .. }
+        ));
         assert!(repo_root.join(npub).join("repo.git").exists());
         let mapping = repositories
             .mapping_by_repo(&pubkey_bytes, "repo")
