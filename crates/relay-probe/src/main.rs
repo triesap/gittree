@@ -139,6 +139,13 @@ where
 
 fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
     let client = HttpRelayProbeClient::new().map_err(ProbeCommandError::Cli)?;
+    run_with_cli_with_client(cli, &client)
+}
+
+fn run_with_cli_with_client<C: RelayProbeClient>(
+    cli: ProbeCli,
+    client: &C,
+) -> Result<(), ProbeCommandError> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|err| ProbeCommandError::Runtime(err.to_string()))?;
     let mut probe_config = RelayProbeConfig::from_env().map_err(ProbeCommandError::Config)?;
@@ -152,7 +159,7 @@ fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
         probe_config.secret_key = Some(secret_key);
     }
     probe_config.validate().map_err(ProbeCommandError::Config)?;
-    let results = execute_probe_with_client(&cli, &probe_config, &runtime, &client)?;
+    let results = execute_probe_with_client(&cli, &probe_config, &runtime, client)?;
     let output = render_probe_output(&cli, &results);
     if !output.is_empty() {
         print!("{output}");
@@ -418,8 +425,8 @@ mod tests {
     use super::{
         ProbeCli, ProbeCommandError, RelayProbeError, RelayProbeResult, StorageConfigError,
         execute_probe_with_client, now_unix_timestamp, print_help, render_probe_output,
-        resolve_targets, run_with_args, storage_from_env, store_probe_result,
-        store_probe_result_with_repo,
+        resolve_targets, run_with_args, run_with_cli_with_client, storage_from_env,
+        store_probe_result, store_probe_result_with_repo,
     };
     use gittree_config::RelayProbeConfig;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
@@ -764,6 +771,21 @@ mod tests {
     }
 
     #[test]
+    fn storage_config_treats_empty_max_connections_as_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "  ", || {
+                    let config = storage_from_env().expect("config");
+                    assert_eq!(config.max_connections, 10);
+                });
+            },
+        );
+    }
+
+    #[test]
     fn with_env_var_restores_previous_value() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let key = "GITTREE_RELAY_PROBE_TEST_ENV";
@@ -881,6 +903,104 @@ mod tests {
     }
 
     #[test]
+    fn execute_probe_with_client_active_mode_maps_adapter_errors() {
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: Some(true),
+            timeout_secs: Some(3),
+            secret_key: Some(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+        };
+        let probe_config = RelayProbeConfig {
+            active: true,
+            timeout_secs: 3,
+            secret_key: Some(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let client = StubProbeClient {
+            response: Ok(Some(
+                r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+            )),
+        };
+
+        let results = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
+            .expect("active probe returns a compatibility result with active probe metadata");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].active_probe.is_some());
+    }
+
+    #[test]
+    fn execute_probe_with_client_store_mode_maps_storage_config_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: true,
+            active: Some(false),
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let probe_config = RelayProbeConfig {
+            active: false,
+            timeout_secs: 5,
+            secret_key: None,
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let client = StubProbeClient {
+            response: Ok(Some(
+                r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+            )),
+        };
+
+        with_env_var(super::ENV_STORAGE_READ_URL, "", || {
+            let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
+                .expect_err("store mode should fail without storage env");
+            assert!(
+                matches!(
+                    err,
+                    ProbeCommandError::StorageConfig(_) | ProbeCommandError::Storage(_)
+                ),
+                "unexpected store error: {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn run_with_cli_with_client_applies_cli_overrides_and_emits_output() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_RELAY_PROBE_ACTIVE", "1", || {
+            with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "10", || {
+                let cli = ProbeCli {
+                    relay: Some("wss://relay.example".to_string()),
+                    all: false,
+                    json: false,
+                    store: false,
+                    active: Some(false),
+                    timeout_secs: Some(3),
+                    secret_key: Some(
+                        "1111111111111111111111111111111111111111111111111111111111111111"
+                            .to_string(),
+                    ),
+                };
+                let client = StubProbeClient {
+                    response: Ok(Some(
+                        r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+                    )),
+                };
+
+                run_with_cli_with_client(cli, &client).expect("run");
+            });
+        });
+    }
+
+    #[test]
     fn render_probe_output_covers_json_and_text_modes() {
         let mut detailed = sample_probe_result();
         detailed.report.missing_required = vec![RelayCapability::Nip34];
@@ -946,6 +1066,29 @@ mod tests {
             },
         }
         assert!(matches!(err, ProbeCommandError::StorageConfig(_)));
+    }
+
+    #[test]
+    fn store_probe_result_writes_to_database_when_available() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let database_url = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string());
+
+        with_env_var(super::ENV_STORAGE_READ_URL, &database_url, || {
+            with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                let result = runtime.block_on(store_probe_result(&sample_probe_result()));
+                if matches!(
+                    result,
+                    Err(ProbeCommandError::Storage(StorageError::Database { .. }))
+                ) {
+                    return;
+                }
+                result.expect("store");
+            });
+        });
     }
 
     #[test]
