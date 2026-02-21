@@ -1317,6 +1317,47 @@ mod tests {
         }
     }
 
+    fn postgres_test_config() -> GitHttpConfig {
+        GitHttpConfig {
+            bind: "127.0.0.1:0".to_string(),
+            upstream_url: "https://git.example".to_string(),
+            timeout: Duration::from_secs(1),
+            auth: test_auth(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: Some("gittree-git-http-test".to_string()),
+            },
+        }
+    }
+
+    fn postgres_state() -> GitHttpAppState<super::PostgresRepositories, ReqwestUpstreamClient> {
+        let config = postgres_test_config();
+        let repositories = Arc::new(super::build_repositories(&config).expect("repositories"));
+        let upstream =
+            Arc::new(ReqwestUpstreamClient::new(Duration::from_secs(1)).expect("client"));
+        GitHttpAppState {
+            auth: config.auth,
+            repositories,
+            upstream,
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: config.upstream_url,
+        }
+    }
+
+    fn sample_normalized_repo(pubkey: &str) -> super::NormalizedRepo {
+        super::NormalizedRepo {
+            npub: "npub1test".to_string(),
+            identifier: "repo".to_string(),
+            canonical_path: "/npub1test/repo.git".to_string(),
+            pubkey: pubkey.to_string(),
+        }
+    }
+
     fn signed_event(url: &str, method: &str, body: &Bytes, created_at: i64) -> Nip98Event {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[4u8; 32]).expect("secret");
@@ -1789,6 +1830,56 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn postgres_handlers_cover_not_found_and_pre_storage_validation_paths() {
+        let state = postgres_state();
+        let app = super::build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let repo = sample_normalized_repo("not-hex");
+        let mapping_error = super::resolve_mapping(state.repositories.as_ref(), &repo)
+            .await
+            .expect_err("invalid pubkey");
+        assert_eq!(
+            mapping_error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let maintainer_error = super::resolve_maintainers(state.repositories.as_ref(), &repo)
+            .await
+            .expect_err("invalid maintainer pubkey");
+        assert_eq!(
+            maintainer_error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let auth_error = super::authorize_receive_pack(
+            &state,
+            &sample_normalized_repo(&"11".repeat(32)),
+            &HeaderMap::new(),
+            &Method::POST,
+            &"/npub1test/repo.git/git-receive-pack".parse().expect("uri"),
+            &Bytes::from_static(b"payload"),
+        )
+        .await
+        .expect_err("missing auth");
+        assert_eq!(
+            auth_error.into_response().status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
