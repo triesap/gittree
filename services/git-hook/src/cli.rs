@@ -47,10 +47,7 @@ impl HookRunConfig {
             cli.sync_url,
         )?;
         let stdin_file = cli.stdin_file.or_else(|| env_path(ENV_HOOK_STDIN_FILE));
-        Ok(Self {
-            hook,
-            stdin_file,
-        })
+        Ok(Self { hook, stdin_file })
     }
 }
 
@@ -64,8 +61,8 @@ fn env_path(key: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::{HookCli, HookConfigError, HookModeArg, HookRunConfig};
     use clap::Parser;
-    use super::{HookCli, HookModeArg, HookRunConfig};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -98,7 +95,10 @@ mod tests {
         ])
         .expect("parse cli");
         assert_eq!(cli.mode, Some(HookModeArg::PostReceive));
-        assert_eq!(cli.stdin_file.as_deref(), Some(std::path::Path::new("updates.txt")));
+        assert_eq!(
+            cli.stdin_file.as_deref(),
+            Some(std::path::Path::new("updates.txt"))
+        );
     }
 
     #[test]
@@ -109,6 +109,22 @@ mod tests {
             let config = HookRunConfig::from_env(cli).expect("config");
             assert_eq!(config.hook.state_url, "http://127.0.0.1:8082");
         });
+    }
+
+    #[test]
+    fn run_config_maps_post_receive_mode() {
+        let cli = HookCli::try_parse_from([
+            "gittree-git-hook",
+            "--mode",
+            "post-receive",
+            "--state-url",
+            "http://127.0.0.1:8082",
+            "--sync-url",
+            "http://127.0.0.1:8088",
+        ])
+        .expect("parse cli");
+        let config = HookRunConfig::from_env(cli).expect("config");
+        assert_eq!(config.hook.mode, HookModeArg::PostReceive.into());
     }
 
     #[test]
@@ -124,5 +140,51 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[test]
+    fn run_config_ignores_empty_stdin_file_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", || {
+            with_env_var("GITTREE_HOOK_STDIN_FILE", "   ", || {
+                let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
+                let config = HookRunConfig::from_env(cli).expect("config");
+                assert!(config.stdin_file.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn run_config_propagates_config_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        // SAFETY: tests serialize environment mutation with ENV_LOCK.
+        unsafe {
+            std::env::remove_var("GITTREE_STATE_URL");
+            std::env::remove_var("GITTREE_SYNC_URL");
+        }
+        let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
+        let err = HookRunConfig::from_env(cli).expect_err("missing env");
+        assert!(matches!(
+            err,
+            HookConfigError::MissingEnv(_) | HookConfigError::Config(_)
+        ));
+    }
+
+    #[test]
+    fn with_env_var_restores_existing_values() {
+        // SAFETY: dedicated test key avoids collisions with non-test code.
+        unsafe { std::env::set_var("GITTREE_CLI_TEST_KEY", "before") };
+        with_env_var("GITTREE_CLI_TEST_KEY", "after", || {
+            assert_eq!(
+                std::env::var("GITTREE_CLI_TEST_KEY").ok().as_deref(),
+                Some("after")
+            );
+        });
+        assert_eq!(
+            std::env::var("GITTREE_CLI_TEST_KEY").ok().as_deref(),
+            Some("before")
+        );
+        // SAFETY: dedicated test key cleanup.
+        unsafe { std::env::remove_var("GITTREE_CLI_TEST_KEY") };
     }
 }
