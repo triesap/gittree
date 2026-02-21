@@ -513,7 +513,9 @@ mod tests {
     use super::ENV_STORAGE_MAX_LIFETIME_SECS;
     use super::ENV_STORAGE_MIN_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
+    use super::ForgejoRepo;
     use super::StorageConfigError;
+    use super::StorageError;
     use super::control_client_from_env;
     use super::env_u32;
     use super::env_u64;
@@ -633,11 +635,8 @@ mod tests {
     fn control_client_from_env_requires_token() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var_opt(ENV_CONTROL_TOKEN, None, || {
-            let err = match control_client_from_env() {
-                Ok(_) => panic!("expected missing token"),
-                Err(err) => err,
-            };
-            assert!(matches!(err, AdminError::ControlConfig(_)));
+            let result = control_client_from_env();
+            assert!(matches!(result, Err(AdminError::ControlConfig(_))));
         });
     }
 
@@ -726,6 +725,56 @@ mod tests {
                 .contains("admin control response error")
         );
         assert!(control_resp.source().is_none());
+
+        let storage = AdminError::Storage(StorageError::Internal {
+            message: "boom".to_string(),
+        });
+        assert!(storage.to_string().contains("admin storage error"));
+        assert!(storage.source().is_some());
+
+        let core_err = AdminError::Core(
+            ForgejoRepo::parse("invalid").expect_err("invalid forgejo repo should fail"),
+        );
+        assert!(core_err.to_string().contains("admin mapping error"));
+        assert!(core_err.source().is_some());
+
+        let invalid_env = StorageConfigError::InvalidEnv {
+            key: "KEY",
+            value: "value".to_string(),
+        };
+        assert_eq!(invalid_env.to_string(), "invalid env KEY: value");
+        let invalid_cfg = StorageConfigError::InvalidConfig("bad config".to_string());
+        assert_eq!(invalid_cfg.to_string(), "bad config");
+    }
+
+    #[test]
+    fn with_env_helpers_restore_existing_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_TEST_RESTORE", "before", || {
+            with_env_var("GITTREE_TEST_RESTORE", "during", || {
+                assert_eq!(
+                    std::env::var("GITTREE_TEST_RESTORE").expect("during value"),
+                    "during"
+                );
+            });
+            assert_eq!(
+                std::env::var("GITTREE_TEST_RESTORE").expect("restored value"),
+                "before"
+            );
+        });
+
+        with_env_var("GITTREE_TEST_RESTORE_OPT", "before", || {
+            with_env_var_opt("GITTREE_TEST_RESTORE_OPT", Some("during"), || {
+                assert_eq!(
+                    std::env::var("GITTREE_TEST_RESTORE_OPT").expect("during value"),
+                    "during"
+                );
+            });
+            assert_eq!(
+                std::env::var("GITTREE_TEST_RESTORE_OPT").expect("restored value"),
+                "before"
+            );
+        });
     }
 
     fn start_mock_http_server(

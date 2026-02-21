@@ -25,13 +25,18 @@ fn start_mock_http_server(status: &str, body: &str) -> (String, std::thread::Joi
     (format!("http://{addr}"), handle)
 }
 
-fn run_admin(args: &[&str], control_url: Option<&str>) -> std::process::Output {
+fn run_admin(
+    args: &[&str],
+    control_url: Option<&str>,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_gittree-admin"));
     command.current_dir("/tmp");
     for key in [
         "GITTREE_CONTROL_URL",
         "GITTREE_CONTROL_TOKEN",
         "GITTREE_STORAGE_READ_URL",
+        "GITTREE_STORAGE_WRITE_URL",
     ] {
         command.env_remove(key);
     }
@@ -40,12 +45,15 @@ fn run_admin(args: &[&str], control_url: Option<&str>) -> std::process::Output {
             .env("GITTREE_CONTROL_URL", control_url)
             .env("GITTREE_CONTROL_TOKEN", "token");
     }
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     command.args(args).output().expect("run admin binary")
 }
 
 #[test]
 fn admin_binary_help_exits_successfully() {
-    let output = run_admin(&["--help"], None);
+    let output = run_admin(&["--help"], None, &[]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("gittree-admin <command> [options]"));
@@ -68,6 +76,7 @@ fn admin_binary_create_user_uses_control_endpoint() {
             "secret",
         ],
         Some(&base_url),
+        &[],
     );
     assert!(output.status.success());
     let request = handle.join().expect("request");
@@ -83,6 +92,7 @@ fn admin_binary_create_org_uses_control_endpoint() {
     let output = run_admin(
         &["create-org", "--owner", "alice", "--name", "acme"],
         Some(&base_url),
+        &[],
     );
     assert!(output.status.success());
     let request = handle.join().expect("request");
@@ -100,6 +110,7 @@ fn admin_binary_create_repo_uses_control_endpoint() {
     let output = run_admin(
         &["create-repo", "--owner", "alice", "--name", "repo"],
         Some(&base_url),
+        &[],
     );
     assert!(output.status.success());
     let request = handle.join().expect("request");
@@ -129,10 +140,57 @@ fn admin_binary_create_pull_uses_control_endpoint() {
             "my pull",
         ],
         Some(&base_url),
+        &[],
     );
     assert!(output.status.success());
     let request = handle.join().expect("request");
     assert!(request.contains("POST /control/pulls"));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("created pull #1"));
+}
+
+#[test]
+fn admin_binary_map_rejects_invalid_forgejo_repo() {
+    let output = run_admin(
+        &[
+            "map",
+            "--forgejo",
+            "invalid",
+            "--pubkey",
+            "11f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871a",
+            "--identifier",
+            "repo",
+        ],
+        None,
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gittree-admin failed: admin mapping error:"));
+}
+
+#[test]
+fn admin_binary_map_reports_invalid_write_connection_before_db_connect() {
+    let output = run_admin(
+        &[
+            "map",
+            "--forgejo",
+            "alice/repo",
+            "--pubkey",
+            "11f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871a",
+            "--identifier",
+            "repo",
+        ],
+        None,
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                "postgres://user:pass@localhost:5432/gittree",
+            ),
+            ("GITTREE_STORAGE_WRITE_URL", "invalid-write-url"),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gittree-admin failed: admin storage error:"));
 }
