@@ -152,7 +152,18 @@ where
 }
 
 fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
-    let client = HttpRelayProbeClient::new().map_err(ProbeCommandError::Cli)?;
+    run_with_cli_with_client_factory(cli, HttpRelayProbeClient::new)
+}
+
+fn run_with_cli_with_client_factory<C, Factory>(
+    cli: ProbeCli,
+    client_factory: Factory,
+) -> Result<(), ProbeCommandError>
+where
+    C: RelayProbeClient,
+    Factory: FnOnce() -> Result<C, RelayProbeError>,
+{
+    let client = client_factory().map_err(ProbeCommandError::Cli)?;
     run_with_cli_with_client(cli, &client)
 }
 
@@ -160,8 +171,19 @@ fn run_with_cli_with_client<C: RelayProbeClient>(
     cli: ProbeCli,
     client: &C,
 ) -> Result<(), ProbeCommandError> {
-    let runtime = tokio::runtime::Runtime::new()
-        .map_err(|err| ProbeCommandError::Runtime(err.to_string()))?;
+    run_with_cli_with_client_and_runtime(cli, client, tokio::runtime::Runtime::new)
+}
+
+fn run_with_cli_with_client_and_runtime<C, RuntimeBuilder>(
+    cli: ProbeCli,
+    client: &C,
+    runtime_builder: RuntimeBuilder,
+) -> Result<(), ProbeCommandError>
+where
+    C: RelayProbeClient,
+    RuntimeBuilder: FnOnce() -> Result<tokio::runtime::Runtime, std::io::Error>,
+{
+    let runtime = runtime_builder().map_err(|err| ProbeCommandError::Runtime(err.to_string()))?;
     let mut probe_config = RelayProbeConfig::from_env().map_err(ProbeCommandError::Config)?;
     if let Some(active) = cli.active {
         probe_config.active = active;
@@ -438,7 +460,8 @@ mod tests {
         ProbeCli, ProbeCommandError, RelayProbeError, RelayProbeResult, StorageConfigError,
         execute_probe_with_client, handle_main_result_with, now_unix_timestamp, print_help,
         render_probe_output, resolve_targets, run_with_args, run_with_cli_with_client,
-        storage_from_env, store_probe_result, store_probe_result_with_repo,
+        run_with_cli_with_client_and_runtime, run_with_cli_with_client_factory, storage_from_env,
+        store_probe_result, store_probe_result_with_repo,
     };
     use async_trait::async_trait;
     use gittree_config::RelayProbeConfig;
@@ -669,6 +692,11 @@ mod tests {
             .await
             .expect_err("upsert failure");
         assert!(err.to_string().contains("upsert failed"));
+        let record = repo
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("read");
+        assert!(record.is_none());
     }
 
     #[test]
@@ -798,6 +826,24 @@ mod tests {
                         let config = storage_from_env().expect("config");
                         assert_eq!(config.min_connections, 5);
                         assert_eq!(config.max_lifetime_secs, Some(120));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn storage_config_reads_max_connections_and_idle_timeout() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "20", || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "30", || {
+                        let config = storage_from_env().expect("config");
+                        assert_eq!(config.max_connections, 20);
+                        assert_eq!(config.idle_timeout_secs, Some(30));
                     });
                 });
             },
@@ -1151,6 +1197,76 @@ mod tests {
                 run_with_cli_with_client(cli, &client).expect("run");
             });
         });
+    }
+
+    #[test]
+    fn run_with_cli_with_client_maps_runtime_creation_errors() {
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: Some(false),
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let client = StubProbeClient {
+            response: Ok(Some(
+                r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+            )),
+        };
+
+        let err = run_with_cli_with_client_and_runtime(cli, &client, || {
+            Err(std::io::Error::other("runtime init failed"))
+        })
+        .expect_err("runtime error");
+        assert!(err.to_string().contains("relay probe runtime error"));
+    }
+
+    #[test]
+    fn run_with_cli_with_client_maps_probe_config_validation_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "5", || {
+            let cli = ProbeCli {
+                relay: Some("wss://relay.example".to_string()),
+                all: false,
+                json: false,
+                store: false,
+                active: Some(true),
+                timeout_secs: Some(0),
+                secret_key: None,
+            };
+            let client = StubProbeClient {
+                response: Ok(Some(
+                    r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+                )),
+            };
+
+            let err = run_with_cli_with_client(cli, &client).expect_err("validation error");
+            assert!(err.to_string().contains("relay probe config error"));
+        });
+    }
+
+    #[test]
+    fn run_with_cli_with_client_factory_maps_client_construction_errors() {
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: None,
+            timeout_secs: None,
+            secret_key: None,
+        };
+
+        let err = run_with_cli_with_client_factory::<StubProbeClient, _>(cli, || {
+            Err(RelayProbeError::Http("client init failed".to_string()))
+        })
+        .expect_err("client error");
+        assert_eq!(
+            err.to_string(),
+            "relay probe http error: client init failed"
+        );
     }
 
     #[test]
