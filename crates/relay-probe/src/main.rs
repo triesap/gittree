@@ -175,9 +175,7 @@ fn run_with_cli_with_client<C: RelayProbeClient>(
     probe_config.validate().map_err(ProbeCommandError::Config)?;
     let results = execute_probe_with_client(&cli, &probe_config, &runtime, client)?;
     let output = render_probe_output(&cli, &results);
-    if !output.is_empty() {
-        print!("{output}");
-    }
+    print!("{output}");
 
     Ok(())
 }
@@ -442,6 +440,7 @@ mod tests {
         render_probe_output, resolve_targets, run_with_args, run_with_cli_with_client,
         storage_from_env, store_probe_result, store_probe_result_with_repo,
     };
+    use async_trait::async_trait;
     use gittree_config::RelayProbeConfig;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_relay_probe::RelayProbeClient;
@@ -628,6 +627,50 @@ mod tests {
         assert_eq!(record.active_probe_error, None);
     }
 
+    struct FailingRelayCompatibilityRepo;
+
+    #[async_trait]
+    impl RelayCompatibilityRepository for FailingRelayCompatibilityRepo {
+        async fn upsert_relay_compatibility(
+            &self,
+            _record: gittree_storage::RelayCompatibilityRecord,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Internal {
+                message: "upsert failed".to_string(),
+            })
+        }
+
+        async fn relay_compatibility(
+            &self,
+            _relay_url: &str,
+        ) -> Result<Option<gittree_storage::RelayCompatibilityRecord>, StorageError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn store_probe_result_with_repo_rejects_empty_relay_url_record() {
+        let repo = InMemoryRepositories::new();
+        let mut result = sample_probe_result();
+        result.report.relay_url = " ".to_string();
+        let err = store_probe_result_with_repo(&repo, &result, 1)
+            .await
+            .expect_err("empty relay url");
+        assert!(matches!(
+            err,
+            StorageError::InvalidField { field, .. } if field == "relay_url"
+        ));
+    }
+
+    #[tokio::test]
+    async fn store_probe_result_with_repo_surfaces_repository_upsert_errors() {
+        let repo = FailingRelayCompatibilityRepo;
+        let err = store_probe_result_with_repo(&repo, &sample_probe_result(), 1)
+            .await
+            .expect_err("upsert failure");
+        assert!(err.to_string().contains("upsert failed"));
+    }
+
     #[test]
     fn resolve_targets_requires_env_list() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -643,6 +686,21 @@ mod tests {
         let cli = ProbeCli::parse(["probe", "--relay", "wss://relay.example"]).expect("cli");
         let targets = resolve_targets(&cli).expect("targets");
         assert_eq!(targets, vec!["wss://relay.example".to_string()]);
+    }
+
+    #[test]
+    fn resolve_targets_requires_relay_when_not_all() {
+        let cli = ProbeCli {
+            relay: None,
+            all: false,
+            json: false,
+            store: false,
+            active: None,
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let err = resolve_targets(&cli).expect_err("missing relay");
+        assert_eq!(err.to_string(), "missing --relay value");
     }
 
     #[test]
@@ -729,6 +787,24 @@ mod tests {
     }
 
     #[test]
+    fn storage_config_reads_min_connections_and_max_lifetime() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "5", || {
+                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "120", || {
+                        let config = storage_from_env().expect("config");
+                        assert_eq!(config.min_connections, 5);
+                        assert_eq!(config.max_lifetime_secs, Some(120));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn storage_config_rejects_invalid_numeric_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
@@ -780,10 +856,7 @@ mod tests {
                 with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
                     with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
                         let err = storage_from_env().expect_err("invalid pool bounds");
-                        assert!(matches!(
-                            err,
-                            StorageConfigError::InvalidConfig(message) if !message.is_empty()
-                        ));
+                        assert!(err.to_string().contains("min_connections"));
                     });
                 });
             },
@@ -1172,10 +1245,10 @@ mod tests {
     #[test]
     fn store_probe_result_writes_to_database_when_available() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let database_url = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string());
+        let database_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok() {
+            Some(value) if !value.trim().is_empty() => value,
+            _ => "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+        };
 
         with_env_var(super::ENV_STORAGE_READ_URL, &database_url, || {
             with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
@@ -1188,8 +1261,9 @@ mod tests {
 
     #[test]
     fn handle_main_result_with_maps_success_and_error_exit_codes() {
+        fn ignore_message(_: &str) {}
         let mut messages = Vec::new();
-        let ok_code = handle_main_result_with(Ok(()), |_| {});
+        let ok_code = handle_main_result_with(Ok(()), ignore_message);
         assert_eq!(ok_code, 0);
         assert!(messages.is_empty());
 
