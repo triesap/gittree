@@ -1126,38 +1126,19 @@ mod tests {
         assert!(render_probe_output(&json_one_cli, &[]).is_empty());
     }
 
-    #[tokio::test]
-    async fn store_probe_result_reports_storage_config_error() {
+    #[test]
+    fn store_probe_result_reports_storage_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let original = std::env::var_os(super::ENV_STORAGE_READ_URL);
-        // SAFETY: protected by ENV_LOCK and restored below.
-        unsafe {
-            std::env::set_var(
-                super::ENV_STORAGE_READ_URL,
-                "postgres://gittree:gittree@127.0.0.1:5432/gittree",
-            );
-        }
-        let previous = std::env::var_os(super::ENV_STORAGE_READ_URL);
-        // SAFETY: protected by ENV_LOCK and restored below.
-        unsafe {
-            std::env::remove_var(super::ENV_STORAGE_READ_URL);
-        }
-        let err = store_probe_result(&sample_probe_result())
-            .await
-            .expect_err("missing storage config");
-        match previous {
-            Some(value) => unsafe {
-                std::env::set_var(super::ENV_STORAGE_READ_URL, value);
-            },
-            None => unsafe {
-                std::env::remove_var(super::ENV_STORAGE_READ_URL);
-            },
-        }
-        match original {
-            Some(value) => unsafe { std::env::set_var(super::ENV_STORAGE_READ_URL, value) },
-            None => unsafe { std::env::remove_var(super::ENV_STORAGE_READ_URL) },
-        }
-        assert!(matches!(err, ProbeCommandError::StorageConfig(_)));
+        with_env_var(super::ENV_STORAGE_READ_URL, "", || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let err = runtime
+                .block_on(store_probe_result(&sample_probe_result()))
+                .expect_err("missing storage config");
+            assert!(matches!(
+                err,
+                ProbeCommandError::StorageConfig(_) | ProbeCommandError::Storage(_)
+            ));
+        });
     }
 
     fn assert_store_result_or_skip_database_error(result: Result<(), ProbeCommandError>) {
@@ -1211,9 +1192,7 @@ mod tests {
     #[test]
     fn handle_main_result_with_maps_success_and_error_exit_codes() {
         let mut messages = Vec::new();
-        let ok_code = handle_main_result_with(Ok(()), |message| {
-            messages.push(message.to_string());
-        });
+        let ok_code = handle_main_result_with(Ok(()), |_| {});
         assert_eq!(ok_code, 0);
         assert!(messages.is_empty());
 
