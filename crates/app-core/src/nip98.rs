@@ -1,6 +1,6 @@
 use crate::AppCoreError;
-use k256::schnorr::signature::hazmat::PrehashSigner;
 use k256::schnorr::SigningKey;
+use k256::schnorr::signature::hazmat::PrehashSigner;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -64,8 +64,8 @@ pub fn nip98_sign_event(
     payload_sha256: Option<&str>,
     created_at: i64,
 ) -> Result<Nip98Event, AppCoreError> {
-    let signing_key = SigningKey::from_bytes(secret_key)
-        .map_err(|_| AppCoreError::InvalidSecretKey)?;
+    let signing_key =
+        SigningKey::from_bytes(secret_key).map_err(|_| AppCoreError::InvalidSecretKey)?;
     let verifying_key = signing_key.verifying_key();
     let pubkey_hex = hex::encode(verifying_key.to_bytes());
     let unsigned = nip98_unsigned_event(pubkey_hex, method, url, payload_sha256, created_at);
@@ -117,11 +117,11 @@ fn nip98_event_id_bytes(unsigned: &Nip98UnsignedEvent) -> Result<[u8; 32], AppCo
 #[cfg(test)]
 mod tests {
     use super::{
-        nip98_event_id, nip98_payload_hash, nip98_sign_event, nip98_unsigned_event, NIP98_KIND,
-        Nip98Event, Nip98UnsignedEvent,
+        NIP98_KIND, Nip98Event, Nip98UnsignedEvent, nip98_event_id, nip98_payload_hash,
+        nip98_sign_event, nip98_unsigned_event,
     };
     use crate::AppCoreError;
-    use gittree_nostr_auth::{validate_nip98, Nip98Event as AuthEvent, Nip98Request};
+    use gittree_nostr_auth::{Nip98Event as AuthEvent, Nip98Request, validate_nip98};
 
     const NOW: i64 = 1_700_000_000;
 
@@ -181,18 +181,24 @@ mod tests {
             NOW,
         );
         assert_eq!(event.kind, NIP98_KIND);
-        assert!(event
-            .tags
-            .iter()
-            .any(|tag| tag.first() == Some(&"u".to_string())));
-        assert!(event
-            .tags
-            .iter()
-            .any(|tag| tag.first() == Some(&"method".to_string())));
-        assert!(event
-            .tags
-            .iter()
-            .any(|tag| tag.first() == Some(&"payload".to_string())));
+        assert!(
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.first() == Some(&"u".to_string()))
+        );
+        assert!(
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.first() == Some(&"method".to_string()))
+        );
+        assert!(
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.first() == Some(&"payload".to_string()))
+        );
     }
 
     #[test]

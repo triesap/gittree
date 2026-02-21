@@ -57,7 +57,8 @@ impl AuthServiceConfig {
     fn from_env_with(
         get_var: &mut dyn FnMut(&'static str) -> Option<String>,
     ) -> Result<Self, AuthConfigError> {
-        let services = ServicesConfig::from_env_validated_with(get_var).map_err(AuthConfigError::Config)?;
+        let services =
+            ServicesConfig::from_env_validated_with(get_var).map_err(AuthConfigError::Config)?;
         let auth = AuthSettings::from_env_with(get_var).map_err(AuthConfigError::Config)?;
         let forgejo = ForgejoConfig::from_env_with(get_var).map_err(AuthConfigError::Config)?;
         let storage = storage_from_env_with(get_var)?;
@@ -236,13 +237,15 @@ impl std::error::Error for AuthError {
 }
 
 pub fn init_observability() -> Result<ObservabilityHandle, AuthError> {
-    let mut load_config =
-        || gittree_observability::ObservabilityConfig::from_env("gittree-auth");
+    let mut load_config = || gittree_observability::ObservabilityConfig::from_env("gittree-auth");
     init_observability_with(&mut load_config)
 }
 
 fn init_observability_with(
-    load_config: &mut dyn FnMut() -> Result<gittree_observability::ObservabilityConfig, ObservabilityConfigError>,
+    load_config: &mut dyn FnMut() -> Result<
+        gittree_observability::ObservabilityConfig,
+        ObservabilityConfigError,
+    >,
 ) -> Result<ObservabilityHandle, AuthError> {
     let config = load_config().map_err(AuthError::ObservabilityConfig)?;
     let handle = gittree_observability::init(&config).map_err(AuthError::Observability)?;
@@ -303,7 +306,8 @@ async fn serve_without_observability(config: AuthServiceConfig) -> Result<(), Au
     let build_repositories_fn: Box<
         dyn FnOnce(
                 &AuthServiceConfig,
-            ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
+            )
+                -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
             + Send,
     > = Box::new(|cfg: &AuthServiceConfig| {
         let repositories = Arc::new(build_repositories(cfg)?);
@@ -319,7 +323,8 @@ async fn serve_without_observability_with(
     build_repositories_fn: Box<
         dyn FnOnce(
                 &AuthServiceConfig,
-            ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
+            )
+                -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
             + Send,
     >,
 ) -> Result<(), AuthError> {
@@ -865,7 +870,10 @@ mod tests {
     }
 
     fn is_storage_invalid_config(err: &AuthConfigError) -> bool {
-        matches!(err, AuthConfigError::Storage(StorageConfigError::InvalidConfig(_)))
+        matches!(
+            err,
+            AuthConfigError::Storage(StorageConfigError::InvalidConfig(_))
+        )
     }
 
     fn is_auth_config_missing_env(err: &AuthConfigError) -> bool {
@@ -918,9 +926,8 @@ mod tests {
         assert!(is_auth_config_missing_env(&config_missing));
         assert!(!is_storage_invalid_config(&config_missing));
 
-        let storage_invalid = AuthConfigError::Storage(StorageConfigError::InvalidConfig(
-            "broken".to_string(),
-        ));
+        let storage_invalid =
+            AuthConfigError::Storage(StorageConfigError::InvalidConfig("broken".to_string()));
         assert!(is_storage_invalid_config(&storage_invalid));
         assert!(!is_auth_config_missing_env(&storage_invalid));
 
@@ -952,8 +959,12 @@ mod tests {
         assert!(is_bad_request(&bad_request));
         assert!(!is_unauthorized(&bad_request));
         assert!(!is_internal(&bad_request));
-        assert!(!is_bad_request(&AuthHttpError::Unauthorized("nope".to_string())));
-        assert!(is_unauthorized(&AuthHttpError::Unauthorized("nope".to_string())));
+        assert!(!is_bad_request(&AuthHttpError::Unauthorized(
+            "nope".to_string()
+        )));
+        assert!(is_unauthorized(&AuthHttpError::Unauthorized(
+            "nope".to_string()
+        )));
         assert!(is_internal(&AuthHttpError::Internal("boom".to_string())));
     }
 
@@ -1314,10 +1325,12 @@ mod tests {
     #[test]
     fn env_parsers_treat_empty_values_as_absent() {
         let mut get_var_u32 = |_| Some("   ".to_string());
-        let empty_u32 = env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, &mut get_var_u32).expect("empty u32");
+        let empty_u32 =
+            env_u32_with(ENV_STORAGE_MAX_CONNECTIONS, &mut get_var_u32).expect("empty u32");
         assert!(empty_u32.is_none());
         let mut get_var_u64 = |_| Some(String::new());
-        let empty_u64 = env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, &mut get_var_u64).expect("empty u64");
+        let empty_u64 =
+            env_u64_with(ENV_STORAGE_IDLE_TIMEOUT_SECS, &mut get_var_u64).expect("empty u64");
         assert!(empty_u64.is_none());
     }
 
@@ -1792,16 +1805,20 @@ mod tests {
         let build_repositories_fn: Box<
             dyn FnOnce(
                     &AuthServiceConfig,
-                ) -> Result<(Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>), AuthError>
-                + Send,
+                ) -> Result<
+                    (Arc<dyn AccountRepository>, Arc<dyn ProfileRepository>),
+                    AuthError,
+                > + Send,
         > = Box::new(|_| {
             let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
             let accounts: Arc<dyn AccountRepository> = repositories.clone();
             let profiles: Arc<dyn ProfileRepository> = repositories;
             Ok((accounts, profiles))
         });
-        let handle =
-            tokio::spawn(super::serve_without_observability_with(config, build_repositories_fn));
+        let handle = tokio::spawn(super::serve_without_observability_with(
+            config,
+            build_repositories_fn,
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!handle.is_finished());
         handle.abort();
@@ -1990,8 +2007,8 @@ mod tests {
 
     #[test]
     fn map_server_result_maps_errors_to_auth_serve_error() {
-        let err = super::map_server_result(Err(std::io::Error::other("boom")))
-            .expect_err("serve error");
+        let err =
+            super::map_server_result(Err(std::io::Error::other("boom"))).expect_err("serve error");
         assert!(matches!(err, AuthError::Serve(message) if message == "boom"));
     }
 

@@ -6,13 +6,8 @@ use serde::{Deserialize, Serialize};
 mod nip98;
 
 pub use nip98::{
-    nip98_event_id,
-    nip98_payload_hash,
-    nip98_sign_event,
-    nip98_unsigned_event,
-    Nip98Event,
-    Nip98UnsignedEvent,
-    NIP98_KIND,
+    NIP98_KIND, Nip98Event, Nip98UnsignedEvent, nip98_event_id, nip98_payload_hash,
+    nip98_sign_event, nip98_unsigned_event,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,9 +165,9 @@ pub fn pubkey_bytes_from_npub(npub: &str) -> Result<Vec<u8>, AppCoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clone_url, normalize_identifier, npub_from_bytes, pubkey_bytes_from_npub,
         AppCoreError, ProfileVisibility, RepoCreateRequest, RepoCreateResponse, RepoDetail,
-        RepoListItem, SignedNostrEvent,
+        RepoListItem, SignedNostrEvent, clone_url, normalize_identifier, npub_from_bytes,
+        pubkey_bytes_from_npub,
     };
 
     #[test]
@@ -209,8 +204,7 @@ mod tests {
             private: Some(true),
         };
         let json = serde_json::to_string(&request).expect("json");
-        let decoded: RepoCreateRequest =
-            serde_json::from_str(&json).expect("decode");
+        let decoded: RepoCreateRequest = serde_json::from_str(&json).expect("decode");
         assert_eq!(request, decoded);
     }
 
@@ -222,8 +216,7 @@ mod tests {
             html_url: Some("http://localhost/demo".to_string()),
         };
         let json = serde_json::to_string(&response).expect("json");
-        let decoded: RepoCreateResponse =
-            serde_json::from_str(&json).expect("decode");
+        let decoded: RepoCreateResponse = serde_json::from_str(&json).expect("decode");
         assert_eq!(response, decoded);
     }
 
@@ -250,7 +243,10 @@ mod tests {
             "https://gittr.ee/npub1demo/demo.git".to_string(),
         );
         let detail = RepoDetail::from(item.clone());
-        assert_eq!(detail, RepoDetail::new(item.npub, item.identifier, item.forgejo, item.clone_url));
+        assert_eq!(
+            detail,
+            RepoDetail::new(item.npub, item.identifier, item.forgejo, item.clone_url)
+        );
     }
 
     #[test]

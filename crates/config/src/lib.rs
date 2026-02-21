@@ -329,19 +329,18 @@ impl AuthConfig {
             Some(value) => value,
             None => DEFAULT_AUTH_EMAIL_DOMAIN.to_string(),
         };
-        let max_skew_seconds =
-            match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, get_var) {
-                Some(value) => match value.parse::<u64>() {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        return Err(ConfigError::InvalidConfig {
-                            field: "auth.max_skew_seconds",
-                            value,
-                        });
-                    }
-                },
-                None => DEFAULT_AUTH_MAX_SKEW_SECS,
-            };
+        let max_skew_seconds = match env_optional_string_with(ENV_AUTH_MAX_SKEW_SECONDS, get_var) {
+            Some(value) => match value.parse::<u64>() {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    return Err(ConfigError::InvalidConfig {
+                        field: "auth.max_skew_seconds",
+                        value,
+                    });
+                }
+            },
+            None => DEFAULT_AUTH_MAX_SKEW_SECS,
+        };
         let config = Self {
             email_domain,
             max_skew_seconds,
@@ -679,11 +678,7 @@ impl ServicesConfig {
                 DEFAULT_GIT_HTTP_BIND,
                 get_var,
             )),
-            ui: ServiceConfig::new(env_or_default_with(
-                ENV_UI_BIND,
-                DEFAULT_UI_BIND,
-                get_var,
-            )),
+            ui: ServiceConfig::new(env_or_default_with(ENV_UI_BIND, DEFAULT_UI_BIND, get_var)),
             webhook: ServiceConfig::new(env_or_default_with(
                 ENV_WEBHOOK_BIND,
                 DEFAULT_WEBHOOK_BIND,
@@ -1921,29 +1916,43 @@ secret_key = "22"
     fn relay_policy_validate_rejects_zero_across_remaining_limits() {
         let mut config = RelayPolicyConfig::default();
         config.max_tag_values = 0;
-        let err = config.validate().expect_err("max_tag_values zero should fail");
-        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_tag_values"));
+        let err = config
+            .validate()
+            .expect_err("max_tag_values zero should fail");
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.max_tag_values")
+        );
 
         let mut config = RelayPolicyConfig::default();
         config.max_tag_value_len = 0;
         let err = config
             .validate()
             .expect_err("max_tag_value_len zero should fail");
-        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_tag_value_len"));
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.max_tag_value_len")
+        );
 
         let mut config = RelayPolicyConfig::default();
         config.max_future_seconds = 0;
         let err = config
             .validate()
             .expect_err("max_future_seconds zero should fail");
-        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_future_seconds"));
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.max_future_seconds")
+        );
 
         let mut config = RelayPolicyConfig::default();
         config.max_subscriptions = Some(0);
         let err = config
             .validate()
             .expect_err("max_subscriptions zero should fail");
-        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_subscriptions"));
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.max_subscriptions")
+        );
 
         let mut config = RelayPolicyConfig::default();
         config.max_limit = Some(0);
@@ -1955,21 +1964,30 @@ secret_key = "22"
         let err = config
             .validate()
             .expect_err("max_message_bytes zero should fail");
-        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_message_bytes"));
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.max_message_bytes")
+        );
 
         let mut config = RelayPolicyConfig::default();
         config.max_events_per_min = Some(0);
         let err = config
             .validate()
             .expect_err("max_events_per_min zero should fail");
-        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_events_per_min"));
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.max_events_per_min")
+        );
 
         let mut config = RelayPolicyConfig::default();
         config.max_requests_per_min = Some(0);
         let err = config
             .validate()
             .expect_err("max_requests_per_min zero should fail");
-        assert_eq!(relay_policy_field(&err), Some("relay_policy.max_requests_per_min"));
+        assert_eq!(
+            relay_policy_field(&err),
+            Some("relay_policy.max_requests_per_min")
+        );
 
         let mut config = RelayPolicyConfig::default();
         config.retention_max_age_seconds = Some(0);
@@ -2298,7 +2316,8 @@ max_content_len = 0
     fn services_config_from_env_validated_with_rejects_invalid_bind() {
         let values = env_map(&[(ENV_STATE_BIND, "bad")]);
         let mut get_var = |key| values.get(key).cloned();
-        let err = ServicesConfig::from_env_validated_with(&mut get_var).expect_err("invalid state bind");
+        let err =
+            ServicesConfig::from_env_validated_with(&mut get_var).expect_err("invalid state bind");
         assert!(matches!(
             err,
             ConfigError::InvalidServiceBind {
@@ -2427,10 +2446,7 @@ bind = "127.0.0.1:9101"
         ui.ui.bind = bad.clone();
         assert!(matches!(
             ui.validate(),
-            Err(ConfigError::InvalidServiceBind {
-                service: "ui",
-                ..
-            })
+            Err(ConfigError::InvalidServiceBind { service: "ui", .. })
         ));
 
         let mut webhook = services.clone();
@@ -2786,7 +2802,10 @@ webhook_secret = "secret"
         with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
             with_env_var(ENV_UI_PUBLIC_GIT_URL, " ", || {
                 let err = UiConfig::from_env().expect_err("blank public git url should fail");
-                assert!(matches!(err, ConfigError::MissingEnv(ENV_UI_PUBLIC_GIT_URL)));
+                assert!(matches!(
+                    err,
+                    ConfigError::MissingEnv(ENV_UI_PUBLIC_GIT_URL)
+                ));
             });
         });
     }
@@ -3040,8 +3059,7 @@ auth_url = "ws://localhost:8089"
     fn auth_config_from_env_with_rejects_zero_skew() {
         let values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "0")]);
         let mut get_var = |key| values.get(key).cloned();
-        let err = AuthConfig::from_env_with(&mut get_var)
-            .expect_err("zero skew should fail");
+        let err = AuthConfig::from_env_with(&mut get_var).expect_err("zero skew should fail");
         assert!(matches!(
             err,
             ConfigError::InvalidConfig {
@@ -3383,8 +3401,7 @@ repo_root = "/tmp/gittree-ui"
     fn auth_and_probe_env_parsers_reject_invalid_numbers_and_bools() {
         let auth_values = env_map(&[(ENV_AUTH_MAX_SKEW_SECONDS, "bad")]);
         let mut get_var = |key| auth_values.get(key).cloned();
-        let auth_err = AuthConfig::from_env_with(&mut get_var)
-            .expect_err("invalid skew");
+        let auth_err = AuthConfig::from_env_with(&mut get_var).expect_err("invalid skew");
         assert!(matches!(
             auth_err,
             ConfigError::InvalidConfig {
@@ -3446,7 +3463,10 @@ repo_root = "/tmp/gittree-ui"
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "abc", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max content len");
-            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_content_len"));
+            assert_eq!(
+                relay_policy_field(&err),
+                Some("relay_policy.max_content_len")
+            );
         });
 
         with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "abc", || {
@@ -3516,12 +3536,18 @@ repo_root = "/tmp/gittree-ui"
 
         with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "abc", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max events per min");
-            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_events_per_min"));
+            assert_eq!(
+                relay_policy_field(&err),
+                Some("relay_policy.max_events_per_min")
+            );
         });
 
         with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "abc", || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max requests per min");
-            assert_eq!(relay_policy_field(&err), Some("relay_policy.max_requests_per_min"));
+            assert_eq!(
+                relay_policy_field(&err),
+                Some("relay_policy.max_requests_per_min")
+            );
         });
 
         with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "abc", || {

@@ -42,16 +42,31 @@ pub struct Nip98Auth {
 pub enum Nip98Error {
     InvalidKind(u32),
     MissingTag(&'static str),
-    InvalidHex { field: &'static str, value: String },
-    InvalidMethod { expected: String, found: String },
-    InvalidUrl { expected: String, found: String },
-    PayloadMismatch { expected: String, found: String },
+    InvalidHex {
+        field: &'static str,
+        value: String,
+    },
+    InvalidMethod {
+        expected: String,
+        found: String,
+    },
+    InvalidUrl {
+        expected: String,
+        found: String,
+    },
+    PayloadMismatch {
+        expected: String,
+        found: String,
+    },
     TimeSkew {
         created_at: i64,
         now: i64,
         max_skew: i64,
     },
-    InvalidEventId { expected: String, found: String },
+    InvalidEventId {
+        expected: String,
+        found: String,
+    },
     InvalidSignature,
     InvalidEventEncoding(String),
     InvalidPublicKey,
@@ -67,17 +82,15 @@ impl std::fmt::Display for Nip98Error {
             Nip98Error::InvalidHex { field, value } => {
                 write!(f, "invalid hex for {field}: {value}")
             }
-            Nip98Error::InvalidMethod { expected, found } => write!(
-                f,
-                "method mismatch (expected {expected}, got {found})"
-            ),
+            Nip98Error::InvalidMethod { expected, found } => {
+                write!(f, "method mismatch (expected {expected}, got {found})")
+            }
             Nip98Error::InvalidUrl { expected, found } => {
                 write!(f, "url mismatch (expected {expected}, got {found})")
             }
-            Nip98Error::PayloadMismatch { expected, found } => write!(
-                f,
-                "payload mismatch (expected {expected}, got {found})"
-            ),
+            Nip98Error::PayloadMismatch { expected, found } => {
+                write!(f, "payload mismatch (expected {expected}, got {found})")
+            }
             Nip98Error::TimeSkew {
                 created_at,
                 now,
@@ -86,10 +99,9 @@ impl std::fmt::Display for Nip98Error {
                 f,
                 "created_at outside skew (created_at {created_at}, now {now}, max {max_skew})"
             ),
-            Nip98Error::InvalidEventId { expected, found } => write!(
-                f,
-                "event id mismatch (expected {expected}, got {found})"
-            ),
+            Nip98Error::InvalidEventId { expected, found } => {
+                write!(f, "event id mismatch (expected {expected}, got {found})")
+            }
             Nip98Error::InvalidSignature => write!(f, "invalid signature"),
             Nip98Error::InvalidEventEncoding(message) => {
                 write!(f, "invalid event encoding: {message}")
@@ -122,8 +134,7 @@ pub fn validate_nip98(
         });
     }
 
-    let method = tag_value(&event.tags, "method")
-        .ok_or(Nip98Error::MissingTag("method"))?;
+    let method = tag_value(&event.tags, "method").ok_or(Nip98Error::MissingTag("method"))?;
     if !method.eq_ignore_ascii_case(request.method) {
         return Err(Nip98Error::InvalidMethod {
             expected: request.method.to_string(),
@@ -132,8 +143,7 @@ pub fn validate_nip98(
     }
 
     if let Some(expected_payload) = request.payload_sha256 {
-        let payload = tag_value(&event.tags, "payload")
-            .ok_or(Nip98Error::MissingTag("payload"))?;
+        let payload = tag_value(&event.tags, "payload").ok_or(Nip98Error::MissingTag("payload"))?;
         if payload != expected_payload {
             return Err(Nip98Error::PayloadMismatch {
                 expected: expected_payload.to_string(),
@@ -247,11 +257,11 @@ fn verify_signature(event: &Nip98Event) -> Result<[u8; 32], Nip98Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Nip98Error, Nip98Event, Nip98Request, NIP98_KIND, serialize_event_payload, validate_nip98,
+        NIP98_KIND, Nip98Error, Nip98Event, Nip98Request, serialize_event_payload, validate_nip98,
         verify_signature,
     };
+    use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
     use serde::ser::{Serialize, Serializer};
-    use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey, Message};
     use sha2::Digest;
 
     const NOW: i64 = 1_700_000_000;
@@ -310,7 +320,11 @@ mod tests {
         hex::encode(digest)
     }
 
-    fn sign_event_id(event_id: &str, keypair: &Keypair, secp: &Secp256k1<secp256k1::All>) -> String {
+    fn sign_event_id(
+        event_id: &str,
+        keypair: &Keypair,
+        secp: &Secp256k1<secp256k1::All>,
+    ) -> String {
         let bytes = hex::decode(event_id).expect("decode");
         let msg = Message::from_digest_slice(&bytes).expect("msg");
         let sig = secp.sign_schnorr_no_aux_rand(&msg, keypair);
@@ -455,8 +469,12 @@ mod tests {
     #[test]
     fn rejects_payload_mismatch() {
         let payload_hash = "11".repeat(32);
-        let (event, _) =
-            build_event("https://gittr.ee/v1/signup", "POST", NOW, Some(&payload_hash));
+        let (event, _) = build_event(
+            "https://gittr.ee/v1/signup",
+            "POST",
+            NOW,
+            Some(&payload_hash),
+        );
         let expected = "22".repeat(32);
         let request = Nip98Request {
             method: "POST",
@@ -468,15 +486,22 @@ mod tests {
         let err = validate_nip98(&event, &request).unwrap_err();
         assert_eq!(
             err.to_string(),
-            format!("payload mismatch (expected {}, got {})", expected, payload_hash)
+            format!(
+                "payload mismatch (expected {}, got {})",
+                expected, payload_hash
+            )
         );
     }
 
     #[test]
     fn accepts_matching_payload_hash() {
         let payload_hash = "11".repeat(32);
-        let (event, _) =
-            build_event("https://gittr.ee/v1/signup", "POST", NOW, Some(&payload_hash));
+        let (event, _) = build_event(
+            "https://gittr.ee/v1/signup",
+            "POST",
+            NOW,
+            Some(&payload_hash),
+        );
         let request = Nip98Request {
             method: "POST",
             url: "https://gittr.ee/v1/signup",
@@ -549,7 +574,9 @@ mod tests {
     #[test]
     fn rejects_missing_url_tag() {
         let (mut event, _) = build_event("https://gittr.ee/v1/signup", "POST", NOW, None);
-        event.tags.retain(|tag| tag.first().map(|v| v.as_str()) != Some("u"));
+        event
+            .tags
+            .retain(|tag| tag.first().map(|v| v.as_str()) != Some("u"));
         let request = Nip98Request {
             method: "POST",
             url: "https://gittr.ee/v1/signup",
@@ -730,8 +757,6 @@ mod tests {
     #[test]
     fn serialize_event_payload_maps_serialization_failures() {
         let err = serialize_event_payload(&FailingSerialize).expect_err("serialization must fail");
-        assert!(err
-            .to_string()
-            .starts_with("invalid event encoding:"));
+        assert!(err.to_string().starts_with("invalid event encoding:"));
     }
 }

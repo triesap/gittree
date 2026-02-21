@@ -134,7 +134,11 @@ mod tests {
     #[tokio::test]
     async fn run_with_injected_loader_maps_config_error() {
         let result = run_with(
-            || Err(AuthError::Config(AuthConfigError::Storage(StorageConfigError::MissingEnv("TEST")))),
+            || {
+                Err(AuthError::Config(AuthConfigError::Storage(
+                    StorageConfigError::MissingEnv("TEST"),
+                )))
+            },
             serve,
         )
         .await;
@@ -228,9 +232,11 @@ mod tests {
     fn error_match_helper_covers_non_matching_results() {
         let ok: Result<(), AuthError> = Ok(());
         let serve_err = Err(AuthError::Serve("boom".to_string()));
-        let storage_err = Err(AuthError::Storage(gittree_storage::StorageError::Internal {
-            message: "boom".to_string(),
-        }));
+        let storage_err = Err(AuthError::Storage(
+            gittree_storage::StorageError::Internal {
+                message: "boom".to_string(),
+            },
+        ));
         assert!(!is_config_error(&ok));
         assert!(!is_config_error(&serve_err));
         assert!(is_storage_error(&storage_err));
@@ -243,7 +249,10 @@ mod tests {
         let original = std::env::var_os("GITTREE_AUTH_BIND");
 
         restore_auth_bind(Some(OsString::from("127.0.0.1:9191")));
-        assert_eq!(std::env::var("GITTREE_AUTH_BIND").ok().as_deref(), Some("127.0.0.1:9191"));
+        assert_eq!(
+            std::env::var("GITTREE_AUTH_BIND").ok().as_deref(),
+            Some("127.0.0.1:9191")
+        );
 
         restore_auth_bind(None);
         assert!(std::env::var_os("GITTREE_AUTH_BIND").is_none());

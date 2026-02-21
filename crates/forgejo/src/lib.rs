@@ -389,10 +389,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
     }
 
     async fn get_user(&self, username: &str) -> Result<Option<ForgejoUser>, ForgejoError> {
-        let url = join_url(
-            &self.config.base_url,
-            &format!("/api/v1/users/{username}"),
-        );
+        let url = join_url(&self.config.base_url, &format!("/api/v1/users/{username}"));
         let response = self
             .transport
             .send(ForgejoRequest {
@@ -545,11 +542,7 @@ impl<T: ForgejoTransport> ForgejoClient<T> {
         self.create_hook_for_owner(&self.config.owner, repo).await
     }
 
-    async fn create_hook_for_owner(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<(), ForgejoError> {
+    async fn create_hook_for_owner(&self, owner: &str, repo: &str) -> Result<(), ForgejoError> {
         let url = join_url(
             &self.config.base_url,
             &format!("/api/v1/repos/{owner}/{repo}/hooks"),
@@ -661,10 +654,9 @@ struct ForgejoPullRequestResponse {
 
 impl ForgejoPullRequestResponse {
     fn into_pull_request(self) -> Result<ForgejoPullRequest, ForgejoError> {
-        let number = u64::try_from(self.number).map_err(|_| ForgejoError::Parse(format!(
-            "invalid pull request number: {}",
-            self.number
-        )))?;
+        let number = u64::try_from(self.number).map_err(|_| {
+            ForgejoError::Parse(format!("invalid pull request number: {}", self.number))
+        })?;
         Ok(ForgejoPullRequest {
             number,
             url: self.url,
@@ -721,7 +713,11 @@ struct HookConfig {
 }
 
 fn join_url(base: &str, path: &str) -> String {
-    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 fn parse_json<T: for<'de> Deserialize<'de>>(input: &str) -> Result<T, ForgejoError> {
@@ -823,11 +819,10 @@ mod tests {
 
     #[tokio::test]
     async fn map_request_error_returns_ok_value() {
-        let value = super::map_request_error::<&'static str, _, _>(async {
-            Ok::<u64, &'static str>(42)
-        })
-        .await
-        .expect("ok");
+        let value =
+            super::map_request_error::<&'static str, _, _>(async { Ok::<u64, &'static str>(42) })
+                .await
+                .expect("ok");
         assert_eq!(value, 42);
     }
 
@@ -946,9 +941,7 @@ mod tests {
         let requests = transport.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, ForgejoMethod::Get);
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/repos/gittree/alpha"));
+        assert!(requests[0].url.ends_with("/api/v1/repos/gittree/alpha"));
     }
 
     #[tokio::test]
@@ -1099,9 +1092,11 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].method, ForgejoMethod::Get);
         assert_eq!(requests[1].method, ForgejoMethod::Post);
-        assert!(requests[1]
-            .url
-            .ends_with("/api/v1/repos/gittree/repo/hooks"));
+        assert!(
+            requests[1]
+                .url
+                .ends_with("/api/v1/repos/gittree/repo/hooks")
+        );
         let body = requests[1].body.clone().expect("body");
         assert!(body.contains("\"push\""));
         assert!(body.contains("\"secret\":\"secret\""));
@@ -1131,9 +1126,7 @@ mod tests {
         let requests = transport.requests();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].url.ends_with("/api/v1/repos/alice/delta"));
-        assert!(requests[1]
-            .url
-            .ends_with("/api/v1/admin/users/alice/repos"));
+        assert!(requests[1].url.ends_with("/api/v1/admin/users/alice/repos"));
     }
 
     #[tokio::test]
@@ -1206,12 +1199,8 @@ mod tests {
 
         let requests = transport.requests();
         assert_eq!(requests.len(), 2);
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/repos/alice/repo/hooks"));
-        assert!(requests[1]
-            .url
-            .ends_with("/api/v1/repos/alice/repo/hooks"));
+        assert!(requests[0].url.ends_with("/api/v1/repos/alice/repo/hooks"));
+        assert!(requests[1].url.ends_with("/api/v1/repos/alice/repo/hooks"));
     }
 
     #[tokio::test]
@@ -1231,9 +1220,7 @@ mod tests {
         let requests = transport.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, ForgejoMethod::Get);
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/repos/alice/repo/hooks"));
+        assert!(requests[0].url.ends_with("/api/v1/repos/alice/repo/hooks"));
     }
 
     #[tokio::test]
@@ -1419,9 +1406,7 @@ mod tests {
         assert_eq!(org.name, "acme");
         let requests = transport.requests();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/admin/users/admin/orgs"));
+        assert!(requests[0].url.ends_with("/api/v1/admin/users/admin/orgs"));
     }
 
     #[tokio::test]
@@ -1449,9 +1434,7 @@ mod tests {
         assert_eq!(repo.full_name, "alice/demo");
         let requests = transport.requests();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/admin/users/alice/repos"));
+        assert!(requests[0].url.ends_with("/api/v1/admin/users/alice/repos"));
         let body = requests[0].body.clone().expect("body");
         assert!(body.contains("\"name\":\"demo\""));
         assert!(body.contains("\"auto_init\":true"));
@@ -1483,9 +1466,11 @@ mod tests {
         assert_eq!(pr.number, 5);
         let requests = transport.requests();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/repos/gittree/demo/pulls"));
+        assert!(
+            requests[0]
+                .url
+                .ends_with("/api/v1/repos/gittree/demo/pulls")
+        );
         let body = requests[0].body.clone().expect("body");
         assert!(body.contains("\"head\":\"feature\""));
         assert!(body.contains("\"base\":\"main\""));
@@ -1645,9 +1630,7 @@ mod tests {
 
         let requests = transport.requests();
         assert_eq!(requests.len(), 2);
-        assert!(requests[0]
-            .url
-            .ends_with("/api/v1/admin/users/alice/repos"));
+        assert!(requests[0].url.ends_with("/api/v1/admin/users/alice/repos"));
         assert!(requests[1].url.ends_with("/api/v1/repos/alice/demo"));
     }
 
