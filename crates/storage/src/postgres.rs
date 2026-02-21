@@ -1552,7 +1552,9 @@ mod tests {
                     ));
                 })
                 .ok()?;
-            run_migrations(&pool).await.expect("run database migrations");
+            run_migrations(&pool)
+                .await
+                .expect("run database migrations");
 
             Some(Self {
                 base_url,
@@ -1994,40 +1996,43 @@ WHERE datname = $1
 
     #[tokio::test]
     async fn fetch_tags_reports_name_decode_error_db() {
-        with_test_db("fetch_tags_reports_name_decode_error_db", |test_db| async move {
-            let repositories = test_db.repositories();
-            let event = EventRecord::new(
-                "tenant-1",
-                &"aa".repeat(32),
-                &"bb".repeat(32),
-                200,
-                1,
-                "event-name-decode".to_string(),
-                &"cc".repeat(64),
-                vec![vec!["p".to_string(), "x".to_string()]],
-            )
-            .expect("event");
-            repositories
-                .insert_event(event.clone())
-                .await
-                .expect("insert event");
+        with_test_db(
+            "fetch_tags_reports_name_decode_error_db",
+            |test_db| async move {
+                let repositories = test_db.repositories();
+                let event = EventRecord::new(
+                    "tenant-1",
+                    &"aa".repeat(32),
+                    &"bb".repeat(32),
+                    200,
+                    1,
+                    "event-name-decode".to_string(),
+                    &"cc".repeat(64),
+                    vec![vec!["p".to_string(), "x".to_string()]],
+                )
+                .expect("event");
+                repositories
+                    .insert_event(event.clone())
+                    .await
+                    .expect("insert event");
 
-            sqlx::query(
+                sqlx::query(
                 "ALTER TABLE nostr_tag ALTER COLUMN name TYPE bytea USING convert_to(name, 'UTF8')",
             )
             .execute(&repositories.pool)
             .await
             .expect("alter name to bytea");
 
-            assert_db_error(
-                repositories
-                    .fetch_tags("tenant-1", &event.id)
-                    .await
-                    .expect_err("decode error"),
-            );
+                assert_db_error(
+                    repositories
+                        .fetch_tags("tenant-1", &event.id)
+                        .await
+                        .expect_err("decode error"),
+                );
 
-            test_db.cleanup().await;
-        })
+                test_db.cleanup().await;
+            },
+        )
         .await;
     }
 

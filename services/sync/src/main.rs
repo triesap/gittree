@@ -111,10 +111,7 @@ mod tests {
     #[test]
     fn handle_main_result_writes_error_on_failure() {
         let mut stderr = Vec::new();
-        let exit_code = handle_main_result(
-            Err(SyncError::Serve("boom".to_string())),
-            &mut stderr,
-        );
+        let exit_code = handle_main_result(Err(SyncError::Serve("boom".to_string())), &mut stderr);
         assert_eq!(exit_code, 1);
         assert_eq!(
             String::from_utf8(stderr).expect("utf8"),

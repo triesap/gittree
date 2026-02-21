@@ -1,12 +1,12 @@
 use async_trait::async_trait;
+use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use gittree_config::{AuthConfig, ConfigError, ServicesConfig};
 use gittree_nostr_auth::{Nip98Event, Nip98Request, validate_nip98};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
@@ -300,7 +300,10 @@ pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
 }
 
 fn build_repositories(config: &GitHttpConfig) -> Result<PostgresRepositories, GitHttpError> {
-    let pool_options = config.storage.pool_options().map_err(GitHttpError::Storage)?;
+    let pool_options = config
+        .storage
+        .pool_options()
+        .map_err(GitHttpError::Storage)?;
     let connect_options = config
         .storage
         .read_connect_options()
@@ -388,8 +391,8 @@ impl UpstreamClient for ReqwestUpstreamClient {
             .send()
             .await
             .map_err(|err| UpstreamError::Request(err.to_string()))?;
-        let status = StatusCode::from_u16(response.status().as_u16())
-            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let status =
+            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let headers = response.headers().clone();
         let body = response
             .bytes()
@@ -462,7 +465,9 @@ where
         Ok(response) => response,
         Err(err) => err.into_response(),
     };
-    state.metrics.record(&route, response.status().as_u16(), start.elapsed());
+    state
+        .metrics
+        .record(&route, response.status().as_u16(), start.elapsed());
     Ok(response)
 }
 
@@ -487,10 +492,7 @@ where
     let mapping = resolve_mapping(state.repositories.as_ref(), repo).await?;
     let mut url = format!(
         "{}/{}/{}.git{}",
-        state.upstream_url,
-        mapping.forgejo_owner,
-        mapping.forgejo_repo,
-        suffix
+        state.upstream_url, mapping.forgejo_owner, mapping.forgejo_repo, suffix
     );
     if let Some(query) = query {
         url.push('?');
@@ -507,15 +509,8 @@ where
         .map_err(|err| GitHttpHttpError::Internal(err.to_string()))?;
 
     if matches!(route, GitHttpRoute::ReceivePack { .. }) {
-        authorize_receive_pack(
-            state,
-            repo,
-            &auth_headers,
-            &parts.method,
-            &parts.uri,
-            &body,
-        )
-        .await?;
+        authorize_receive_pack(state, repo, &auth_headers, &parts.method, &parts.uri, &body)
+            .await?;
     }
 
     let upstream_request = UpstreamRequest {
@@ -843,21 +838,21 @@ mod tests {
     use super::ENV_STORAGE_READ_URL;
     use super::ENV_TIMEOUT_SECS;
     use super::ENV_UPSTREAM_URL;
-    use super::GitHttpConfigError;
-    use super::GitHttpError;
     use super::GitHttpAppState;
     use super::GitHttpConfig;
+    use super::GitHttpConfigError;
+    use super::GitHttpError;
     use super::GitHttpMetrics;
     use super::GitHttpRequest;
     use super::GitHttpRoute;
     use super::GitHttpService;
     use super::ObservabilityHandle;
+    use super::ReqwestUpstreamClient;
     use super::StorageConfigError;
     use super::UpstreamClient;
     use super::UpstreamError;
     use super::UpstreamRequest;
     use super::UpstreamResponse;
-    use super::ReqwestUpstreamClient;
     use super::init_observability;
     use super::payload_hash;
     use super::route_request;
@@ -868,7 +863,7 @@ mod tests {
     use base64::Engine;
     use gittree_config::ConfigError;
     use gittree_core::{RepoAnnouncement, RepoMapping};
-    use gittree_nostr_auth::{Nip98Event, NIP98_KIND};
+    use gittree_nostr_auth::{NIP98_KIND, Nip98Event};
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RepoAnnouncementRecord, RepoMappingRecord,
@@ -935,107 +930,131 @@ mod tests {
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                with_env_var("GITTREE_GIT_HTTP_BIND", "127.0.0.1:9090", || {
-                    with_env_var(ENV_TIMEOUT_SECS, "15", || {
-                        let config = GitHttpConfig::from_env().expect("config");
-                        assert_eq!(config.bind, "127.0.0.1:9090");
-                        assert_eq!(config.upstream_url, "https://git.example");
-                        assert_eq!(config.timeout, Duration::from_secs(15));
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var("GITTREE_GIT_HTTP_BIND", "127.0.0.1:9090", || {
+                        with_env_var(ENV_TIMEOUT_SECS, "15", || {
+                            let config = GitHttpConfig::from_env().expect("config");
+                            assert_eq!(config.bind, "127.0.0.1:9090");
+                            assert_eq!(config.upstream_url, "https://git.example");
+                            assert_eq!(config.timeout, Duration::from_secs(15));
+                        });
                     });
                 });
-            });
-        });
+            },
+        );
     }
 
     #[test]
     fn config_ignores_empty_timeout_override() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                with_env_var(ENV_TIMEOUT_SECS, "", || {
-                    let config = GitHttpConfig::from_env().expect("config");
-                    assert_eq!(
-                        config.timeout,
-                        Duration::from_secs(super::DEFAULT_TIMEOUT_SECS)
-                    );
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_TIMEOUT_SECS, "", || {
+                        let config = GitHttpConfig::from_env().expect("config");
+                        assert_eq!(
+                            config.timeout,
+                            Duration::from_secs(super::DEFAULT_TIMEOUT_SECS)
+                        );
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     #[test]
     fn config_rejects_invalid_upstream_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(ENV_UPSTREAM_URL, "not-a-url", || {
-                let err = GitHttpConfig::from_env().expect_err("invalid upstream");
-                assert!(matches!(
-                    err,
-                    GitHttpConfigError::InvalidEnv {
-                        key: ENV_UPSTREAM_URL,
-                        ..
-                    }
-                ));
-            });
-        });
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "not-a-url", || {
+                    let err = GitHttpConfig::from_env().expect_err("invalid upstream");
+                    assert!(matches!(
+                        err,
+                        GitHttpConfigError::InvalidEnv {
+                            key: ENV_UPSTREAM_URL,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
     }
 
     #[test]
     fn config_rejects_invalid_timeout_value() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                with_env_var(ENV_TIMEOUT_SECS, "bad-timeout", || {
-                    let err = GitHttpConfig::from_env().expect_err("invalid timeout");
-                    assert!(matches!(
-                        err,
-                        GitHttpConfigError::InvalidEnv {
-                            key: ENV_TIMEOUT_SECS,
-                            ..
-                        }
-                    ));
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_TIMEOUT_SECS, "bad-timeout", || {
+                        let err = GitHttpConfig::from_env().expect_err("invalid timeout");
+                        assert!(matches!(
+                            err,
+                            GitHttpConfigError::InvalidEnv {
+                                key: ENV_TIMEOUT_SECS,
+                                ..
+                            }
+                        ));
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     #[test]
     fn config_rejects_invalid_storage_numeric_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
-                    let err = GitHttpConfig::from_env().expect_err("invalid storage value");
-                    assert!(matches!(
-                        err,
-                        GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
-                            key: ENV_STORAGE_MAX_CONNECTIONS,
-                            ..
-                        })
-                    ));
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
+                        let err = GitHttpConfig::from_env().expect_err("invalid storage value");
+                        assert!(matches!(
+                            err,
+                            GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
+                                key: ENV_STORAGE_MAX_CONNECTIONS,
+                                ..
+                            })
+                        ));
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     #[test]
     fn config_rejects_invalid_storage_bounds() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_STORAGE_READ_URL, "postgres://user:pass@localhost:5432/gittree", || {
-            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", || {
-                        let err = GitHttpConfig::from_env().expect_err("invalid bounds");
-                        assert!(matches!(
-                            err,
-                            GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(_))
-                        ));
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                        with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                            let err = GitHttpConfig::from_env().expect_err("invalid bounds");
+                            assert!(matches!(
+                                err,
+                                GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(_))
+                            ));
+                        });
                     });
                 });
-            });
-        });
+            },
+        );
     }
 
     #[test]
@@ -1210,7 +1229,12 @@ mod tests {
         });
 
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1222,13 +1246,9 @@ mod tests {
         let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
         let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
             .expect("parse");
-        let mapping =
-            RepoMapping::new("owner", "repo", parsed.pubkey, "repo").expect("mapping");
+        let mapping = RepoMapping::new("owner", "repo", parsed.pubkey, "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
-        repositories
-            .upsert_mapping(record)
-            .await
-            .expect("mapping");
+        repositories.upsert_mapping(record).await.expect("mapping");
 
         let upstream = Arc::new(MockUpstreamClient::new(UpstreamResponse {
             status: StatusCode::OK,
@@ -1256,7 +1276,9 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert_eq!(body, Bytes::from_static(b"upstream"));
 
         let calls = upstream.calls.lock().expect("calls");
@@ -1276,10 +1298,7 @@ mod tests {
         let mapping =
             RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
-        repositories
-            .upsert_mapping(record)
-            .await
-            .expect("mapping");
+        repositories.upsert_mapping(record).await.expect("mapping");
 
         let maintainer_pubkey = "11".repeat(32);
         let announcement = RepoAnnouncement {
@@ -1340,10 +1359,7 @@ mod tests {
         let mapping =
             RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
-        repositories
-            .upsert_mapping(record)
-            .await
-            .expect("mapping");
+        repositories.upsert_mapping(record).await.expect("mapping");
 
         let body = Bytes::from_static(b"payload");
         let url = format!("http://localhost/{npub}/repo.git/git-receive-pack");
@@ -1429,7 +1445,10 @@ mod tests {
         assert!(url.starts_with("https://git.example/"));
 
         let missing_auth = super::parse_nostr_auth(&HeaderMap::new()).expect_err("missing auth");
-        assert_eq!(missing_auth.into_response().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            missing_auth.into_response().status(),
+            StatusCode::UNAUTHORIZED
+        );
 
         let mut invalid_prefix = HeaderMap::new();
         invalid_prefix.insert(AUTH_HEADER, "Bearer token".parse().expect("auth"));
@@ -1443,10 +1462,7 @@ mod tests {
 
         let token = BASE64_STANDARD.encode(b"{\"invalid\":true}");
         let mut invalid_event = HeaderMap::new();
-        invalid_event.insert(
-            AUTH_HEADER,
-            format!("Nostr {token}").parse().expect("auth"),
-        );
+        invalid_event.insert(AUTH_HEADER, format!("Nostr {token}").parse().expect("auth"));
         let err = super::parse_nostr_auth(&invalid_event).expect_err("invalid event");
         assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
     }
@@ -1463,12 +1479,11 @@ mod tests {
         assert!(format!("{config}").contains("git-http error"));
         assert!(config.source().is_some());
 
-        let observability_config = GitHttpError::ObservabilityConfig(
-            ObservabilityConfigError::InvalidEnv {
+        let observability_config =
+            GitHttpError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv {
                 key: "KEY",
                 value: "bad".to_string(),
-            },
-        );
+            });
         assert!(format!("{observability_config}").contains("observability config error"));
         assert!(observability_config.source().is_some());
 

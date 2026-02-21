@@ -227,5 +227,4 @@ mod tests {
         let rendered = format!("{record:?}");
         assert!(rendered.contains("RelayCompatibilityRecord"));
     }
-
 }

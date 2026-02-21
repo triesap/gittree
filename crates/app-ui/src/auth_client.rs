@@ -59,11 +59,12 @@ pub async fn signup(
     headers
         .set("Authorization", &header)
         .map_err(request_error)?;
-    headers.set("Accept", "application/json").map_err(request_error)?;
+    headers
+        .set("Accept", "application/json")
+        .map_err(request_error)?;
     init.set_headers(&headers);
 
-    let request =
-        Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
+    let request = Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
     let window = web_sys::window().ok_or(AuthClientError::MissingWindow)?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -98,9 +99,7 @@ fn request_error(value: JsValue) -> AuthClientError {
 }
 
 fn js_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
+    value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }
 
 #[cfg(test)]

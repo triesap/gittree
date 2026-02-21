@@ -238,9 +238,11 @@ mod tests {
     fn error_match_helper_covers_non_matching_results() {
         let ok: Result<(), ControlError> = Ok(());
         let serve_err = Err(ControlError::Serve("boom".to_string()));
-        let storage_err = Err(ControlError::Storage(gittree_storage::StorageError::Internal {
-            message: "boom".to_string(),
-        }));
+        let storage_err = Err(ControlError::Storage(
+            gittree_storage::StorageError::Internal {
+                message: "boom".to_string(),
+            },
+        ));
         assert!(!is_config_error(&ok));
         assert!(!is_config_error(&serve_err));
         assert!(is_storage_error(&storage_err));

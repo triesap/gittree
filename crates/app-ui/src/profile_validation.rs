@@ -1,5 +1,5 @@
-use gittree_app_core::ProfileUpdate;
 use crate::t;
+use gittree_app_core::ProfileUpdate;
 
 const MAX_DISPLAY_NAME: usize = 80;
 const MAX_BIO: usize = 500;
@@ -21,12 +21,18 @@ pub enum ProfileValidationError {
 impl ProfileValidationError {
     pub fn message_key(&self) -> &'static str {
         match self {
-            ProfileValidationError::DisplayNameTooLong => "app.profile.validation.display_name_length",
+            ProfileValidationError::DisplayNameTooLong => {
+                "app.profile.validation.display_name_length"
+            }
             ProfileValidationError::BioTooLong => "app.profile.validation.bio_length",
             ProfileValidationError::AvatarUrlTooLong => "app.profile.validation.avatar_url_length",
             ProfileValidationError::AvatarUrlInvalid => "app.profile.validation.avatar_url_scheme",
-            ProfileValidationError::WebsiteUrlTooLong => "app.profile.validation.website_url_length",
-            ProfileValidationError::WebsiteUrlInvalid => "app.profile.validation.website_url_scheme",
+            ProfileValidationError::WebsiteUrlTooLong => {
+                "app.profile.validation.website_url_length"
+            }
+            ProfileValidationError::WebsiteUrlInvalid => {
+                "app.profile.validation.website_url_scheme"
+            }
             ProfileValidationError::LocationTooLong => "app.profile.validation.location_length",
         }
     }
@@ -94,7 +100,7 @@ fn profile_validation_message_keys() {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_profile_update, ProfileValidationError};
+    use super::{ProfileValidationError, validate_profile_update};
     use gittree_app_core::ProfileUpdate;
 
     #[test]

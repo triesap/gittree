@@ -3,7 +3,7 @@
 use gittree_app_core::{RepoDetail, RepoListResponse};
 #[cfg(feature = "ssr")]
 use gittree_app_core::{
-    clone_url, normalize_identifier, npub_from_bytes, pubkey_bytes_from_npub, RepoListItem,
+    RepoListItem, clone_url, normalize_identifier, npub_from_bytes, pubkey_bytes_from_npub,
 };
 use leptos::prelude::*;
 
@@ -140,12 +140,9 @@ pub async fn repo_detail_item(
     identifier: &str,
 ) -> Result<RepoDetail, AppUiError> {
     let identifier = normalize_identifier(identifier);
-    let repo_path = state
-        .repo_root
-        .join(npub)
-        .join(format!("{identifier}.git"));
-    let parsed = parse_repo_path(&repo_path)
-        .map_err(|err| AppUiError::BadRequest(err.to_string()))?;
+    let repo_path = state.repo_root.join(npub).join(format!("{identifier}.git"));
+    let parsed =
+        parse_repo_path(&repo_path).map_err(|err| AppUiError::BadRequest(err.to_string()))?;
     let pubkey_bytes = hex::decode(&parsed.pubkey)
         .map_err(|_| AppUiError::BadRequest("invalid pubkey".to_string()))?;
     if !profile_is_public(&state.profiles, &pubkey_bytes).await? {
@@ -166,8 +163,8 @@ fn repo_list_item(
     public_git_url: &str,
     mapping: RepoMappingRecord,
 ) -> Result<RepoListItem, AppUiError> {
-    let npub = npub_from_bytes(&mapping.pubkey)
-        .map_err(|err| AppUiError::Internal(err.to_string()))?;
+    let npub =
+        npub_from_bytes(&mapping.pubkey).map_err(|err| AppUiError::Internal(err.to_string()))?;
     let forgejo = mapping.forgejo_full_name();
     let identifier = mapping.identifier;
     let clone_url = clone_url(public_git_url, &npub, &identifier);
@@ -191,23 +188,23 @@ async fn profile_is_public(
 
 #[server(prefix = "/api", name = ListRepositoriesFn)]
 pub async fn list_repositories() -> Result<RepoListResponse, ServerFnError> {
-    let state = use_context::<AppUiState>()
-        .ok_or_else(|| ServerFnError::new("missing app state"))?;
+    let state =
+        use_context::<AppUiState>().ok_or_else(|| ServerFnError::new("missing app state"))?;
     let items = list_repo_items(&state).await?;
     Ok(RepoListResponse { items })
 }
 
 #[server(prefix = "/api", name = RepoDetailFn)]
 pub async fn repo_detail(npub: String, identifier: String) -> Result<RepoDetail, ServerFnError> {
-    let state = use_context::<AppUiState>()
-        .ok_or_else(|| ServerFnError::new("missing app state"))?;
+    let state =
+        use_context::<AppUiState>().ok_or_else(|| ServerFnError::new("missing app state"))?;
     let detail = repo_detail_item(&state, &npub, &identifier).await?;
     Ok(detail)
 }
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
-    use super::{list_repo_items, list_repo_items_for_npub, repo_detail_item, AppUiState};
+    use super::{AppUiState, list_repo_items, list_repo_items_for_npub, repo_detail_item};
     use gittree_app_core::npub_from_bytes;
     use gittree_core::RepoMapping;
     use gittree_storage::{
@@ -270,13 +267,8 @@ mod tests {
     async fn list_repo_items_returns_entries() {
         let repositories = Arc::new(InMemoryRepositories::new());
         let pubkey_hex = "11".repeat(32);
-        let mapping = RepoMapping::new(
-            "owner",
-            "repo",
-            pubkey_hex.clone(),
-            "repo",
-        )
-        .expect("mapping");
+        let mapping =
+            RepoMapping::new("owner", "repo", pubkey_hex.clone(), "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
         repositories
             .upsert_mapping(record)
@@ -294,10 +286,7 @@ mod tests {
             10,
         )
         .expect("profile");
-        repositories
-            .upsert_profile(profile)
-            .await
-            .expect("profile");
+        repositories.upsert_profile(profile).await.expect("profile");
 
         let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;
@@ -407,13 +396,8 @@ mod tests {
     async fn repo_detail_item_returns_repo() {
         let repositories = Arc::new(InMemoryRepositories::new());
         let pubkey_hex = "11".repeat(32);
-        let mapping = RepoMapping::new(
-            "owner",
-            "repo",
-            pubkey_hex.clone(),
-            "repo",
-        )
-        .expect("mapping");
+        let mapping =
+            RepoMapping::new("owner", "repo", pubkey_hex.clone(), "repo").expect("mapping");
         let record = RepoMappingRecord::new(&mapping).expect("record");
         let npub = npub_from_bytes(&record.pubkey).expect("npub");
         repositories
@@ -432,10 +416,7 @@ mod tests {
             10,
         )
         .expect("profile");
-        repositories
-            .upsert_profile(profile)
-            .await
-            .expect("profile");
+        repositories.upsert_profile(profile).await.expect("profile");
 
         let profiles: Arc<dyn ProfileRepository> = repositories.clone();
         let repositories: Arc<dyn RepoMappingRepository> = repositories;

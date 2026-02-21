@@ -1,38 +1,32 @@
 #![forbid(unsafe_code)]
 
-use leptos::prelude::*;
-use leptos::prelude::IntoAny;
-use leptos_router::components::{Route, Router, Routes};
-use leptos_router::hooks::use_params_map;
-use leptos_router::path;
-use gittree_app_core::{
-    nip98_payload_hash, Nip98Event, Profile, ProfileUpdate, ProfileVisibility, RepoListResponse,
-};
-use js_sys::Reflect;
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::JsFuture;
-use web_sys::{Request, RequestInit, RequestMode, Response};
 use crate::auth::{
-    AuthError,
-    local_key_event,
-    local_key_material,
-    nip07_available,
-    nip07_pubkey,
-    nip07_sign_nip98,
-    unix_timestamp,
+    AuthError, local_key_event, local_key_material, nip07_available, nip07_pubkey,
+    nip07_sign_nip98, unix_timestamp,
 };
-use crate::auth_client::{signup, signup_endpoint, SignupResponse};
-use crate::control_client::{create_repo, ControlRepoInput, ControlRepoResponse};
+use crate::auth_client::{SignupResponse, signup, signup_endpoint};
+use crate::control_client::{ControlRepoInput, ControlRepoResponse, create_repo};
 use crate::control_token::{clear_control_token, load_control_token, store_control_token};
 use crate::i18n::app_i18n_init;
 use crate::profile_client::{
-    fetch_profile, fetch_public_profile, profile_endpoint, public_profile_endpoint,
-    update_profile,
+    fetch_profile, fetch_public_profile, profile_endpoint, public_profile_endpoint, update_profile,
 };
 use crate::profile_validation::validate_profile_update;
-use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
 use crate::server::{list_repositories, repo_detail};
+use crate::session::{AuthSession, AuthSource, clear_session, load_session, store_session};
 use crate::t;
+use gittree_app_core::{
+    Nip98Event, Profile, ProfileUpdate, ProfileVisibility, RepoListResponse, nip98_payload_hash,
+};
+use js_sys::Reflect;
+use leptos::prelude::IntoAny;
+use leptos::prelude::*;
+use leptos_router::components::{Route, Router, Routes};
+use leptos_router::hooks::use_params_map;
+use leptos_router::path;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{Request, RequestInit, RequestMode, Response};
 
 #[derive(Clone)]
 struct AppBasePath(String);
@@ -144,10 +138,7 @@ fn RepoDetailPage() -> impl IntoView {
     let detail = Resource::new(
         move || {
             let params = params.get();
-            (
-                params.get("npub"),
-                params.get("identifier"),
-            )
+            (params.get("npub"), params.get("identifier"))
         },
         |(npub, identifier)| async move {
             match (npub, identifier) {
@@ -229,8 +220,7 @@ fn SignupPage() -> impl IntoView {
             match event {
                 Ok(event) => match signup(&auth_endpoint, event).await {
                     Ok(response) => {
-                        if let Err(message) = persist_session(&response.pubkey, AuthSource::Nip07)
-                        {
+                        if let Err(message) = persist_session(&response.pubkey, AuthSource::Nip07) {
                             set_error.set(Some(message));
                         }
                         set_status.set(Some(response));
@@ -263,8 +253,7 @@ fn SignupPage() -> impl IntoView {
             match local_key_event("POST", &auth_endpoint, None, now) {
                 Ok(event) => match signup(&auth_endpoint, event).await {
                     Ok(response) => {
-                        if let Err(message) = persist_session(&response.pubkey, AuthSource::Local)
-                        {
+                        if let Err(message) = persist_session(&response.pubkey, AuthSource::Local) {
                             set_error.set(Some(message));
                         }
                         set_status.set(Some(response));
@@ -418,8 +407,7 @@ fn ProfilePage() -> impl IntoView {
                 set_status.set(Some(t!("app.profile.loading").to_string()));
 
                 let now = unix_timestamp();
-                let event =
-                    session_sign_nip98(&session, "GET", &auth_endpoint, None, now).await;
+                let event = session_sign_nip98(&session, "GET", &auth_endpoint, None, now).await;
                 match event {
                     Ok(event) => match fetch_profile(&auth_endpoint, event).await {
                         Ok(profile) => {
@@ -507,14 +495,9 @@ fn ProfilePage() -> impl IntoView {
                     }
                 };
                 let now = unix_timestamp();
-                let event = session_sign_nip98(
-                    &session,
-                    "PATCH",
-                    &auth_endpoint,
-                    Some(&payload_hash),
-                    now,
-                )
-                .await;
+                let event =
+                    session_sign_nip98(&session, "PATCH", &auth_endpoint, Some(&payload_hash), now)
+                        .await;
                 match event {
                     Ok(event) => match update_profile(&auth_endpoint, event, body).await {
                         Ok(profile) => {
@@ -942,8 +925,7 @@ fn TestConsolePage() -> impl IntoView {
     let (control_repo_private, set_control_repo_private) = signal(true);
     let (control_repo_status, set_control_repo_status) =
         signal::<Option<ControlRepoResponse>>(None);
-    let (control_repo_pubkey, set_control_repo_pubkey) =
-        signal::<Option<String>>(None);
+    let (control_repo_pubkey, set_control_repo_pubkey) = signal::<Option<String>>(None);
     let (error, set_error) = signal::<Option<String>>(None);
     let (busy, set_busy) = signal(false);
 
@@ -1725,8 +1707,7 @@ fn health_endpoint(base_url: &str) -> String {
 }
 
 fn persist_session(pubkey: &str, source: AuthSource) -> Result<AuthSession, String> {
-    let session = AuthSession::from_pubkey_hex(pubkey, source)
-        .map_err(|err| err.to_string())?;
+    let session = AuthSession::from_pubkey_hex(pubkey, source).map_err(|err| err.to_string())?;
     store_session(&session).map_err(|err| err.to_string())?;
     Ok(session)
 }
@@ -1762,8 +1743,7 @@ async fn fetch_repo_list(endpoint: &str) -> Result<RepoListResponse, String> {
     init.set_method("GET");
     init.set_mode(RequestMode::Cors);
 
-    let request =
-        Request::new_with_str_and_init(endpoint, &init).map_err(request_error)?;
+    let request = Request::new_with_str_and_init(endpoint, &init).map_err(request_error)?;
     let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -1789,8 +1769,7 @@ async fn fetch_health(endpoint: &str) -> Result<u16, String> {
     init.set_method("GET");
     init.set_mode(RequestMode::Cors);
 
-    let request =
-        Request::new_with_str_and_init(endpoint, &init).map_err(request_error)?;
+    let request = Request::new_with_str_and_init(endpoint, &init).map_err(request_error)?;
     let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -1838,9 +1817,7 @@ fn run_health_check(
 }
 
 fn request_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
+    value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }
 
 fn event_value(event: &leptos::ev::Event) -> String {

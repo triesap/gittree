@@ -322,11 +322,9 @@ where
 }
 
 pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
-    serve_with(
-        config,
-        init_observability,
-        |listener, router| async move { axum::serve(listener, router).await },
-    )
+    serve_with(config, init_observability, |listener, router| async move {
+        axum::serve(listener, router).await
+    })
     .await
 }
 
@@ -666,9 +664,11 @@ mod tests {
             ui: test_ui_config(),
         };
 
-        let err = super::serve_with(config, || Ok(()), |listener, router| async move {
-            axum::serve(listener, router).await
-        })
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |listener, router| async move { axum::serve(listener, router).await },
+        )
         .await
         .expect_err("bind error");
         assert!(matches!(err, AppError::Serve(_)));
@@ -684,9 +684,11 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let err = super::serve_with(config, || Ok(()), |_listener, _router| async {
-            Err(std::io::Error::other("boom"))
-        })
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Err(std::io::Error::other("boom")) },
+        )
         .await
         .expect_err("serve error");
         assert!(matches!(err, AppError::Serve(message) if message.contains("boom")));

@@ -117,9 +117,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MainError, handle_main_outcome, main_impl_with, main_result_with, run_migrations,
-    };
+    use super::{MainError, handle_main_outcome, main_impl_with, main_result_with, run_migrations};
     use gittree_migrate::{MigrationConfigError, MigrationError};
 
     #[tokio::test]

@@ -119,7 +119,5 @@ fn window_ref() -> Result<Window, ControlTokenError> {
 
 #[cfg(target_arch = "wasm32")]
 fn js_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
+    value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }

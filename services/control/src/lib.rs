@@ -1961,9 +1961,8 @@ mod tests {
             &control_storage_err
         ));
 
-        let control_forgejo_err = super::ControlError::Forgejo(ForgejoError::Request(
-            "request failed".to_string(),
-        ));
+        let control_forgejo_err =
+            super::ControlError::Forgejo(ForgejoError::Request("request failed".to_string()));
         assert!(is_control_error_forgejo_or_observability(
             &control_forgejo_err
         ));
@@ -2420,8 +2419,7 @@ mod tests {
 
     #[test]
     fn map_server_result_maps_errors_to_control_serve_error() {
-        let err = super::map_server_result(Err(std::io::Error::other("boom")))
-            .expect_err("error");
+        let err = super::map_server_result(Err(std::io::Error::other("boom"))).expect_err("error");
         assert!(matches!(err, super::ControlError::Serve(message) if message.contains("boom")));
     }
 

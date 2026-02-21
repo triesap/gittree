@@ -23,7 +23,9 @@ impl std::fmt::Display for ProfileClientError {
         match self {
             ProfileClientError::MissingWindow => write!(f, "missing window"),
             ProfileClientError::Request(message) => write!(f, "request error: {message}"),
-            ProfileClientError::InvalidResponse(message) => write!(f, "invalid response: {message}"),
+            ProfileClientError::InvalidResponse(message) => {
+                write!(f, "invalid response: {message}")
+            }
             ProfileClientError::ProfileFailed(message) => write!(f, "profile failed: {message}"),
         }
     }
@@ -65,11 +67,12 @@ pub async fn fetch_profile(
     headers
         .set("Authorization", &header)
         .map_err(request_error)?;
-    headers.set("Accept", "application/json").map_err(request_error)?;
+    headers
+        .set("Accept", "application/json")
+        .map_err(request_error)?;
     init.set_headers(&headers);
 
-    let request =
-        Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
+    let request = Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
     let window = web_sys::window().ok_or(ProfileClientError::MissingWindow)?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -78,18 +81,17 @@ pub async fn fetch_profile(
     read_profile_response(response).await
 }
 
-pub async fn fetch_public_profile(
-    auth_endpoint: &str,
-) -> Result<Profile, ProfileClientError> {
+pub async fn fetch_public_profile(auth_endpoint: &str) -> Result<Profile, ProfileClientError> {
     let init = RequestInit::new();
     init.set_method("GET");
     init.set_mode(RequestMode::Cors);
     let headers = Headers::new().map_err(request_error)?;
-    headers.set("Accept", "application/json").map_err(request_error)?;
+    headers
+        .set("Accept", "application/json")
+        .map_err(request_error)?;
     init.set_headers(&headers);
 
-    let request =
-        Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
+    let request = Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
     let window = web_sys::window().ok_or(ProfileClientError::MissingWindow)?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -121,8 +123,7 @@ pub async fn update_profile(
         .map_err(request_error)?;
     init.set_headers(&headers);
 
-    let request =
-        Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
+    let request = Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
     let window = web_sys::window().ok_or(ProfileClientError::MissingWindow)?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -141,7 +142,9 @@ async fn read_profile_response(response: Response) -> Result<Profile, ProfileCli
         serde_json::from_str::<Profile>(&body)
             .map_err(|err| ProfileClientError::InvalidResponse(err.to_string()))
     } else {
-        Err(ProfileClientError::ProfileFailed(parse_profile_error(&body)))
+        Err(ProfileClientError::ProfileFailed(parse_profile_error(
+            &body,
+        )))
     }
 }
 
@@ -161,9 +164,7 @@ fn request_error(value: JsValue) -> ProfileClientError {
 }
 
 fn js_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
+    value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }
 
 #[cfg(test)]

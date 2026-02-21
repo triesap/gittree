@@ -232,11 +232,9 @@ where
 }
 
 pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
-    serve_with(
-        config,
-        init_observability,
-        |listener, router| async move { axum::serve(listener, router).await },
-    )
+    serve_with(config, init_observability, |listener, router| async move {
+        axum::serve(listener, router).await
+    })
     .await
 }
 
@@ -1020,9 +1018,7 @@ mod tests {
                 key: "KEY",
                 value: "bad".to_string(),
             });
-        assert!(
-            format!("{sync_observability_config}").contains("sync observability config error")
-        );
+        assert!(format!("{sync_observability_config}").contains("sync observability config error"));
         assert!(sync_observability_config.source().is_some());
 
         let sync_observability =
@@ -1092,9 +1088,8 @@ mod tests {
         assert!(matches!(timed_out, GitExecError::Timeout));
 
         let missing_command = Command::new("/definitely/missing/command");
-        let spawn_err =
-            run_with_timeout(missing_command, std::time::Duration::from_millis(20))
-                .expect_err("spawn should fail");
+        let spawn_err = run_with_timeout(missing_command, std::time::Duration::from_millis(20))
+            .expect_err("spawn should fail");
         assert!(matches!(spawn_err, GitExecError::Io(_)));
 
         let executor = CommandGitExecutor;
@@ -1193,9 +1188,11 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = super::serve_with(config, || Ok(()), |listener, router| async move {
-            axum::serve(listener, router).await
-        })
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |listener, router| async move { axum::serve(listener, router).await },
+        )
         .await
         .expect_err("bind error");
         assert!(matches!(err, SyncError::Serve(_)));
@@ -1217,9 +1214,11 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = super::serve_with(config, || Ok(()), |_listener, _router| async {
-            Err(std::io::Error::other("boom"))
-        })
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Err(std::io::Error::other("boom")) },
+        )
         .await
         .expect_err("serve error");
         assert!(matches!(err, SyncError::Serve(message) if message.contains("boom")));
@@ -1271,9 +1270,7 @@ mod tests {
             .expect_err("expected serve error");
         assert!(matches!(
             err,
-            SyncError::Serve(_)
-                | SyncError::Observability(_)
-                | SyncError::ObservabilityConfig(_)
+            SyncError::Serve(_) | SyncError::Observability(_) | SyncError::ObservabilityConfig(_)
         ));
     }
 

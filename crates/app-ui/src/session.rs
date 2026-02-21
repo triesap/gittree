@@ -161,9 +161,7 @@ fn window_ref() -> Result<Window, SessionError> {
 
 #[cfg(target_arch = "wasm32")]
 fn js_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
+    value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }
 
 #[cfg(test)]
@@ -172,8 +170,8 @@ mod tests {
 
     #[test]
     fn session_from_pubkey_hex_builds_npub() {
-        let session = AuthSession::from_pubkey_hex(&"11".repeat(32), AuthSource::Local)
-            .expect("session");
+        let session =
+            AuthSession::from_pubkey_hex(&"11".repeat(32), AuthSource::Local).expect("session");
         assert_eq!(session.pubkey, "11".repeat(32));
         assert!(session.npub.starts_with("npub1"));
         assert_eq!(session.source, AuthSource::Local);
@@ -187,8 +185,8 @@ mod tests {
 
     #[test]
     fn session_serializes_to_json() {
-        let session = AuthSession::from_pubkey_hex(&"22".repeat(32), AuthSource::Nip07)
-            .expect("session");
+        let session =
+            AuthSession::from_pubkey_hex(&"22".repeat(32), AuthSource::Nip07).expect("session");
         let json = session.to_json_string().expect("json");
         assert!(json.contains("\"pubkey\""));
         assert!(json.contains("\"npub\""));

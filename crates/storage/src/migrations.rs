@@ -765,7 +765,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_database_for_base_url_returns_none_when_create_database_statement_is_invalid()
-    {
+     {
         assert!(
             provision_database_for_base_url_with_name(
                 DEFAULT_TEST_DATABASE_URL,
@@ -840,8 +840,12 @@ mod tests {
         let _ = backend.current_version().await.expect("current version");
         backend.execute_sql("SELECT 1").await.expect("execute sql");
 
-        let version = 9_000_000_000_i64 + TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed) as i64;
-        backend.record_version(version).await.expect("record version");
+        let version =
+            9_000_000_000_i64 + TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed) as i64;
+        backend
+            .record_version(version)
+            .await
+            .expect("record version");
 
         drop(backend);
         drop(connection);
@@ -866,7 +870,10 @@ mod tests {
             connection: &mut connection,
         };
 
-        let current_err = backend.current_version().await.expect_err("current version error");
+        let current_err = backend
+            .current_version()
+            .await
+            .expect_err("current version error");
         assert_database_error(current_err);
 
         let record_err = backend

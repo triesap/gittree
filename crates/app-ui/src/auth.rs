@@ -1,18 +1,18 @@
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use gittree_app_core::{nip98_sign_event, AppCoreError, Nip98Event};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use gittree_app_core::{AppCoreError, Nip98Event, nip98_sign_event};
 #[cfg(target_family = "wasm")]
-use gittree_app_core::{nip98_unsigned_event, Nip98UnsignedEvent};
+use gittree_app_core::{Nip98UnsignedEvent, nip98_unsigned_event};
 use js_sys::Date;
 use k256::schnorr::SigningKey;
-use wasm_bindgen::prelude::*;
-use web_sys::{Storage, Window};
 #[cfg(target_family = "wasm")]
 use nostr::signer::NostrSigner;
 #[cfg(target_family = "wasm")]
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 #[cfg(target_family = "wasm")]
 use nostr_browser_signer::{BrowserSigner, Error as Nip07Error};
+use wasm_bindgen::prelude::*;
+use web_sys::{Storage, Window};
 
 const LOCAL_SECRET_KEY: &str = "gittree_local_secret";
 
@@ -67,8 +67,8 @@ pub fn unix_timestamp() -> i64 {
 }
 
 pub fn auth_header(event: &Nip98Event) -> Result<String, AuthError> {
-    let json = serde_json::to_vec(event)
-        .map_err(|err| AuthError::EventEncoding(err.to_string()))?;
+    let json =
+        serde_json::to_vec(event).map_err(|err| AuthError::EventEncoding(err.to_string()))?;
     let token = BASE64_STANDARD.encode(json);
     Ok(format!("Nostr {token}"))
 }
@@ -80,8 +80,7 @@ pub fn local_key_event(
     created_at: i64,
 ) -> Result<Nip98Event, AuthError> {
     let secret = local_secret_key()?;
-    nip98_sign_event(&secret, method, url, payload_sha256, created_at)
-        .map_err(AuthError::Core)
+    nip98_sign_event(&secret, method, url, payload_sha256, created_at).map_err(AuthError::Core)
 }
 
 pub fn local_secret_key() -> Result<[u8; 32], AuthError> {
@@ -180,8 +179,7 @@ fn generate_secret_key() -> Result<[u8; 32], AuthError> {
 }
 
 fn pubkey_from_secret(secret: &[u8; 32]) -> Result<String, AuthError> {
-    let signing_key =
-        SigningKey::from_bytes(secret).map_err(|_| AuthError::InvalidSecretKey)?;
+    let signing_key = SigningKey::from_bytes(secret).map_err(|_| AuthError::InvalidSecretKey)?;
     let verifying_key = signing_key.verifying_key();
     Ok(hex::encode(verifying_key.to_bytes()))
 }
@@ -197,9 +195,7 @@ fn parse_secret_hex(value: &str) -> Result<[u8; 32], AuthError> {
 }
 
 fn js_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
+    value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }
 
 #[cfg(target_family = "wasm")]

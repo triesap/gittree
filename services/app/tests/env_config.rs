@@ -235,7 +235,10 @@ fn app_service_config_from_env_uses_defaults_for_empty_optional_values() {
             let config = AppServiceConfig::from_env().expect("config");
             assert_eq!(config.bind.to_string(), "127.0.0.1:8090");
             assert_eq!(config.base_path, "/ui");
-            assert_eq!(config.site_root, std::path::PathBuf::from("crates/app-ui/dist"));
+            assert_eq!(
+                config.site_root,
+                std::path::PathBuf::from("crates/app-ui/dist")
+            );
             assert_eq!(config.site_pkg_dir, "pkg");
             assert_eq!(config.storage.max_connections, 10);
             assert_eq!(config.storage.min_connections, 2);
@@ -261,7 +264,10 @@ fn app_service_config_from_env_uses_defaults_when_optional_envs_are_missing() {
             let config = AppServiceConfig::from_env().expect("config");
             assert_eq!(config.bind.to_string(), "127.0.0.1:8090");
             assert_eq!(config.base_path, "/ui");
-            assert_eq!(config.site_root, std::path::PathBuf::from("crates/app-ui/dist"));
+            assert_eq!(
+                config.site_root,
+                std::path::PathBuf::from("crates/app-ui/dist")
+            );
             assert_eq!(config.site_pkg_dir, "pkg");
             assert_eq!(config.storage.max_connections, 10);
             assert_eq!(config.storage.min_connections, 2);

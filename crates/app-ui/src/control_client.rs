@@ -86,10 +86,7 @@ pub fn control_event_endpoint(control_url: &str) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(format!(
-            "{}/control/events",
-            trimmed.trim_end_matches('/')
-        ))
+        Some(format!("{}/control/events", trimmed.trim_end_matches('/')))
     }
 }
 
@@ -98,8 +95,8 @@ pub async fn create_repo(
     token: &str,
     input: ControlRepoInput,
 ) -> Result<ControlRepoResponse, ControlClientError> {
-    let endpoint = control_event_endpoint(control_url)
-        .ok_or(ControlClientError::MissingEndpoint)?;
+    let endpoint =
+        control_event_endpoint(control_url).ok_or(ControlClientError::MissingEndpoint)?;
     let token = token.trim();
     if token.is_empty() {
         return Err(ControlClientError::MissingToken);
@@ -136,14 +133,15 @@ pub async fn create_repo(
     headers
         .set("Authorization", &format!("Bearer {token}"))
         .map_err(request_error)?;
-    headers.set("Accept", "application/json").map_err(request_error)?;
+    headers
+        .set("Accept", "application/json")
+        .map_err(request_error)?;
     headers
         .set("Content-Type", "application/json")
         .map_err(request_error)?;
     init.set_headers(&headers);
 
-    let request =
-        Request::new_with_str_and_init(&endpoint, &init).map_err(request_error)?;
+    let request = Request::new_with_str_and_init(&endpoint, &init).map_err(request_error)?;
     let window = web_sys::window().ok_or(ControlClientError::MissingWindow)?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -174,19 +172,16 @@ fn request_error(value: JsValue) -> ControlClientError {
 }
 
 fn js_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{:?}", value))
+    value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{control_event_endpoint, ControlRepoInput, create_repo};
+    use super::{ControlRepoInput, control_event_endpoint, create_repo};
 
     #[test]
     fn control_event_endpoint_joins_path() {
-        let endpoint =
-            control_event_endpoint("http://localhost:8088/").expect("endpoint");
+        let endpoint = control_event_endpoint("http://localhost:8088/").expect("endpoint");
         assert_eq!(endpoint, "http://localhost:8088/control/events");
     }
 

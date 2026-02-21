@@ -62,7 +62,7 @@ fn app_theme_apply_name(_name: &str) -> GittreeAppThemeResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_theme_init, APP_THEME_NAME};
+    use super::{APP_THEME_NAME, app_theme_init};
 
     #[test]
     fn theme_init_returns_name() {

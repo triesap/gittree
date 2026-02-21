@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use leptos::prelude::{use_context, RwSignal, StoredValue, WithUntracked, WithValue};
+use leptos::prelude::{RwSignal, StoredValue, WithUntracked, WithValue, use_context};
 
 use mf2_i18n_core::{Args, MessageId};
 use mf2_i18n_embedded::{EmbeddedPack, EmbeddedRuntime};
@@ -51,7 +51,10 @@ fn load_embedded_runtime() -> Option<EmbeddedRuntime> {
 }
 
 fn load_id_map() -> Option<BTreeMap<String, MessageId>> {
-    let raw = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/i18n/build/id_map.json"));
+    let raw = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/i18n/build/id_map.json"
+    ));
     let parsed: BTreeMap<String, u32> = serde_json::from_slice(raw).ok()?;
     let mut map = BTreeMap::new();
     for (key, id) in parsed {
@@ -61,7 +64,10 @@ fn load_id_map() -> Option<BTreeMap<String, MessageId>> {
 }
 
 fn load_id_map_hash() -> Option<[u8; 32]> {
-    let raw = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/i18n/build/id_map_hash"));
+    let raw = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/i18n/build/id_map_hash"
+    ));
     let text = std::str::from_utf8(raw).ok()?;
     let value = text.trim();
     let hex_value = value.strip_prefix("sha256:").unwrap_or(value);
@@ -91,7 +97,7 @@ macro_rules! t {
 #[cfg(test)]
 mod tests {
     use super::{app_i18n, app_i18n_init, translate};
-    use leptos::prelude::{provide_context, Owner};
+    use leptos::prelude::{Owner, provide_context};
 
     #[test]
     fn translate_falls_back_without_context() {
