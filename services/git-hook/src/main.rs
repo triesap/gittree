@@ -16,9 +16,7 @@ fn init_observability() -> Result<gittree_observability::ObservabilityHandle, St
 fn main() {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr);
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
+    exit_if_needed(exit_code, std::process::exit);
 }
 
 fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -58,14 +56,54 @@ fn handle_main_result(result: Result<(), String>, stderr: &mut impl Write) -> i3
     }
 }
 
+fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
+where
+    F: FnOnce(i32) -> R,
+{
+    if exit_code != 0 {
+        let _ = exit_fn(exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{HookCli, HookServiceError, handle_main_result, run_with_cli, try_main};
+    use super::{
+        HookCli, HookServiceError, exit_if_needed, handle_main_result, init_observability,
+        run_with_cli, try_main,
+    };
     use clap::Parser;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
 
     fn noop_run() -> Result<(), HookServiceError> {
         Ok(())
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env_var<F>(key: &str, value: Option<&str>, run: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = env_lock().lock().expect("lock env");
+        let previous = std::env::var(key).ok();
+        match value {
+            // SAFETY: tests mutate process env under a global lock and always restore state.
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            // SAFETY: tests mutate process env under a global lock and always restore state.
+            None => unsafe { std::env::remove_var(key) },
+        }
+        run();
+        if let Some(previous) = previous {
+            // SAFETY: tests mutate process env under a global lock and always restore state.
+            unsafe { std::env::set_var(key, previous) };
+        } else {
+            // SAFETY: tests mutate process env under a global lock and always restore state.
+            unsafe { std::env::remove_var(key) };
+        }
     }
 
     #[test]
@@ -107,7 +145,9 @@ mod tests {
             Err(HookServiceError::Core("runner boom".to_string()))
         })
         .expect_err("runner should fail");
-        assert!(matches!(err, HookServiceError::Core(_)));
+        if !matches!(err, HookServiceError::Core(_)) {
+            panic!("expected core error");
+        }
     }
 
     #[test]
@@ -150,5 +190,34 @@ mod tests {
         let exit_code = handle_main_result(Err("boom".to_string()), &mut stderr);
         assert_eq!(exit_code, 1);
         assert_eq!(String::from_utf8(stderr).expect("utf8"), "boom\n");
+    }
+
+    #[test]
+    fn init_observability_reports_invalid_log_env() {
+        with_env_var("GITTREE_LOG_JSON", Some("invalid-bool"), || {
+            let result = init_observability();
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn init_observability_invokes_runtime_init_path() {
+        with_env_var("GITTREE_LOG_JSON", Some("false"), || {
+            let _ = init_observability();
+        });
+    }
+
+    #[test]
+    fn exit_if_needed_skips_exit_when_code_is_zero() {
+        let mut seen = None;
+        exit_if_needed(0, |code| seen = Some(code));
+        assert!(seen.is_none());
+    }
+
+    #[test]
+    fn exit_if_needed_calls_exit_when_code_is_non_zero() {
+        let mut seen = None;
+        exit_if_needed(17, |code| seen = Some(code));
+        assert_eq!(seen, Some(17));
     }
 }
