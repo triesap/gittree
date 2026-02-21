@@ -216,11 +216,11 @@ fn execute_probe_with_client<C: RelayProbeClient>(
 fn render_probe_output(cli: &ProbeCli, results: &[RelayProbeResult]) -> String {
     if cli.json {
         if cli.all {
-            let json = serde_json::to_string_pretty(results).unwrap_or_else(|_| "[]".to_string());
+            let json = serde_json::to_string_pretty(results).unwrap_or("[]".to_string());
             return format!("{json}\n");
         }
         if let Some(result) = results.first() {
-            let json = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
+            let json = serde_json::to_string_pretty(result).unwrap_or("{}".to_string());
             return format!("{json}\n");
         }
         return String::new();
@@ -525,7 +525,10 @@ mod tests {
     fn parse_rejects_all_with_relay() {
         let err =
             ProbeCli::parse(["probe", "--all", "--relay", "wss://relay.example"]).unwrap_err();
-        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(_)));
+        assert_eq!(
+            err.to_string(),
+            "invalid relay url: cannot combine --all with --relay"
+        );
     }
 
     #[test]
@@ -564,7 +567,7 @@ mod tests {
     #[test]
     fn parse_rejects_missing_relay_value() {
         let err = ProbeCli::parse(["probe", "--relay"]).expect_err("missing relay value");
-        assert!(matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "--relay"));
+        assert_eq!(err.to_string(), "invalid relay url: --relay");
     }
 
     #[test]
@@ -631,7 +634,7 @@ mod tests {
         with_env_var("GITTREE_RELAY_URLS", "", || {
             let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
             let err = resolve_targets(&cli).unwrap_err();
-            assert!(matches!(err, ProbeCommandError::MissingTargets(_)));
+            assert_eq!(err.to_string(), "GITTREE_RELAY_URLS is empty");
         });
     }
 
@@ -665,7 +668,7 @@ mod tests {
         with_env_var("GITTREE_RELAY_URLS", "not-a-relay", || {
             let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
             let err = resolve_targets(&cli).expect_err("invalid env relay url");
-            assert!(matches!(err, ProbeCommandError::Config(_)));
+            assert!(err.to_string().contains("invalid relay url"));
         });
     }
 
@@ -676,7 +679,7 @@ mod tests {
             std::env::remove_var(super::ENV_STORAGE_READ_URL);
         }
         let err = storage_from_env().unwrap_err();
-        assert!(matches!(err, StorageConfigError::MissingEnv(_)));
+        assert_eq!(err.to_string(), "missing env GITTREE_STORAGE_READ_URL");
     }
 
     #[test]
@@ -777,7 +780,10 @@ mod tests {
                 with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
                     with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
                         let err = storage_from_env().expect_err("invalid pool bounds");
-                        assert!(matches!(err, StorageConfigError::InvalidConfig(_)));
+                        assert!(matches!(
+                            err,
+                            StorageConfigError::InvalidConfig(message) if !message.is_empty()
+                        ));
                     });
                 });
             },
@@ -910,10 +916,7 @@ mod tests {
 
         let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
             .expect_err("probe failure");
-        assert!(matches!(
-            err,
-            ProbeCommandError::Cli(RelayProbeError::Http(_))
-        ));
+        assert_eq!(err.to_string(), "relay probe http error: boom");
     }
 
     #[test]
@@ -976,10 +979,7 @@ mod tests {
         with_env_var(super::ENV_STORAGE_READ_URL, "", || {
             let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
                 .expect_err("store mode should fail without storage env");
-            assert!(matches!(
-                err,
-                ProbeCommandError::StorageConfig(_) | ProbeCommandError::Storage(_)
-            ));
+            assert!(err.to_string().contains("relay probe storage"));
         });
     }
 
@@ -1013,7 +1013,7 @@ mod tests {
             || {
                 let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
                     .expect_err("store mode should fail when database is unreachable");
-                assert!(matches!(err, ProbeCommandError::Storage(_)));
+                assert!(err.to_string().contains("relay probe storage error"));
             },
         );
     }
@@ -1134,10 +1134,7 @@ mod tests {
             let err = runtime
                 .block_on(store_probe_result(&sample_probe_result()))
                 .expect_err("missing storage config");
-            assert!(matches!(
-                err,
-                ProbeCommandError::StorageConfig(_) | ProbeCommandError::Storage(_)
-            ));
+            assert!(err.to_string().contains("relay probe storage"));
         });
     }
 
@@ -1264,7 +1261,7 @@ mod tests {
     #[test]
     fn run_with_args_reports_cli_errors() {
         let err = run_with_args(["probe"]).expect_err("missing args");
-        assert!(matches!(err, ProbeCommandError::Cli(_)));
+        assert!(err.to_string().contains("missing --relay or --all"));
     }
 
     #[test]
@@ -1273,7 +1270,7 @@ mod tests {
         with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "0", || {
             let err = run_with_args(["probe", "--relay", "wss://relay.example"])
                 .expect_err("invalid relay probe config");
-            assert!(matches!(err, ProbeCommandError::Config(_)));
+            assert!(err.to_string().contains("relay probe config error"));
         });
     }
 
@@ -1282,7 +1279,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_RELAY_URLS", "", || {
             let err = run_with_args(["probe", "--all"]).expect_err("missing targets");
-            assert!(matches!(err, ProbeCommandError::MissingTargets(_)));
+            assert_eq!(err.to_string(), "GITTREE_RELAY_URLS is empty");
         });
     }
 }
