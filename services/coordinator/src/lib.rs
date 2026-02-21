@@ -1376,6 +1376,22 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_invalid_relay_and_missing_forgejo_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_required_coordinator_envs(|| {
+            with_env_var("GITTREE_RELAY_URLS", "not-a-url", || {
+                let err = CoordinatorConfig::from_env().expect_err("invalid relay target");
+                assert!(matches!(err, super::CoordinatorConfigError::Config(_)));
+            });
+
+            with_unset_env_var("GITTREE_FORGEJO_OWNER", || {
+                let err = CoordinatorConfig::from_env().expect_err("missing forgejo owner");
+                assert!(matches!(err, super::CoordinatorConfigError::Config(_)));
+            });
+        });
+    }
+
+    #[test]
     fn config_rejects_missing_and_empty_paths() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_unset_env_var(super::ENV_COORDINATOR_REPO_ROOT, || {
@@ -2366,6 +2382,22 @@ mod tests {
     fn observability_init_returns_registry() {
         let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
         assert!(handle.prometheus_registry().is_some());
+    }
+
+    #[test]
+    fn observability_init_maps_invalid_env_and_reinit_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_JSON", "invalid-bool", || {
+            let err = init_observability().expect_err("invalid observability config");
+            assert!(matches!(
+                err,
+                super::CoordinatorError::ObservabilityConfig(_)
+            ));
+        });
+
+        let _ = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        let err = init_observability().expect_err("reinit should fail");
+        assert!(matches!(err, super::CoordinatorError::Observability(_)));
     }
 
     #[test]
