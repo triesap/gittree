@@ -100,11 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(
-            || Ok::<_, WebhookError>("config"),
-            |_| async { Ok::<(), WebhookError>(()) },
-        )
-        .await;
+        let result = run_with(|| Ok::<_, WebhookError>(()), serve_ok).await;
         assert!(result.is_ok());
     }
 

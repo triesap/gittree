@@ -72,11 +72,15 @@ mod tests {
     use super::{handle_main_result, main_impl_with, run_with};
     use gittree_coordinator::CoordinatorError;
 
+    async fn serve_ok(_: ()) -> Result<(), CoordinatorError> {
+        Ok(())
+    }
+
     #[tokio::test]
     async fn run_with_returns_config_errors() {
         let err = run_with(
             || Err::<(), CoordinatorError>(CoordinatorError::Serve("config failed".to_string())),
-            |_| async { Ok::<(), CoordinatorError>(()) },
+            serve_ok,
         )
         .await
         .expect_err("config error");
@@ -98,11 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(
-            || Ok::<_, CoordinatorError>("config"),
-            |_| async { Ok::<(), CoordinatorError>(()) },
-        )
-        .await;
+        let result = run_with(|| Ok::<_, CoordinatorError>(()), serve_ok).await;
         assert!(result.is_ok());
     }
 

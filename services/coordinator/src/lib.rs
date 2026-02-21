@@ -17,6 +17,7 @@ use gittree_storage::{
     RepoAnnouncementRecord, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
 };
 use serde::{Deserialize, Serialize};
+use std::future::{Future, pending};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -291,14 +292,37 @@ where
         forgejo,
     };
     let publisher_state = state.clone();
-    tokio::spawn(async move {
-        publish_outbox_loop(publisher_state).await;
-    });
+    spawn_publish_outbox(publisher_state);
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| CoordinatorError::Serve(err.to_string()))?;
+    run_http_server_with_shutdown(listener, router, pending()).await
+}
+
+fn spawn_publish_outbox<R, T>(state: CoordinatorAppState<R, T>) -> tokio::task::JoinHandle<()>
+where
+    R: RelayPublishRepository
+        + AnnouncementRepository
+        + RepoMappingRepository
+        + Send
+        + Sync
+        + 'static,
+    T: ForgejoTransport + Clone + Send + Sync + 'static,
+{
+    tokio::spawn(publish_outbox_loop(state))
+}
+
+async fn run_http_server_with_shutdown<Shutdown>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: Shutdown,
+) -> Result<(), CoordinatorError>
+where
+    Shutdown: Future<Output = ()> + Send + 'static,
+{
     axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|err| CoordinatorError::Serve(err.to_string()))?;
     Ok(())
@@ -1003,6 +1027,7 @@ mod tests {
     use super::init_repo;
     use super::install_hooks;
     use async_trait::async_trait;
+    use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::response::IntoResponse;
@@ -2202,6 +2227,55 @@ mod tests {
             .await
             .expect_err("bind error");
         assert!(matches!(err, super::CoordinatorError::Serve(_)));
+    }
+
+    #[test]
+    fn serve_maps_observability_config_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+            let config = sample_coordinator_config(sample_storage_config(
+                "postgres://user:pass@localhost:5432/gittree",
+            ));
+            let err = runtime
+                .block_on(super::serve(config))
+                .expect_err("observability config");
+            assert!(matches!(
+                err,
+                super::CoordinatorError::ObservabilityConfig(_)
+            ));
+        });
+    }
+
+    #[tokio::test]
+    async fn run_http_server_with_shutdown_returns_ok() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let result = super::run_http_server_with_shutdown(listener, Router::new(), async {}).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn spawn_publish_outbox_starts_loop() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-publish-loop-starts");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        let task = super::spawn_publish_outbox(state);
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
