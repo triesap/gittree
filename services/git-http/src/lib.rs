@@ -1082,6 +1082,29 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_invalid_storage_timeout_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "oops", || {
+                        let err = GitHttpConfig::from_env().expect_err("invalid storage timeout");
+                        assert!(matches!(
+                            err,
+                            GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
+                                key: ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                                ..
+                            })
+                        ));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn config_rejects_invalid_storage_bounds() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
@@ -1195,6 +1218,16 @@ mod tests {
     }
 
     #[test]
+    fn route_request_rejects_query_without_service_pair() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
+            Some("foo=bar"),
+        );
+        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+    }
+
+    #[test]
     fn route_request_rejects_invalid_service_param() {
         let request = GitHttpRequest::new(
             "GET",
@@ -1210,6 +1243,16 @@ mod tests {
             "GET",
             "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/git-receive-pack",
             None,
+        );
+        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+    }
+
+    #[test]
+    fn route_request_rejects_invalid_npub_segment() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/not-npub/repo.git/info/refs",
+            Some("service=git-upload-pack"),
         );
         assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
     }
@@ -1413,6 +1456,135 @@ mod tests {
             calls[0].url,
             "https://git.example/owner/repo.git/info/refs?service=git-upload-pack"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_upload_pack_forwards_to_upstream() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
+            .expect("parse");
+        let mapping = RepoMapping::new("owner", "repo", parsed.pubkey, "repo").expect("mapping");
+        let record = RepoMappingRecord::new(&mapping).expect("record");
+        repositories.upsert_mapping(record).await.expect("mapping");
+
+        let upstream = Arc::new(MockUpstreamClient::new(UpstreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"upstream"),
+        }));
+        let app = super::build_router(GitHttpAppState {
+            auth: test_auth(),
+            repositories,
+            upstream: Arc::clone(&upstream),
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/{npub}/repo.git/git-upload-pack"))
+                    .body(Body::from(Bytes::from_static(b"pkt-line")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = upstream.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].url,
+            "https://git.example/owner/repo.git/git-upload-pack"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_returns_not_found_for_unmatched_route() {
+        let app = super::build_router(GitHttpAppState {
+            auth: test_auth(),
+            repositories: Arc::new(InMemoryRepositories::new()),
+            upstream: Arc::new(MockUpstreamClient::new(UpstreamResponse {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Bytes::new(),
+            })),
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/bad/path")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_maintainers_handles_duplicate_queue_entries() {
+        let repositories = InMemoryRepositories::new();
+        let repo_npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let maintainer_pubkey = "58e318557257f2ab58a415d21bb57082b4824cf667a1d64e72bcbc5acc018c62";
+        let repo_path = Path::new("/").join(repo_npub).join("repo.git");
+        let parsed = gittree_core::parse_repo_path(&repo_path).expect("repo parse");
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![maintainer_pubkey.to_string(), maintainer_pubkey.to_string()],
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"aa".repeat(32), &parsed.pubkey, 1, &announcement)
+                .expect("announcement");
+        repositories
+            .insert_announcement(announcement_record)
+            .await
+            .expect("insert announcement");
+
+        let repo = super::normalize_repo_path(repo_npub, "repo.git").expect("normalized");
+        let maintainers = super::resolve_maintainers(&repositories, &repo)
+            .await
+            .expect("maintainers");
+        assert!(maintainers.contains(&parsed.pubkey));
+        assert!(maintainers.contains(&maintainer_pubkey.to_string()));
+    }
+
+    #[test]
+    fn env_helpers_restore_preexisting_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_GIT_HTTP_ENV_HELPER";
+        // SAFETY: protected by ENV_LOCK and restored below.
+        unsafe {
+            std::env::set_var(key, "before");
+        }
+        with_env_var(key, "during", || {
+            assert_eq!(std::env::var(key).ok().as_deref(), Some("during"));
+        });
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("before"));
+
+        with_env_value(key, Some("value"), || {
+            assert_eq!(std::env::var(key).ok().as_deref(), Some("value"));
+        });
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("before"));
+        // SAFETY: clean test env key.
+        unsafe {
+            std::env::remove_var(key);
+        }
     }
 
     #[tokio::test]
