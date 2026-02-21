@@ -628,7 +628,9 @@ mod tests {
     }
 
     fn with_env_var(key: &str, value: Option<&str>, run: impl FnOnce()) {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let previous = std::env::var(key).ok();
 
         match value {
@@ -656,8 +658,10 @@ mod tests {
         }
     }
 
-    fn with_env_vars(vars: &[(&str, Option<&str>)], run: impl FnOnce()) {
-        let _guard = env_lock().lock().expect("env lock");
+    fn with_env_vars<R>(vars: &[(&str, Option<&str>)], run: impl FnOnce() -> R) -> R {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let previous: Vec<(&str, Option<std::ffi::OsString>)> = vars
             .iter()
             .map(|(key, _)| (*key, std::env::var_os(key)))
@@ -676,7 +680,7 @@ mod tests {
             }
         }
 
-        run();
+        let result = run();
 
         for (key, previous) in previous {
             match previous {
@@ -690,6 +694,7 @@ mod tests {
                 }
             }
         }
+        result
     }
 
     fn write_updates_file(contents: &str) -> std::path::PathBuf {
@@ -855,6 +860,24 @@ mod tests {
         );
         // SAFETY: dedicated test key cleanup.
         unsafe { std::env::remove_var("GITTREE_TEST_RESTORE") };
+    }
+
+    #[test]
+    fn with_env_vars_restores_existing_values() {
+        // SAFETY: dedicated test key avoids collisions with non-test code.
+        unsafe { std::env::set_var("GITTREE_TEST_RESTORE_VARS", "before") };
+        with_env_vars(&[("GITTREE_TEST_RESTORE_VARS", Some("after"))], || {
+            assert_eq!(
+                std::env::var("GITTREE_TEST_RESTORE_VARS").ok().as_deref(),
+                Some("after")
+            );
+        });
+        assert_eq!(
+            std::env::var("GITTREE_TEST_RESTORE_VARS").ok().as_deref(),
+            Some("before")
+        );
+        // SAFETY: dedicated test key cleanup.
+        unsafe { std::env::remove_var("GITTREE_TEST_RESTORE_VARS") };
     }
 
     #[test]
@@ -1262,7 +1285,7 @@ mod tests {
 
     #[test]
     fn run_hook_pre_receive_surfaces_reject_reason() {
-        let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let updates = format!("{} {} refs/heads/main\n", "1".repeat(40), "2".repeat(40));
         let updates_path = write_updates_file(&updates);
         let repo_path = std::path::Path::new("/tmp")
             .join(SAMPLE_NPUB)
@@ -1313,6 +1336,62 @@ mod tests {
             },
         );
         let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_reports_current_dir_lookup_errors() {
+        let updates = format!(
+            "{} {} refs/nostr/{}\n",
+            "0".repeat(40),
+            "1".repeat(40),
+            "a".repeat(64)
+        );
+        let updates_path = write_updates_file(&updates);
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: None,
+            mode: HookMode::PreReceive,
+        };
+        let original_dir = std::env::current_dir().expect("current dir");
+        let temp = std::env::temp_dir().join(format!(
+            "gittree-hook-cwd-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        std::env::set_current_dir(&temp).expect("set current dir");
+        std::fs::remove_dir_all(&temp).expect("remove temp dir");
+        let result = with_env_vars(
+            &[(super::ENV_HOOK_REPO_PATH, None), ("GIT_DIR", None)],
+            || super::run_hook(config, Some(&updates_path)),
+        );
+        std::env::set_current_dir(&original_dir).expect("restore current dir");
+        let err = result.expect_err("expected current dir failure");
+        assert!(matches!(err, HookServiceError::Core(_)));
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_reads_stdin_when_no_file_is_provided() {
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: None,
+            mode: HookMode::PreReceive,
+        };
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            || {
+                super::run_hook(config, None).expect("stdin read should not fail");
+            },
+        );
     }
 
     #[test]
