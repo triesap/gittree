@@ -5,8 +5,8 @@ use gittree_storage::{
     PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
 };
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -497,14 +497,23 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AdminError> {
 
 #[cfg(test)]
 mod tests {
+    use super::AdminError;
     use super::ControlClientConfig;
+    use super::ControlConfigError;
     use super::DEFAULT_CONTROL_URL;
     use super::ENV_CONTROL_TOKEN;
     use super::ENV_CONTROL_URL;
     use super::ENV_STORAGE_IDLE_TIMEOUT_SECS;
+    use super::ENV_STORAGE_MAX_CONNECTIONS;
     use super::ENV_STORAGE_MAX_LIFETIME_SECS;
+    use super::ENV_STORAGE_MIN_CONNECTIONS;
     use super::ENV_STORAGE_READ_URL;
+    use super::StorageConfigError;
+    use super::control_client_from_env;
+    use super::env_u32;
+    use super::env_u64;
     use super::storage_from_env;
+    use std::error::Error;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -514,6 +523,33 @@ mod tests {
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
             std::env::set_var(key, value);
+        }
+        f();
+        match previous {
+            Some(old) => unsafe {
+                std::env::set_var(key, old);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+    }
+
+    fn with_env_var_opt<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize env mutation with ENV_LOCK and restore previous values.
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+            }
+            None => {
+                // SAFETY: tests serialize env mutation with ENV_LOCK and restore previous values.
+                unsafe {
+                    std::env::remove_var(key);
+                }
+            }
         }
         f();
         match previous {
@@ -564,5 +600,123 @@ mod tests {
                 assert_eq!(config.base_url, "http://localhost:9090");
             });
         });
+    }
+
+    #[test]
+    fn control_config_requires_non_empty_token() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var_opt(ENV_CONTROL_TOKEN, None, || {
+            let err = ControlClientConfig::from_env().expect_err("missing token");
+            assert!(matches!(
+                err,
+                AdminError::ControlConfig(ControlConfigError::MissingEnv(ENV_CONTROL_TOKEN))
+            ));
+        });
+        with_env_var(ENV_CONTROL_TOKEN, "   ", || {
+            let err = ControlClientConfig::from_env().expect_err("empty token");
+            assert!(matches!(
+                err,
+                AdminError::ControlConfig(ControlConfigError::MissingEnv(ENV_CONTROL_TOKEN))
+            ));
+        });
+    }
+
+    #[test]
+    fn control_client_from_env_requires_token() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var_opt(ENV_CONTROL_TOKEN, None, || {
+            let err = match control_client_from_env() {
+                Ok(_) => panic!("expected missing token"),
+                Err(err) => err,
+            };
+            assert!(matches!(err, AdminError::ControlConfig(_)));
+        });
+    }
+
+    #[test]
+    fn env_numeric_helpers_cover_missing_empty_and_invalid() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var_opt("GITTREE_TEST_U32", None, || {
+            assert_eq!(env_u32("GITTREE_TEST_U32").expect("missing"), None);
+        });
+        with_env_var("GITTREE_TEST_U32", "", || {
+            assert_eq!(env_u32("GITTREE_TEST_U32").expect("empty"), None);
+        });
+        with_env_var("GITTREE_TEST_U32", "42", || {
+            assert_eq!(env_u32("GITTREE_TEST_U32").expect("valid"), Some(42));
+        });
+        with_env_var("GITTREE_TEST_U32", "bad", || {
+            let err = env_u32("GITTREE_TEST_U32").expect_err("invalid");
+            assert!(matches!(err, AdminError::StorageConfig(_)));
+        });
+
+        with_env_var_opt("GITTREE_TEST_U64", None, || {
+            assert_eq!(env_u64("GITTREE_TEST_U64").expect("missing"), None);
+        });
+        with_env_var("GITTREE_TEST_U64", "", || {
+            assert_eq!(env_u64("GITTREE_TEST_U64").expect("empty"), None);
+        });
+        with_env_var("GITTREE_TEST_U64", "84", || {
+            assert_eq!(env_u64("GITTREE_TEST_U64").expect("valid"), Some(84));
+        });
+        with_env_var("GITTREE_TEST_U64", "bad", || {
+            let err = env_u64("GITTREE_TEST_U64").expect_err("invalid");
+            assert!(matches!(err, AdminError::StorageConfig(_)));
+        });
+    }
+
+    #[test]
+    fn storage_config_reports_missing_and_invalid_bounds() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var_opt(ENV_STORAGE_READ_URL, None, || {
+            let err = storage_from_env().expect_err("missing read");
+            assert!(matches!(
+                err,
+                AdminError::StorageConfig(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
+            ));
+        });
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", || {
+                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                        let err = storage_from_env().expect_err("invalid bounds");
+                        assert!(matches!(err, AdminError::StorageConfig(_)));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn admin_error_display_and_sources_are_stable() {
+        let cli = AdminError::Cli(super::AdminCliError::MissingCommand);
+        assert!(cli.to_string().contains("admin cli error"));
+        assert!(cli.source().is_some());
+
+        let storage_cfg = AdminError::StorageConfig(StorageConfigError::MissingEnv("K"));
+        assert!(
+            storage_cfg
+                .to_string()
+                .contains("admin storage config error")
+        );
+        assert!(storage_cfg.source().is_some());
+
+        let control_cfg = AdminError::ControlConfig(ControlConfigError::MissingEnv("K"));
+        assert!(
+            control_cfg
+                .to_string()
+                .contains("admin control config error")
+        );
+        assert!(control_cfg.source().is_some());
+
+        let control_resp = AdminError::ControlResponse("boom".to_string());
+        assert!(
+            control_resp
+                .to_string()
+                .contains("admin control response error")
+        );
+        assert!(control_resp.source().is_none());
     }
 }
