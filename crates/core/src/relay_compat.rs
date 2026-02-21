@@ -37,11 +37,15 @@ pub struct ActiveProbeEvidence {
 
 impl ActiveProbeEvidence {
     pub fn success() -> Self {
-        Self { write_read_ok: true }
+        Self {
+            write_read_ok: true,
+        }
     }
 
     pub fn failure() -> Self {
-        Self { write_read_ok: false }
+        Self {
+            write_read_ok: false,
+        }
     }
 }
 
@@ -302,6 +306,42 @@ mod tests {
     fn active_probe_success_does_not_duplicate_existing_requirements() {
         let mut supported = vec![RelayCapability::Nip01, RelayCapability::Nip34];
         merge_active_probe_evidence(&mut supported, ActiveProbeEvidence::success());
-        assert_eq!(supported, vec![RelayCapability::Nip01, RelayCapability::Nip34]);
+        assert_eq!(
+            supported,
+            vec![RelayCapability::Nip01, RelayCapability::Nip34]
+        );
+    }
+
+    #[test]
+    fn active_probe_constructor_helpers_set_expected_flags() {
+        assert!(ActiveProbeEvidence::success().write_read_ok);
+        assert!(!ActiveProbeEvidence::failure().write_read_ok);
+    }
+
+    #[test]
+    fn default_capability_set_exposes_expected_order() {
+        let defaults = RelayCapabilitySet::default();
+        assert_eq!(
+            defaults.required,
+            vec![RelayCapability::Nip01, RelayCapability::Nip34]
+        );
+        assert_eq!(
+            defaults.optional,
+            vec![
+                RelayCapability::Nip11,
+                RelayCapability::Nip65,
+                RelayCapability::Grasp,
+            ]
+        );
+    }
+
+    #[test]
+    fn compatibility_report_serializes_missing_optional_capabilities() {
+        let requirements = RelayCapabilitySet::default();
+        let report = requirements.evaluate("wss://relay.example", &[RelayCapability::Nip01]);
+        let json = serde_json::to_string(&report).expect("serialize report");
+        let decoded: super::RelayCompatibilityReport =
+            serde_json::from_str(&json).expect("decode report");
+        assert_eq!(decoded.missing_optional, report.missing_optional);
     }
 }
