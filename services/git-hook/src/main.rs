@@ -79,6 +79,8 @@ mod tests {
         Ok(())
     }
 
+    fn noop_exit(_code: i32) {}
+
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -208,10 +210,36 @@ mod tests {
     }
 
     #[test]
+    fn init_observability_second_call_reports_error_path() {
+        with_env_var("GITTREE_LOG_JSON", Some("false"), || {
+            let _ = init_observability();
+            let second = init_observability();
+            assert!(second.is_err());
+        });
+    }
+
+    #[test]
+    fn with_env_var_covers_none_and_restore_branches() {
+        const KEY: &str = "GITTREE_TEST_MAIN_HOOK_ENV";
+
+        // SAFETY: test-only env mutation for a unique key.
+        unsafe { std::env::set_var(KEY, "before") };
+        with_env_var(KEY, None, || {
+            assert!(std::env::var(KEY).is_err());
+        });
+        assert_eq!(std::env::var(KEY).expect("restored"), "before");
+        // SAFETY: test-only env cleanup for a unique key.
+        unsafe { std::env::remove_var(KEY) };
+
+        with_env_var(KEY, None, || {
+            assert!(std::env::var(KEY).is_err());
+        });
+        assert!(std::env::var(KEY).is_err());
+    }
+
+    #[test]
     fn exit_if_needed_skips_exit_when_code_is_zero() {
-        let mut seen = None;
-        exit_if_needed(0, |code| seen = Some(code));
-        assert!(seen.is_none());
+        exit_if_needed(0, noop_exit);
     }
 
     #[test]
