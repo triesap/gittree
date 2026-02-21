@@ -71,6 +71,32 @@ fn handle_main_result(result: Result<(), AdmissionError>, stderr: &mut impl Writ
 mod tests {
     use super::{handle_main_result, main_impl_with, run_with};
     use gittree_admission::AdmissionError;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env_var(key: &str, value: &str, run: impl FnOnce()) {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = std::env::var_os(key);
+        // SAFETY: test-only env mutation guarded by a process-wide lock.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        run();
+        match previous {
+            Some(previous) => {
+                // SAFETY: restore previous value under the same lock.
+                unsafe { std::env::set_var(key, previous) };
+            }
+            None => {
+                // SAFETY: restore missing state under the same lock.
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+    }
 
     #[tokio::test]
     async fn run_with_returns_config_errors() {
@@ -154,5 +180,26 @@ mod tests {
         )
         .await;
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn run_reports_config_error_for_invalid_bind_env() {
+        with_env_var("GITTREE_ADMISSION_BIND", "not-a-socket", || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let err = runtime.block_on(super::run()).expect_err("config error");
+            assert!(matches!(err, AdmissionError::Config(_)));
+        });
+    }
+
+    #[test]
+    fn main_impl_reports_config_error_for_invalid_bind_env() {
+        with_env_var("GITTREE_ADMISSION_BIND", "not-a-socket", || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let mut stderr = Vec::new();
+            let exit_code = runtime.block_on(super::main_impl(&mut stderr));
+            assert_eq!(exit_code, 1);
+            let message = String::from_utf8(stderr).expect("utf8");
+            assert!(message.contains("admission config error"));
+        });
     }
 }
