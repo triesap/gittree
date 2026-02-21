@@ -1361,23 +1361,34 @@ mod tests {
     #[test]
     fn store_probe_result_writes_to_database_when_available() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let database_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok() {
-            Some(value) if !value.trim().is_empty() => value,
-            _ => "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
-        };
+        for test_database_url in ["postgres://gittree:gittree@127.0.0.1:5432/gittree", " "] {
+            with_env_var(
+                "GITTREE_STORAGE_TEST_DATABASE_URL",
+                test_database_url,
+                || {
+                    let database_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok()
+                    {
+                        Some(value) if !value.trim().is_empty() => value,
+                        _ => "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                    };
 
-        with_env_var(super::ENV_STORAGE_READ_URL, &database_url, || {
-            with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
-                let runtime = tokio::runtime::Runtime::new().expect("runtime");
-                let result = runtime.block_on(store_probe_result(&sample_probe_result()));
-                assert_store_result_or_skip_database_error(result);
-            });
-        });
+                    with_env_var(super::ENV_STORAGE_READ_URL, &database_url, || {
+                        with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
+                            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                            let result =
+                                runtime.block_on(store_probe_result(&sample_probe_result()));
+                            assert_store_result_or_skip_database_error(result);
+                        });
+                    });
+                },
+            );
+        }
     }
 
     #[test]
     fn handle_main_result_with_maps_success_and_error_exit_codes() {
         fn ignore_message(_: &str) {}
+        ignore_message("noop");
         let mut messages = Vec::new();
         let ok_code = handle_main_result_with(Ok(()), ignore_message);
         assert_eq!(ok_code, 0);
