@@ -166,7 +166,10 @@ fn js_error(value: JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthSession, AuthSource, SessionError};
+    use super::{
+        AuthSession, AuthSource, SessionError, clear_session, load_session, parse_pubkey_bytes,
+        store_session,
+    };
 
     #[test]
     fn session_from_pubkey_hex_builds_npub() {
@@ -191,5 +194,38 @@ mod tests {
         assert!(json.contains("\"pubkey\""));
         assert!(json.contains("\"npub\""));
         assert!(json.contains("\"source\""));
+        assert!(json.contains("\"nip07\""));
+    }
+
+    #[test]
+    fn session_from_pubkey_hex_normalizes_input() {
+        let session = AuthSession::from_pubkey_hex(&format!("  {}  ", "AA".repeat(32)), AuthSource::Nip07)
+            .expect("session");
+        assert_eq!(session.pubkey, "aa".repeat(32));
+    }
+
+    #[test]
+    fn parse_pubkey_bytes_rejects_wrong_length() {
+        let error = parse_pubkey_bytes("11").expect_err("invalid pubkey");
+        assert!(matches!(error, SessionError::InvalidPubkey));
+    }
+
+    #[test]
+    fn native_session_storage_apis_are_noops() {
+        let session =
+            AuthSession::from_pubkey_hex(&"33".repeat(32), AuthSource::Local).expect("session");
+        store_session(&session).expect("store session");
+        assert_eq!(load_session().expect("load session"), None);
+        clear_session().expect("clear session");
+    }
+
+    #[test]
+    fn session_error_display_variants_are_stable() {
+        assert_eq!(SessionError::InvalidPubkey.to_string(), "invalid pubkey");
+        let serialization = SessionError::Serialization("bad json".to_string());
+        assert_eq!(
+            serialization.to_string(),
+            "serialization error: bad json"
+        );
     }
 }
