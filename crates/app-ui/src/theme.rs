@@ -62,10 +62,17 @@ fn app_theme_apply_name(_name: &str) -> GittreeAppThemeResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{APP_THEME_NAME, app_theme_init};
+    use super::{APP_THEME_NAME, GittreeAppThemeError, app_theme_init};
 
     #[test]
     fn theme_init_returns_name() {
         assert_eq!(app_theme_init().unwrap(), APP_THEME_NAME);
+    }
+
+    #[test]
+    fn theme_error_message_and_display_are_stable() {
+        let error = GittreeAppThemeError::Unavailable;
+        assert_eq!(error.message(), "error.app.theme.unavailable");
+        assert_eq!(error.to_string(), "error.app.theme.unavailable");
     }
 }
