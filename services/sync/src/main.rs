@@ -94,11 +94,15 @@ mod tests {
         }
     }
 
+    async fn serve_ok<T>(_config: T) -> Result<(), SyncError> {
+        Ok(())
+    }
+
     #[tokio::test]
     async fn run_with_returns_config_errors() {
         let err = run_with(
             || Err::<(), SyncError>(SyncError::Serve("config failed".to_string())),
-            |_| async { Ok::<(), SyncError>(()) },
+            serve_ok,
         )
         .await
         .expect_err("config error");
@@ -118,12 +122,21 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(
-            || Ok::<_, SyncError>("config"),
-            |_| async { Ok::<(), SyncError>(()) },
-        )
-        .await;
+        let result = run_with(|| Ok::<_, SyncError>("config"), serve_ok).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn with_env_var_restores_existing_value() {
+        const KEY: &str = "GITTREE_TEST_SYNC_MAIN_ENV";
+        // SAFETY: test-only env mutation for a unique key.
+        unsafe { std::env::set_var(KEY, "before") };
+        with_env_var(KEY, "after", || {
+            assert_eq!(std::env::var(KEY).expect("set"), "after");
+        });
+        assert_eq!(std::env::var(KEY).expect("restored"), "before");
+        // SAFETY: test-only env cleanup for a unique key.
+        unsafe { std::env::remove_var(KEY) };
     }
 
     #[test]
