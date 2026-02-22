@@ -256,7 +256,18 @@ fn nip98_event_from_nostr(event: nostr::Event) -> Nip98Event {
 
 #[cfg(test)]
 mod tests {
-    use super::{nip07_available, pubkey_from_secret};
+    use super::{
+        AuthError, auth_header, nip07_available, nip07_pubkey, nip07_sign_nip98, parse_secret_hex,
+        pubkey_from_secret,
+    };
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use gittree_app_core::{AppCoreError, Nip98Event};
+    use std::error::Error;
+    #[cfg(target_arch = "wasm32")]
+    use super::js_error;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen::JsValue;
 
     #[test]
     fn nip07_available_defaults_false_on_native() {
@@ -268,5 +279,84 @@ mod tests {
         let pubkey = pubkey_from_secret(&[1u8; 32]).expect("pubkey");
         assert_eq!(pubkey.len(), 64);
         assert!(pubkey.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn nip07_pubkey_returns_missing_on_native() {
+        let error = nip07_pubkey().await.expect_err("missing nip-07");
+        assert!(matches!(error, AuthError::MissingNip07));
+    }
+
+    #[tokio::test]
+    async fn nip07_sign_nip98_returns_missing_on_native() {
+        let error = nip07_sign_nip98(
+            "11".repeat(32),
+            "GET",
+            "http://localhost:8089/v1/health",
+            None,
+            1_700_000_000,
+        )
+        .await
+        .expect_err("missing nip-07");
+        assert!(matches!(error, AuthError::MissingNip07));
+    }
+
+    #[test]
+    fn auth_header_encodes_event_json() {
+        let event = sample_event();
+        let header = auth_header(&event).expect("auth header");
+        assert!(header.starts_with("Nostr "));
+        let encoded = header.strip_prefix("Nostr ").expect("prefix");
+        let decoded = BASE64_STANDARD.decode(encoded).expect("decode");
+        let parsed: Nip98Event = serde_json::from_slice(&decoded).expect("json");
+        assert_eq!(parsed.id, event.id);
+        assert_eq!(parsed.kind, event.kind);
+    }
+
+    #[test]
+    fn parse_secret_hex_parses_valid_secret() {
+        let secret = parse_secret_hex(&"11".repeat(32)).expect("secret");
+        assert_eq!(secret, [0x11u8; 32]);
+    }
+
+    #[test]
+    fn parse_secret_hex_rejects_invalid_values() {
+        assert!(matches!(
+            parse_secret_hex("zz"),
+            Err(AuthError::InvalidSecretKey)
+        ));
+        assert!(matches!(
+            parse_secret_hex("11"),
+            Err(AuthError::InvalidSecretKey)
+        ));
+    }
+
+    #[test]
+    fn auth_error_display_and_source_are_wired() {
+        let core = AuthError::Core(AppCoreError::InvalidSignature);
+        assert_eq!(core.to_string(), "auth core error: invalid signature");
+        assert!(core.source().is_some());
+
+        let missing = AuthError::MissingNip07;
+        assert_eq!(missing.to_string(), "missing nip-07 provider");
+        assert!(missing.source().is_none());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn js_error_prefers_string_values() {
+        assert_eq!(js_error(JsValue::from_str("boom")), "boom");
+    }
+
+    fn sample_event() -> Nip98Event {
+        Nip98Event {
+            id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 1_700_000_000,
+            kind: 27_235,
+            tags: vec![vec!["u".to_string(), "http://localhost:8089/v1/health".to_string()]],
+            content: String::new(),
+            sig: "33".repeat(64),
+        }
     }
 }
