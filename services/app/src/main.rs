@@ -156,6 +156,7 @@ mod tests {
 
     #[test]
     fn exit_if_needed_skips_zero_exit_code() {
+        noop_exit(0);
         let mut exit = noop_exit;
         exit_if_needed(0, &mut exit);
     }

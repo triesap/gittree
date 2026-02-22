@@ -683,33 +683,20 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         let app = axum::Router::new().route("/health", get(super::health_handler));
         let task = tokio::spawn(async move { run_axum_server(listener, app).await });
-        let bad_port = addr.port().wrapping_add(1);
-        let bad_addr = std::net::SocketAddr::new(addr.ip(), bad_port);
-        let _ = tokio::net::TcpStream::connect(bad_addr).await;
         tokio::time::sleep(Duration::from_millis(25)).await;
-
-        let mut ready = false;
-        for _ in 0..20 {
-            if let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await {
-                stream
-                    .write_all(
-                        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                    )
-                    .await
-                    .expect("write request");
-                let mut response = Vec::new();
-                stream
-                    .read_to_end(&mut response)
-                    .await
-                    .expect("read response");
-                if response.starts_with(b"HTTP/1.1 200") {
-                    ready = true;
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert!(ready);
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect health socket");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        assert!(response.starts_with(b"HTTP/1.1 200"));
         task.abort();
         let join_err = task.await.expect_err("abort");
         assert!(join_err.is_cancelled());
