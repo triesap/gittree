@@ -232,10 +232,14 @@ where
 }
 
 pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
-    serve_with(config, init_observability, |listener, router| async move {
-        axum::serve(listener, router).await
-    })
-    .await
+    serve_with(config, init_observability, run_axum_server).await
+}
+
+fn run_axum_server(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> impl Future<Output = Result<(), std::io::Error>> {
+    async move { axum::serve(listener, router).await }
 }
 
 fn build_router(state: SyncAppState) -> Router {
@@ -733,10 +737,11 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
     use std::process::Command;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static OBSERVABILITY: OnceLock<gittree_observability::ObservabilityHandle> = OnceLock::new();
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -1191,7 +1196,7 @@ mod tests {
         let err = super::serve_with(
             config,
             || Ok(()),
-            |listener, router| async move { axum::serve(listener, router).await },
+            super::run_axum_server,
         )
         .await
         .expect_err("bind error");
@@ -1272,6 +1277,20 @@ mod tests {
             err,
             SyncError::Serve(_) | SyncError::Observability(_) | SyncError::ObservabilityConfig(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_can_start_and_be_aborted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let app = super::build_router(super::SyncAppState {
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        });
+        let task = tokio::spawn(async move { super::run_axum_server(listener, app).await });
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        task.abort();
+        let _ = task.await;
     }
 
     #[tokio::test]
@@ -1635,10 +1654,10 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        match init_observability() {
-            Ok(handle) => assert!(handle.prometheus_registry().is_some()),
-            Err(SyncError::Observability(_)) => {}
-            Err(other) => panic!("unexpected observability result: {other}"),
-        }
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        without_env_var("GITTREE_LOG_JSON", || {
+            let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+            assert!(handle.prometheus_registry().is_some());
+        });
     }
 }
