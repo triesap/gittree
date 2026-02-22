@@ -151,9 +151,15 @@ pub async fn create_repo(
     let text = response.text().map_err(request_error)?;
     let text = JsFuture::from(text).await.map_err(request_error)?;
     let body = text.as_string().unwrap_or_default();
+    parse_control_response(status, &body)
+}
 
+fn parse_control_response(
+    status: u16,
+    body: &str,
+) -> Result<ControlRepoResponse, ControlClientError> {
     if (200..300).contains(&status) {
-        match serde_json::from_str::<ControlEventResponse>(&body)
+        match serde_json::from_str::<ControlEventResponse>(body)
             .map_err(|err| ControlClientError::InvalidResponse(err.to_string()))?
         {
             ControlEventResponse::CreateRepo { repo } => Ok(repo),
@@ -163,7 +169,7 @@ pub async fn create_repo(
             "status {status}"
         )))
     } else {
-        Err(ControlClientError::ControlFailed(body))
+        Err(ControlClientError::ControlFailed(body.to_string()))
     }
 }
 
@@ -177,7 +183,10 @@ fn js_error(value: JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlRepoInput, control_event_endpoint, create_repo};
+    use super::{
+        ControlClientError, ControlRepoInput, control_event_endpoint, create_repo,
+        parse_control_response,
+    };
 
     #[test]
     fn control_event_endpoint_joins_path() {
@@ -219,5 +228,53 @@ mod tests {
             .await
             .expect_err("error");
         assert!(err.to_string().contains("missing control token"));
+    }
+
+    #[tokio::test]
+    async fn create_repo_rejects_missing_endpoint() {
+        let input = ControlRepoInput {
+            name: "hello".to_string(),
+            owner: None,
+            identifier: None,
+            description: None,
+            private: Some(true),
+            pubkey: "11".repeat(32),
+            privkey: "22".repeat(32),
+        };
+        let err = create_repo("", "token", input).await.expect_err("error");
+        assert!(matches!(err, ControlClientError::MissingEndpoint));
+    }
+
+    #[test]
+    fn parse_control_response_decodes_success_body() {
+        let response = parse_control_response(
+            200,
+            "{\"action\":\"create_repo\",\"repo\":{\"owner\":\"gt_demo\",\"name\":\"hello\",\"html_url\":\"https://gittr.ee/gt_demo/hello\"}}",
+        )
+        .expect("response");
+        assert_eq!(response.owner, "gt_demo");
+        assert_eq!(response.name, "hello");
+        assert_eq!(
+            response.html_url.as_deref(),
+            Some("https://gittr.ee/gt_demo/hello")
+        );
+    }
+
+    #[test]
+    fn parse_control_response_rejects_invalid_success_body() {
+        let err = parse_control_response(200, "{}").expect_err("invalid response");
+        assert!(matches!(err, ControlClientError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn parse_control_response_formats_empty_error_bodies() {
+        let err = parse_control_response(503, " ").expect_err("error");
+        assert!(matches!(err, ControlClientError::ControlFailed(message) if message == "status 503"));
+    }
+
+    #[test]
+    fn parse_control_response_uses_error_body_text() {
+        let err = parse_control_response(401, "denied").expect_err("error");
+        assert!(matches!(err, ControlClientError::ControlFailed(message) if message == "denied"));
     }
 }
