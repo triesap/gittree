@@ -121,3 +121,20 @@ fn window_ref() -> Result<Window, ControlTokenError> {
 fn js_error(value: JsValue) -> String {
     value.as_string().unwrap_or_else(|| format!("{:?}", value))
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::{clear_control_token, load_control_token, store_control_token};
+
+    #[test]
+    fn native_control_token_load_returns_none() {
+        assert_eq!(load_control_token().expect("load token"), None);
+    }
+
+    #[test]
+    fn native_control_token_store_and_clear_are_noops() {
+        store_control_token("token").expect("store token");
+        clear_control_token().expect("clear token");
+        assert_eq!(load_control_token().expect("load token"), None);
+    }
+}
