@@ -2,7 +2,7 @@ use gittree_config::{ConfigError, ServicesConfig};
 use gittree_core::{RepoMapping, RepoState, UpdateDecision};
 use hmac::Mac;
 use serde::{Deserialize, Serialize};
-use std::io::{IsTerminal, Read};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -224,16 +224,16 @@ fn read_input(stdin_file: Option<&Path>) -> Result<String, HookServiceError> {
             ))),
         }
     } else {
-        let mut input = String::new();
-        match std::io::stdin().read_to_string(&mut input) {
-            Ok(_) => {}
-            Err(err) => {
-                return Err(HookServiceError::Core(format!(
-                    "failed to read stdin: {err}"
-                )));
-            }
-        }
-        Ok(input)
+        let mut stdin = std::io::stdin();
+        read_from_reader(&mut stdin)
+    }
+}
+
+fn read_from_reader(reader: &mut dyn std::io::Read) -> Result<String, HookServiceError> {
+    let mut input = String::new();
+    match reader.read_to_string(&mut input) {
+        Ok(_) => Ok(input),
+        Err(err) => Err(HookServiceError::Core(format!("failed to read stdin: {err}"))),
     }
 }
 
@@ -411,20 +411,15 @@ pub trait StateFetcher {
 pub struct HttpStateFetcher {
     base_url: String,
     client: reqwest::blocking::Client,
+    timeout: Duration,
 }
 
 impl HttpStateFetcher {
     pub fn new(base_url: impl Into<String>, timeout: Duration) -> Result<Self, HookServiceError> {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-        {
-            Ok(client) => client,
-            Err(err) => return Err(HookServiceError::State(err.to_string())),
-        };
         Ok(Self {
             base_url: base_url.into(),
-            client,
+            client: reqwest::blocking::Client::new(),
+            timeout,
         })
     }
 
@@ -449,7 +444,7 @@ impl StateFetcher for HttpStateFetcher {
         identifier: &str,
     ) -> Result<Option<RepoState>, HookServiceError> {
         let url = self.state_endpoint(pubkey, identifier);
-        let response = match self.client.get(url).send() {
+        let response = match self.client.get(url).timeout(self.timeout).send() {
             Ok(response) => response,
             Err(err) => return Err(HookServiceError::State(err.to_string())),
         };
@@ -545,27 +540,28 @@ impl From<&RefUpdate> for RefUpdatePayload {
 pub struct HttpPostReceiveNotifier {
     endpoint: String,
     client: reqwest::blocking::Client,
+    timeout: Duration,
 }
 
 impl HttpPostReceiveNotifier {
     pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Result<Self, HookServiceError> {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-        {
-            Ok(client) => client,
-            Err(err) => return Err(HookServiceError::State(err.to_string())),
-        };
         Ok(Self {
             endpoint: endpoint.into(),
-            client,
+            client: reqwest::blocking::Client::new(),
+            timeout,
         })
     }
 }
 
 impl PostReceiveNotifier for HttpPostReceiveNotifier {
     fn notify(&self, payload: PostReceivePayload) -> Result<(), HookServiceError> {
-        let response = match self.client.post(&self.endpoint).json(&payload).send() {
+        let response = match self
+            .client
+            .post(&self.endpoint)
+            .timeout(self.timeout)
+            .json(&payload)
+            .send()
+        {
             Ok(response) => response,
             Err(err) => return Err(HookServiceError::State(err.to_string())),
         };
@@ -639,6 +635,7 @@ mod tests {
     use super::handle_post_receive;
     use super::parse_forgejo_push;
     use super::parse_updates;
+    use super::read_from_reader;
     use super::read_input;
     use super::validate_input_source;
     use super::verify_forgejo_signature;
@@ -839,6 +836,21 @@ mod tests {
     fn read_input_reports_missing_file_errors() {
         let missing = std::path::Path::new("/tmp/does-not-exist-gittree-hook.txt");
         let err = read_input(Some(missing)).expect_err("read should fail");
+        assert!(matches!(err, HookServiceError::Core(_)));
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("boom"))
+        }
+    }
+
+    #[test]
+    fn read_from_reader_reports_stdin_io_errors() {
+        let mut reader = FailingReader;
+        let err = read_from_reader(&mut reader).expect_err("read should fail");
         assert!(matches!(err, HookServiceError::Core(_)));
     }
 
@@ -1067,6 +1079,12 @@ mod tests {
         }
         "#;
         let err = parse_forgejo_push(payload).unwrap_err();
+        assert!(matches!(err, HookError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn parse_forgejo_push_rejects_invalid_json() {
+        let err = parse_forgejo_push("{not-json}").expect_err("invalid payload");
         assert!(matches!(err, HookError::InvalidPayload(_)));
     }
 
@@ -1500,6 +1518,31 @@ mod tests {
     }
 
     #[test]
+    fn http_state_fetcher_reports_send_errors() {
+        let fetcher = super::HttpStateFetcher::new(
+            "http://127.0.0.1:1",
+            std::time::Duration::from_millis(100),
+        )
+        .expect("fetcher");
+        let err = fetcher
+            .latest_state("11".repeat(32).as_str(), "repo")
+            .expect_err("state should fail");
+        assert!(matches!(err, super::HookServiceError::State(_)));
+    }
+
+    #[test]
+    fn http_state_fetcher_reports_json_parse_errors() {
+        let (base_url, handle) = start_mock_http_server("200 OK", "application/json", "{");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
+            .expect("fetcher");
+        let err = fetcher
+            .latest_state("11".repeat(32).as_str(), "repo")
+            .expect_err("state should fail");
+        assert!(matches!(err, super::HookServiceError::State(_)));
+        handle.join().expect("server join");
+    }
+
+    #[test]
     fn http_post_receive_notifier_reports_error_status() {
         let (endpoint, handle) =
             start_mock_http_server("500 Internal Server Error", "text/plain", "nope");
@@ -1537,6 +1580,26 @@ mod tests {
         };
         notifier.notify(payload).expect("notify");
         handle.join().expect("server join");
+    }
+
+    #[test]
+    fn http_post_receive_notifier_reports_send_errors() {
+        let notifier = super::HttpPostReceiveNotifier::new(
+            "http://127.0.0.1:1",
+            std::time::Duration::from_millis(100),
+        )
+        .expect("notifier");
+        let payload = PostReceivePayload {
+            pubkey: "11".repeat(32),
+            identifier: "repo".to_string(),
+            updates: vec![super::RefUpdatePayload {
+                old: "0".repeat(40),
+                new: "1".repeat(40),
+                reference: "refs/heads/main".to_string(),
+            }],
+        };
+        let err = notifier.notify(payload).expect_err("notify should fail");
+        assert!(matches!(err, super::HookServiceError::State(_)));
     }
 
     struct MockNotifier {
@@ -1591,6 +1654,19 @@ mod tests {
     }
 
     #[test]
+    fn handle_post_receive_rejects_invalid_repo_path() {
+        let notifier = MockNotifier::new();
+        let updates = vec![super::RefUpdate {
+            old: "0".repeat(40),
+            new: "1".repeat(40),
+            reference: "refs/heads/main".to_string(),
+        }];
+        let err = handle_post_receive(&notifier, "/tmp/not-an-npub/repo.git", &updates)
+            .expect_err("invalid path");
+        assert!(matches!(err, HookServiceError::Core(_)));
+    }
+
+    #[test]
     fn handle_forgejo_push_resolves_mapping() {
         let resolver = MockResolver {
             mapping: Some(
@@ -1635,5 +1711,14 @@ mod tests {
         "#;
         let err = handle_forgejo_push(&resolver, &notifier, payload).unwrap_err();
         assert!(matches!(err, super::HookServiceError::Reject(_)));
+    }
+
+    #[test]
+    fn handle_forgejo_push_rejects_invalid_json_payload() {
+        let resolver = MockResolver { mapping: None };
+        let notifier = MockNotifier::new();
+        let err = handle_forgejo_push(&resolver, &notifier, "{not-json}")
+            .expect_err("invalid payload should fail");
+        assert!(matches!(err, HookServiceError::Parse(_)));
     }
 }
