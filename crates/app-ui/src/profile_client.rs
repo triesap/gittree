@@ -137,14 +137,15 @@ async fn read_profile_response(response: Response) -> Result<Profile, ProfileCli
     let text = response.text().map_err(request_error)?;
     let text = JsFuture::from(text).await.map_err(request_error)?;
     let body = text.as_string().unwrap_or_default();
+    parse_profile_response(status, &body)
+}
 
+fn parse_profile_response(status: u16, body: &str) -> Result<Profile, ProfileClientError> {
     if (200..300).contains(&status) {
-        serde_json::from_str::<Profile>(&body)
+        serde_json::from_str::<Profile>(body)
             .map_err(|err| ProfileClientError::InvalidResponse(err.to_string()))
     } else {
-        Err(ProfileClientError::ProfileFailed(parse_profile_error(
-            &body,
-        )))
+        Err(ProfileClientError::ProfileFailed(parse_profile_error(body)))
     }
 }
 
@@ -169,7 +170,11 @@ fn js_error(value: JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_profile_error, profile_endpoint, public_profile_endpoint};
+    use super::{
+        ProfileClientError, parse_profile_error, parse_profile_response, profile_endpoint,
+        public_profile_endpoint,
+    };
+    use gittree_app_core::{Profile, ProfileVisibility};
 
     #[test]
     fn profile_endpoint_joins_paths() {
@@ -205,5 +210,44 @@ mod tests {
     fn parse_profile_error_falls_back_to_body() {
         let error = parse_profile_error("plain");
         assert_eq!(error, "plain");
+    }
+
+    #[test]
+    fn parse_profile_response_decodes_success_json() {
+        let response =
+            parse_profile_response(200, &serde_json::to_string(&sample_profile()).expect("json"))
+                .expect("profile");
+        assert_eq!(response.username, "gt_demo");
+        assert_eq!(response.visibility, ProfileVisibility::Public);
+    }
+
+    #[test]
+    fn parse_profile_response_rejects_invalid_success_json() {
+        let error = parse_profile_response(200, "{}").expect_err("invalid response");
+        assert!(matches!(error, ProfileClientError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn parse_profile_response_converts_non_success_to_profile_failed() {
+        let error = parse_profile_response(404, "{\"error\":\"missing\"}").expect_err("missing");
+        match error {
+            ProfileClientError::ProfileFailed(message) => assert_eq!(message, "missing"),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    fn sample_profile() -> Profile {
+        Profile {
+            pubkey: "11".repeat(32),
+            username: "gt_demo".to_string(),
+            display_name: Some("demo".to_string()),
+            bio: Some("hello".to_string()),
+            avatar_url: None,
+            website_url: None,
+            location: None,
+            visibility: ProfileVisibility::Public,
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_001,
+        }
     }
 }

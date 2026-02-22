@@ -74,12 +74,15 @@ pub async fn signup(
     let text = response.text().map_err(request_error)?;
     let text = JsFuture::from(text).await.map_err(request_error)?;
     let body = text.as_string().unwrap_or_default();
+    parse_signup_response(status, &body)
+}
 
+fn parse_signup_response(status: u16, body: &str) -> Result<SignupResponse, AuthClientError> {
     if (200..300).contains(&status) {
-        serde_json::from_str::<SignupResponse>(&body)
+        serde_json::from_str::<SignupResponse>(body)
             .map_err(|err| AuthClientError::InvalidResponse(err.to_string()))
     } else {
-        Err(AuthClientError::SignupFailed(parse_signup_error(&body)))
+        Err(AuthClientError::SignupFailed(parse_signup_error(body)))
     }
 }
 
@@ -104,7 +107,7 @@ fn js_error(value: JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_signup_error, signup_endpoint};
+    use super::{AuthClientError, parse_signup_error, parse_signup_response, signup_endpoint};
 
     #[test]
     fn signup_endpoint_joins_paths() {
@@ -127,5 +130,32 @@ mod tests {
     fn parse_signup_error_falls_back_to_body() {
         let error = parse_signup_error("plain");
         assert_eq!(error, "plain");
+    }
+
+    #[test]
+    fn parse_signup_response_decodes_success_json() {
+        let response = parse_signup_response(
+            201,
+            "{\"pubkey\":\"11\",\"username\":\"gt_demo\",\"status\":\"created\"}",
+        )
+        .expect("signup response");
+        assert_eq!(response.pubkey, "11");
+        assert_eq!(response.username, "gt_demo");
+        assert_eq!(response.status, "created");
+    }
+
+    #[test]
+    fn parse_signup_response_rejects_invalid_success_json() {
+        let error = parse_signup_response(200, "{}").expect_err("invalid response");
+        assert!(matches!(error, AuthClientError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn parse_signup_response_converts_non_success_to_signup_failed() {
+        let error = parse_signup_response(401, "{\"error\":\"denied\"}").expect_err("signup failed");
+        match error {
+            AuthClientError::SignupFailed(message) => assert_eq!(message, "denied"),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }
