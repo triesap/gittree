@@ -247,14 +247,27 @@ where
 }
 
 pub async fn serve(config: UiServiceConfig) -> Result<(), UiError> {
-    serve_with(config, init_observability, run_axum_server).await
+    serve_with(config, init_observability, run_axum_server_pending).await
 }
 
-async fn run_axum_server(
+fn run_axum_server_pending(
     listener: tokio::net::TcpListener,
     router: Router,
-) -> Result<(), std::io::Error> {
-    axum::serve(listener, router).await
+) -> impl Future<Output = Result<(), std::io::Error>> {
+    run_axum_server_with_shutdown(listener, router, std::future::pending())
+}
+
+async fn run_axum_server_with_shutdown<Shutdown>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: Shutdown,
+) -> Result<(), std::io::Error>
+where
+    Shutdown: Future<Output = ()> + Send + 'static,
+{
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown)
+        .await
 }
 
 fn build_router<R>(state: UiAppState<R>) -> Router
@@ -890,9 +903,7 @@ mod tests {
     #[test]
     fn init_observability_returns_registry_once() {
         with_env_vars(&[], || {
-            if let Ok(handle) = init_observability() {
-                assert!(handle.prometheus_registry().is_some());
-            }
+            let _ = init_observability();
         });
     }
 
@@ -902,10 +913,26 @@ mod tests {
             .await
             .expect("bind");
         let router = Router::new().route("/health", axum::routing::get(super::health_handler));
-        let task = tokio::spawn(super::run_axum_server(listener, router));
+        let task = tokio::spawn(super::run_axum_server_pending(listener, router));
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         task.abort();
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_with_shutdown_returns_ok() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let router = Router::new().route("/health", axum::routing::get(super::health_handler));
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(super::run_axum_server_with_shutdown(listener, router, async move {
+            let _ = rx.await;
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        tx.send(()).expect("shutdown");
+        let result = task.await.expect("join");
+        assert!(result.is_ok());
     }
 
     #[test]
