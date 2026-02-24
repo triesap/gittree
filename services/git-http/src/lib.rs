@@ -106,10 +106,10 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, GitHttpConfigError> {
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value
-                .parse::<u64>()
-                .map(Some)
-                .map_err(|_| GitHttpConfigError::InvalidEnv { key, value })
+            match value.parse::<u64>() {
+                Ok(parsed) => Ok(Some(parsed)),
+                Err(_) => Err(GitHttpConfigError::InvalidEnv { key, value }),
+            }
         }
         Err(_) => Ok(None),
     }
@@ -137,9 +137,14 @@ impl std::fmt::Display for StorageConfigError {
 impl std::error::Error for StorageConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, GitHttpConfigError> {
-    let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
-        GitHttpConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
-    })?;
+    let read_connection = match std::env::var(ENV_STORAGE_READ_URL) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(GitHttpConfigError::Storage(StorageConfigError::MissingEnv(
+                ENV_STORAGE_READ_URL,
+            )));
+        }
+    };
     let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
     let max_connections = storage_env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
     let min_connections = storage_env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
@@ -157,9 +162,11 @@ fn storage_from_env() -> Result<StorageConfig, GitHttpConfigError> {
         application_name,
     };
 
-    config.validate().map_err(|err| {
-        GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(err.to_string()))
-    })?;
+    if let Err(err) = config.validate() {
+        return Err(GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(
+            err.to_string(),
+        )));
+    }
 
     Ok(config)
 }
@@ -170,9 +177,13 @@ fn storage_env_u32(key: &'static str) -> Result<Option<u32>, GitHttpConfigError>
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u32>().map(Some).map_err(|_| {
-                GitHttpConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
-            })
+            match value.parse::<u32>() {
+                Ok(parsed) => Ok(Some(parsed)),
+                Err(_) => Err(GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key,
+                    value,
+                })),
+            }
         }
         Err(_) => Ok(None),
     }
@@ -184,9 +195,13 @@ fn storage_env_u64(key: &'static str) -> Result<Option<u64>, GitHttpConfigError>
             if value.trim().is_empty() {
                 return Ok(None);
             }
-            value.parse::<u64>().map(Some).map_err(|_| {
-                GitHttpConfigError::Storage(StorageConfigError::InvalidEnv { key, value })
-            })
+            match value.parse::<u64>() {
+                Ok(parsed) => Ok(Some(parsed)),
+                Err(_) => Err(GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key,
+                    value,
+                })),
+            }
         }
         Err(_) => Ok(None),
     }
@@ -1886,6 +1901,38 @@ mod tests {
         assert_eq!(super::env_u64(missing_key).expect("timeout"), None);
         assert_eq!(super::storage_env_u32(missing_key).expect("u32"), None);
         assert_eq!(super::storage_env_u64(missing_key).expect("u64"), None);
+    }
+
+    #[test]
+    fn env_parsers_parse_numeric_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        // SAFETY: protected by ENV_LOCK and restored in this test.
+        unsafe {
+            std::env::set_var(ENV_TIMEOUT_SECS, "15");
+            std::env::set_var(ENV_STORAGE_MAX_CONNECTIONS, "42");
+            std::env::set_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "90");
+            std::env::set_var(ENV_STORAGE_MAX_LIFETIME_SECS, "120");
+        }
+        assert_eq!(super::env_u64(ENV_TIMEOUT_SECS).expect("timeout"), Some(15));
+        assert_eq!(
+            super::storage_env_u32(ENV_STORAGE_MAX_CONNECTIONS).expect("max connections"),
+            Some(42)
+        );
+        assert_eq!(
+            super::storage_env_u64(ENV_STORAGE_IDLE_TIMEOUT_SECS).expect("idle timeout"),
+            Some(90)
+        );
+        assert_eq!(
+            super::storage_env_u64(ENV_STORAGE_MAX_LIFETIME_SECS).expect("max lifetime"),
+            Some(120)
+        );
+        // SAFETY: test cleanup for unique keys above.
+        unsafe {
+            std::env::remove_var(ENV_TIMEOUT_SECS);
+            std::env::remove_var(ENV_STORAGE_MAX_CONNECTIONS);
+            std::env::remove_var(ENV_STORAGE_IDLE_TIMEOUT_SECS);
+            std::env::remove_var(ENV_STORAGE_MAX_LIFETIME_SECS);
+        }
     }
 
     #[tokio::test]
