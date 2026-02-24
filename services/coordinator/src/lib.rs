@@ -1906,6 +1906,25 @@ mod tests {
     }
 
     #[test]
+    fn plan_rejects_invalid_npub_repo_path() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let root = std::path::Path::new("/var/lib/gittree");
+        let err = build_provision_plan(root, "npub-invalid", &announcement).expect_err("invalid npub");
+        assert!(matches!(err, super::ProvisionPlanError::InvalidRepo(_)));
+    }
+
+    #[test]
     fn init_repo_creates_bare_repo() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
