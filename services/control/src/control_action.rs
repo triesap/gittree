@@ -1,5 +1,7 @@
-use crate::{CoreError, Result};
+use gittree_core::CoreError;
 use serde::{Deserialize, Serialize};
+
+type Result<T> = std::result::Result<T, CoreError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -140,8 +142,7 @@ fn is_hex(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::ControlAction;
-    use crate::CoreError;
-    use crate::kinds::KIND_GITTREE_CONTROL;
+    use gittree_core::{CoreError, kinds::KIND_GITTREE_CONTROL};
 
     fn assert_invalid_field(json: &str, field: &'static str) {
         let err =

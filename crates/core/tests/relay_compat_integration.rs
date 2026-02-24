@@ -1,7 +1,6 @@
 use gittree_core::{
-    ActiveProbeEvidence, ControlAction, CoreError, KIND_GITTREE_CONTROL, RelayCapability,
-    RelayCapabilitySet, RelayCompatibilityReport, RelayInfoDocument, capabilities_from_nip11,
-    merge_active_probe_evidence,
+    ActiveProbeEvidence, RelayCapability, RelayCapabilitySet, RelayCompatibilityReport,
+    RelayInfoDocument, capabilities_from_nip11, merge_active_probe_evidence,
 };
 
 fn relay_doc_with_nips_and_grasps(
@@ -138,44 +137,4 @@ fn compatibility_report_round_trip_preserves_optional_fields() {
     let json = serde_json::to_string(&report).expect("serialize report");
     let decoded: RelayCompatibilityReport = serde_json::from_str(&json).expect("decode report");
     assert_eq!(decoded.missing_optional, report.missing_optional);
-}
-
-#[test]
-fn control_action_paths_are_exercised_in_relay_compat_binary() {
-    let valid_variants = [
-        r#"{"action":"create_user","username":"alice","email":"alice@example.com","password":"secret"}"#,
-        r#"{"action":"create_org","name":"acme","full_name":"acme corp"}"#,
-        r#"{"action":"create_repo","name":"repo","owner":"alice","identifier":"repo","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#,
-        r#"{"action":"create_pull_request","owner":"alice","repo":"repo","head":"feature","base":"main","title":"hello"}"#,
-    ];
-
-    for payload in valid_variants {
-        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, payload, KIND_GITTREE_CONTROL.0)
-            .expect("parse valid action");
-        action.validate().expect("validate parsed action");
-        let encoded = serde_json::to_string(&action).expect("serialize action");
-        let decoded: ControlAction = serde_json::from_str(&encoded).expect("decode action");
-        decoded.validate().expect("validate decoded action");
-    }
-
-    let wrong_kind = ControlAction::parse(
-        KIND_GITTREE_CONTROL.0 + 1,
-        valid_variants[0],
-        KIND_GITTREE_CONTROL.0,
-    )
-    .expect_err("wrong kind");
-    assert!(matches!(
-        wrong_kind,
-        CoreError::InvalidField { field: "kind", .. }
-    ));
-
-    let invalid_json = ControlAction::parse(KIND_GITTREE_CONTROL.0, "not-json", KIND_GITTREE_CONTROL.0)
-        .expect_err("invalid json");
-    assert!(matches!(
-        invalid_json,
-        CoreError::InvalidField {
-            field: "content",
-            ..
-        }
-    ));
 }

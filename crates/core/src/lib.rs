@@ -23,7 +23,6 @@ impl std::fmt::Display for CoreError {
 impl std::error::Error for CoreError {}
 
 pub mod admission;
-pub mod control_events;
 pub mod event_filters;
 pub mod event_refs;
 pub mod git_receive;
@@ -47,7 +46,6 @@ pub mod repo_path;
 pub mod tags;
 
 pub use admission::{AdmissionDecision, evaluate_admission};
-pub use control_events::ControlAction;
 pub use event_filters::{EventFilter, build_related_event_filters};
 pub use event_refs::{
     EventReferences, collect_event_references, collect_event_references_with_self,

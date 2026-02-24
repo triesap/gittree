@@ -16,7 +16,7 @@ use gittree_config::{
     ConfigError, ControlAuthConfig, ForgejoConfig, RelayTargetsConfig, ServicesConfig, UiConfig,
 };
 use gittree_core::kinds::{KIND_GIT_REPO_ANNOUNCEMENT, KIND_GITTREE_CONTROL};
-use gittree_core::{ControlAction, RepoAnnouncement, format_grasp_server_url_as_clone_url};
+use gittree_core::{RepoAnnouncement, format_grasp_server_url_as_clone_url};
 use gittree_forgejo::{
     ForgejoClient, ForgejoCreateOrg, ForgejoCreatePullRequest, ForgejoCreateRepo,
     ForgejoCreateUser, ForgejoError, ForgejoOrg, ForgejoPullRequest, ForgejoRepo, ForgejoTransport,
@@ -39,6 +39,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower_http::cors::{Any, CorsLayer};
+
+mod control_action;
+use control_action::ControlAction;
 
 #[allow(dead_code)]
 const AUTH_HEADER: &str = "authorization";
