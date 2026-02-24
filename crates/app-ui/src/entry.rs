@@ -3,9 +3,9 @@ use leptos::mount::mount_to_body;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::{app_logging_init, app_theme_init};
 #[cfg(target_arch = "wasm32")]
 use crate::GittreeApp;
+use crate::{app_logging_init, app_theme_init};
 
 fn start_with_mount(mount: impl FnOnce()) {
     app_logging_init();

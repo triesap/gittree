@@ -256,6 +256,8 @@ fn nip98_event_from_nostr(event: nostr::Event) -> Nip98Event {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    use super::js_error;
     use super::{
         AuthError, auth_header, nip07_available, nip07_pubkey, nip07_sign_nip98, parse_secret_hex,
         pubkey_from_secret,
@@ -264,8 +266,6 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use gittree_app_core::{AppCoreError, Nip98Event};
     use std::error::Error;
-    #[cfg(target_arch = "wasm32")]
-    use super::js_error;
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen::JsValue;
 
@@ -354,7 +354,10 @@ mod tests {
             pubkey: "22".repeat(32),
             created_at: 1_700_000_000,
             kind: 27_235,
-            tags: vec![vec!["u".to_string(), "http://localhost:8089/v1/health".to_string()]],
+            tags: vec![vec![
+                "u".to_string(),
+                "http://localhost:8089/v1/health".to_string(),
+            ]],
             content: String::new(),
             sig: "33".repeat(64),
         }

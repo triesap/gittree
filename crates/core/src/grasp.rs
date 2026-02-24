@@ -228,20 +228,16 @@ mod tests {
 
     #[test]
     fn format_grasp_server_url_as_relay_url_handles_https() {
-        let relay = format_grasp_server_url_as_relay_url("https://gittr.ee")
-            .expect("format relay url");
+        let relay =
+            format_grasp_server_url_as_relay_url("https://gittr.ee").expect("format relay url");
         assert_eq!(relay, "wss://gittr.ee");
     }
 
     #[test]
     fn format_grasp_server_url_as_clone_url_handles_https() {
-        let clone =
-            format_grasp_server_url_as_clone_url("https://gittr.ee", SAMPLE_NPUB, "repo")
-                .expect("format clone url");
-        assert_eq!(
-            clone,
-            format!("https://gittr.ee/{SAMPLE_NPUB}/repo.git")
-        );
+        let clone = format_grasp_server_url_as_clone_url("https://gittr.ee", SAMPLE_NPUB, "repo")
+            .expect("format clone url");
+        assert_eq!(clone, format!("https://gittr.ee/{SAMPLE_NPUB}/repo.git"));
     }
 
     #[test]
@@ -257,8 +253,8 @@ mod tests {
 
     #[test]
     fn format_grasp_server_url_as_blossom_url_handles_https() {
-        let blossom = format_grasp_server_url_as_blossom_url("https://gittr.ee")
-            .expect("format blossom url");
+        let blossom =
+            format_grasp_server_url_as_blossom_url("https://gittr.ee").expect("format blossom url");
         assert_eq!(blossom, "https://gittr.ee");
     }
 
@@ -320,9 +316,7 @@ mod tests {
 
     #[test]
     fn invalid_no_npub() {
-        assert!(!is_grasp_server_clone_url(
-            "https://gittr.ee/my-repo.git"
-        ));
+        assert!(!is_grasp_server_clone_url("https://gittr.ee/my-repo.git"));
     }
 
     #[test]
@@ -408,10 +402,7 @@ mod tests {
             "http://localhost:8080/".to_string(),
         ];
 
-        assert!(is_grasp_server_in_list(
-            "https://gittr.ee/",
-            &grasp_servers
-        ));
+        assert!(is_grasp_server_in_list("https://gittr.ee/", &grasp_servers));
         assert!(is_grasp_server_in_list(
             "http://localhost:8080",
             &grasp_servers

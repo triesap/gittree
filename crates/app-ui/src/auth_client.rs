@@ -152,7 +152,8 @@ mod tests {
 
     #[test]
     fn parse_signup_response_converts_non_success_to_signup_failed() {
-        let error = parse_signup_response(401, "{\"error\":\"denied\"}").expect_err("signup failed");
+        let error =
+            parse_signup_response(401, "{\"error\":\"denied\"}").expect_err("signup failed");
         match error {
             AuthClientError::SignupFailed(message) => assert_eq!(message, "denied"),
             other => panic!("unexpected error: {other}"),

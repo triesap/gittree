@@ -214,9 +214,11 @@ mod tests {
 
     #[test]
     fn parse_profile_response_decodes_success_json() {
-        let response =
-            parse_profile_response(200, &serde_json::to_string(&sample_profile()).expect("json"))
-                .expect("profile");
+        let response = parse_profile_response(
+            200,
+            &serde_json::to_string(&sample_profile()).expect("json"),
+        )
+        .expect("profile");
         assert_eq!(response.username, "gt_demo");
         assert_eq!(response.visibility, ProfileVisibility::Public);
     }

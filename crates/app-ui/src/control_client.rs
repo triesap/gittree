@@ -269,7 +269,9 @@ mod tests {
     #[test]
     fn parse_control_response_formats_empty_error_bodies() {
         let err = parse_control_response(503, " ").expect_err("error");
-        assert!(matches!(err, ControlClientError::ControlFailed(message) if message == "status 503"));
+        assert!(
+            matches!(err, ControlClientError::ControlFailed(message) if message == "status 503")
+        );
     }
 
     #[test]

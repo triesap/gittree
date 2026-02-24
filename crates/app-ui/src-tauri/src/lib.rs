@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-fn run_with(builder: tauri::Builder<tauri::Wry>, run_fn: impl FnOnce(tauri::Builder<tauri::Wry>) -> tauri::Result<()>) {
+fn run_with(
+    builder: tauri::Builder<tauri::Wry>,
+    run_fn: impl FnOnce(tauri::Builder<tauri::Wry>) -> tauri::Result<()>,
+) {
     run_fn(builder).expect("error while running tauri application");
 }
 

@@ -457,10 +457,10 @@ mod tests {
         UiServiceConfigError, build_repositories, build_router, init_observability,
         npub_from_bytes, render_index, render_repo, repo_list_item,
     };
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
-    use axum::Router;
     use gittree_config::{ConfigError, UiConfig};
     use gittree_core::RepoMapping;
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
@@ -833,13 +833,9 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let err = super::serve_with(
-            config,
-            || Ok(()),
-            noop_server,
-        )
-        .await
-        .expect_err("bind error");
+        let err = super::serve_with(config, || Ok(()), noop_server)
+            .await
+            .expect_err("bind error");
         assert!(matches!(err, UiError::Serve(_)));
     }
 
@@ -867,12 +863,7 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let result = super::serve_with(
-            config,
-            || Ok(()),
-            noop_server,
-        )
-        .await;
+        let result = super::serve_with(config, || Ok(()), noop_server).await;
         assert!(result.is_ok());
     }
 
@@ -926,9 +917,13 @@ mod tests {
             .expect("bind");
         let router = Router::new().route("/health", axum::routing::get(super::health_handler));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(super::run_axum_server_with_shutdown(listener, router, async move {
-            let _ = rx.await;
-        }));
+        let task = tokio::spawn(super::run_axum_server_with_shutdown(
+            listener,
+            router,
+            async move {
+                let _ = rx.await;
+            },
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         tx.send(()).expect("shutdown");
         let result = task.await.expect("join");

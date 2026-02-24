@@ -199,8 +199,9 @@ mod tests {
 
     #[test]
     fn session_from_pubkey_hex_normalizes_input() {
-        let session = AuthSession::from_pubkey_hex(&format!("  {}  ", "AA".repeat(32)), AuthSource::Nip07)
-            .expect("session");
+        let session =
+            AuthSession::from_pubkey_hex(&format!("  {}  ", "AA".repeat(32)), AuthSource::Nip07)
+                .expect("session");
         assert_eq!(session.pubkey, "aa".repeat(32));
     }
 
@@ -223,9 +224,6 @@ mod tests {
     fn session_error_display_variants_are_stable() {
         assert_eq!(SessionError::InvalidPubkey.to_string(), "invalid pubkey");
         let serialization = SessionError::Serialization("bad json".to_string());
-        assert_eq!(
-            serialization.to_string(),
-            "serialization error: bad json"
-        );
+        assert_eq!(serialization.to_string(), "serialization error: bad json");
     }
 }

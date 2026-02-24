@@ -29,7 +29,10 @@ impl HookConfig {
         state_url: Option<String>,
         sync_url: Option<String>,
     ) -> Result<Self, HookConfigError> {
-        let _services = ServicesConfig::from_env_validated().map_err(HookConfigError::Config)?;
+        let _services = match ServicesConfig::from_env_validated() {
+            Ok(services) => services,
+            Err(err) => return Err(HookConfigError::Config(err)),
+        };
         let state_url = if let Some(state_url) = state_url {
             state_url
         } else if let Ok(env_state_url) = std::env::var(ENV_STATE_URL) {
@@ -161,8 +164,10 @@ impl std::error::Error for HookServiceError {
 }
 
 pub fn run_hook_from_env(mode: HookMode) -> Result<(), HookServiceError> {
-    let config = HookConfig::from_env_with_overrides(Some(mode), None, None)
-        .map_err(HookServiceError::Config)?;
+    let config = match HookConfig::from_env_with_overrides(Some(mode), None, None) {
+        Ok(config) => config,
+        Err(err) => return Err(HookServiceError::Config(err)),
+    };
     let stdin_file = env_path(ENV_HOOK_STDIN_FILE);
     run_hook(config, stdin_file.as_deref())
 }
