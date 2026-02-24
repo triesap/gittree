@@ -1839,8 +1839,9 @@ fn event_checked(event: &leptos::ev::Event) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        account_href, health_endpoint, public_profile_href, repo_list_by_owner_endpoint,
-        repo_list_endpoint, signup_href, test_href,
+        AuthSource, HealthState, account_href, auth_source_label, base_href, health_endpoint,
+        normalize_base_path, persist_session, profile_href, public_profile_href, render_health,
+        repo_href, repo_list_by_owner_endpoint, repo_list_endpoint, signup_href, test_href,
     };
 
     #[test]
@@ -1903,5 +1904,49 @@ mod tests {
     fn public_profile_href_joins_base_path() {
         assert_eq!(public_profile_href("/ui", "npub1"), "/ui/u/npub1");
         assert_eq!(public_profile_href("/", "npub1"), "/u/npub1");
+    }
+
+    #[test]
+    fn normalize_base_path_handles_empty_and_relative_inputs() {
+        assert_eq!(normalize_base_path(""), "/");
+        assert_eq!(normalize_base_path("/"), "/");
+        assert_eq!(normalize_base_path(" ui "), "/ui");
+        assert_eq!(normalize_base_path("/ui/"), "/ui");
+    }
+
+    #[test]
+    fn href_helpers_handle_root_and_nested_base_paths() {
+        assert_eq!(base_href("/"), "/");
+        assert_eq!(base_href("/ui/"), "/ui");
+        assert_eq!(repo_href("/", "npub1", "demo"), "/npub1/demo");
+        assert_eq!(repo_href("/ui", "npub1", "demo"), "/ui/npub1/demo");
+        assert_eq!(profile_href("/"), "/profile");
+        assert_eq!(profile_href("/ui"), "/ui/profile");
+    }
+
+    #[test]
+    fn persist_session_accepts_valid_and_rejects_invalid_pubkey() {
+        let session =
+            persist_session(&"11".repeat(32), AuthSource::Local).expect("session persisted");
+        assert_eq!(session.pubkey, "11".repeat(32));
+        assert_eq!(session.source, AuthSource::Local);
+        let err = persist_session("zz", AuthSource::Nip07).expect_err("invalid pubkey");
+        assert!(err.contains("invalid pubkey"));
+    }
+
+    #[test]
+    fn auth_source_label_returns_expected_values() {
+        assert_eq!(auth_source_label(AuthSource::Nip07), "nip-07");
+        assert_eq!(auth_source_label(AuthSource::Local), "local");
+    }
+
+    #[test]
+    fn render_health_formats_each_state() {
+        let idle = render_health(&HealthState::Idle);
+        assert!(!idle.is_empty());
+        let ok = render_health(&HealthState::Ok(200));
+        assert!(ok.contains("200"));
+        let error = render_health(&HealthState::Error("down".to_string()));
+        assert!(error.contains("down"));
     }
 }

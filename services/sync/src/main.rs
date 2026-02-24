@@ -2,11 +2,13 @@ use gittree_sync::{SyncConfig, SyncError, serve};
 use std::future::Future;
 use std::io::Write;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut stderr = std::io::stderr();
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let exit_code = runtime.block_on(main_impl(&mut stderr));
-    maybe_exit(exit_code, |code| std::process::exit(code));
+    let exit_code = main_impl(&mut stderr).await;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 }
 
 async fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -61,15 +63,9 @@ fn handle_main_result(result: Result<(), SyncError>, stderr: &mut impl Write) ->
     }
 }
 
-fn maybe_exit(exit_code: i32, exit_fn: impl FnOnce(i32)) {
-    if exit_code != 0 {
-        exit_fn(exit_code);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, main_impl_with, maybe_exit, run_with};
+    use super::{handle_main_result, main_impl_with, run_with};
     use gittree_sync::SyncError;
     use std::sync::{Mutex, OnceLock};
 
@@ -160,23 +156,6 @@ mod tests {
             String::from_utf8(stderr).expect("utf8"),
             "sync service failed: sync serve error: boom\n"
         );
-    }
-
-    #[test]
-    fn maybe_exit_skips_exit_for_zero_code() {
-        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        maybe_exit(0, |_| {});
-        assert!(!called.load(std::sync::atomic::Ordering::Relaxed));
-    }
-
-    #[test]
-    fn maybe_exit_invokes_exit_for_non_zero_code() {
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let seen_code = seen.clone();
-        maybe_exit(7, move |code| {
-            *seen_code.lock().expect("seen code") = Some(code);
-        });
-        assert_eq!(*seen.lock().expect("seen code"), Some(7));
     }
 
     #[tokio::test]

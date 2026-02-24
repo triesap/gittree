@@ -100,3 +100,45 @@ Override with:
 ```
 COV_STORAGE_DATABASE_URL="postgres://..." ./scripts/coverage-gate-storage.sh
 ```
+
+## Coverage Contract (Current Stage)
+
+Current stage contract for this repo requires:
+
+- **100% line/function/region coverage for `gittree-storage`** (strict mode).
+- **100% line/function/region coverage for security-critical packages in the core stack**:
+  - `gittree-config`
+  - `gittree-core`
+  - `gittree-nostr-auth`
+  - `gittree-relay-adapter`
+  - `gittree-forgejo`
+  - `gittree-relay`
+  - `gittree-control`
+  - `gittree-auth`
+
+This matches the default set used by `./scripts/coverage-gate.sh`.
+
+Note:
+- Enforcement for these 100% thresholds is staged. Today, only storage is
+  fully enforceable through `COV_STRICT_STORAGE` in the repository scripts.
+  Other packages will be moved to 100% enforcement in the next step while keeping
+  the same package set.
+
+### Stage-0 frontend exception
+
+For this stage, `gittree-app-ui` is not in the 100/100/100 scope because frontend
+coverage is not yet required.
+
+Use these commands for the required checks:
+
+```bash
+# 1) Storage hardening requirement.
+COV_PACKAGES="gittree-storage" COV_STRICT_STORAGE=1 ./scripts/coverage-gate.sh
+
+# 2) Security-critical rust stack baseline.
+COV_PACKAGES="gittree-config gittree-core gittree-nostr-auth gittree-relay-adapter gittree-forgejo gittree-relay gittree-control gittree-auth" ./scripts/coverage-gate.sh
+```
+
+When frontend coverage is required in a later stage, add `gittree-app-ui` and
+feature-aligned SSR/non-SSR checks to this contract with staged threshold
+increases.

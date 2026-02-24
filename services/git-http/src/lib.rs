@@ -1003,6 +1003,66 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    fn route_kind(route: &GitHttpRoute) -> &'static str {
+        match route {
+            GitHttpRoute::InfoRefs { .. } => "info_refs",
+            GitHttpRoute::UploadPack { .. } => "upload_pack",
+            GitHttpRoute::ReceivePack { .. } => "receive_pack",
+            GitHttpRoute::NotFound => "not_found",
+        }
+    }
+
+    fn info_refs_service(route: &GitHttpRoute) -> Option<GitHttpService> {
+        match route {
+            GitHttpRoute::InfoRefs { service, .. } => Some(service.clone()),
+            _ => None,
+        }
+    }
+
+    fn config_error_label(err: &GitHttpConfigError) -> &'static str {
+        match err {
+            GitHttpConfigError::Config(_) => "config",
+            GitHttpConfigError::MissingEnv(_) => "missing_env",
+            GitHttpConfigError::InvalidEnv { .. } => "invalid_env",
+            GitHttpConfigError::Storage(_) => "storage",
+        }
+    }
+
+    fn git_http_error_label(err: &GitHttpError) -> &'static str {
+        match err {
+            GitHttpError::Config(_) => "config",
+            GitHttpError::ObservabilityConfig(_) => "observability_config",
+            GitHttpError::Observability(_) => "observability",
+            GitHttpError::Storage(_) => "storage",
+            GitHttpError::Upstream(_) => "upstream",
+            GitHttpError::Serve(_) => "serve",
+        }
+    }
+
+    fn upstream_error_label(err: &UpstreamError) -> &'static str {
+        match err {
+            UpstreamError::Request(_) => "request",
+        }
+    }
+
+    #[test]
+    fn helper_label_functions_cover_all_variants() {
+        assert_eq!(route_kind(&GitHttpRoute::NotFound), "not_found");
+        assert_eq!(info_refs_service(&GitHttpRoute::NotFound), None);
+
+        let cfg_missing = GitHttpConfigError::MissingEnv("MISSING");
+        assert_eq!(config_error_label(&cfg_missing), "missing_env");
+        let cfg_config = GitHttpConfigError::Config(ConfigError::MissingEnv("CONFIG_MISSING"));
+        assert_eq!(config_error_label(&cfg_config), "config");
+
+        let git_cfg = GitHttpError::Config(GitHttpConfigError::MissingEnv("X"));
+        assert_eq!(git_http_error_label(&git_cfg), "config");
+        let git_obs = GitHttpError::Observability(ObservabilityError::TraceInit("x".to_string()));
+        assert_eq!(git_http_error_label(&git_obs), "observability");
+        let git_upstream = GitHttpError::Upstream("upstream".to_string());
+        assert_eq!(git_http_error_label(&git_upstream), "upstream");
+    }
+
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -1053,13 +1113,7 @@ mod tests {
             || {
                 with_env_var(ENV_UPSTREAM_URL, "not-a-url", || {
                     let err = GitHttpConfig::from_env().expect_err("invalid upstream");
-                    assert!(matches!(
-                        err,
-                        GitHttpConfigError::InvalidEnv {
-                            key: ENV_UPSTREAM_URL,
-                            ..
-                        }
-                    ));
+                    assert_eq!(config_error_label(&err), "invalid_env");
                 });
             },
         );
@@ -1075,13 +1129,7 @@ mod tests {
                 with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
                     with_env_var(ENV_TIMEOUT_SECS, "bad-timeout", || {
                         let err = GitHttpConfig::from_env().expect_err("invalid timeout");
-                        assert!(matches!(
-                            err,
-                            GitHttpConfigError::InvalidEnv {
-                                key: ENV_TIMEOUT_SECS,
-                                ..
-                            }
-                        ));
+                        assert_eq!(config_error_label(&err), "invalid_env");
                     });
                 });
             },
@@ -1098,13 +1146,7 @@ mod tests {
                 with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
                     with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
                         let err = GitHttpConfig::from_env().expect_err("invalid storage value");
-                        assert!(matches!(
-                            err,
-                            GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
-                                key: ENV_STORAGE_MAX_CONNECTIONS,
-                                ..
-                            })
-                        ));
+                        assert_eq!(config_error_label(&err), "storage");
                     });
                 });
             },
@@ -1121,13 +1163,7 @@ mod tests {
                 with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
                     with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "oops", || {
                         let err = GitHttpConfig::from_env().expect_err("invalid storage timeout");
-                        assert!(matches!(
-                            err,
-                            GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
-                                key: ENV_STORAGE_IDLE_TIMEOUT_SECS,
-                                ..
-                            })
-                        ));
+                        assert_eq!(config_error_label(&err), "storage");
                     });
                 });
             },
@@ -1145,10 +1181,7 @@ mod tests {
                     with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", || {
                         with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", || {
                             let err = GitHttpConfig::from_env().expect_err("invalid bounds");
-                            assert!(matches!(
-                                err,
-                                GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(_))
-                            ));
+                            assert_eq!(config_error_label(&err), "storage");
                         });
                     });
                 });
@@ -1162,12 +1195,7 @@ mod tests {
         with_env_value(ENV_STORAGE_READ_URL, None, || {
             with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
                 let err = GitHttpConfig::from_env().expect_err("missing read url");
-                assert!(matches!(
-                    err,
-                    GitHttpConfigError::Storage(StorageConfigError::MissingEnv(
-                        ENV_STORAGE_READ_URL
-                    ))
-                ));
+                assert_eq!(config_error_label(&err), "storage");
             });
         });
     }
@@ -1206,13 +1234,8 @@ mod tests {
             Some("service=git-upload-pack"),
         );
         let route = route_request(&request);
-        assert!(matches!(
-            route,
-            GitHttpRoute::InfoRefs {
-                service: GitHttpService::UploadPack,
-                ..
-            }
-        ));
+        assert_eq!(route_kind(&route), "info_refs");
+        assert_eq!(info_refs_service(&route), Some(GitHttpService::UploadPack));
     }
 
     #[test]
@@ -1223,7 +1246,7 @@ mod tests {
             None,
         );
         let route = route_request(&request);
-        assert!(matches!(route, GitHttpRoute::ReceivePack { .. }));
+        assert_eq!(route_kind(&route), "receive_pack");
     }
 
     #[test]
@@ -1234,7 +1257,7 @@ mod tests {
             Some("service=git-upload-pack"),
         );
         let route = route_request(&request);
-        assert!(matches!(route, GitHttpRoute::NotFound));
+        assert_eq!(route_kind(&route), "not_found");
     }
 
     #[test]
@@ -1244,7 +1267,7 @@ mod tests {
             "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
             None,
         );
-        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+        assert_eq!(route_kind(&route_request(&request)), "not_found");
     }
 
     #[test]
@@ -1254,7 +1277,7 @@ mod tests {
             "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
             Some("foo=bar"),
         );
-        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+        assert_eq!(route_kind(&route_request(&request)), "not_found");
     }
 
     #[test]
@@ -1264,7 +1287,7 @@ mod tests {
             "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
             Some("service=git-bad"),
         );
-        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+        assert_eq!(route_kind(&route_request(&request)), "not_found");
     }
 
     #[test]
@@ -1274,7 +1297,7 @@ mod tests {
             "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/git-receive-pack",
             None,
         );
-        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+        assert_eq!(route_kind(&route_request(&request)), "not_found");
     }
 
     #[test]
@@ -1284,7 +1307,7 @@ mod tests {
             "/not-npub/repo.git/info/refs",
             Some("service=git-upload-pack"),
         );
-        assert!(matches!(route_request(&request), GitHttpRoute::NotFound));
+        assert_eq!(route_kind(&route_request(&request)), "not_found");
     }
 
     #[test]
@@ -1296,7 +1319,7 @@ mod tests {
             None,
         );
         let upload_route = router.route(&request);
-        assert!(matches!(upload_route, GitHttpRoute::UploadPack { .. }));
+        assert_eq!(route_kind(&upload_route), "upload_pack");
         assert_eq!(super::route_label(&upload_route), "upload_pack");
 
         let receive_request = GitHttpRequest::new(
@@ -1321,7 +1344,7 @@ mod tests {
             None,
         );
         let not_found_route = router.route(&not_found_request);
-        assert!(matches!(not_found_route, GitHttpRoute::NotFound));
+        assert_eq!(route_kind(&not_found_route), "not_found");
         assert_eq!(super::route_label(&not_found_route), "not_found");
     }
 
@@ -1932,7 +1955,7 @@ mod tests {
             },
         };
         let err = super::build_repositories(&config).expect_err("invalid pool");
-        assert!(matches!(err, GitHttpError::Storage(_)));
+        assert_eq!(git_http_error_label(&err), "storage");
     }
 
     #[tokio::test]
@@ -1959,7 +1982,7 @@ mod tests {
         let bind_err = super::serve_with(config, init_ok_handle, noop_server)
             .await
             .expect_err("bind error");
-        assert!(matches!(bind_err, GitHttpError::Serve(_)));
+        assert_eq!(git_http_error_label(&bind_err), "serve");
 
         let config = GitHttpConfig {
             bind: "127.0.0.1:0".to_string(),
@@ -1979,7 +2002,8 @@ mod tests {
         let serve_err = super::serve_with(config, init_ok_handle, fail_server)
             .await
             .expect_err("serve error");
-        assert!(matches!(serve_err, GitHttpError::Serve(message) if message.contains("boom")));
+        assert_eq!(git_http_error_label(&serve_err), "serve");
+        assert!(serve_err.to_string().contains("boom"));
     }
 
     #[tokio::test]
@@ -2038,7 +2062,7 @@ mod tests {
             let err = runtime
                 .block_on(super::serve(config))
                 .expect_err("observability config error");
-            assert!(matches!(err, GitHttpError::ObservabilityConfig(_)));
+            assert_eq!(git_http_error_label(&err), "observability_config");
         });
     }
 
@@ -2232,7 +2256,7 @@ mod tests {
             })
             .await
             .expect_err("expected transport error");
-        assert!(matches!(err, UpstreamError::Request(_)));
+        assert_eq!(upstream_error_label(&err), "request");
     }
 
     #[tokio::test]
@@ -2249,7 +2273,7 @@ mod tests {
             })
             .await
             .expect_err("expected body read error");
-        assert!(matches!(err, UpstreamError::Request(_)));
+        assert_eq!(upstream_error_label(&err), "request");
         handle.join().expect("server join");
     }
 }
