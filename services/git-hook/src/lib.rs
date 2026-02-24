@@ -224,9 +224,7 @@ fn run_hook_with_terminal(
                 )));
             };
             let notifier = HttpPostReceiveNotifier::new(sync_url, Duration::from_secs(5));
-            if let Err(err) = handle_post_receive(&notifier, repo_path, &updates) {
-                eprintln!("post-receive notify failed: {err}");
-            }
+            if handle_post_receive(&notifier, repo_path, &updates).is_err() {}
         }
     }
     Ok(())

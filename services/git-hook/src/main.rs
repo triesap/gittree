@@ -161,6 +161,24 @@ mod tests {
     }
 
     #[test]
+    fn hook_service_error_kind_covers_all_variants() {
+        let config_err = HookServiceError::Config(gittree_git_hook::HookConfigError::MissingEnv(
+            "GITTREE_STATE_URL",
+        ));
+        assert_eq!(hook_service_error_kind(&config_err), "config");
+
+        let parse_err =
+            HookServiceError::Parse(gittree_git_hook::HookError::InvalidPayload("bad".to_string()));
+        assert_eq!(hook_service_error_kind(&parse_err), "parse");
+
+        let state_err = HookServiceError::State("state".to_string());
+        assert_eq!(hook_service_error_kind(&state_err), "state");
+
+        let reject_err = HookServiceError::Reject("reject".to_string());
+        assert_eq!(hook_service_error_kind(&reject_err), "reject");
+    }
+
+    #[test]
     fn run_with_cli_passes_stdin_file_to_runner() {
         let cli = HookCli::try_parse_from([
             "gittree-git-hook",

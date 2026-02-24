@@ -176,6 +176,12 @@ mod tests {
     }
 
     #[test]
+    fn hook_config_error_kind_handles_invalid_mode_variant() {
+        let err = HookConfigError::InvalidMode("bad-mode".to_string());
+        assert_eq!(hook_config_error_kind(&err), "invalid_mode");
+    }
+
+    #[test]
     fn run_config_propagates_nested_config_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_AUTH_BIND", "not-a-socket", || {
