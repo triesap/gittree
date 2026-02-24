@@ -1443,7 +1443,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             auth: test_auth(),
             storage: super::StorageConfig {
-                read_connection: "postgres://user:pass@127.0.0.1:5432/gittree".to_string(),
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
                 write_connection: None,
                 max_connections: 10,
                 min_connections: 2,
@@ -1743,9 +1743,11 @@ mod tests {
     fn env_helpers_restore_preexisting_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let key = "GITTREE_GIT_HTTP_ENV_HELPER";
+        let missing_key = "GITTREE_GIT_HTTP_ENV_HELPER_MISSING";
         // SAFETY: protected by ENV_LOCK and restored below.
         unsafe {
             std::env::set_var(key, "before");
+            std::env::remove_var(missing_key);
         }
         with_env_var(key, "during", || {
             assert_eq!(std::env::var(key).ok().as_deref(), Some("during"));
@@ -1756,10 +1758,41 @@ mod tests {
             assert_eq!(std::env::var(key).ok().as_deref(), Some("value"));
         });
         assert_eq!(std::env::var(key).ok().as_deref(), Some("before"));
+
+        with_env_var(missing_key, "during", || {
+            assert_eq!(std::env::var(missing_key).ok().as_deref(), Some("during"));
+        });
+        assert!(std::env::var(missing_key).is_err());
+
+        with_env_value(missing_key, Some("value"), || {
+            assert_eq!(std::env::var(missing_key).ok().as_deref(), Some("value"));
+        });
+        assert!(std::env::var(missing_key).is_err());
         // SAFETY: clean test env key.
         unsafe {
             std::env::remove_var(key);
+            std::env::remove_var(missing_key);
         }
+    }
+
+    #[test]
+    fn env_parsers_return_none_for_missing_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        // SAFETY: protected by ENV_LOCK and restored in this test.
+        unsafe {
+            std::env::remove_var(ENV_TIMEOUT_SECS);
+            std::env::remove_var(ENV_STORAGE_MAX_CONNECTIONS);
+            std::env::remove_var(ENV_STORAGE_IDLE_TIMEOUT_SECS);
+        }
+        assert_eq!(super::env_u64(ENV_TIMEOUT_SECS).expect("timeout"), None);
+        assert_eq!(
+            super::storage_env_u32(ENV_STORAGE_MAX_CONNECTIONS).expect("max connections"),
+            None
+        );
+        assert_eq!(
+            super::storage_env_u64(ENV_STORAGE_IDLE_TIMEOUT_SECS).expect("idle timeout"),
+            None
+        );
     }
 
     #[tokio::test]

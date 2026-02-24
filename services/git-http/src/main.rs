@@ -50,6 +50,8 @@ fn maybe_exit<T>(exit_code: i32, exit_fn: impl FnOnce(i32) -> T) {
 mod tests {
     use super::{handle_main_result, maybe_exit, run_with};
     use gittree_git_http::{GitHttpConfig, GitHttpError};
+    use gittree_observability::{ObservabilityConfigError, ObservabilityError};
+    use gittree_storage::StorageError;
     use std::cell::Cell;
     use std::time::Duration;
 
@@ -119,6 +121,35 @@ mod tests {
     async fn run_with_succeeds_when_serve_succeeds() {
         let result = run_with(|| Ok(test_config()), serve_ok).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn git_http_error_label_covers_all_variants() {
+        assert_eq!(
+            git_http_error_label(&GitHttpError::ObservabilityConfig(
+                ObservabilityConfigError::InvalidEnv {
+                    key: "GITTREE_METRICS_ENABLED",
+                    value: "nope".to_string(),
+                }
+            )),
+            "observability_config"
+        );
+        assert_eq!(
+            git_http_error_label(&GitHttpError::Observability(ObservabilityError::LogInit(
+                "boom".to_string()
+            ))),
+            "observability"
+        );
+        assert_eq!(
+            git_http_error_label(&GitHttpError::Storage(StorageError::Internal {
+                message: "boom".to_string()
+            })),
+            "storage"
+        );
+        assert_eq!(
+            git_http_error_label(&GitHttpError::Upstream("boom".to_string())),
+            "upstream"
+        );
     }
 
     #[test]
