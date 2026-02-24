@@ -515,6 +515,26 @@ mod tests {
     }
 
     #[test]
+    fn env_helpers_return_none_for_missing_key_without_env_mutation() {
+        let missing_key: &'static str = Box::leak(
+            (0..)
+                .map(|index| format!("GITTREE_APP_TEST_MISSING_KEY_{index}"))
+                .find(|key| std::env::var_os(key).is_none())
+                .expect("find missing env key")
+                .into_boxed_str(),
+        );
+
+        assert_eq!(super::env_u32(missing_key).expect("env_u32"), None);
+        assert_eq!(super::env_u64(missing_key).expect("env_u64"), None);
+        assert_eq!(
+            super::env_socket_addr(missing_key).expect("env_socket_addr"),
+            None
+        );
+        assert_eq!(super::env_string(missing_key).expect("env_string"), None);
+        assert_eq!(super::env_path(missing_key).expect("env_path"), None);
+    }
+
+    #[test]
     fn app_and_storage_error_display_paths_are_stable() {
         let config_error = AppServiceConfigError::Config(ConfigError::InvalidConfig {
             field: "ui.repo_root",
