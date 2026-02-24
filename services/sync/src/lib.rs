@@ -7,7 +7,9 @@ use bech32::{Bech32, Hrp};
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_core::nip34_common::RepoAddress;
 use gittree_core::{NostrEvent, RepoState, collect_clone_urls};
-use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
+use gittree_observability::{
+    ObservabilityConfig, ObservabilityConfigError, ObservabilityError, ObservabilityHandle,
+};
 use gittree_storage::{RelayCompatibilityRecord, StorageConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -197,10 +199,13 @@ impl std::error::Error for SyncError {
 }
 
 pub fn init_observability() -> Result<ObservabilityHandle, SyncError> {
-    let config = gittree_observability::ObservabilityConfig::from_env("gittree-sync")
-        .map_err(SyncError::ObservabilityConfig)?;
+    let config = load_observability_config()?;
     let handle = gittree_observability::init(&config).map_err(SyncError::Observability)?;
     Ok(handle)
+}
+
+fn load_observability_config() -> Result<ObservabilityConfig, SyncError> {
+    ObservabilityConfig::from_env("gittree-sync").map_err(SyncError::ObservabilityConfig)
 }
 
 struct SyncAppState {
@@ -312,10 +317,21 @@ fn npub_from_hex(pubkey: &str) -> Result<String, SyncHttpError> {
     }
     let bytes =
         hex::decode(pubkey).map_err(|_| SyncHttpError::BadRequest("invalid pubkey".to_string()))?;
+    encode_npub_bytes(&bytes)
+}
+
+fn encode_npub_bytes(bytes: &[u8]) -> Result<String, SyncHttpError> {
+    encode_npub_bytes_with(bytes, |hrp, payload| {
+        bech32::encode::<Bech32>(hrp, payload).map_err(|_| ())
+    })
+}
+
+fn encode_npub_bytes_with<F>(bytes: &[u8], encode: F) -> Result<String, SyncHttpError>
+where
+    F: FnOnce(Hrp, &[u8]) -> Result<String, ()>,
+{
     let hrp = Hrp::parse("npub").expect("static npub hrp");
-    let encoded = bech32::encode::<Bech32>(hrp, &bytes)
-        .map_err(|_| SyncHttpError::Internal("npub encode failed".to_string()))?;
-    Ok(encoded)
+    encode(hrp, bytes).map_err(|_| SyncHttpError::Internal("npub encode failed".to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,11 +753,16 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
     use std::process::Command;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    static OBSERVABILITY: OnceLock<gittree_observability::ObservabilityHandle> = OnceLock::new();
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
@@ -777,7 +798,7 @@ mod tests {
 
     #[test]
     fn config_loads_from_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
@@ -802,7 +823,7 @@ mod tests {
 
     #[test]
     fn config_ignores_empty_pool_timeouts() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
@@ -828,7 +849,7 @@ mod tests {
 
     #[test]
     fn config_requires_storage_read_url() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
             with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
                 without_env_var(ENV_STORAGE_READ_URL, || {
@@ -846,7 +867,7 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_numeric_storage_values_and_repo_root() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
@@ -901,7 +922,7 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_pool_bounds() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
@@ -925,7 +946,7 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_relay_url() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
@@ -942,7 +963,7 @@ mod tests {
 
     #[test]
     fn with_env_var_restores_previous_value() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         const KEY: &str = "GITTREE_SYNC_TEST_ENV_RESTORE";
         unsafe {
             std::env::set_var(KEY, "before");
@@ -958,7 +979,7 @@ mod tests {
 
     #[test]
     fn without_env_var_restores_previous_value() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         const KEY: &str = "GITTREE_SYNC_TEST_ENV_RESTORE";
         with_env_var(KEY, "before", || {
             without_env_var(KEY, || {
@@ -1061,6 +1082,13 @@ mod tests {
         assert_eq!(
             invalid_hex.into_response().status(),
             axum::http::StatusCode::BAD_REQUEST
+        );
+
+        let encode_err = super::encode_npub_bytes_with(&[0_u8; 32], |_hrp, _bytes| Err(()))
+            .expect_err("forced encode failure");
+        assert_eq!(
+            encode_err.into_response().status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 
@@ -1193,13 +1221,9 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = super::serve_with(
-            config,
-            || Ok(()),
-            super::run_axum_server,
-        )
-        .await
-        .expect_err("bind error");
+        let err = super::serve_with(config, || Ok(()), super::run_axum_server)
+            .await
+            .expect_err("bind error");
         assert!(matches!(err, SyncError::Serve(_)));
     }
 
@@ -1654,10 +1678,28 @@ mod tests {
 
     #[test]
     fn observability_init_returns_registry() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         without_env_var("GITTREE_LOG_JSON", || {
-            let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
-            assert!(handle.prometheus_registry().is_some());
+            let _ = init_observability();
+            let second = init_observability();
+            assert!(matches!(
+                second,
+                Err(SyncError::Observability(
+                    ObservabilityError::SubscriberInit(_)
+                ))
+            ));
+        });
+    }
+
+    #[test]
+    fn observability_init_reports_config_error() {
+        let _guard = env_guard();
+        with_env_var("GITTREE_LOG_JSON", "not-a-bool", || {
+            let err = super::load_observability_config().expect_err("invalid observability config");
+            assert!(matches!(
+                err,
+                SyncError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv { .. })
+            ));
         });
     }
 }
