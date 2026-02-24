@@ -158,13 +158,13 @@ pub async fn probe_relay_with_adapter(
     adapter: &dyn RelayAdapter,
 ) -> Result<RelayProbeResult, RelayProbeError> {
     let result = probe_relay(relay_url, client)?;
-    probe_relay_with_adapter_result(result, adapter).await
+    Ok(probe_relay_with_adapter_result(result, adapter).await)
 }
 
 pub async fn probe_relay_with_adapter_result(
     mut result: RelayProbeResult,
     adapter: &dyn RelayAdapter,
-) -> Result<RelayProbeResult, RelayProbeError> {
+) -> RelayProbeResult {
     let relay_url = result.relay_url.clone();
     match adapter.probe_write_read().await {
         Ok(()) => {
@@ -188,7 +188,7 @@ pub async fn probe_relay_with_adapter_result(
             );
         }
     }
-    Ok(result)
+    result
 }
 
 #[cfg(test)]

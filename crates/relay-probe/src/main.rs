@@ -211,7 +211,7 @@ fn execute_probe_with_client(
     let mut results = Vec::with_capacity(targets.len());
 
     for relay_url in targets {
-        let mut result = probe_relay(&relay_url, client).map_err(ProbeCommandError::Cli)?;
+        let mut result = probe_relay(&relay_url, client)?;
         if probe_config.active {
             let mut adapter_config = RelayAdapterConfig::new(&relay_url)
                 .with_timeout(Duration::from_secs(probe_config.timeout_secs));
@@ -219,9 +219,7 @@ fn execute_probe_with_client(
                 adapter_config = adapter_config.with_secret_key(secret_key);
             }
             let adapter = WebsocketRelayAdapter::new(adapter_config);
-            result = runtime
-                .block_on(probe_relay_with_adapter_result(result, &adapter))
-                .map_err(ProbeCommandError::Cli)?;
+            result = runtime.block_on(probe_relay_with_adapter_result(result, &adapter));
         }
         if cli.store {
             runtime.block_on(store_probe_result(&result))?;
@@ -266,21 +264,16 @@ fn render_probe_output(cli: &ProbeCli, results: &[RelayProbeResult]) -> String {
 }
 
 async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeCommandError> {
-    let storage = storage_from_env().map_err(ProbeCommandError::StorageConfig)?;
-    let options = storage
-        .write_connect_options()
-        .map_err(ProbeCommandError::Storage)?;
+    let storage = storage_from_env()?;
+    let options = storage.write_connect_options()?;
     let pool = storage
-        .pool_options()
-        .map_err(ProbeCommandError::Storage)?
+        .pool_options_validated()
         .connect_with(options)
         .await
         .map_err(StorageError::from)
         .map_err(ProbeCommandError::Storage)?;
     let repo = PostgresRepositories::new(pool);
-    store_probe_result_with_repo(&repo, result, now_unix_timestamp())
-        .await
-        .map_err(ProbeCommandError::Storage)?;
+    store_probe_result_with_repo(&repo, result, now_unix_timestamp()).await?;
     Ok(())
 }
 
@@ -372,6 +365,24 @@ impl std::error::Error for ProbeCommandError {
             ProbeCommandError::StorageConfig(err) => Some(err),
             ProbeCommandError::Storage(err) => Some(err),
         }
+    }
+}
+
+impl From<RelayProbeError> for ProbeCommandError {
+    fn from(value: RelayProbeError) -> Self {
+        Self::Cli(value)
+    }
+}
+
+impl From<StorageConfigError> for ProbeCommandError {
+    fn from(value: StorageConfigError) -> Self {
+        Self::StorageConfig(value)
+    }
+}
+
+impl From<StorageError> for ProbeCommandError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(value)
     }
 }
 
@@ -477,6 +488,23 @@ mod tests {
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
             std::env::set_var(key, value);
+        }
+        f();
+        match previous {
+            Some(old) => unsafe {
+                std::env::set_var(key, old);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+    }
+
+    fn with_env_var_unset<F: FnOnce()>(key: &str, f: F) {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
+        unsafe {
+            std::env::remove_var(key);
         }
         f();
         match previous {
@@ -786,6 +814,30 @@ mod tests {
     }
 
     #[test]
+    fn storage_config_defaults_pool_values_when_optional_envs_are_empty() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
+                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+                                let config = storage_from_env().expect("config");
+                                assert_eq!(config.max_connections, 10);
+                                assert_eq!(config.min_connections, 2);
+                                assert_eq!(config.idle_timeout_secs, None);
+                                assert_eq!(config.max_lifetime_secs, None);
+                            });
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn storage_config_reads_optional_write_and_app_name() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
@@ -871,6 +923,27 @@ mod tests {
     }
 
     #[test]
+    fn storage_config_rejects_invalid_min_connections_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "invalid", || {
+                    let err = storage_from_env().expect_err("invalid min connections");
+                    assert!(matches!(
+                        err,
+                        StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MIN_CONNECTIONS,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
     fn storage_config_rejects_invalid_u64_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
@@ -883,6 +956,27 @@ mod tests {
                         err,
                         StorageConfigError::InvalidEnv {
                             key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn storage_config_rejects_invalid_max_lifetime_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "invalid", || {
+                    let err = storage_from_env().expect_err("invalid max lifetime");
+                    assert!(matches!(
+                        err,
+                        StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MAX_LIFETIME_SECS,
                             ..
                         }
                     ));
@@ -933,6 +1027,24 @@ mod tests {
         }
         with_env_var(key, "temporary", || {
             assert_eq!(std::env::var(key).ok().as_deref(), Some("temporary"));
+        });
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("original"));
+        // SAFETY: clean up test-only key.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn with_env_var_unset_restores_previous_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let key = "GITTREE_RELAY_PROBE_TEST_UNSET_ENV";
+        // SAFETY: protected by ENV_LOCK and restored at the end of the test.
+        unsafe {
+            std::env::set_var(key, "original");
+        }
+        with_env_var_unset(key, || {
+            assert!(std::env::var(key).is_err());
         });
         assert_eq!(std::env::var(key).ok().as_deref(), Some("original"));
         // SAFETY: clean up test-only key.
@@ -1066,6 +1178,35 @@ mod tests {
 
         let results = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
             .expect("active probe returns a compatibility result with active probe metadata");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].active_probe.is_some());
+    }
+
+    #[test]
+    fn execute_probe_with_client_active_mode_without_secret_key() {
+        let cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: Some(true),
+            timeout_secs: Some(3),
+            secret_key: None,
+        };
+        let probe_config = RelayProbeConfig {
+            active: true,
+            timeout_secs: 3,
+            secret_key: None,
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let client = StubProbeClient {
+            response: Ok(Some(
+                r#"{"name":"relay","supported_nips":[1,11,34]}"#.to_string(),
+            )),
+        };
+
+        let results = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
+            .expect("active mode without secret key");
         assert_eq!(results.len(), 1);
         assert!(results[0].active_probe.is_some());
     }
@@ -1315,6 +1456,22 @@ mod tests {
     }
 
     #[test]
+    fn render_probe_output_omits_optional_section_when_optional_list_is_empty() {
+        let text_cli = ProbeCli {
+            relay: Some("wss://relay.example".to_string()),
+            all: false,
+            json: false,
+            store: false,
+            active: None,
+            timeout_secs: None,
+            secret_key: None,
+        };
+        let output = render_probe_output(&text_cli, &[sample_probe_result()]);
+        assert!(output.contains("relay: wss://relay.example"));
+        assert!(!output.contains("missing optional"));
+    }
+
+    #[test]
     fn store_probe_result_reports_storage_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(super::ENV_STORAGE_READ_URL, "", || {
@@ -1323,6 +1480,21 @@ mod tests {
                 .block_on(store_probe_result(&sample_probe_result()))
                 .expect_err("missing storage config");
             assert!(err.to_string().contains("relay probe storage"));
+        });
+    }
+
+    #[test]
+    fn store_probe_result_reports_missing_storage_read_url_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var_unset(super::ENV_STORAGE_READ_URL, || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let err = runtime
+                .block_on(store_probe_result(&sample_probe_result()))
+                .expect_err("missing storage env");
+            assert_eq!(
+                err.to_string(),
+                "relay probe storage config error: missing env GITTREE_STORAGE_READ_URL"
+            );
         });
     }
 
@@ -1355,6 +1527,44 @@ mod tests {
             )));
         });
         assert!(panic.is_err());
+    }
+
+    #[test]
+    fn store_probe_result_maps_invalid_record_error_when_database_is_available() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        for test_database_url in [
+            "postgres://gittree:gittree@127.0.0.1:5432/gittree",
+            "postgres://gittree:gittree@127.0.0.1:1/gittree",
+            " ",
+        ] {
+            with_env_var(
+                "GITTREE_STORAGE_TEST_DATABASE_URL",
+                test_database_url,
+                || {
+                    let database_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok()
+                    {
+                        Some(value) if !value.trim().is_empty() => value,
+                        _ => "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                    };
+                    with_env_var(super::ENV_STORAGE_READ_URL, &database_url, || {
+                        with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
+                            let mut invalid = sample_probe_result();
+                            invalid.report.relay_url = " ".to_string();
+                            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                            let result = runtime.block_on(store_probe_result(&invalid));
+                            if matches!(
+                                result,
+                                Err(ProbeCommandError::Storage(StorageError::Database { .. }))
+                            ) {
+                                return;
+                            }
+                            let err = result.expect_err("invalid relay url should fail");
+                            assert!(err.to_string().contains("relay_url"));
+                        });
+                    });
+                },
+            );
+        }
     }
 
     #[test]
@@ -1435,6 +1645,14 @@ mod tests {
                 .contains("relay probe storage config error")
         );
         assert!(storage_cfg.source().is_some());
+
+        let storage_cfg_from = ProbeCommandError::from(StorageConfigError::MissingEnv("KEY"));
+        assert!(
+            storage_cfg_from
+                .to_string()
+                .contains("relay probe storage config error")
+        );
+        assert!(storage_cfg_from.source().is_some());
 
         let storage = ProbeCommandError::Storage(StorageError::Internal {
             message: "store failed".to_string(),

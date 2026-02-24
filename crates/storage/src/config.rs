@@ -61,7 +61,10 @@ impl StorageConfig {
 
     pub fn pool_options(&self) -> Result<PoolOptions<Postgres>, StorageError> {
         self.validate()?;
+        Ok(self.pool_options_validated())
+    }
 
+    pub fn pool_options_validated(&self) -> PoolOptions<Postgres> {
         let mut options = PoolOptions::new()
             .max_connections(self.max_connections)
             .min_connections(self.min_connections);
@@ -69,7 +72,7 @@ impl StorageConfig {
         options = options.idle_timeout(self.idle_timeout_secs.map(Duration::from_secs));
         options = options.max_lifetime(self.max_lifetime_secs.map(Duration::from_secs));
 
-        Ok(options)
+        options
     }
 
     fn apply_connect_options(&self, mut options: PgConnectOptions) -> PgConnectOptions {
