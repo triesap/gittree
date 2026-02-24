@@ -165,9 +165,9 @@ fn storage_from_env() -> Result<StorageConfig, GitHttpConfigError> {
     };
 
     if let Err(err) = config.validate() {
-        return Err(GitHttpConfigError::Storage(StorageConfigError::InvalidConfig(
-            err.to_string(),
-        )));
+        return Err(GitHttpConfigError::Storage(
+            StorageConfigError::InvalidConfig(err.to_string()),
+        ));
     }
 
     Ok(config)
@@ -181,10 +181,9 @@ fn storage_env_u32(key: &'static str) -> Result<Option<u32>, GitHttpConfigError>
             }
             match value.parse::<u32>() {
                 Ok(parsed) => Ok(Some(parsed)),
-                Err(_) => Err(GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
-                    key,
-                    value,
-                })),
+                Err(_) => Err(GitHttpConfigError::Storage(
+                    StorageConfigError::InvalidEnv { key, value },
+                )),
             }
         }
         Err(_) => Ok(None),
@@ -199,10 +198,9 @@ fn storage_env_u64(key: &'static str) -> Result<Option<u64>, GitHttpConfigError>
             }
             match value.parse::<u64>() {
                 Ok(parsed) => Ok(Some(parsed)),
-                Err(_) => Err(GitHttpConfigError::Storage(StorageConfigError::InvalidEnv {
-                    key,
-                    value,
-                })),
+                Err(_) => Err(GitHttpConfigError::Storage(
+                    StorageConfigError::InvalidEnv { key, value },
+                )),
             }
         }
         Err(_) => Ok(None),
@@ -413,10 +411,16 @@ pub struct ReqwestUpstreamClient {
 
 impl ReqwestUpstreamClient {
     pub fn new(timeout: Duration) -> Result<Self, GitHttpError> {
-        let client = match reqwest::Client::builder().timeout(timeout).build() {
-            Ok(client) => client,
-            Err(err) => return Err(GitHttpError::Upstream(err.to_string())),
-        };
+        Self::from_builder_result(
+            reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(|err| err.to_string()),
+        )
+    }
+
+    fn from_builder_result(result: Result<reqwest::Client, String>) -> Result<Self, GitHttpError> {
+        let client = result.map_err(GitHttpError::Upstream)?;
         Ok(Self { client })
     }
 
@@ -425,11 +429,7 @@ impl ReqwestUpstreamClient {
     where
         F: FnOnce(Duration) -> Result<reqwest::Client, String>,
     {
-        let client = match build_client(timeout) {
-            Ok(client) => client,
-            Err(err) => return Err(GitHttpError::Upstream(err)),
-        };
-        Ok(Self { client })
+        Self::from_builder_result(build_client(timeout))
     }
 }
 
@@ -722,10 +722,10 @@ fn build_request_url(
     } else {
         "http"
     };
-    let path = if let Some(path_and_query) = uri.path_and_query() {
-        path_and_query.as_str()
+    let path = if let Some(query) = uri.query() {
+        format!("{}?{query}", uri.path())
     } else {
-        uri.path()
+        uri.path().to_string()
     };
     Ok(format!("{scheme}://{host}{path}"))
 }
@@ -1002,8 +1002,8 @@ mod tests {
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::pin::Pin;
     use std::path::Path;
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::OnceLock;
@@ -1573,7 +1573,8 @@ mod tests {
 
     fn unavailable_postgres_repositories() -> super::PostgresRepositories {
         let mut config = postgres_test_config();
-        config.storage.read_connection = "postgres://gittree:gittree@127.0.0.1:1/gittree".to_string();
+        config.storage.read_connection =
+            "postgres://gittree:gittree@127.0.0.1:1/gittree".to_string();
         super::build_repositories(&config).expect("repositories")
     }
 
@@ -1691,7 +1692,6 @@ mod tests {
             Poll::Ready(Some(Err(std::io::Error::other("body read failed"))))
         }
     }
-
 
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
@@ -1867,6 +1867,66 @@ mod tests {
             .insert_announcement(announcement_record)
             .await
             .expect("insert announcement");
+
+        let repo = super::normalize_repo_path(repo_npub, "repo.git").expect("normalized");
+        let maintainers = super::resolve_maintainers(&repositories, &repo)
+            .await
+            .expect("maintainers");
+        assert!(maintainers.contains(&parsed.pubkey));
+        assert!(maintainers.contains(&maintainer_pubkey.to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_maintainers_enqueues_unique_maintainers() {
+        let repositories = InMemoryRepositories::new();
+        let repo_npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let maintainer_pubkey = "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27";
+        let repo_path = Path::new("/").join(repo_npub).join("repo.git");
+        let parsed = gittree_core::parse_repo_path(&repo_path).expect("repo parse");
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![maintainer_pubkey.to_string()],
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"cc".repeat(32), &parsed.pubkey, 1, &announcement)
+                .expect("announcement");
+        repositories
+            .insert_announcement(announcement_record)
+            .await
+            .expect("insert root announcement");
+
+        let maintainer_announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let maintainer_record = RepoAnnouncementRecord::new(
+            &"dd".repeat(32),
+            maintainer_pubkey,
+            2,
+            &maintainer_announcement,
+        )
+        .expect("maintainer announcement");
+        repositories
+            .insert_announcement(maintainer_record)
+            .await
+            .expect("insert maintainer announcement");
 
         let repo = super::normalize_repo_path(repo_npub, "repo.git").expect("normalized");
         let maintainers = super::resolve_maintainers(&repositories, &repo)
@@ -2223,8 +2283,8 @@ mod tests {
         let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
         let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
             .expect("parse");
-        let mapping = RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo")
-            .expect("mapping");
+        let mapping =
+            RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo").expect("mapping");
         repositories
             .upsert_mapping(RepoMappingRecord::new(&mapping).expect("record"))
             .await
@@ -2252,7 +2312,10 @@ mod tests {
         let err = super::handle_git_route(&state, &route, request)
             .await
             .expect_err("body read error");
-        assert_eq!(err.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -2261,8 +2324,8 @@ mod tests {
         let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
         let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
             .expect("parse");
-        let mapping = RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo")
-            .expect("mapping");
+        let mapping =
+            RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo").expect("mapping");
         repositories
             .upsert_mapping(RepoMappingRecord::new(&mapping).expect("record"))
             .await
@@ -2324,9 +2387,7 @@ mod tests {
             upstream_url: "https://git.example".to_string(),
         };
         let body = Bytes::from_static(b"payload");
-        let uri: axum::http::Uri = "/npub1test/repo.git/git-receive-pack"
-            .parse()
-            .expect("uri");
+        let uri: axum::http::Uri = "/npub1test/repo.git/git-receive-pack".parse().expect("uri");
         let url = format!("http://localhost{uri}");
         let event = signed_event(&url, "GET", &body, super::unix_timestamp());
         let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event"));
@@ -2353,7 +2414,10 @@ mod tests {
         let err = super::resolve_maintainers(&unavailable, &repo)
             .await
             .expect_err("storage error");
-        assert_eq!(err.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
@@ -2586,6 +2650,17 @@ mod tests {
         let url = super::build_request_url(&invalid_proto, &uri).expect("fallback proto url");
         assert!(url.starts_with("http://git.example/"));
 
+        let mut no_query_headers = HeaderMap::new();
+        no_query_headers.insert("host", "git.example".parse().expect("host"));
+        let uri_without_path_query: axum::http::Uri =
+            "/owner/repo.git/git-receive-pack".parse().expect("uri");
+        let url = super::build_request_url(&no_query_headers, &uri_without_path_query)
+            .expect("uri path fallback");
+        assert_eq!(
+            url,
+            format!("http://git.example{}", uri_without_path_query.path())
+        );
+
         let missing_auth = super::parse_nostr_auth(&HeaderMap::new()).expect_err("missing auth");
         assert_eq!(
             missing_auth.into_response().status(),
@@ -2613,8 +2688,7 @@ mod tests {
             AUTH_HEADER,
             axum::http::HeaderValue::from_bytes(b"\xff").expect("auth value"),
         );
-        let err =
-            super::parse_nostr_auth(&invalid_header_bytes).expect_err("invalid header bytes");
+        let err = super::parse_nostr_auth(&invalid_header_bytes).expect_err("invalid header bytes");
         assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -2791,9 +2865,7 @@ mod tests {
             .timeout(Duration::from_secs(1))
             .build()
             .expect("client");
-        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| {
-            Ok(client)
-        });
+        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| Ok(client));
         assert!(result.is_ok());
     }
 
