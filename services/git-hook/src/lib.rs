@@ -384,14 +384,9 @@ pub fn verify_forgejo_signature(
         }
     };
 
-    let mut mac = match hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()) {
-        Ok(mac) => mac,
-        Err(_) => {
-            return Err(HookError::InvalidSignature(
-                "invalid signature secret".to_string(),
-            ));
-        }
-    };
+    // HMAC accepts arbitrary key lengths for SHA-256; this constructor is effectively infallible here.
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+        .expect("hmac sha256 key init should be infallible");
     mac.update(payload);
     if mac.verify_slice(&provided).is_err() {
         return Err(HookError::InvalidSignature(
