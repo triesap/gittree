@@ -2569,6 +2569,23 @@ mod tests {
         let url = super::build_request_url(&headers, &uri).expect("url");
         assert!(url.starts_with("https://git.example/"));
 
+        let mut invalid_host = HeaderMap::new();
+        invalid_host.insert(
+            "host",
+            axum::http::HeaderValue::from_bytes(b"\xff").expect("host value"),
+        );
+        let err = super::build_request_url(&invalid_host, &uri).expect_err("invalid host");
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+
+        let mut invalid_proto = HeaderMap::new();
+        invalid_proto.insert("host", "git.example".parse().expect("host"));
+        invalid_proto.insert(
+            "x-forwarded-proto",
+            axum::http::HeaderValue::from_bytes(b"\xff").expect("proto value"),
+        );
+        let url = super::build_request_url(&invalid_proto, &uri).expect("fallback proto url");
+        assert!(url.starts_with("http://git.example/"));
+
         let missing_auth = super::parse_nostr_auth(&HeaderMap::new()).expect_err("missing auth");
         assert_eq!(
             missing_auth.into_response().status(),
@@ -2589,6 +2606,15 @@ mod tests {
         let mut invalid_event = HeaderMap::new();
         invalid_event.insert(AUTH_HEADER, format!("Nostr {token}").parse().expect("auth"));
         let err = super::parse_nostr_auth(&invalid_event).expect_err("invalid event");
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+
+        let mut invalid_header_bytes = HeaderMap::new();
+        invalid_header_bytes.insert(
+            AUTH_HEADER,
+            axum::http::HeaderValue::from_bytes(b"\xff").expect("auth value"),
+        );
+        let err =
+            super::parse_nostr_auth(&invalid_header_bytes).expect_err("invalid header bytes");
         assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -2757,6 +2783,18 @@ mod tests {
         let err = result.err().expect("builder error expected");
         assert_eq!(git_http_error_label(&err), "upstream");
         assert!(err.to_string().contains("builder failed"));
+    }
+
+    #[test]
+    fn reqwest_upstream_client_new_with_supports_success_path() {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("client");
+        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| {
+            Ok(client)
+        });
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
