@@ -251,15 +251,17 @@ impl AdmissionCache {
             map.clear();
             return;
         }
-        while map.len() > max_entries {
-            let Some(oldest) = map
-                .iter()
-                .min_by_key(|(_, entry)| entry.stored_at)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            map.remove(&oldest);
+        if map.len() <= max_entries {
+            return;
+        }
+        let remove_count = map.len() - max_entries;
+        let mut oldest: Vec<(std::time::Instant, K)> = map
+            .iter()
+            .map(|(key, entry)| (entry.stored_at, key.clone()))
+            .collect();
+        oldest.sort_by_key(|(stored_at, _)| *stored_at);
+        for (_, key) in oldest.into_iter().take(remove_count) {
+            map.remove(&key);
         }
     }
 
