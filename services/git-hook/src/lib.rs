@@ -654,6 +654,39 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn hook_config_error_kind(err: &HookConfigError) -> (&'static str, Option<&'static str>) {
+        match err {
+            HookConfigError::MissingEnv(key) => ("missing_env", Some(*key)),
+            HookConfigError::InvalidMode(_) => ("invalid_mode", None),
+            HookConfigError::Config(_) => ("config", None),
+        }
+    }
+
+    fn hook_service_error_kind(err: &HookServiceError) -> &'static str {
+        match err {
+            HookServiceError::Config(_) => "config",
+            HookServiceError::Parse(_) => "parse",
+            HookServiceError::Core(_) => "core",
+            HookServiceError::State(_) => "state",
+            HookServiceError::Reject(_) => "reject",
+        }
+    }
+
+    fn hook_error_kind(err: &HookError) -> &'static str {
+        match err {
+            HookError::InvalidLine(_) => "invalid_line",
+            HookError::InvalidPayload(_) => "invalid_payload",
+            HookError::InvalidSignature(_) => "invalid_signature",
+        }
+    }
+
+    fn update_decision_kind(decision: &gittree_core::UpdateDecision) -> &'static str {
+        match decision {
+            gittree_core::UpdateDecision::Accept => "accept",
+            gittree_core::UpdateDecision::Reject { .. } => "reject",
+        }
+    }
+
     fn with_env_var(key: &str, value: Option<&str>, run: impl FnOnce()) {
         let _guard = env_lock()
             .lock()
@@ -755,16 +788,15 @@ mod tests {
         let content_type = content_type.to_string();
         let body = body.to_string();
         let handle = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
         });
         (format!("http://{addr}"), handle)
     }
@@ -815,7 +847,7 @@ mod tests {
     fn hook_mode_from_env_rejects_unknown_mode() {
         with_env_var(super::ENV_HOOK_MODE, Some("bad-mode"), || {
             let err = HookMode::from_env().expect_err("invalid mode");
-            assert!(matches!(err, HookConfigError::InvalidMode(_)));
+            assert_eq!(hook_config_error_kind(&err), ("invalid_mode", None));
         });
     }
 
@@ -836,7 +868,7 @@ mod tests {
     fn read_input_reports_missing_file_errors() {
         let missing = std::path::Path::new("/tmp/does-not-exist-gittree-hook.txt");
         let err = read_input(Some(missing)).expect_err("read should fail");
-        assert!(matches!(err, HookServiceError::Core(_)));
+        assert_eq!(hook_service_error_kind(&err), "core");
     }
 
     struct FailingReader;
@@ -851,7 +883,7 @@ mod tests {
     fn read_from_reader_reports_stdin_io_errors() {
         let mut reader = FailingReader;
         let err = read_from_reader(&mut reader).expect_err("read should fail");
-        assert!(matches!(err, HookServiceError::Core(_)));
+        assert_eq!(hook_service_error_kind(&err), "core");
     }
 
     #[test]
@@ -978,10 +1010,10 @@ mod tests {
             ],
             || {
                 let err = super::HookConfig::from_env().expect_err("missing sync url");
-                assert!(matches!(
-                    err,
-                    HookConfigError::MissingEnv(super::ENV_SYNC_URL)
-                ));
+                assert_eq!(
+                    hook_config_error_kind(&err),
+                    ("missing_env", Some(super::ENV_SYNC_URL))
+                );
             },
         );
     }
@@ -998,7 +1030,7 @@ mod tests {
     #[test]
     fn parse_updates_rejects_missing_fields() {
         let err = parse_updates("only-two parts").unwrap_err();
-        assert!(matches!(err, HookError::InvalidLine(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_line");
     }
 
     #[test]
@@ -1061,7 +1093,7 @@ mod tests {
         }
         "#;
         let err = parse_forgejo_push(payload).unwrap_err();
-        assert!(matches!(err, HookError::InvalidPayload(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_payload");
     }
 
     #[test]
@@ -1079,13 +1111,13 @@ mod tests {
         }
         "#;
         let err = parse_forgejo_push(payload).unwrap_err();
-        assert!(matches!(err, HookError::InvalidPayload(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_payload");
     }
 
     #[test]
     fn parse_forgejo_push_rejects_invalid_json() {
         let err = parse_forgejo_push("{not-json}").expect_err("invalid payload");
-        assert!(matches!(err, HookError::InvalidPayload(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_payload");
     }
 
     #[test]
@@ -1102,25 +1134,25 @@ mod tests {
     #[test]
     fn verify_forgejo_signature_rejects_invalid() {
         let err = verify_forgejo_signature("secret", b"payload", "sha256=deadbeef").unwrap_err();
-        assert!(matches!(err, HookError::InvalidSignature(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_signature");
     }
 
     #[test]
     fn verify_forgejo_signature_rejects_missing_secret() {
         let err = verify_forgejo_signature("", b"payload", "sha256=deadbeef").unwrap_err();
-        assert!(matches!(err, HookError::InvalidSignature(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_signature");
     }
 
     #[test]
     fn verify_forgejo_signature_rejects_missing_signature_header() {
         let err = verify_forgejo_signature("secret", b"payload", "   ").unwrap_err();
-        assert!(matches!(err, HookError::InvalidSignature(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_signature");
     }
 
     #[test]
     fn verify_forgejo_signature_rejects_invalid_encoding() {
         let err = verify_forgejo_signature("secret", b"payload", "sha256=zz").unwrap_err();
-        assert!(matches!(err, HookError::InvalidSignature(_)));
+        assert_eq!(hook_error_kind(&err), "invalid_signature");
     }
 
     #[test]
@@ -1190,10 +1222,7 @@ mod tests {
             .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
             .join("repo.git");
         let decision = evaluate_pre_receive(&fetcher, repo_path, &updates).expect("decision");
-        assert!(matches!(
-            decision,
-            gittree_core::UpdateDecision::Reject { .. }
-        ));
+        assert_eq!(update_decision_kind(&decision), "reject");
     }
 
     #[test]
@@ -1210,7 +1239,7 @@ mod tests {
             .join("repo.git");
         let decision =
             evaluate_pre_receive(&FailingFetcher, repo_path, &updates).expect("decision");
-        assert!(matches!(decision, gittree_core::UpdateDecision::Accept));
+        assert_eq!(update_decision_kind(&decision), "accept");
     }
 
     #[test]
@@ -1224,7 +1253,7 @@ mod tests {
             .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
             .join("repo.git");
         let err = evaluate_pre_receive(&FailingFetcher, repo_path, &updates).unwrap_err();
-        assert!(matches!(err, super::HookServiceError::State(_)));
+        assert_eq!(hook_service_error_kind(&err), "state");
     }
 
     #[test]
@@ -1276,7 +1305,7 @@ mod tests {
             )],
             || {
                 let err = super::run_hook(config, Some(&updates_path)).expect_err("parse error");
-                assert!(matches!(err, HookServiceError::Parse(_)));
+                assert_eq!(hook_service_error_kind(&err), "parse");
             },
         );
         let _ = std::fs::remove_file(updates_path);
@@ -1324,10 +1353,7 @@ mod tests {
             )],
             || {
                 let err = super::run_hook(config, Some(&updates_path)).expect_err("missing sync");
-                assert!(matches!(
-                    err,
-                    HookServiceError::Config(HookConfigError::MissingEnv(super::ENV_SYNC_URL))
-                ));
+                assert_eq!(hook_service_error_kind(&err), "config");
             },
         );
         let _ = std::fs::remove_file(updates_path);
@@ -1384,7 +1410,7 @@ mod tests {
             )],
             || {
                 let err = super::run_hook(config, Some(&updates_path)).expect_err("reject");
-                assert!(matches!(err, HookServiceError::Reject(_)));
+                assert_eq!(hook_service_error_kind(&err), "reject");
             },
         );
         handle.join().expect("server join");
@@ -1409,7 +1435,7 @@ mod tests {
             &[(super::ENV_HOOK_REPO_PATH, None), ("GIT_DIR", None)],
             || {
                 let err = super::run_hook(config, Some(&updates_path)).expect_err("invalid cwd");
-                assert!(matches!(err, HookServiceError::Core(_)));
+                assert_eq!(hook_service_error_kind(&err), "core");
             },
         );
         let _ = std::fs::remove_file(updates_path);
@@ -1449,7 +1475,7 @@ mod tests {
             },
         );
         let err = result.expect_err("expected current dir failure");
-        assert!(matches!(err, HookServiceError::Core(_)));
+        assert_eq!(hook_service_error_kind(&err), "core");
         let _ = std::fs::remove_file(updates_path);
     }
 
@@ -1495,7 +1521,7 @@ mod tests {
         let err = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect_err("state should fail");
-        assert!(matches!(err, super::HookServiceError::State(_)));
+        assert_eq!(hook_service_error_kind(&err), "state");
         handle.join().expect("server join");
     }
 
@@ -1527,7 +1553,7 @@ mod tests {
         let err = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect_err("state should fail");
-        assert!(matches!(err, super::HookServiceError::State(_)));
+        assert_eq!(hook_service_error_kind(&err), "state");
     }
 
     #[test]
@@ -1538,7 +1564,7 @@ mod tests {
         let err = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect_err("state should fail");
-        assert!(matches!(err, super::HookServiceError::State(_)));
+        assert_eq!(hook_service_error_kind(&err), "state");
         handle.join().expect("server join");
     }
 
@@ -1559,7 +1585,7 @@ mod tests {
             }],
         };
         let err = notifier.notify(payload).expect_err("notify should fail");
-        assert!(matches!(err, super::HookServiceError::State(_)));
+        assert_eq!(hook_service_error_kind(&err), "state");
         handle.join().expect("server join");
     }
 
@@ -1599,7 +1625,7 @@ mod tests {
             }],
         };
         let err = notifier.notify(payload).expect_err("notify should fail");
-        assert!(matches!(err, super::HookServiceError::State(_)));
+        assert_eq!(hook_service_error_kind(&err), "state");
     }
 
     struct MockNotifier {
@@ -1663,7 +1689,7 @@ mod tests {
         }];
         let err = handle_post_receive(&notifier, "/tmp/not-an-npub/repo.git", &updates)
             .expect_err("invalid path");
-        assert!(matches!(err, HookServiceError::Core(_)));
+        assert_eq!(hook_service_error_kind(&err), "core");
     }
 
     #[test]
@@ -1710,7 +1736,7 @@ mod tests {
         }
         "#;
         let err = handle_forgejo_push(&resolver, &notifier, payload).unwrap_err();
-        assert!(matches!(err, super::HookServiceError::Reject(_)));
+        assert_eq!(hook_service_error_kind(&err), "reject");
     }
 
     #[test]
@@ -1719,6 +1745,6 @@ mod tests {
         let notifier = MockNotifier::new();
         let err = handle_forgejo_push(&resolver, &notifier, "{not-json}")
             .expect_err("invalid payload should fail");
-        assert!(matches!(err, HookServiceError::Parse(_)));
+        assert_eq!(hook_service_error_kind(&err), "parse");
     }
 }
