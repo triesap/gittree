@@ -981,6 +981,24 @@ mod tests {
     }
 
     #[test]
+    fn with_env_var_recovers_from_poisoned_lock() {
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = env_lock().lock().expect("lock");
+            panic!("poison env lock");
+        });
+
+        with_env_var("GITTREE_TEST_POISONED_LOCK", Some("after"), || {
+            assert_eq!(
+                std::env::var("GITTREE_TEST_POISONED_LOCK").ok().as_deref(),
+                Some("after")
+            );
+        });
+
+        // SAFETY: dedicated test key cleanup.
+        unsafe { std::env::remove_var("GITTREE_TEST_POISONED_LOCK") };
+    }
+
+    #[test]
     fn with_env_vars_restores_existing_values() {
         // SAFETY: dedicated test key avoids collisions with non-test code.
         unsafe { std::env::set_var("GITTREE_TEST_RESTORE_VARS", "before") };
