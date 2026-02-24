@@ -164,7 +164,10 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, WebhookConfigError> {
 }
 
 fn env_required_string(key: &'static str) -> Result<String, WebhookConfigError> {
-    let value = std::env::var(key).map_err(|_| WebhookConfigError::MissingEnv(key))?;
+    let value = match std::env::var(key) {
+        Ok(value) => value,
+        Err(_) => return Err(WebhookConfigError::MissingEnv(key)),
+    };
     if value.trim().is_empty() {
         return Err(WebhookConfigError::InvalidEnv { key, value });
     }
@@ -244,9 +247,10 @@ pub struct HttpSyncNotifier {
 
 impl HttpSyncNotifier {
     pub fn new(endpoint: impl Into<String>) -> Result<Self, String> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|err| err.to_string())?;
+        let client = match reqwest::Client::builder().build() {
+            Ok(client) => client,
+            Err(err) => return Err(err.to_string()),
+        };
         Ok(Self {
             endpoint: endpoint.into(),
             client,
@@ -323,10 +327,12 @@ async fn run_http_server_with_shutdown<Shutdown>(
 where
     Shutdown: Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, router)
+    if let Err(err) = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
-        .map_err(|err| WebhookError::Serve(err.to_string()))?;
+    {
+        return Err(WebhookError::Serve(err.to_string()));
+    }
     Ok(())
 }
 
