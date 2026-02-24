@@ -1795,6 +1795,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn env_parsers_return_none_for_unique_missing_key_without_env_mutation() {
+        let missing_key: &'static str = Box::leak(
+            (0..)
+                .map(|index| format!("GITTREE_GIT_HTTP_MISSING_KEY_{index}"))
+                .find(|key| std::env::var_os(key).is_none())
+                .expect("find missing env key")
+                .into_boxed_str(),
+        );
+        assert_eq!(super::env_u64(missing_key).expect("timeout"), None);
+        assert_eq!(super::storage_env_u32(missing_key).expect("u32"), None);
+        assert_eq!(super::storage_env_u64(missing_key).expect("u64"), None);
+    }
+
     #[tokio::test]
     async fn receive_pack_rejects_missing_auth() {
         let repositories = Arc::new(InMemoryRepositories::new());
