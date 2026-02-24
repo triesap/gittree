@@ -167,20 +167,19 @@ where
     run_with_cli_with_client(cli, &client)
 }
 
-fn run_with_cli_with_client<C: RelayProbeClient>(
+fn run_with_cli_with_client(
     cli: ProbeCli,
-    client: &C,
+    client: &dyn RelayProbeClient,
 ) -> Result<(), ProbeCommandError> {
     run_with_cli_with_client_and_runtime(cli, client, tokio::runtime::Runtime::new)
 }
 
-fn run_with_cli_with_client_and_runtime<C, RuntimeBuilder>(
+fn run_with_cli_with_client_and_runtime<RuntimeBuilder>(
     cli: ProbeCli,
-    client: &C,
+    client: &dyn RelayProbeClient,
     runtime_builder: RuntimeBuilder,
 ) -> Result<(), ProbeCommandError>
 where
-    C: RelayProbeClient,
     RuntimeBuilder: FnOnce() -> Result<tokio::runtime::Runtime, std::io::Error>,
 {
     let runtime = runtime_builder().map_err(|err| ProbeCommandError::Runtime(err.to_string()))?;
@@ -202,11 +201,11 @@ where
     Ok(())
 }
 
-fn execute_probe_with_client<C: RelayProbeClient>(
+fn execute_probe_with_client(
     cli: &ProbeCli,
     probe_config: &RelayProbeConfig,
     runtime: &tokio::runtime::Runtime,
-    client: &C,
+    client: &dyn RelayProbeClient,
 ) -> Result<Vec<RelayProbeResult>, ProbeCommandError> {
     let targets = resolve_targets(cli)?;
     let mut results = Vec::with_capacity(targets.len());
