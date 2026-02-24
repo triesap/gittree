@@ -150,7 +150,7 @@ pub fn clone_url(public_git_url: &str, npub: &str, identifier: &str) -> String {
 }
 
 pub fn npub_from_bytes(bytes: &[u8]) -> Result<String, AppCoreError> {
-    let hrp = Hrp::parse("npub").map_err(|_| AppCoreError::InvalidPubkey)?;
+    let hrp = Hrp::parse("npub").expect("npub hrp is a valid bech32 human-readable prefix");
     bech32::encode::<Bech32>(hrp, bytes).map_err(|_| AppCoreError::InvalidPubkey)
 }
 
@@ -271,7 +271,7 @@ mod tests {
     fn pubkey_bytes_from_npub_rejects_wrong_payload_length() {
         let short = npub_from_bytes(&[9u8; 31]).expect("npub");
         let err = pubkey_bytes_from_npub(&short).expect_err("invalid length");
-        assert!(matches!(err, AppCoreError::InvalidPubkey));
+        assert_eq!(err.to_string(), "invalid pubkey");
     }
 
     #[test]
@@ -279,6 +279,6 @@ mod tests {
         let npub = npub_from_bytes(&[7u8; 32]).expect("npub");
         let nsec = npub.replacen("npub1", "nsec1", 1);
         let err = pubkey_bytes_from_npub(&nsec).expect_err("invalid hrp");
-        assert!(matches!(err, AppCoreError::InvalidPubkey));
+        assert_eq!(err.to_string(), "invalid pubkey");
     }
 }

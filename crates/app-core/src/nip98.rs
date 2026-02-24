@@ -52,9 +52,9 @@ pub fn nip98_unsigned_event(
     }
 }
 
-pub fn nip98_event_id(unsigned: &Nip98UnsignedEvent) -> Result<String, AppCoreError> {
-    let bytes = nip98_event_id_bytes(unsigned)?;
-    Ok(hex::encode(bytes))
+pub fn nip98_event_id(unsigned: &Nip98UnsignedEvent) -> String {
+    let bytes = nip98_event_id_bytes(unsigned);
+    hex::encode(bytes)
 }
 
 pub fn nip98_sign_event(
@@ -71,11 +71,10 @@ pub fn nip98_sign_event(
     let verifying_key = signing_key.verifying_key();
     let pubkey_hex = hex::encode(verifying_key.to_bytes());
     let unsigned = nip98_unsigned_event(pubkey_hex, method, url, payload_sha256, created_at);
-    let id_bytes = nip98_event_id_bytes(&unsigned)?;
-    let sig = match signing_key.sign_prehash(&id_bytes) {
-        Ok(signature) => signature,
-        Err(_) => return Err(AppCoreError::InvalidSignature),
-    };
+    let id_bytes = nip98_event_id_bytes(&unsigned);
+    let sig = signing_key
+        .sign_prehash(&id_bytes)
+        .expect("sign_prehash takes a fixed 32-byte prehash digest");
     Ok(Nip98Event {
         id: hex::encode(id_bytes),
         pubkey: unsigned.pubkey,
@@ -98,7 +97,7 @@ fn nip98_tags(method: &str, url: &str, payload_sha256: Option<&str>) -> Vec<Vec<
     tags
 }
 
-fn nip98_event_id_bytes(unsigned: &Nip98UnsignedEvent) -> Result<[u8; 32], AppCoreError> {
+fn nip98_event_id_bytes(unsigned: &Nip98UnsignedEvent) -> [u8; 32] {
     let payload = serde_json::json!([
         0,
         unsigned.pubkey,
@@ -107,16 +106,13 @@ fn nip98_event_id_bytes(unsigned: &Nip98UnsignedEvent) -> Result<[u8; 32], AppCo
         unsigned.tags,
         unsigned.content,
     ]);
-    let serialized = match serde_json::to_string(&payload) {
-        Ok(serialized) => serialized,
-        Err(err) => return Err(AppCoreError::InvalidEventEncoding(err.to_string())),
-    };
+    let serialized = payload.to_string();
     let mut hasher = sha2::Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&digest);
-    Ok(bytes)
+    bytes
 }
 
 #[cfg(test)]
@@ -125,7 +121,6 @@ mod tests {
         NIP98_KIND, Nip98Event, Nip98UnsignedEvent, nip98_event_id, nip98_payload_hash,
         nip98_sign_event, nip98_unsigned_event,
     };
-    use crate::AppCoreError;
     use gittree_nostr_auth::{Nip98Event as AuthEvent, Nip98Request, validate_nip98};
 
     const NOW: i64 = 1_700_000_000;
@@ -224,7 +219,7 @@ mod tests {
             None,
             NOW,
         );
-        let expected = nip98_event_id(&unsigned).expect("event id");
+        let expected = nip98_event_id(&unsigned);
         assert_eq!(signed.id, expected);
     }
 
@@ -238,7 +233,7 @@ mod tests {
             NOW,
         )
         .expect_err("zero secret must fail");
-        assert!(matches!(err, AppCoreError::InvalidSecretKey));
+        assert_eq!(err.to_string(), "invalid secret key");
     }
 
     #[test]
