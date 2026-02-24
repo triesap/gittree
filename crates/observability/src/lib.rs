@@ -326,7 +326,7 @@ fn init_with_subscriber(
         let exporter = opentelemetry_prometheus::exporter()
             .with_registry(registry.clone())
             .build()
-            .map_err(|err| ObservabilityError::MetricsInit(err.to_string()))?;
+            .expect("prometheus exporter build should succeed with a fresh registry");
 
         let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_resource(resource)
@@ -437,6 +437,24 @@ mod tests {
     }
 
     #[test]
+    fn env_config_rejects_invalid_log_stdout_bool() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_STDOUT", "maybe", || {
+            let err = ObservabilityConfig::from_env("svc").expect_err("invalid");
+            assert!(err.to_string().contains("GITTREE_LOG_STDOUT"));
+        });
+    }
+
+    #[test]
+    fn env_config_rejects_invalid_metrics_enabled_bool() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_METRICS_ENABLED", "maybe", || {
+            let err = ObservabilityConfig::from_env("svc").expect_err("invalid");
+            assert!(err.to_string().contains("GITTREE_METRICS_ENABLED"));
+        });
+    }
+
+    #[test]
     fn env_config_uses_defaults_for_empty_bool_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_JSON", "", || {
@@ -451,10 +469,14 @@ mod tests {
         });
     }
 
+    fn ok_subscriber(_: super::BoxSubscriber) -> Result<(), ObservabilityError> {
+        Ok(())
+    }
+
     #[test]
     fn init_returns_handle() {
         let config = ObservabilityConfig::default();
-        let mut set_subscriber = |_| Ok(());
+        let mut set_subscriber = ok_subscriber;
         let handle = super::init_with_subscriber(&config, &mut set_subscriber).expect("init");
         assert!(handle.prometheus_registry().is_some());
     }
@@ -523,7 +545,7 @@ mod tests {
         config.log_stdout = false;
         config.log_dir = None;
         config.metrics_enabled = false;
-        let mut set_subscriber = |_| Ok(());
+        let mut set_subscriber = ok_subscriber;
         let handle = super::init_with_subscriber(&config, &mut set_subscriber).expect("init");
         assert!(handle.prometheus_registry().is_none());
     }
@@ -536,7 +558,7 @@ mod tests {
         config.log_stdout = true;
         config.log_dir = Some(temp_dir.clone());
         config.metrics_enabled = false;
-        let mut set_subscriber = |_| Ok(());
+        let mut set_subscriber = ok_subscriber;
         super::init_with_subscriber(&config, &mut set_subscriber).expect("init");
         std::fs::remove_dir_all(temp_dir).ok();
     }
@@ -555,9 +577,60 @@ mod tests {
     fn init_with_subscriber_maps_log_init_error_for_invalid_path() {
         let mut config = ObservabilityConfig::default();
         config.log_dir = Some(PathBuf::from("/dev/null"));
-        let mut set_subscriber = |_| Ok(());
+        let mut set_subscriber = ok_subscriber;
         let err = super::init_with_subscriber(&config, &mut set_subscriber).expect_err("log init");
         assert!(err.to_string().contains("log init failed"));
+    }
+
+    #[test]
+    fn init_with_subscriber_maps_trace_init_error_for_invalid_otlp_endpoint() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = runtime.enter();
+
+        let mut config = ObservabilityConfig::default();
+        config.otlp_endpoint = Some("http://[::1".to_string());
+        config.log_dir = None;
+        config.metrics_enabled = false;
+        let mut set_subscriber = ok_subscriber;
+        let err = super::init_with_subscriber(&config, &mut set_subscriber)
+            .expect_err("invalid otlp endpoint");
+        assert!(err.to_string().contains("trace init failed"));
+    }
+
+    #[test]
+    fn init_with_subscriber_maps_subscriber_error_for_non_otlp_json() {
+        let mut config = ObservabilityConfig::default();
+        config.log_json = true;
+        config.log_stdout = true;
+        config.log_dir = None;
+        config.metrics_enabled = false;
+        let mut set_subscriber = |_| Err(ObservabilityError::SubscriberInit("boom".to_string()));
+        let err = super::init_with_subscriber(&config, &mut set_subscriber)
+            .expect_err("subscriber error");
+        assert!(err.to_string().contains("subscriber init failed"));
+    }
+
+    #[test]
+    fn init_with_subscriber_maps_subscriber_error_for_otlp_json_and_text() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = runtime.enter();
+
+        let mut json_config = ObservabilityConfig::default();
+        json_config.otlp_endpoint = Some("http://localhost:4317".to_string());
+        json_config.log_json = true;
+        json_config.log_dir = None;
+        json_config.metrics_enabled = false;
+        let mut set_subscriber = |_| Err(ObservabilityError::SubscriberInit("boom".to_string()));
+        let err = super::init_with_subscriber(&json_config, &mut set_subscriber)
+            .expect_err("subscriber error");
+        assert!(err.to_string().contains("subscriber init failed"));
+
+        let mut text_config = json_config.clone();
+        text_config.log_json = false;
+        let mut set_subscriber = |_| Err(ObservabilityError::SubscriberInit("boom".to_string()));
+        let err = super::init_with_subscriber(&text_config, &mut set_subscriber)
+            .expect_err("subscriber error");
+        assert!(err.to_string().contains("subscriber init failed"));
     }
 
     #[test]
@@ -571,13 +644,41 @@ mod tests {
         let temp_dir = unique_temp_dir("gittree-observability-otlp");
         json_config.log_dir = Some(temp_dir.clone());
         json_config.metrics_enabled = false;
-        let mut set_subscriber = |_| Ok(());
+        let mut set_subscriber = ok_subscriber;
         super::init_with_subscriber(&json_config, &mut set_subscriber).expect("otlp json");
 
         let mut text_config = json_config.clone();
         text_config.log_json = false;
         super::init_with_subscriber(&text_config, &mut set_subscriber).expect("otlp text");
         std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn init_with_subscriber_accepts_valid_rust_log_env_filter() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("RUST_LOG", "debug", || {
+            assert!(tracing_subscriber::EnvFilter::try_from_default_env().is_ok());
+            let mut config = ObservabilityConfig::default();
+            config.log_dir = None;
+            config.metrics_enabled = false;
+            let mut set_subscriber = ok_subscriber;
+            let handle = super::init_with_subscriber(&config, &mut set_subscriber).expect("init");
+            assert!(handle.prometheus_registry().is_none());
+        });
+    }
+
+    #[test]
+    fn init_with_subscriber_falls_back_for_invalid_rust_log_env_filter() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("RUST_LOG", "=", || {
+            assert!(tracing_subscriber::EnvFilter::try_from_default_env().is_err());
+            let mut config = ObservabilityConfig::default();
+            config.log_dir = None;
+            config.metrics_enabled = false;
+            let mut set_subscriber = ok_subscriber;
+            let handle = super::init_with_subscriber(&config, &mut set_subscriber).expect("init");
+            assert!(handle.prometheus_registry().is_none());
+        });
     }
 
     #[test]
