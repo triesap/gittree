@@ -22,7 +22,10 @@ const DEFAULT_CONTROL_URL: &str = "http://127.0.0.1:8088";
 fn init_observability() -> Result<ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env("gittree-admin")
         .map_err(|err| err.to_string())?;
-    gittree_observability::init(&config).map_err(|err| err.to_string())
+    match gittree_observability::init(&config) {
+        Ok(handle) => Ok(handle),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -202,9 +205,10 @@ async fn run() -> Result<(), AdminError> {
         println!("{}", AdminCli::help_text());
         return Ok(());
     }
-    let command = cli
-        .command
-        .ok_or_else(|| AdminError::Cli(AdminCliError::MissingCommand))?;
+    let command = match cli.command {
+        Some(command) => command,
+        None => return Err(AdminError::Cli(AdminCliError::MissingCommand)),
+    };
 
     match command {
         AdminCommand::Map {
