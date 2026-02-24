@@ -24,11 +24,7 @@ struct ProbeCli {
 }
 
 impl ProbeCli {
-    fn parse<I, T>(args: I) -> Result<Self, RelayProbeError>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString>,
-    {
+    fn parse(args: Vec<std::ffi::OsString>) -> Result<Self, RelayProbeError> {
         let mut relay: Option<String> = None;
         let mut all = false;
         let mut json = false;
@@ -39,7 +35,7 @@ impl ProbeCli {
 
         let mut iter = args
             .into_iter()
-            .map(|arg| arg.into().to_string_lossy().to_string());
+            .map(|arg| arg.to_string_lossy().to_string());
         iter.next();
         while let Some(value) = iter.next() {
             match value.as_str() {
@@ -139,14 +135,10 @@ where
 }
 
 fn run() -> Result<(), ProbeCommandError> {
-    run_with_args(std::env::args_os())
+    run_with_args(std::env::args_os().collect())
 }
 
-fn run_with_args<I, T>(args: I) -> Result<(), ProbeCommandError>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString>,
-{
+fn run_with_args(args: Vec<std::ffi::OsString>) -> Result<(), ProbeCommandError> {
     let cli = ProbeCli::parse(args).map_err(ProbeCommandError::Cli)?;
     run_with_cli(cli)
 }
@@ -483,6 +475,13 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn os_args(values: &[&str]) -> Vec<std::ffi::OsString> {
+        values
+            .iter()
+            .map(|value| std::ffi::OsString::from(*value))
+            .collect()
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
@@ -519,8 +518,8 @@ mod tests {
 
     #[test]
     fn parse_accepts_store_flag() {
-        let cli =
-            ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--store"]).expect("cli");
+        let cli = ProbeCli::parse(os_args(&["probe", "--relay", "wss://relay.example", "--store"]))
+            .expect("cli");
         assert!(cli.store);
         assert!(!cli.all);
         assert_eq!(cli.relay.as_deref(), Some("wss://relay.example"));
@@ -528,41 +527,46 @@ mod tests {
 
     #[test]
     fn parse_accepts_all_flag() {
-        let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+        let cli = ProbeCli::parse(os_args(&["probe", "--all"])).expect("cli");
         assert!(cli.all);
         assert!(cli.relay.is_none());
     }
 
     #[test]
     fn parse_accepts_active_flag() {
-        let cli =
-            ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--active"]).expect("cli");
+        let cli = ProbeCli::parse(os_args(&[
+            "probe",
+            "--relay",
+            "wss://relay.example",
+            "--active",
+        ]))
+        .expect("cli");
         assert_eq!(cli.active, Some(true));
     }
 
     #[test]
     fn parse_accepts_timeout_flag() {
-        let cli = ProbeCli::parse([
+        let cli = ProbeCli::parse(os_args(&[
             "probe",
             "--relay",
             "wss://relay.example",
             "--timeout-secs",
             "12",
-        ])
+        ]))
         .expect("cli");
         assert_eq!(cli.timeout_secs, Some(12));
     }
 
     #[test]
     fn parse_accepts_inline_relay_and_optional_flags() {
-        let cli = ProbeCli::parse([
+        let cli = ProbeCli::parse(os_args(&[
             "probe",
             "--relay=wss://relay.example",
             "--json",
             "--no-active",
             "--secret-key",
             "00",
-        ])
+        ]))
         .expect("cli");
         assert_eq!(cli.relay.as_deref(), Some("wss://relay.example"));
         assert!(cli.json);
@@ -572,8 +576,8 @@ mod tests {
 
     #[test]
     fn parse_rejects_all_with_relay() {
-        let err =
-            ProbeCli::parse(["probe", "--all", "--relay", "wss://relay.example"]).unwrap_err();
+        let err = ProbeCli::parse(os_args(&["probe", "--all", "--relay", "wss://relay.example"]))
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "invalid relay url: cannot combine --all with --relay"
@@ -582,8 +586,13 @@ mod tests {
 
     #[test]
     fn parse_rejects_missing_timeout_value() {
-        let err = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--timeout-secs"])
-            .expect_err("missing timeout");
+        let err = ProbeCli::parse(os_args(&[
+            "probe",
+            "--relay",
+            "wss://relay.example",
+            "--timeout-secs",
+        ]))
+        .expect_err("missing timeout");
         assert!(
             matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "missing timeout value")
         );
@@ -591,13 +600,13 @@ mod tests {
 
     #[test]
     fn parse_rejects_invalid_timeout_value() {
-        let err = ProbeCli::parse([
+        let err = ProbeCli::parse(os_args(&[
             "probe",
             "--relay",
             "wss://relay.example",
             "--timeout-secs",
             "invalid",
-        ])
+        ]))
         .expect_err("invalid timeout");
         assert!(
             matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "invalid timeout value")
@@ -606,8 +615,13 @@ mod tests {
 
     #[test]
     fn parse_rejects_missing_secret_key() {
-        let err = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--secret-key"])
-            .expect_err("missing secret key");
+        let err = ProbeCli::parse(os_args(&[
+            "probe",
+            "--relay",
+            "wss://relay.example",
+            "--secret-key",
+        ]))
+        .expect_err("missing secret key");
         assert!(
             matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "missing secret key")
         );
@@ -615,13 +629,13 @@ mod tests {
 
     #[test]
     fn parse_rejects_missing_relay_value() {
-        let err = ProbeCli::parse(["probe", "--relay"]).expect_err("missing relay value");
+        let err = ProbeCli::parse(os_args(&["probe", "--relay"])).expect_err("missing relay value");
         assert_eq!(err.to_string(), "invalid relay url: --relay");
     }
 
     #[test]
     fn parse_rejects_unknown_flag() {
-        let err = ProbeCli::parse(["probe", "--relay", "wss://relay.example", "--wat"])
+        let err = ProbeCli::parse(os_args(&["probe", "--relay", "wss://relay.example", "--wat"]))
             .expect_err("unknown flag");
         assert!(
             matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "unknown flag --wat")
@@ -630,7 +644,7 @@ mod tests {
 
     #[test]
     fn parse_requires_relay_or_all() {
-        let err = ProbeCli::parse(["probe"]).expect_err("missing relay or all");
+        let err = ProbeCli::parse(os_args(&["probe"])).expect_err("missing relay or all");
         assert!(
             matches!(err, RelayProbeError::InvalidRelayUrl(message) if message == "missing --relay or --all")
         );
@@ -730,7 +744,7 @@ mod tests {
     fn resolve_targets_requires_env_list() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_RELAY_URLS", "", || {
-            let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+            let cli = ProbeCli::parse(os_args(&["probe", "--all"])).expect("cli");
             let err = resolve_targets(&cli).unwrap_err();
             assert_eq!(err.to_string(), "GITTREE_RELAY_URLS is empty");
         });
@@ -738,7 +752,8 @@ mod tests {
 
     #[test]
     fn resolve_targets_returns_relay_for_single_mode() {
-        let cli = ProbeCli::parse(["probe", "--relay", "wss://relay.example"]).expect("cli");
+        let cli =
+            ProbeCli::parse(os_args(&["probe", "--relay", "wss://relay.example"])).expect("cli");
         let targets = resolve_targets(&cli).expect("targets");
         assert_eq!(targets, vec!["wss://relay.example".to_string()]);
     }
@@ -765,7 +780,7 @@ mod tests {
             "GITTREE_RELAY_URLS",
             "wss://relay.one,wss://relay.two",
             || {
-                let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+                let cli = ProbeCli::parse(os_args(&["probe", "--all"])).expect("cli");
                 let targets = resolve_targets(&cli).expect("targets");
                 assert_eq!(
                     targets,
@@ -779,7 +794,7 @@ mod tests {
     fn resolve_targets_reports_invalid_relay_url_in_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_RELAY_URLS", "not-a-relay", || {
-            let cli = ProbeCli::parse(["probe", "--all"]).expect("cli");
+            let cli = ProbeCli::parse(os_args(&["probe", "--all"])).expect("cli");
             let err = resolve_targets(&cli).expect_err("invalid env relay url");
             assert!(err.to_string().contains("invalid relay url"));
         });
@@ -1284,13 +1299,13 @@ mod tests {
             super::ENV_STORAGE_READ_URL,
             "postgres://gittree:gittree@127.0.0.1:1/gittree",
             || {
-                let result = run_with_args([
+                let result = run_with_args(os_args(&[
                     "probe",
                     "--relay",
                     "wss://relay.example",
                     "--store",
                     "--no-active",
-                ]);
+                ]));
                 assert!(result.is_err());
             },
         );
@@ -1300,13 +1315,13 @@ mod tests {
     fn run_with_args_reports_storage_config_error_when_store_read_url_missing() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(super::ENV_STORAGE_READ_URL, "", || {
-            let result = run_with_args([
+            let result = run_with_args(os_args(&[
                 "probe",
                 "--relay",
                 "wss://relay.example",
                 "--store",
                 "--no-active",
-            ]);
+            ]));
             assert!(result.is_err());
         });
     }
@@ -1678,7 +1693,7 @@ mod tests {
 
     #[test]
     fn run_with_args_reports_cli_errors() {
-        let err = run_with_args(["probe"]).expect_err("missing args");
+        let err = run_with_args(os_args(&["probe"])).expect_err("missing args");
         assert!(err.to_string().contains("missing --relay or --all"));
     }
 
@@ -1686,7 +1701,7 @@ mod tests {
     fn run_with_args_reports_probe_config_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "0", || {
-            let err = run_with_args(["probe", "--relay", "wss://relay.example"])
+            let err = run_with_args(os_args(&["probe", "--relay", "wss://relay.example"]))
                 .expect_err("invalid relay probe config");
             assert!(err.to_string().contains("relay probe config error"));
         });
@@ -1696,7 +1711,7 @@ mod tests {
     fn run_with_args_reports_missing_targets_for_all_mode() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_RELAY_URLS", "", || {
-            let err = run_with_args(["probe", "--all"]).expect_err("missing targets");
+            let err = run_with_args(os_args(&["probe", "--all"])).expect_err("missing targets");
             assert_eq!(err.to_string(), "GITTREE_RELAY_URLS is empty");
         });
     }
