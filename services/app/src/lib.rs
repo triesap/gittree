@@ -344,8 +344,6 @@ fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
 fn build_router(state: AppUiState) -> Router {
     let routes = leptos_axum::generate_route_list(gittree_app_ui::GittreeApp);
     let base_path = state.base_path.clone();
-    let server_fn_state = state.clone();
-    let server_fn_context = move || provide_context(server_fn_state.clone());
     let shell = |_options: LeptosOptions| gittree_app_ui::GittreeApp();
 
     let app = Router::new()
@@ -359,14 +357,8 @@ fn build_router(state: AppUiState) -> Router {
             "/api/users/{npub}/repos",
             get(api_list_repos_by_owner_handler),
         )
-        .route(
-            "/api/{*fn_name}",
-            post({
-                let server_fn_context = server_fn_context.clone();
-                move |req| handle_server_fns_with_context(server_fn_context.clone(), req)
-            }),
-        )
-        .leptos_routes_with_context(&state, routes, || {}, gittree_app_ui::GittreeApp)
+        .route("/api/{*fn_name}", post(server_fn_route_handler))
+        .leptos_routes_with_context(&state, routes, provide_empty_context, gittree_app_ui::GittreeApp)
         .fallback(leptos_axum::file_and_error_handler::<AppUiState, _>(shell));
 
     let app = app.with_state(state);
@@ -376,6 +368,17 @@ fn build_router(state: AppUiState) -> Router {
     } else {
         Router::new().nest(&base_path, app)
     }
+}
+
+fn provide_empty_context() {}
+
+async fn server_fn_route_handler(
+    State(state): State<AppUiState>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    handle_server_fns_with_context(move || provide_context(state.clone()), req)
+        .await
+        .into_response()
 }
 
 #[derive(Debug)]
@@ -436,10 +439,11 @@ async fn health_handler() -> &'static str {
 mod tests {
     use super::{
         AppApiError, AppError, AppServiceConfig, AppServiceConfigError, AppUiState,
-        StorageConfigError, build_router, run_axum_server,
+        StorageConfigError, build_router, run_axum_server, server_fn_route_handler,
     };
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::extract::{Path, State};
+    use axum::http::{Method, Request, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::get;
     use gittree_app_core::RepoListResponse;
@@ -512,6 +516,11 @@ mod tests {
         assert_eq!(super::normalize_base_path("/"), "/");
         assert_eq!(super::normalize_base_path("ui"), "/ui");
         assert_eq!(super::normalize_base_path("/ui/"), "/ui");
+    }
+
+    #[test]
+    fn provide_empty_context_is_callable() {
+        super::provide_empty_context();
     }
 
     #[test]
@@ -786,12 +795,9 @@ mod tests {
     #[test]
     fn init_observability_returns_registry() {
         let first = super::init_observability();
-        let first_ok = first
-            .as_ref()
-            .ok()
-            .map(|handle| handle.prometheus_registry().is_some())
-            .unwrap_or(true);
-        assert!(first_ok);
+        if let Ok(handle) = first.as_ref() {
+            assert!(handle.prometheus_registry().is_some());
+        }
         let second = super::init_observability();
         assert!(matches!(
             second,
@@ -800,12 +806,6 @@ mod tests {
                     _
                 )))
         ));
-        let second_ok = second
-            .as_ref()
-            .ok()
-            .map(|handle| handle.prometheus_registry().is_some())
-            .unwrap_or(true);
-        assert!(second_ok);
     }
 
     #[tokio::test]
@@ -862,11 +862,16 @@ mod tests {
             .expect("response");
         assert_eq!(health_response.status(), StatusCode::OK);
 
+        let server_fn_path = leptos::server_fn::axum::server_fn_paths()
+            .find(|(path, method)| path.starts_with("/api/") && *method == Method::POST)
+            .map(|(path, _)| path.to_string())
+            .expect("registered /api server fn path");
+
         let server_fn_response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/coverage_context_hook")
+                    .uri(server_fn_path)
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
                     .expect("request"),
@@ -875,6 +880,31 @@ mod tests {
             .expect("response");
         assert_ne!(server_fn_response.status(), StatusCode::NOT_FOUND);
         assert_ne!(server_fn_response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn server_fn_route_handler_resolves_registered_paths() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let repositories: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(repositories, profiles);
+        let server_fn_path = leptos::server_fn::axum::server_fn_paths()
+            .find(|(path, method)| path.starts_with("/api/") && *method == Method::POST)
+            .map(|(path, _)| path.to_string())
+            .expect("registered /api server fn path");
+
+        let response = server_fn_route_handler(
+            State(state),
+            Request::builder()
+                .method("POST")
+                .uri(server_fn_path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await;
+        assert_ne!(response.status(), StatusCode::NOT_FOUND);
+        assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[test]
@@ -1300,5 +1330,56 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_handlers_execute_direct_invocations() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let record = RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: "repo".to_string(),
+            pubkey: vec![0x33; 32],
+            identifier: "repo".to_string(),
+        };
+        let pubkey_hex = pubkey_hex(0x33);
+        let npub = gittree_app_core::npub_from_bytes(&record.pubkey).expect("npub");
+        repositories
+            .upsert_mapping(record)
+            .await
+            .expect("insert mapping");
+        let profile = ProfileRecord::new(
+            &pubkey_hex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        repositories.upsert_profile(profile).await.expect("profile");
+
+        let profiles: Arc<dyn ProfileRepository> = repositories.clone();
+        let mappings: Arc<dyn RepoMappingRepository> = repositories;
+        let state = test_state(mappings, profiles);
+
+        let listed = super::api_list_repos_handler(State(state.clone()))
+            .await
+            .expect("list repos");
+        assert_eq!(listed.0.items.len(), 1);
+
+        let listed_for_owner =
+            super::api_list_repos_by_owner_handler(State(state.clone()), Path(npub.clone()))
+                .await
+                .expect("list owner repos");
+        assert_eq!(listed_for_owner.0.items.len(), 1);
+
+        let detail =
+            super::api_repo_detail_handler(State(state), Path((npub, "repo".to_string())))
+                .await
+                .expect("repo detail");
+        assert_eq!(detail.0.identifier, "repo");
     }
 }
