@@ -6,9 +6,7 @@ use std::io::Write;
 async fn main() {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr).await;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
+    exit_if_needed(exit_code, std::process::exit);
 }
 
 async fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -67,9 +65,18 @@ fn handle_main_result(result: Result<(), CoordinatorError>, stderr: &mut impl Wr
     }
 }
 
+fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
+where
+    F: FnOnce(i32) -> R,
+{
+    if exit_code != 0 {
+        let _ = exit_fn(exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, main_impl_with, run_with};
+    use super::{exit_if_needed, handle_main_result, main_impl_with, run_with};
     use gittree_coordinator::CoordinatorError;
 
     async fn serve_ok(_: ()) -> Result<(), CoordinatorError> {
@@ -140,6 +147,18 @@ mod tests {
         assert_eq!(exit_code, 1);
         let message = String::from_utf8(stderr).expect("utf8");
         assert!(message.contains("coordinator serve error: boom"));
+    }
+
+    #[test]
+    fn exit_if_needed_skips_exit_when_code_is_zero() {
+        exit_if_needed(0, |_| ());
+    }
+
+    #[test]
+    fn exit_if_needed_calls_exit_when_code_is_non_zero() {
+        let mut seen = None;
+        exit_if_needed(17, |code| seen = Some(code));
+        assert_eq!(seen, Some(17));
     }
 
     #[tokio::test]
