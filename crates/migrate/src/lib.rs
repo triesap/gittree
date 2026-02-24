@@ -446,6 +446,27 @@ mod tests {
         });
     }
 
+    #[test]
+    fn push_unique_candidate_adds_unique_values_only_once() {
+        let mut candidates = Vec::new();
+        push_unique_candidate(
+            &mut candidates,
+            Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string()),
+        );
+        push_unique_candidate(
+            &mut candidates,
+            Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string()),
+        );
+        push_unique_candidate(&mut candidates, Some("   ".to_string()));
+        push_unique_candidate(&mut candidates, None);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0],
+            "postgres://gittree:gittree@127.0.0.1:5432/gittree"
+        );
+    }
+
     #[tokio::test]
     async fn first_reachable_migration_database_url_with_returns_none_for_unreachable_candidates() {
         let candidates = vec!["postgres://gittree:gittree@127.0.0.1:1/gittree".to_string()];
