@@ -780,6 +780,24 @@ mod tests {
     }
 
     #[test]
+    fn env_numeric_parsers_return_none_when_vars_are_unset() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+        unsafe {
+            std::env::remove_var("GITTREE_STORAGE_MAX_CONNECTIONS");
+            std::env::remove_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS");
+        }
+        assert_eq!(
+            super::env_u32("GITTREE_STORAGE_MAX_CONNECTIONS").expect("u32"),
+            None
+        );
+        assert_eq!(
+            super::env_u64("GITTREE_STORAGE_IDLE_TIMEOUT_SECS").expect("u64"),
+            None
+        );
+    }
+
+    #[test]
     fn with_env_var_restores_existing_value() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
@@ -820,6 +838,28 @@ mod tests {
         unsafe {
             std::env::remove_var("GITTREE_WEBHOOK_TEST_REMOVED");
         }
+    }
+
+    #[test]
+    fn env_helpers_restore_unset_values_after_scope() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
+        unsafe {
+            std::env::remove_var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING");
+            std::env::remove_var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING");
+        }
+        with_env_var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING", "during", || {
+            assert_eq!(
+                std::env::var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING").expect("transient value"),
+                "during"
+            );
+        });
+        assert!(std::env::var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING").is_err());
+
+        with_removed_env_var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING", || {
+            assert!(std::env::var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING").is_err());
+        });
+        assert!(std::env::var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING").is_err());
     }
 
     #[test]
