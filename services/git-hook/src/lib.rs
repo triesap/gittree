@@ -618,6 +618,7 @@ pub fn handle_forgejo_push(
 
 #[cfg(test)]
 mod tests {
+    use super::ConfigError;
     use super::HookConfigError;
     use super::HookError;
     use super::HookMode;
@@ -849,6 +850,12 @@ mod tests {
             let err = HookMode::from_env().expect_err("invalid mode");
             assert_eq!(hook_config_error_kind(&err), ("invalid_mode", None));
         });
+    }
+
+    #[test]
+    fn hook_config_error_kind_handles_config_variant() {
+        let err = HookConfigError::Config(ConfigError::MissingEnv("MISSING"));
+        assert_eq!(hook_config_error_kind(&err), ("config", None));
     }
 
     #[test]
