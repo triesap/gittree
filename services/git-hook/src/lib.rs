@@ -233,7 +233,9 @@ fn read_from_reader(reader: &mut dyn std::io::Read) -> Result<String, HookServic
     let mut input = String::new();
     match reader.read_to_string(&mut input) {
         Ok(_) => Ok(input),
-        Err(err) => Err(HookServiceError::Core(format!("failed to read stdin: {err}"))),
+        Err(err) => Err(HookServiceError::Core(format!(
+            "failed to read stdin: {err}"
+        ))),
     }
 }
 
@@ -646,6 +648,7 @@ mod tests {
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -735,11 +738,13 @@ mod tests {
     }
 
     fn write_updates_file(contents: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("gittree-hook-updates-{nanos}.txt"));
+        let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("gittree-hook-updates-{nanos}-{suffix}.txt"));
         std::fs::write(&path, contents).expect("write updates file");
         path
     }
