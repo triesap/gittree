@@ -47,12 +47,11 @@ impl ControlAction {
         if content.trim().is_empty() {
             return Err(CoreError::MissingField("content"));
         }
-        let action: ControlAction = serde_json::from_str(content).map_err(|_| {
-            CoreError::InvalidField {
+        let action: ControlAction =
+            serde_json::from_str(content).map_err(|_| CoreError::InvalidField {
                 field: "content",
                 value: "invalid json".to_string(),
-            }
-        })?;
+            })?;
         action.validate()?;
         Ok(action)
     }
@@ -141,12 +140,12 @@ fn is_hex(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::ControlAction;
-    use crate::kinds::KIND_GITTREE_CONTROL;
     use crate::CoreError;
+    use crate::kinds::KIND_GITTREE_CONTROL;
 
     fn assert_invalid_field(json: &str, field: &'static str) {
-        let err = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-            .unwrap_err();
+        let err =
+            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0).unwrap_err();
         assert!(matches!(
             err,
             CoreError::InvalidField {
@@ -165,9 +164,8 @@ mod tests {
     #[test]
     fn parse_accepts_valid_payload() {
         let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
-        let action =
-            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-                .expect("action");
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
         assert_action_tag(action, "create_repo");
     }
 
@@ -175,10 +173,7 @@ mod tests {
     fn parse_rejects_wrong_kind() {
         let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree"}"#;
         let err = ControlAction::parse(1, json, KIND_GITTREE_CONTROL.0).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::InvalidField { field: "kind", .. }
-        ));
+        assert!(matches!(err, CoreError::InvalidField { field: "kind", .. }));
     }
 
     #[test]
@@ -204,9 +199,16 @@ mod tests {
     #[test]
     fn parse_accepts_valid_create_user_payload() {
         let json = r#"{"action":"create_user","username":"alice","email":"alice@example.com","password":"secret-password"}"#;
-        let action =
-            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-                .expect("action");
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
+        assert_action_tag(action, "create_user");
+    }
+
+    #[test]
+    fn parse_accepts_create_user_with_optional_flags() {
+        let json = r#"{"action":"create_user","username":"alice","email":"alice@example.com","password":"secret-password","admin":true,"must_change_password":false}"#;
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
         assert_action_tag(action, "create_user");
     }
 
@@ -215,13 +217,7 @@ mod tests {
         let json = r#"{"action":"create_org","name":""}"#;
         let err =
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::InvalidField {
-                field: "name",
-                ..
-            }
-        ));
+        assert!(matches!(err, CoreError::InvalidField { field: "name", .. }));
     }
 
     #[test]
@@ -241,18 +237,24 @@ mod tests {
     #[test]
     fn parse_accepts_non_empty_optional_full_name() {
         let json = r#"{"action":"create_org","name":"acme","full_name":"acme corp"}"#;
-        let action =
-            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-                .expect("action");
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
+        assert_action_tag(action, "create_org");
+    }
+
+    #[test]
+    fn parse_accepts_create_org_with_description() {
+        let json = r#"{"action":"create_org","name":"acme","description":"org description"}"#;
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
         assert_action_tag(action, "create_org");
     }
 
     #[test]
     fn parse_accepts_missing_optional_full_name() {
         let json = r#"{"action":"create_org","name":"acme"}"#;
-        let action =
-            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-                .expect("action");
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
         assert_action_tag(action, "create_org");
     }
 
@@ -277,10 +279,7 @@ mod tests {
             ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0).unwrap_err();
         assert!(matches!(
             err,
-            CoreError::InvalidField {
-                field: "owner",
-                ..
-            }
+            CoreError::InvalidField { field: "owner", .. }
         ));
     }
 
@@ -300,29 +299,111 @@ mod tests {
 
     #[test]
     fn parse_accepts_non_empty_optional_owner_and_identifier() {
-        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","identifier":"repo-slug","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
-        let action =
-            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-                .expect("action");
+        let json = r#"{"action":"create_repo","name":"hello-ngit","owner":"gittree","identifier":"repo-slug","description":"repo description","private":true,"pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
         assert_action_tag(action, "create_repo");
     }
 
     #[test]
     fn parse_accepts_missing_optional_owner_and_identifier() {
         let json = r#"{"action":"create_repo","name":"hello-ngit","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a","privkey":"22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"}"#;
-        let action =
-            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-                .expect("action");
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
         assert_action_tag(action, "create_repo");
     }
 
     #[test]
     fn parse_accepts_valid_pull_request_payload() {
         let json = r#"{"action":"create_pull_request","owner":"gittree","repo":"repo-one","head":"feature-branch","base":"main","title":"my pull request"}"#;
-        let action =
-            ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
-                .expect("action");
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
         assert_action_tag(action, "create_pull_request");
+    }
+
+    #[test]
+    fn parse_accepts_pull_request_with_optional_body_and_draft() {
+        let json = r#"{"action":"create_pull_request","owner":"gittree","repo":"repo-one","head":"feature-branch","base":"main","title":"my pull request","body":"details","draft":true}"#;
+        let action = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect("action");
+        assert_action_tag(action, "create_pull_request");
+    }
+
+    #[test]
+    fn parse_rejects_unknown_action() {
+        let json = r#"{"action":"delete_repo","name":"repo-one"}"#;
+        let err = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+            .expect_err("unknown action");
+        assert!(matches!(
+            err,
+            CoreError::InvalidField {
+                field: "content",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_missing_required_fields() {
+        let user_missing =
+            r#"{"action":"create_user","username":"alice","password":"secret-password"}"#;
+        let org_missing = r#"{"action":"create_org"}"#;
+        let repo_missing = r#"{"action":"create_repo","name":"hello-ngit","pubkey":"11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a"}"#;
+        let pr_missing = r#"{"action":"create_pull_request","owner":"gittree","repo":"repo-one","head":"feature","base":"main"}"#;
+        for json in [user_missing, org_missing, repo_missing, pr_missing] {
+            let err = ControlAction::parse(KIND_GITTREE_CONTROL.0, json, KIND_GITTREE_CONTROL.0)
+                .expect_err("missing required field should fail");
+            assert!(matches!(
+                err,
+                CoreError::InvalidField {
+                    field: "content",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn validate_accepts_constructed_variants() {
+        let actions = vec![
+            ControlAction::CreateUser {
+                username: "alice".to_string(),
+                email: "alice@example.com".to_string(),
+                password: "secret-password".to_string(),
+                admin: Some(true),
+                must_change_password: Some(false),
+            },
+            ControlAction::CreateOrg {
+                name: "acme".to_string(),
+                full_name: Some("acme corp".to_string()),
+                description: Some("org".to_string()),
+            },
+            ControlAction::CreateRepo {
+                name: "repo".to_string(),
+                owner: Some("gittree".to_string()),
+                identifier: Some("repo".to_string()),
+                description: Some("repo".to_string()),
+                private: Some(true),
+                pubkey: "11e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a"
+                    .to_string(),
+                privkey: "22e92f29b2e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8b"
+                    .to_string(),
+            },
+            ControlAction::CreatePullRequest {
+                owner: "gittree".to_string(),
+                repo: "repo".to_string(),
+                head: "feature".to_string(),
+                base: "main".to_string(),
+                title: "title".to_string(),
+                body: Some("body".to_string()),
+                draft: Some(false),
+            },
+        ];
+        for action in actions {
+            action
+                .validate()
+                .expect("constructed action should validate");
+        }
     }
 
     #[test]
@@ -333,15 +414,13 @@ mod tests {
 
     #[test]
     fn parse_rejects_create_user_with_empty_email() {
-        let json =
-            r#"{"action":"create_user","username":"alice","email":"  ","password":"secret-password"}"#;
+        let json = r#"{"action":"create_user","username":"alice","email":"  ","password":"secret-password"}"#;
         assert_invalid_field(json, "email");
     }
 
     #[test]
     fn parse_rejects_create_user_with_empty_password() {
-        let json =
-            r#"{"action":"create_user","username":"alice","email":"alice@example.com","password":"  "}"#;
+        let json = r#"{"action":"create_user","username":"alice","email":"alice@example.com","password":"  "}"#;
         assert_invalid_field(json, "password");
     }
 
