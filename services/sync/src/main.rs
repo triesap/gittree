@@ -164,9 +164,7 @@ mod tests {
 
     #[test]
     fn maybe_exit_skips_exit_for_zero_code() {
-        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        maybe_exit(0, |_| {});
-        assert!(!called.load(std::sync::atomic::Ordering::Relaxed));
+        maybe_exit(0, std::mem::drop);
     }
 
     #[test]

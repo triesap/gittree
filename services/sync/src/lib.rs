@@ -159,7 +159,10 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, SyncConfigError> {
 }
 
 fn env_path(key: &'static str) -> Result<PathBuf, SyncConfigError> {
-    let value = std::env::var(key).map_err(|_| SyncConfigError::MissingEnv(key))?;
+    let value = match std::env::var(key) {
+        Ok(value) => value,
+        Err(_) => return Err(SyncConfigError::MissingEnv(key)),
+    };
     if value.trim().is_empty() {
         return Err(SyncConfigError::InvalidEnv { key, value });
     }
@@ -759,9 +762,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        ENV_LOCK.lock().expect("env lock poisoned")
     }
 
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
@@ -863,6 +864,26 @@ mod tests {
                 });
             });
         });
+    }
+
+    #[test]
+    fn config_requires_repo_root() {
+        let _guard = env_guard();
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+                    without_env_var(super::ENV_SYNC_REPO_ROOT, || {
+                        let err = SyncConfig::from_env().expect_err("missing repo root");
+                        assert!(matches!(
+                            err,
+                            SyncConfigError::MissingEnv(super::ENV_SYNC_REPO_ROOT)
+                        ));
+                    });
+                });
+            },
+        );
     }
 
     #[test]
