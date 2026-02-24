@@ -1071,6 +1071,19 @@ mod tests {
     }
 
     #[test]
+    fn hook_config_reports_invalid_env_mode() {
+        with_env_vars(&[(super::ENV_HOOK_MODE, Some("invalid-mode"))], || {
+            let err = super::HookConfig::from_env_with_overrides(
+                None,
+                Some("http://127.0.0.1:8082".to_string()),
+                None,
+            )
+            .expect_err("invalid mode should fail");
+            assert_eq!(hook_config_error_kind(&err).0, "invalid_mode");
+        });
+    }
+
+    #[test]
     fn parse_updates_accepts_lines() {
         let input = "old new refs/heads/main\nold2 new2 refs/tags/v1";
         let updates = parse_updates(input).expect("updates");
@@ -1170,6 +1183,33 @@ mod tests {
     fn parse_forgejo_push_rejects_invalid_json() {
         let err = parse_forgejo_push("{not-json}").expect_err("invalid payload");
         assert_eq!(hook_error_kind(&err), "invalid_payload");
+    }
+
+    #[test]
+    fn parse_forgejo_push_rejects_empty_required_fields() {
+        let mut payload = serde_json::json!({
+            "ref": "refs/heads/main",
+            "before": "0".repeat(40),
+            "after": "1".repeat(40),
+            "repository": {
+                "name": "repo",
+                "owner": { "username": "owner" }
+            }
+        });
+
+        payload["before"] = serde_json::Value::String(String::new());
+        let before_err = parse_forgejo_push(&payload.to_string()).expect_err("empty before");
+        assert_eq!(hook_error_kind(&before_err), "invalid_payload");
+
+        payload["before"] = serde_json::Value::String("0".repeat(40));
+        payload["after"] = serde_json::Value::String(String::new());
+        let after_err = parse_forgejo_push(&payload.to_string()).expect_err("empty after");
+        assert_eq!(hook_error_kind(&after_err), "invalid_payload");
+
+        payload["after"] = serde_json::Value::String("1".repeat(40));
+        payload["repository"]["name"] = serde_json::Value::String(String::new());
+        let name_err = parse_forgejo_push(&payload.to_string()).expect_err("empty repo name");
+        assert_eq!(hook_error_kind(&name_err), "invalid_payload");
     }
 
     #[test]
@@ -1816,6 +1856,40 @@ mod tests {
         "#;
         let err = handle_forgejo_push(&resolver, &notifier, payload).unwrap_err();
         assert_eq!(hook_service_error_kind(&err), "reject");
+    }
+
+    struct ErrorResolver;
+
+    impl MappingResolver for ErrorResolver {
+        fn resolve_mapping(
+            &self,
+            _owner: &str,
+            _repo: &str,
+        ) -> Result<Option<RepoMapping>, super::HookServiceError> {
+            Err(super::HookServiceError::Core(
+                "mapping resolver failed".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn handle_forgejo_push_propagates_mapping_resolver_errors() {
+        let resolver = ErrorResolver;
+        let notifier = MockNotifier::new();
+        let payload = r#"
+        {
+            "ref": "refs/heads/main",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "1111111111111111111111111111111111111111",
+            "repository": {
+                "name": "repo",
+                "full_name": "owner/repo",
+                "owner": { "username": "owner" }
+            }
+        }
+        "#;
+        let err = handle_forgejo_push(&resolver, &notifier, payload).unwrap_err();
+        assert_eq!(hook_service_error_kind(&err), "core");
     }
 
     #[test]
