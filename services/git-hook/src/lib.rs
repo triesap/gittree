@@ -30,11 +30,19 @@ impl HookConfig {
         sync_url: Option<String>,
     ) -> Result<Self, HookConfigError> {
         let _services = ServicesConfig::from_env_validated().map_err(HookConfigError::Config)?;
-        let state_url = state_url
-            .or_else(|| std::env::var(ENV_STATE_URL).ok())
-            .ok_or(HookConfigError::MissingEnv(ENV_STATE_URL))?;
+        let state_url = if let Some(state_url) = state_url {
+            state_url
+        } else if let Ok(env_state_url) = std::env::var(ENV_STATE_URL) {
+            env_state_url
+        } else {
+            return Err(HookConfigError::MissingEnv(ENV_STATE_URL));
+        };
         let mode = mode.unwrap_or(HookMode::from_env()?);
-        let sync_url = sync_url.or_else(|| std::env::var(ENV_SYNC_URL).ok());
+        let sync_url = if let Some(sync_url) = sync_url {
+            Some(sync_url)
+        } else {
+            std::env::var(ENV_SYNC_URL).ok()
+        };
         if matches!(mode, HookMode::PostReceive) && sync_url.is_none() {
             return Err(HookConfigError::MissingEnv(ENV_SYNC_URL));
         }
@@ -81,7 +89,10 @@ pub enum HookMode {
 
 impl HookMode {
     pub fn from_env() -> Result<Self, HookConfigError> {
-        let mode = std::env::var(ENV_HOOK_MODE).unwrap_or_else(|_| "pre-receive".to_string());
+        let mode = match std::env::var(ENV_HOOK_MODE) {
+            Ok(mode) => mode,
+            Err(_) => "pre-receive".to_string(),
+        };
         match mode.as_str() {
             "pre-receive" => Ok(HookMode::PreReceive),
             "post-receive" => Ok(HookMode::PostReceive),
@@ -170,11 +181,10 @@ pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), Hoo
             return Err(HookServiceError::Parse(err));
         }
     };
-    let repo_path = if let Some(path) = std::env::var_os(ENV_HOOK_REPO_PATH)
-        .or_else(|| std::env::var_os("GIT_DIR"))
-        .map(PathBuf::from)
-    {
-        path
+    let repo_path = if let Some(path) = std::env::var_os(ENV_HOOK_REPO_PATH) {
+        PathBuf::from(path)
+    } else if let Some(path) = std::env::var_os("GIT_DIR") {
+        PathBuf::from(path)
     } else {
         match std::env::current_dir() {
             Ok(path) => path,
@@ -194,9 +204,13 @@ pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), Hoo
             }
         }
         HookMode::PostReceive => {
-            let sync_url = config.sync_url.ok_or_else(|| {
-                HookServiceError::Config(HookConfigError::MissingEnv(ENV_SYNC_URL))
-            })?;
+            let sync_url = if let Some(sync_url) = config.sync_url {
+                sync_url
+            } else {
+                return Err(HookServiceError::Config(HookConfigError::MissingEnv(
+                    ENV_SYNC_URL,
+                )));
+            };
             let notifier = HttpPostReceiveNotifier::new(sync_url, Duration::from_secs(5))?;
             if let Err(err) = handle_post_receive(&notifier, repo_path, &updates) {
                 eprintln!("post-receive notify failed: {err}");
@@ -261,13 +275,17 @@ pub fn parse_updates(input: &str) -> Result<Vec<RefUpdate>, HookError> {
         let mut parts = line.split_whitespace();
         let old = parts
             .next()
-            .ok_or_else(|| HookError::InvalidLine(line.to_string()))?;
-        let new = parts
-            .next()
-            .ok_or_else(|| HookError::InvalidLine(line.to_string()))?;
-        let reference = parts
-            .next()
-            .ok_or_else(|| HookError::InvalidLine(line.to_string()))?;
+            .expect("trimmed non-empty hook line must contain at least one token");
+        let new = if let Some(new) = parts.next() {
+            new
+        } else {
+            return Err(HookError::InvalidLine(line.to_string()));
+        };
+        let reference = if let Some(reference) = parts.next() {
+            reference
+        } else {
+            return Err(HookError::InvalidLine(line.to_string()));
+        };
         updates.push(RefUpdate {
             old: old.to_string(),
             new: new.to_string(),
@@ -324,12 +342,14 @@ pub fn parse_forgejo_push(payload: &str) -> Result<ForgejoPushEvent, HookError> 
         &parsed.repository.owner.username,
     )?;
 
-    let full_name = parsed.repository.full_name.unwrap_or_else(|| {
+    let full_name = if let Some(full_name) = parsed.repository.full_name {
+        full_name
+    } else {
         format!(
             "{}/{}",
             parsed.repository.owner.username, parsed.repository.name
         )
-    });
+    };
 
     if !full_name.contains('/') {
         return Err(HookError::InvalidPayload(format!(
@@ -601,9 +621,11 @@ pub fn handle_forgejo_push(
         Ok(event) => event,
         Err(err) => return Err(HookServiceError::Parse(err)),
     };
-    let mapping = resolver
-        .resolve_mapping(&event.owner, &event.repo)?
-        .ok_or_else(|| HookServiceError::Reject("missing repo mapping".to_string()))?;
+    let mapping = if let Some(mapping) = resolver.resolve_mapping(&event.owner, &event.repo)? {
+        mapping
+    } else {
+        return Err(HookServiceError::Reject("missing repo mapping".to_string()));
+    };
     let payload = PostReceivePayload {
         pubkey: mapping.pubkey,
         identifier: mapping.identifier,
@@ -1385,6 +1407,33 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
+            || {
+                super::run_hook(config, Some(&updates_path)).expect("run hook");
+            },
+        );
+        handle.join().expect("server join");
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_uses_git_dir_when_repo_path_env_missing() {
+        let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let updates_path = write_updates_file(&updates);
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let (sync_url, handle) =
+            start_mock_http_server("500 Internal Server Error", "text/plain", "nope");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: Some(sync_url),
+            mode: HookMode::PostReceive,
+        };
+        with_env_vars(
+            &[
+                (super::ENV_HOOK_REPO_PATH, None),
+                ("GIT_DIR", Some(repo_path.to_str().expect("repo path"))),
+            ],
             || {
                 super::run_hook(config, Some(&updates_path)).expect("run hook");
             },
