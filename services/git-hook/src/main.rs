@@ -1,5 +1,5 @@
 use clap::Parser;
-use gittree_git_hook::{HookServiceError, run_hook};
+use gittree_git_hook::{run_hook, HookServiceError};
 use std::io::Write;
 use std::path::Path;
 
@@ -68,8 +68,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        HookCli, HookServiceError, exit_if_needed, handle_main_result, init_observability,
-        run_with_cli, try_main,
+        exit_if_needed, handle_main_result, init_observability, run_with_cli, try_main, HookCli,
+        HookServiceError,
     };
     use clap::Parser;
     use std::path::PathBuf;
@@ -80,6 +80,16 @@ mod tests {
     }
 
     fn noop_exit(_code: i32) {}
+
+    fn hook_service_error_kind(err: &HookServiceError) -> &'static str {
+        match err {
+            HookServiceError::Config(_) => "config",
+            HookServiceError::Parse(_) => "parse",
+            HookServiceError::Core(_) => "core",
+            HookServiceError::State(_) => "state",
+            HookServiceError::Reject(_) => "reject",
+        }
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -147,7 +157,7 @@ mod tests {
             Err(HookServiceError::Core("runner boom".to_string()))
         })
         .expect_err("runner should fail");
-        assert!(matches!(err, HookServiceError::Core(_)));
+        assert_eq!(hook_service_error_kind(&err), "core");
     }
 
     #[test]

@@ -67,6 +67,14 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn hook_config_error_kind(err: &HookConfigError) -> &'static str {
+        match err {
+            HookConfigError::MissingEnv(_) => "missing_env",
+            HookConfigError::InvalidMode(_) => "invalid_mode",
+            HookConfigError::Config(_) => "config",
+        }
+    }
+
     fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded behind the env lock, and we restore the value after.
@@ -164,10 +172,19 @@ mod tests {
         }
         let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
         let err = HookRunConfig::from_env(cli).expect_err("missing env");
-        assert!(matches!(
-            err,
-            HookConfigError::MissingEnv(_) | HookConfigError::Config(_)
-        ));
+        assert_eq!(hook_config_error_kind(&err), "missing_env");
+    }
+
+    #[test]
+    fn run_config_propagates_nested_config_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_AUTH_BIND", "not-a-socket", || {
+            with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", || {
+                let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
+                let err = HookRunConfig::from_env(cli).expect_err("invalid services config");
+                assert_eq!(hook_config_error_kind(&err), "config");
+            });
+        });
     }
 
     #[test]

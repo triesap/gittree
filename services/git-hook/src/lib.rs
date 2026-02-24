@@ -173,8 +173,15 @@ pub fn run_hook_from_env(mode: HookMode) -> Result<(), HookServiceError> {
 }
 
 pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), HookServiceError> {
-    tracing::info!(mode = ?config.mode, "git hook configured");
-    validate_input_source(std::io::stdin().is_terminal(), stdin_file)?;
+    run_hook_with_terminal(config, stdin_file, std::io::stdin().is_terminal())
+}
+
+fn run_hook_with_terminal(
+    config: HookConfig,
+    stdin_file: Option<&Path>,
+    stdin_is_terminal: bool,
+) -> Result<(), HookServiceError> {
+    validate_input_source(stdin_is_terminal, stdin_file)?;
     let input = read_input(stdin_file)?;
     let updates = match parse_updates(&input) {
         Ok(updates) => updates,
@@ -202,7 +209,7 @@ pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), Hoo
     };
     match config.mode {
         HookMode::PreReceive => {
-            let fetcher = HttpStateFetcher::new(config.state_url, Duration::from_secs(5))?;
+            let fetcher = HttpStateFetcher::new(config.state_url, Duration::from_secs(5));
             let decision = evaluate_pre_receive(&fetcher, repo_path, &updates)?;
             if let UpdateDecision::Reject { reason } = decision {
                 return Err(HookServiceError::Reject(reason));
@@ -216,7 +223,7 @@ pub fn run_hook(config: HookConfig, stdin_file: Option<&Path>) -> Result<(), Hoo
                     ENV_SYNC_URL,
                 )));
             };
-            let notifier = HttpPostReceiveNotifier::new(sync_url, Duration::from_secs(5))?;
+            let notifier = HttpPostReceiveNotifier::new(sync_url, Duration::from_secs(5));
             if let Err(err) = handle_post_receive(&notifier, repo_path, &updates) {
                 eprintln!("post-receive notify failed: {err}");
             }
@@ -437,12 +444,12 @@ pub struct HttpStateFetcher {
 }
 
 impl HttpStateFetcher {
-    pub fn new(base_url: impl Into<String>, timeout: Duration) -> Result<Self, HookServiceError> {
-        Ok(Self {
+    pub fn new(base_url: impl Into<String>, timeout: Duration) -> Self {
+        Self {
             base_url: base_url.into(),
             client: reqwest::blocking::Client::new(),
             timeout,
-        })
+        }
     }
 
     fn state_endpoint(&self, pubkey: &str, identifier: &str) -> String {
@@ -566,12 +573,12 @@ pub struct HttpPostReceiveNotifier {
 }
 
 impl HttpPostReceiveNotifier {
-    pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Result<Self, HookServiceError> {
-        Ok(Self {
+    pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Self {
+        Self {
             endpoint: endpoint.into(),
             client: reqwest::blocking::Client::new(),
             timeout,
-        })
+        }
     }
 }
 
@@ -645,15 +652,6 @@ pub fn handle_forgejo_push(
 
 #[cfg(test)]
 mod tests {
-    use super::ConfigError;
-    use super::HookConfigError;
-    use super::HookError;
-    use super::HookMode;
-    use super::HookServiceError;
-    use super::MappingResolver;
-    use super::PostReceiveNotifier;
-    use super::PostReceivePayload;
-    use super::StateFetcher;
     use super::env_path;
     use super::evaluate_pre_receive;
     use super::handle_forgejo_push;
@@ -664,6 +662,15 @@ mod tests {
     use super::read_input;
     use super::validate_input_source;
     use super::verify_forgejo_signature;
+    use super::ConfigError;
+    use super::HookConfigError;
+    use super::HookError;
+    use super::HookMode;
+    use super::HookServiceError;
+    use super::MappingResolver;
+    use super::PostReceiveNotifier;
+    use super::PostReceivePayload;
+    use super::StateFetcher;
     use gittree_core::RepoMapping;
     use gittree_core::RepoState;
     use hmac::Mac;
@@ -895,6 +902,13 @@ mod tests {
                 env_path("GITTREE_TEST_PATH"),
                 Some(std::path::PathBuf::from("/tmp/input.txt"))
             );
+        });
+    }
+
+    #[test]
+    fn env_path_returns_none_for_missing_value() {
+        with_env_var("GITTREE_TEST_PATH", None, || {
+            assert!(env_path("GITTREE_TEST_PATH").is_none());
         });
     }
 
@@ -1620,10 +1634,44 @@ mod tests {
     }
 
     #[test]
+    fn run_hook_with_terminal_rejects_tty_without_stdin_file() {
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: None,
+            mode: HookMode::PreReceive,
+        };
+        let err = super::run_hook_with_terminal(config, None, true).expect_err("tty should fail");
+        assert_eq!(hook_service_error_kind(&err), "core");
+    }
+
+    #[test]
+    fn run_hook_with_terminal_reports_missing_stdin_file_error() {
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: None,
+            mode: HookMode::PreReceive,
+        };
+        let missing = std::path::Path::new("/tmp/does-not-exist-gittree-hook-run-hook.txt");
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            || {
+                let err = super::run_hook_with_terminal(config, Some(missing), false)
+                    .expect_err("missing stdin file should fail");
+                assert_eq!(hook_service_error_kind(&err), "core");
+            },
+        );
+    }
+
+    #[test]
     fn http_state_fetcher_returns_none_for_not_found() {
         let (base_url, handle) = start_mock_http_server("404 Not Found", "text/plain", "missing");
-        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
-            .expect("fetcher");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1));
         let state = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect("state fetch");
@@ -1635,8 +1683,7 @@ mod tests {
     fn http_state_fetcher_returns_error_on_non_success() {
         let (base_url, handle) =
             start_mock_http_server("500 Internal Server Error", "text/plain", "boom");
-        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
-            .expect("fetcher");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1));
         let err = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect_err("state should fail");
@@ -1651,8 +1698,7 @@ mod tests {
             "11".repeat(20)
         );
         let (base_url, handle) = start_mock_http_server("200 OK", "application/json", &body);
-        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
-            .expect("fetcher");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1));
         let state = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect("state fetch")
@@ -1667,8 +1713,7 @@ mod tests {
         let fetcher = super::HttpStateFetcher::new(
             "http://127.0.0.1:1",
             std::time::Duration::from_millis(100),
-        )
-        .expect("fetcher");
+        );
         let err = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect_err("state should fail");
@@ -1678,8 +1723,7 @@ mod tests {
     #[test]
     fn http_state_fetcher_reports_json_parse_errors() {
         let (base_url, handle) = start_mock_http_server("200 OK", "application/json", "{");
-        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1))
-            .expect("fetcher");
+        let fetcher = super::HttpStateFetcher::new(base_url, std::time::Duration::from_secs(1));
         let err = fetcher
             .latest_state("11".repeat(32).as_str(), "repo")
             .expect_err("state should fail");
@@ -1692,8 +1736,7 @@ mod tests {
         let (endpoint, handle) =
             start_mock_http_server("500 Internal Server Error", "text/plain", "nope");
         let notifier =
-            super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
-                .expect("notifier");
+            super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1));
         let payload = PostReceivePayload {
             pubkey: "11".repeat(32),
             identifier: "repo".to_string(),
@@ -1712,8 +1755,7 @@ mod tests {
     fn http_post_receive_notifier_accepts_success_status() {
         let (endpoint, handle) = start_mock_http_server("200 OK", "application/json", "{}");
         let notifier =
-            super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1))
-                .expect("notifier");
+            super::HttpPostReceiveNotifier::new(endpoint, std::time::Duration::from_secs(1));
         let payload = PostReceivePayload {
             pubkey: "11".repeat(32),
             identifier: "repo".to_string(),
@@ -1732,8 +1774,7 @@ mod tests {
         let notifier = super::HttpPostReceiveNotifier::new(
             "http://127.0.0.1:1",
             std::time::Duration::from_millis(100),
-        )
-        .expect("notifier");
+        );
         let payload = PostReceivePayload {
             pubkey: "11".repeat(32),
             identifier: "repo".to_string(),

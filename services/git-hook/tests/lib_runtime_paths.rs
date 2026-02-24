@@ -1,9 +1,9 @@
 use gittree_core::{RepoMapping, UpdateDecision};
 use gittree_git_hook::{
-    HookConfig, HookConfigError, HookError, HookMode, HookServiceError, HttpPostReceiveNotifier,
-    HttpStateFetcher, MappingResolver, PostReceiveNotifier, PostReceivePayload, RefUpdate,
-    StateFetcher, evaluate_pre_receive, handle_forgejo_push, handle_post_receive,
-    parse_forgejo_push, parse_updates, run_hook_from_env, verify_forgejo_signature,
+    evaluate_pre_receive, handle_forgejo_push, handle_post_receive, parse_forgejo_push,
+    parse_updates, run_hook_from_env, verify_forgejo_signature, HookConfig, HookConfigError,
+    HookError, HookMode, HookServiceError, HttpPostReceiveNotifier, HttpStateFetcher,
+    MappingResolver, PostReceiveNotifier, PostReceivePayload, RefUpdate, StateFetcher,
 };
 use hmac::Mac;
 use std::error::Error;
@@ -172,8 +172,7 @@ fn run_hook_from_env_covers_non_test_runtime_path() {
 #[test]
 fn integration_http_paths_cover_post_receive_runtime_instantiations() {
     let (endpoint, handle) = start_mock_http_server("200 OK", "application/json", "{}");
-    let notifier =
-        HttpPostReceiveNotifier::new(endpoint, Duration::from_secs(1)).expect("notifier new");
+    let notifier = HttpPostReceiveNotifier::new(endpoint, Duration::from_secs(1));
     let updates = vec![RefUpdate {
         old: "0".repeat(40),
         new: "1".repeat(40),
@@ -191,8 +190,7 @@ fn integration_generic_paths_cover_evaluate_and_forgejo_push() {
         new: "1".repeat(40),
         reference: format!("refs/nostr/{}", "b".repeat(64)),
     }];
-    let fetcher = HttpStateFetcher::new("http://127.0.0.1:8082", Duration::from_secs(1))
-        .expect("fetcher new");
+    let fetcher = HttpStateFetcher::new("http://127.0.0.1:8082", Duration::from_secs(1));
     let decision = evaluate_pre_receive(&fetcher, repo_path(), &updates).expect("decision");
     assert!(matches!(decision, UpdateDecision::Accept));
 
@@ -248,7 +246,7 @@ fn integration_state_fetcher_covers_runtime_latest_state_path() {
         "application/json",
         r#"{"identifier":"repo","state":{"refs/heads/main":"abc"}}"#,
     );
-    let fetcher = HttpStateFetcher::new(base_url, Duration::from_secs(1)).expect("fetcher");
+    let fetcher = HttpStateFetcher::new(base_url, Duration::from_secs(1));
     let state = fetcher
         .latest_state("pubkey", "repo")
         .expect("latest state call")
