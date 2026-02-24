@@ -974,16 +974,15 @@ mod tests {
         let content_type = content_type.to_string();
         let body = body.to_string();
         let handle = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
         });
         (format!("http://{addr}"), handle)
     }
@@ -993,12 +992,11 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         let response = response.to_vec();
         let handle = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request);
-                let _ = stream.write_all(&response);
-                let _ = stream.flush();
-            }
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
         });
         (format!("http://{addr}"), handle)
     }
@@ -1137,6 +1135,41 @@ mod tests {
     }
 
     #[test]
+    fn config_requires_upstream_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_value(ENV_UPSTREAM_URL, None, || {
+                    let err = GitHttpConfig::from_env().expect_err("missing upstream");
+                    assert!(matches!(
+                        err,
+                        GitHttpConfigError::MissingEnv(ENV_UPSTREAM_URL)
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_maps_auth_config_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var("GITTREE_AUTH_MAX_SKEW_SECONDS", "0", || {
+                        let err = GitHttpConfig::from_env().expect_err("auth config error");
+                        assert_eq!(config_error_label(&err), "config");
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn config_rejects_invalid_storage_numeric_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
@@ -1146,6 +1179,36 @@ mod tests {
                 with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
                     with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
                         let err = GitHttpConfig::from_env().expect_err("invalid storage value");
+                        assert_eq!(config_error_label(&err), "storage");
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_rejects_invalid_storage_min_connections_and_max_lifetime_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "oops", || {
+                        let err = GitHttpConfig::from_env().expect_err("invalid min connections");
+                        assert_eq!(config_error_label(&err), "storage");
+                    });
+                });
+            },
+        );
+
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "oops", || {
+                        let err = GitHttpConfig::from_env().expect_err("invalid max lifetime");
                         assert_eq!(config_error_label(&err), "storage");
                     });
                 });
@@ -1308,6 +1371,24 @@ mod tests {
             Some("service=git-upload-pack"),
         );
         assert_eq!(route_kind(&route_request(&request)), "not_found");
+    }
+
+    #[test]
+    fn route_request_rejects_empty_path_segments() {
+        let request = GitHttpRequest::new("GET", "/", Some("service=git-upload-pack"));
+        assert_eq!(route_kind(&route_request(&request)), "not_found");
+    }
+
+    #[test]
+    fn route_request_handles_info_refs_receive_pack_service() {
+        let request = GitHttpRequest::new(
+            "GET",
+            "/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git/info/refs",
+            Some("service=git-receive-pack"),
+        );
+        let route = route_request(&request);
+        assert_eq!(route_kind(&route), "info_refs");
+        assert_eq!(info_refs_service(&route), Some(GitHttpService::ReceivePack));
     }
 
     #[test]
@@ -1927,6 +2008,13 @@ mod tests {
     }
 
     #[test]
+    fn observability_init_second_call_reports_error_variant() {
+        let _ = OBSERVABILITY.get_or_init(init_observability_for_test);
+        let err = init_observability().expect_err("second init should fail");
+        assert_eq!(git_http_error_label(&err), "observability");
+    }
+
+    #[test]
     fn metrics_record_accepts_requests() {
         let _handle = OBSERVABILITY.get_or_init(init_observability_for_test);
         let metrics = GitHttpMetrics::new();
@@ -1934,8 +2022,8 @@ mod tests {
         metrics.record(&route, 200, Duration::from_millis(5));
     }
 
-    #[test]
-    fn upstream_error_and_service_build_paths_are_stable() {
+    #[tokio::test]
+    async fn upstream_error_and_service_build_paths_are_stable() {
         let upstream = UpstreamError::Request("failed".to_string());
         assert_eq!(upstream.to_string(), "failed");
 
@@ -1955,6 +2043,19 @@ mod tests {
             },
         };
         let err = super::build_repositories(&config).expect_err("invalid pool");
+        assert_eq!(git_http_error_label(&err), "storage");
+
+        let invalid_read_connection = GitHttpConfig {
+            storage: super::StorageConfig {
+                read_connection: "this is not a url".to_string(),
+                max_connections: 10,
+                min_connections: 2,
+                ..config.storage.clone()
+            },
+            ..config
+        };
+        let err = super::build_repositories(&invalid_read_connection)
+            .expect_err("invalid read connection");
         assert_eq!(git_http_error_label(&err), "storage");
     }
 
@@ -2004,6 +2105,29 @@ mod tests {
             .expect_err("serve error");
         assert_eq!(git_http_error_label(&serve_err), "serve");
         assert!(serve_err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn serve_with_returns_storage_error_before_bind() {
+        let config = GitHttpConfig {
+            bind: "127.0.0.1:0".to_string(),
+            upstream_url: "https://git.example".to_string(),
+            timeout: Duration::from_secs(1),
+            auth: test_auth(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 0,
+                min_connections: 0,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = super::serve_with(config, init_ok_handle, noop_server)
+            .await
+            .expect_err("storage error");
+        assert_eq!(git_http_error_label(&err), "storage");
     }
 
     #[tokio::test]
@@ -2108,6 +2232,22 @@ mod tests {
     fn payload_hash_handles_empty_and_non_empty_inputs() {
         assert!(super::payload_hash(&Bytes::new()).is_none());
         assert!(super::payload_hash(&Bytes::from_static(b"payload")).is_some());
+    }
+
+    #[test]
+    fn signed_event_skips_payload_tag_for_empty_body() {
+        let event = signed_event(
+            "http://localhost/npub1test/repo.git/git-receive-pack",
+            "POST",
+            &Bytes::new(),
+            super::unix_timestamp(),
+        );
+        assert!(
+            !event
+                .tags
+                .iter()
+                .any(|tag| tag.first().map(String::as_str) == Some("payload"))
+        );
     }
 
     #[test]

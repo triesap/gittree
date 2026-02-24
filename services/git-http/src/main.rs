@@ -6,9 +6,7 @@ use std::io::Write;
 async fn main() {
     dotenvy::dotenv().ok();
     let exit_code = handle_main_result(run().await, &mut std::io::stderr());
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    };
+    maybe_exit(exit_code, std::process::exit);
 }
 
 async fn run() -> Result<(), GitHttpError> {
@@ -42,11 +40,29 @@ fn handle_main_result(result: Result<(), GitHttpError>, stderr: &mut dyn Write) 
     }
 }
 
+fn maybe_exit<T>(exit_code: i32, exit_fn: impl FnOnce(i32) -> T) {
+    if exit_code != 0 {
+        let _ = exit_fn(exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, run_with};
+    use super::{handle_main_result, maybe_exit, run_with};
     use gittree_git_http::{GitHttpConfig, GitHttpError};
+    use std::cell::Cell;
     use std::time::Duration;
+
+    fn git_http_error_label(err: &GitHttpError) -> &'static str {
+        match err {
+            GitHttpError::Config(_) => "config",
+            GitHttpError::ObservabilityConfig(_) => "observability_config",
+            GitHttpError::Observability(_) => "observability",
+            GitHttpError::Storage(_) => "storage",
+            GitHttpError::Upstream(_) => "upstream",
+            GitHttpError::Serve(_) => "serve",
+        }
+    }
 
     async fn serve_ok(_: GitHttpConfig) -> Result<(), GitHttpError> {
         Ok(())
@@ -85,7 +101,7 @@ mod tests {
         )
         .await
         .expect_err("config error");
-        assert!(matches!(err, GitHttpError::Config(_)));
+        assert_eq!(git_http_error_label(&err), "config");
     }
 
     #[tokio::test]
@@ -96,7 +112,7 @@ mod tests {
         )
         .await
         .expect_err("serve error");
-        assert!(matches!(err, GitHttpError::Serve(_)));
+        assert_eq!(git_http_error_label(&err), "serve");
     }
 
     #[tokio::test]
@@ -123,5 +139,19 @@ mod tests {
             String::from_utf8(stderr).expect("utf8"),
             "git-http service failed: git-http serve error: boom\n"
         );
+    }
+
+    #[test]
+    fn maybe_exit_calls_exit_for_non_zero_codes() {
+        let captured = Cell::new(None);
+        maybe_exit(2, |code| captured.set(Some(code)));
+        assert_eq!(captured.get(), Some(2));
+    }
+
+    #[test]
+    fn maybe_exit_ignores_zero_code() {
+        let captured = Cell::new(None);
+        maybe_exit(0, |code| captured.set(Some(code)));
+        assert_eq!(captured.get(), None);
     }
 }
