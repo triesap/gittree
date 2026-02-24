@@ -48,8 +48,10 @@ impl GitHttpConfig {
     pub fn from_env() -> Result<Self, GitHttpConfigError> {
         let services = ServicesConfig::from_env_validated().map_err(GitHttpConfigError::Config)?;
         let auth = AuthConfig::from_env().map_err(GitHttpConfigError::Config)?;
-        let upstream_url = std::env::var(ENV_UPSTREAM_URL)
-            .map_err(|_| GitHttpConfigError::MissingEnv(ENV_UPSTREAM_URL))?;
+        let upstream_url = match std::env::var(ENV_UPSTREAM_URL) {
+            Ok(value) => value,
+            Err(_) => return Err(GitHttpConfigError::MissingEnv(ENV_UPSTREAM_URL)),
+        };
         if url::Url::parse(&upstream_url).is_err() {
             return Err(GitHttpConfigError::InvalidEnv {
                 key: ENV_UPSTREAM_URL,
@@ -411,14 +413,14 @@ pub struct ReqwestUpstreamClient {
 
 impl ReqwestUpstreamClient {
     pub fn new(timeout: Duration) -> Result<Self, GitHttpError> {
-        Self::new_with(timeout, |timeout| {
-            reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .map_err(|err| err.to_string())
-        })
+        let client = match reqwest::Client::builder().timeout(timeout).build() {
+            Ok(client) => client,
+            Err(err) => return Err(GitHttpError::Upstream(err.to_string())),
+        };
+        Ok(Self { client })
     }
 
+    #[cfg(test)]
     fn new_with<F>(timeout: Duration, build_client: F) -> Result<Self, GitHttpError>
     where
         F: FnOnce(Duration) -> Result<reqwest::Client, String>,
@@ -437,17 +439,17 @@ impl UpstreamClient for ReqwestUpstreamClient {
         let mut builder = self.client.request(request.method, request.url);
         builder = builder.headers(request.headers);
         builder = builder.body(request.body);
-        let response = builder
-            .send()
-            .await
-            .map_err(|err| UpstreamError::Request(err.to_string()))?;
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(err) => return Err(UpstreamError::Request(err.to_string())),
+        };
         let status =
             StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let headers = response.headers().clone();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|err| UpstreamError::Request(err.to_string()))?;
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(err) => return Err(UpstreamError::Request(err.to_string())),
+        };
         Ok(UpstreamResponse {
             status,
             headers,
@@ -698,41 +700,71 @@ fn build_request_url(
     headers: &HeaderMap,
     uri: &axum::http::Uri,
 ) -> Result<String, GitHttpHttpError> {
-    let host = match headers.get("host").and_then(|value| value.to_str().ok()) {
-        Some(host) => host,
-        None => {
-            return Err(GitHttpHttpError::BadRequest(
-                "missing host header".to_string(),
-            ));
+    let host = if let Some(value) = headers.get("host") {
+        match value.to_str() {
+            Ok(host) => host,
+            Err(_) => {
+                return Err(GitHttpHttpError::BadRequest(
+                    "missing host header".to_string(),
+                ));
+            }
         }
+    } else {
+        return Err(GitHttpHttpError::BadRequest(
+            "missing host header".to_string(),
+        ));
     };
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("http");
-    let path = uri
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or_else(|| uri.path());
+    let scheme = if let Some(value) = headers.get("x-forwarded-proto") {
+        match value.to_str() {
+            Ok(scheme) => scheme,
+            Err(_) => "http",
+        }
+    } else {
+        "http"
+    };
+    let path = if let Some(path_and_query) = uri.path_and_query() {
+        path_and_query.as_str()
+    } else {
+        uri.path()
+    };
     Ok(format!("{scheme}://{host}{path}"))
 }
 
 fn parse_nostr_auth(headers: &HeaderMap) -> Result<Nip98Event, GitHttpHttpError> {
-    let value = headers
-        .get(AUTH_HEADER)
-        .and_then(|header| header.to_str().ok())
-        .ok_or_else(|| GitHttpHttpError::Unauthorized("missing authorization".to_string()))?;
+    let value = if let Some(header) = headers.get(AUTH_HEADER) {
+        match header.to_str() {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(GitHttpHttpError::Unauthorized(
+                    "missing authorization".to_string(),
+                ));
+            }
+        }
+    } else {
+        return Err(GitHttpHttpError::Unauthorized(
+            "missing authorization".to_string(),
+        ));
+    };
     let value = value.trim();
     let Some(token) = value.strip_prefix("Nostr ") else {
         return Err(GitHttpHttpError::Unauthorized(
             "invalid authorization header".to_string(),
         ));
     };
-    let decoded = BASE64_STANDARD
-        .decode(token.as_bytes())
-        .map_err(|_| GitHttpHttpError::Unauthorized("invalid nostr authorization".to_string()))?;
-    serde_json::from_slice::<Nip98Event>(&decoded)
-        .map_err(|_| GitHttpHttpError::Unauthorized("invalid nostr event".to_string()))
+    let decoded = match BASE64_STANDARD.decode(token.as_bytes()) {
+        Ok(decoded) => decoded,
+        Err(_) => {
+            return Err(GitHttpHttpError::Unauthorized(
+                "invalid nostr authorization".to_string(),
+            ));
+        }
+    };
+    match serde_json::from_slice::<Nip98Event>(&decoded) {
+        Ok(event) => Ok(event),
+        Err(_) => Err(GitHttpHttpError::Unauthorized(
+            "invalid nostr event".to_string(),
+        )),
+    }
 }
 
 fn payload_hash(body: &Bytes) -> Option<String> {
@@ -850,10 +882,19 @@ pub fn route_request(request: &GitHttpRequest<'_>) -> GitHttpRoute {
 
 fn split_repo_segments(path: &str) -> Option<(String, String, Vec<String>)> {
     let trimmed = path.trim_start_matches('/');
-    let mut parts = trimmed.split('/').filter(|segment| !segment.is_empty());
+    let mut segments = Vec::new();
+    for segment in trimmed.split('/') {
+        if !segment.is_empty() {
+            segments.push(segment);
+        }
+    }
+    let mut parts = segments.into_iter();
     let npub = parts.next()?.to_string();
     let repo = parts.next()?.to_string();
-    let rest = parts.map(|segment| segment.to_string()).collect::<Vec<_>>();
+    let mut rest = Vec::new();
+    for segment in parts {
+        rest.push(segment.to_string());
+    }
     if rest.is_empty() {
         return None;
     }
@@ -865,8 +906,10 @@ fn normalize_repo_path(
     repo_segment: &str,
 ) -> Result<NormalizedRepo, GitHttpRouteError> {
     let path = Path::new("/").join(npub).join(repo_segment);
-    let parsed = gittree_core::parse_repo_path(&path)
-        .map_err(|err| GitHttpRouteError::InvalidRepo(err.to_string()))?;
+    let parsed = match gittree_core::parse_repo_path(&path) {
+        Ok(parsed) => parsed,
+        Err(err) => return Err(GitHttpRouteError::InvalidRepo(err.to_string())),
+    };
     Ok(NormalizedRepo {
         canonical_path: format!("/{}/{}.git", parsed.npub, parsed.identifier),
         identifier: parsed.identifier,
