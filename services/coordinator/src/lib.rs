@@ -325,10 +325,12 @@ async fn run_http_server_with_shutdown<Shutdown>(
 where
     Shutdown: Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, router)
+    if let Err(err) = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
-        .map_err(|err| CoordinatorError::Serve(err.to_string()))?;
+    {
+        return Err(CoordinatorError::Serve(err.to_string()));
+    }
     Ok(())
 }
 
@@ -572,7 +574,9 @@ pub fn build_provision_plan(
         .as_ref()
         .join(npub)
         .join(format!("{}.git", announcement.identifier));
-    parse_repo_path(&repo_path).map_err(|err| ProvisionPlanError::InvalidRepo(err.to_string()))?;
+    if let Err(err) = parse_repo_path(&repo_path) {
+        return Err(ProvisionPlanError::InvalidRepo(err.to_string()));
+    }
     let hooks_dir = repo_path.join("hooks");
     let pre_receive_hook = hooks_dir.join("pre-receive");
     let post_receive_hook = hooks_dir.join("post-receive");
@@ -1830,6 +1834,26 @@ mod tests {
     }
 
     #[test]
+    fn plan_builds_repo_paths_from_owned_pathbuf() {
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: Vec::new(),
+            web: Vec::new(),
+            relays: Vec::new(),
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let root = PathBuf::from("/var/lib/gittree");
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let plan = build_provision_plan(root.clone(), npub, &announcement).expect("plan");
+        assert_eq!(plan.repo_path, root.join(npub).join("repo.git"));
+    }
+
+    #[test]
     fn init_repo_creates_bare_repo() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
@@ -1852,6 +1876,21 @@ mod tests {
         let second = init_repo(&plan).expect("init again");
         assert!(!second.created);
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_init_helpers_reject_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_utf8 = PathBuf::from(OsString::from_vec(vec![0xff, b'a']));
+        let init_err = super::create_bare_repo(&non_utf8).expect_err("invalid path");
+        assert!(matches!(init_err, super::RepoInitError::InvalidPath(_)));
+
+        let entry = super::GitConfigEntry::new("core.bare", "true");
+        let config_err = super::apply_git_config(&non_utf8, &entry).expect_err("invalid path");
+        assert!(matches!(config_err, super::RepoInitError::InvalidPath(_)));
     }
 
     #[test]
@@ -2123,6 +2162,31 @@ mod tests {
                 .await
                 .expect("ignored");
         assert!(matches!(action, CoordinatorAction::Ignored));
+        assert!(transport.requests().is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn handle_event_with_storage_surfaces_parse_error() {
+        let invalid = RelayEvent {
+            kind: KIND_GIT_REPO_ANNOUNCEMENT.0,
+            event_id: "77".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: Vec::new(),
+        };
+        let temp_dir = temp_dir("gittree-invalid-storage-event");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
+        let storage = InMemoryRepositories::new();
+        let err =
+            handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &invalid)
+                .await
+                .expect_err("parse error expected");
+        assert!(matches!(err, super::CoordinatorEventError::Parse(_)));
         assert!(transport.requests().is_empty());
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -2488,6 +2552,22 @@ mod tests {
             .expect("bind listener");
         let result = super::run_http_server_with_shutdown(listener, Router::new(), async {}).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_http_server_with_pending_shutdown_can_be_aborted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let task = tokio::spawn(super::run_http_server_with_shutdown(
+            listener,
+            Router::new(),
+            std::future::pending(),
+        ));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let join_err = task.await.expect_err("aborted");
+        assert!(join_err.is_cancelled());
     }
 
     #[tokio::test]
@@ -3094,7 +3174,10 @@ mod tests {
     fn observability_init_returns_registry() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_unset_env_var("GITTREE_LOG_JSON", || {
-            let handle = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+            if OBSERVABILITY.get().is_none() {
+                let _ = OBSERVABILITY.set(init_observability().expect("init"));
+            }
+            let handle = OBSERVABILITY.get().expect("observability handle");
             assert!(handle.prometheus_registry().is_some());
         });
     }
