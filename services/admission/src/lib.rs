@@ -18,6 +18,7 @@ use gittree_storage::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -837,8 +838,17 @@ impl<R> Clone for AdmissionAppState<R> {
     }
 }
 
-pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
-    let _observability = init_observability()?;
+async fn serve_with<InitFn, InitOut, ServeFn, ServeFut>(
+    config: AdmissionConfig,
+    init_fn: InitFn,
+    serve_fn: ServeFn,
+) -> Result<(), AdmissionError>
+where
+    InitFn: FnOnce() -> Result<InitOut, AdmissionError>,
+    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
+    ServeFut: Future<Output = Result<(), std::io::Error>>,
+{
+    let _observability = init_fn()?;
     let repositories = build_repositories(&config)?;
     let cache = Arc::new(AdmissionCache::new(AdmissionCacheConfig::default()));
     let state = AdmissionAppState {
@@ -851,10 +861,21 @@ pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| AdmissionError::Serve(err.to_string()))?;
-    axum::serve(listener, router)
+    serve_fn(listener, router)
         .await
         .map_err(|err| AdmissionError::Serve(err.to_string()))?;
     Ok(())
+}
+
+pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
+    serve_with(config, init_observability, run_axum_server).await
+}
+
+fn run_axum_server(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> impl Future<Output = Result<(), std::io::Error>> {
+    async move { axum::serve(listener, router).await }
 }
 
 fn build_router<R>(state: AdmissionAppState<R>) -> Router
@@ -1029,10 +1050,13 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
+    use axum::routing::get;
     use gittree_config::{RelayCompatibilityConfig, RelayCompatibilityMode, ServicesConfig};
     use gittree_core::EventFilter;
     use gittree_core::RepoAnnouncement;
-    use gittree_core::kinds::{KIND_GIT_PATCH, KIND_GIT_REPO_STATE, KIND_GITTREE_CONTROL};
+    use gittree_core::kinds::{
+        KIND_GIT_PATCH, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GITTREE_CONTROL,
+    };
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoState};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRecord,
@@ -1042,6 +1066,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;
 
     #[test]
@@ -1597,6 +1622,89 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn serve_with_returns_ok_when_server_finishes_cleanly() {
+        let config = AdmissionConfig {
+            bind: "127.0.0.1:0".to_string(),
+            compatibility: RelayCompatibilityConfig::default(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 4,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            control_admin_keys: Vec::new(),
+        };
+
+        let result = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_server_errors() {
+        let config = AdmissionConfig {
+            bind: "127.0.0.1:0".to_string(),
+            compatibility: RelayCompatibilityConfig::default(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 4,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            control_admin_keys: Vec::new(),
+        };
+
+        let err = super::serve_with(
+            config,
+            || Ok(()),
+            |_listener, _router| async { Err(std::io::Error::other("boom")) },
+        )
+        .await
+        .expect_err("server error");
+        assert!(matches!(err, AdmissionError::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_can_start_and_be_aborted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route("/health", get(super::health_handler));
+
+        let task = tokio::spawn(async move { super::run_axum_server(listener, app).await });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect health socket");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+
+        task.abort();
+        let join_result = task.await.expect_err("aborted");
+        assert!(join_result.is_cancelled());
+    }
+
     #[test]
     fn rate_limiter_rejects_ip_over_limit() {
         let limiter = RateLimiter::new(RateLimitConfig::new(1, 0, Duration::from_secs(60)));
@@ -1662,6 +1770,25 @@ mod tests {
         assert!(matches!(
             decision,
             AdmissionDecision::RequiresRelatedEvents { .. }
+        ));
+    }
+
+    #[test]
+    fn evaluate_request_maps_core_reject_decision() {
+        let announcement = sample_announcement("repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_REPO_ANNOUNCEMENT.0 as u64,
+            "pubkey",
+            "event",
+            announcement.to_tags(),
+            None,
+            None,
+        )
+        .expect("request");
+        let decision = evaluate_request(&request).expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason } if reason.contains("missing relay host")
         ));
     }
 
@@ -1736,6 +1863,31 @@ mod tests {
             .await
             .expect("decision");
         assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_rejects_missing_repo_without_relay_host() {
+        let storage = InMemoryRepositories::new();
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            None,
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage(&request, &storage)
+            .await
+            .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason }
+                if reason.contains("repository not found for related event checks")
+        ));
     }
 
     #[tokio::test]
@@ -1951,6 +2103,30 @@ mod tests {
             decision,
             AdmissionDecision::Reject { reason }
                 if reason.contains("missing repo address for related event checks")
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_rejects_when_repo_lookup_errors() {
+        let storage = FailingStorage;
+        let pubkey = hex_32(0x11);
+        let address = format!("30617:{pubkey}:repo");
+        let request = AdmissionRequest::new(
+            KIND_GIT_PATCH.0 as u64,
+            "pubkey",
+            "event",
+            vec![vec!["a".to_string(), address]],
+            None,
+            None,
+        )
+        .expect("request");
+
+        let decision = evaluate_request_with_storage(&request, &storage)
+            .await
+            .expect("decision");
+        assert!(matches!(
+            decision,
+            AdmissionDecision::Reject { reason } if reason.contains("storage error")
         ));
     }
 
