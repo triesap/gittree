@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const TEST_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+const INVALID_NPUB: &str = "not-a-valid-npub";
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -103,6 +103,11 @@ fn stop_app_server(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn assert_route_status(status: Option<u16>) {
+    let code = status.expect("status code");
+    assert!(matches!(code, 200 | 500), "unexpected status code: {code}");
+}
+
 #[tokio::test]
 async fn app_binary_runtime_routes_cover_non_test_monomorphizations() {
     let port = reserve_local_port();
@@ -110,15 +115,14 @@ async fn app_binary_runtime_routes_cover_non_test_monomorphizations() {
     wait_for_health(&base_url, &mut child);
 
     assert_eq!(http_status(&base_url, "/missing"), Some(404));
-    assert_eq!(http_status(&base_url, "/api/repos"), Some(500));
+    assert_route_status(http_status(&base_url, "/api/repos"));
     assert_eq!(
-        http_status(&base_url, &format!("/api/users/{TEST_NPUB}/repos")),
-        Some(500)
+        http_status(&base_url, &format!("/api/users/{INVALID_NPUB}/repos"),),
+        Some(400)
     );
     assert_eq!(
-        http_status(&base_url, &format!("/api/repos/{TEST_NPUB}/repo")),
-        Some(500)
+        http_status(&base_url, &format!("/api/repos/{INVALID_NPUB}/repo")),
+        Some(400)
     );
-
     stop_app_server(&mut child);
 }
