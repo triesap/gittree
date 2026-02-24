@@ -1631,6 +1631,26 @@ mod tests {
                     })
                 ));
             });
+            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", || {
+                let err = CoordinatorConfig::from_env().expect_err("invalid min connections");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::Storage(super::StorageConfigError::InvalidEnv {
+                        key: super::ENV_STORAGE_MIN_CONNECTIONS,
+                        ..
+                    })
+                ));
+            });
+            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", || {
+                let err = CoordinatorConfig::from_env().expect_err("invalid max lifetime");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::Storage(super::StorageConfigError::InvalidEnv {
+                        key: super::ENV_STORAGE_MAX_LIFETIME_SECS,
+                        ..
+                    })
+                ));
+            });
         });
     }
 
@@ -1703,6 +1723,38 @@ mod tests {
                     ..
                 }
             ));
+        });
+    }
+
+    #[test]
+    fn config_rejects_missing_paths_during_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_required_coordinator_envs(|| {
+            with_unset_env_var(super::ENV_COORDINATOR_REPO_ROOT, || {
+                let err = CoordinatorConfig::from_env().expect_err("missing repo root");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::MissingEnv(super::ENV_COORDINATOR_REPO_ROOT)
+                ));
+            });
+            with_unset_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, || {
+                let err = CoordinatorConfig::from_env().expect_err("missing pre-receive hook");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::MissingEnv(
+                        super::ENV_COORDINATOR_PRE_RECEIVE_HOOK
+                    )
+                ));
+            });
+            with_unset_env_var(super::ENV_COORDINATOR_POST_RECEIVE_HOOK, || {
+                let err = CoordinatorConfig::from_env().expect_err("missing post-receive hook");
+                assert!(matches!(
+                    err,
+                    super::CoordinatorConfigError::MissingEnv(
+                        super::ENV_COORDINATOR_POST_RECEIVE_HOOK
+                    )
+                ));
+            });
         });
     }
 
