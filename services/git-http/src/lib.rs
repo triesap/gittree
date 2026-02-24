@@ -313,12 +313,14 @@ where
         auth,
     };
     let router = build_router(state);
-    let listener = tokio::net::TcpListener::bind(&config.bind)
-        .await
-        .map_err(|err| GitHttpError::Serve(err.to_string()))?;
-    serve_fn(listener, router)
-        .await
-        .map_err(|err| GitHttpError::Serve(err.to_string()))?;
+    let listener = match tokio::net::TcpListener::bind(&config.bind).await {
+        Ok(listener) => listener,
+        Err(err) => return Err(GitHttpError::Serve(err.to_string())),
+    };
+    match serve_fn(listener, router).await {
+        Ok(()) => Ok(()),
+        Err(err) => Err(GitHttpError::Serve(err.to_string())),
+    }?;
     Ok(())
 }
 
@@ -394,10 +396,22 @@ pub struct ReqwestUpstreamClient {
 
 impl ReqwestUpstreamClient {
     pub fn new(timeout: Duration) -> Result<Self, GitHttpError> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|err| GitHttpError::Upstream(err.to_string()))?;
+        Self::new_with(timeout, |timeout| {
+            reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(|err| err.to_string())
+        })
+    }
+
+    fn new_with<F>(timeout: Duration, build_client: F) -> Result<Self, GitHttpError>
+    where
+        F: FnOnce(Duration) -> Result<reqwest::Client, String>,
+    {
+        let client = match build_client(timeout) {
+            Ok(client) => client,
+            Err(err) => return Err(GitHttpError::Upstream(err)),
+        };
         Ok(Self { client })
     }
 }
@@ -525,9 +539,10 @@ where
     let auth_headers = headers.clone();
     headers.remove(axum::http::header::HOST);
     headers.remove(AUTH_HEADER);
-    let body = to_bytes(body, usize::MAX)
-        .await
-        .map_err(|err| GitHttpHttpError::Internal(err.to_string()))?;
+    let body = match to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(err) => return Err(GitHttpHttpError::Internal(err.to_string())),
+    };
 
     if matches!(route, GitHttpRoute::ReceivePack { .. }) {
         authorize_receive_pack(state, repo, &auth_headers, &parts.method, &parts.uri, &body)
@@ -540,11 +555,10 @@ where
         headers,
         body,
     };
-    let upstream_response = state
-        .upstream
-        .send(upstream_request)
-        .await
-        .map_err(|err| GitHttpHttpError::Upstream(err.to_string()))?;
+    let upstream_response = match state.upstream.send(upstream_request).await {
+        Ok(response) => response,
+        Err(err) => return Err(GitHttpHttpError::Upstream(err.to_string())),
+    };
 
     let mut response = Response::new(Body::from(upstream_response.body));
     *response.status_mut() = upstream_response.status;
@@ -559,13 +573,27 @@ async fn resolve_mapping<R>(
 where
     R: RepoMappingRepository + Send + Sync,
 {
-    let pubkey = hex::decode(&repo.pubkey)
-        .map_err(|_| GitHttpHttpError::Internal("invalid repo pubkey".to_string()))?;
-    let record = repositories
+    let pubkey = match hex::decode(&repo.pubkey) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err(GitHttpHttpError::Internal(
+                "invalid repo pubkey".to_string(),
+            ));
+        }
+    };
+    let record = match repositories
         .mapping_by_repo(&pubkey, &repo.identifier)
         .await
-        .map_err(|err| GitHttpHttpError::Storage(err.to_string()))?;
-    record.ok_or_else(|| GitHttpHttpError::NotFound("missing repo mapping".to_string()))
+    {
+        Ok(record) => record,
+        Err(err) => return Err(GitHttpHttpError::Storage(err.to_string())),
+    };
+    match record {
+        Some(record) => Ok(record),
+        None => Err(GitHttpHttpError::NotFound(
+            "missing repo mapping".to_string(),
+        )),
+    }
 }
 
 async fn authorize_receive_pack<R, U>(
@@ -590,8 +618,10 @@ where
         now: unix_timestamp(),
         max_skew_seconds: state.auth.max_skew_seconds as i64,
     };
-    let auth = validate_nip98(&event, &request)
-        .map_err(|err| GitHttpHttpError::Unauthorized(err.to_string()))?;
+    let auth = match validate_nip98(&event, &request) {
+        Ok(auth) => auth,
+        Err(err) => return Err(GitHttpHttpError::Unauthorized(err.to_string())),
+    };
     let maintainers = resolve_maintainers(state.repositories.as_ref(), repo).await?;
     if !maintainers
         .iter()
@@ -618,12 +648,21 @@ where
         if !seen.insert(pubkey.clone()) {
             continue;
         }
-        let pubkey_bytes = hex::decode(&pubkey)
-            .map_err(|_| GitHttpHttpError::Internal("invalid maintainer pubkey".to_string()))?;
-        let announcement = repositories
+        let pubkey_bytes = match hex::decode(&pubkey) {
+            Ok(pubkey_bytes) => pubkey_bytes,
+            Err(_) => {
+                return Err(GitHttpHttpError::Internal(
+                    "invalid maintainer pubkey".to_string(),
+                ));
+            }
+        };
+        let announcement = match repositories
             .latest_announcement(&pubkey_bytes, &repo.identifier)
             .await
-            .map_err(|err| GitHttpHttpError::Storage(err.to_string()))?;
+        {
+            Ok(announcement) => announcement,
+            Err(err) => return Err(GitHttpHttpError::Storage(err.to_string())),
+        };
         let Some(announcement) = announcement else {
             continue;
         };
@@ -644,10 +683,14 @@ fn build_request_url(
     headers: &HeaderMap,
     uri: &axum::http::Uri,
 ) -> Result<String, GitHttpHttpError> {
-    let host = headers
-        .get("host")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| GitHttpHttpError::BadRequest("missing host header".to_string()))?;
+    let host = match headers.get("host").and_then(|value| value.to_str().ok()) {
+        Some(host) => host,
+        None => {
+            return Err(GitHttpHttpError::BadRequest(
+                "missing host header".to_string(),
+            ));
+        }
+    };
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
@@ -882,7 +925,7 @@ mod tests {
     use super::route_request;
     use async_trait::async_trait;
     use axum::Router;
-    use axum::body::{Body, Bytes, to_bytes};
+    use axum::body::{Body, Bytes, HttpBody, to_bytes};
     use axum::http::{HeaderMap, Method, Request, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::get;
@@ -901,10 +944,12 @@ mod tests {
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::pin::Pin;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::OnceLock;
+    use std::task::{Context, Poll};
     use std::time::Duration;
     use tower::ServiceExt;
 
@@ -1468,6 +1513,12 @@ mod tests {
         }
     }
 
+    fn unavailable_postgres_repositories() -> super::PostgresRepositories {
+        let mut config = postgres_test_config();
+        config.storage.read_connection = "postgres://gittree:gittree@127.0.0.1:1/gittree".to_string();
+        super::build_repositories(&config).expect("repositories")
+    }
+
     fn sample_normalized_repo(pubkey: &str) -> super::NormalizedRepo {
         super::NormalizedRepo {
             npub: "npub1test".to_string(),
@@ -1535,14 +1586,24 @@ mod tests {
 
     struct MockUpstreamClient {
         calls: Mutex<Vec<UpstreamRequest>>,
-        response: UpstreamResponse,
+        response: Option<UpstreamResponse>,
+        error: Option<String>,
     }
 
     impl MockUpstreamClient {
         fn new(response: UpstreamResponse) -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
-                response,
+                response: Some(response),
+                error: None,
+            }
+        }
+
+        fn with_error(message: &str) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                response: None,
+                error: Some(message.to_string()),
             }
         }
     }
@@ -1552,9 +1613,27 @@ mod tests {
         async fn send(&self, request: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
             let mut calls = self.calls.lock().expect("calls");
             calls.push(request);
-            Ok(self.response.clone())
+            if let Some(message) = &self.error {
+                return Err(UpstreamError::Request(message.clone()));
+            }
+            Ok(self.response.clone().expect("mock response"))
         }
     }
+
+    struct FailingBody;
+
+    impl HttpBody for FailingBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            Poll::Ready(Some(Err(std::io::Error::other("body read failed"))))
+        }
+    }
+
 
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
@@ -2048,25 +2127,173 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn handle_git_route_returns_internal_when_request_body_fails() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
+            .expect("parse");
+        let mapping = RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo")
+            .expect("mapping");
+        repositories
+            .upsert_mapping(RepoMappingRecord::new(&mapping).expect("record"))
+            .await
+            .expect("mapping");
+        let upstream = Arc::new(MockUpstreamClient::new(UpstreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"upstream"),
+        }));
+        let state = GitHttpAppState {
+            auth: test_auth(),
+            repositories,
+            upstream,
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        };
+        let route = super::GitHttpRoute::UploadPack {
+            repo: super::normalize_repo_path(npub, "repo.git").expect("normalized"),
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/{npub}/repo.git/git-upload-pack"))
+            .body(Body::new(FailingBody))
+            .expect("request");
+        let err = super::handle_git_route(&state, &route, request)
+            .await
+            .expect_err("body read error");
+        assert_eq!(err.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn handle_git_route_returns_bad_gateway_when_upstream_send_fails() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let parsed = gittree_core::parse_repo_path(Path::new("/").join(npub).join("repo.git"))
+            .expect("parse");
+        let mapping = RepoMapping::new("owner", "repo", parsed.pubkey.clone(), "repo")
+            .expect("mapping");
+        repositories
+            .upsert_mapping(RepoMappingRecord::new(&mapping).expect("record"))
+            .await
+            .expect("mapping");
+        let state = GitHttpAppState {
+            auth: test_auth(),
+            repositories,
+            upstream: Arc::new(MockUpstreamClient::with_error("upstream failed")),
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        };
+        let route = super::GitHttpRoute::UploadPack {
+            repo: super::normalize_repo_path(npub, "repo.git").expect("normalized"),
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/{npub}/repo.git/git-upload-pack"))
+            .body(Body::from(Bytes::from_static(b"pkt-line")))
+            .expect("request");
+        let err = super::handle_git_route(&state, &route, request)
+            .await
+            .expect_err("upstream error");
+        assert_eq!(err.into_response().status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn resolve_mapping_maps_storage_errors_and_missing_records() {
+        let valid_pubkey = "11".repeat(32);
+        let repo = sample_normalized_repo(&valid_pubkey);
+
+        let unavailable = unavailable_postgres_repositories();
+        let storage_err = super::resolve_mapping(&unavailable, &repo)
+            .await
+            .expect_err("storage error");
+        assert_eq!(
+            storage_err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let missing_err = super::resolve_mapping(&InMemoryRepositories::new(), &repo)
+            .await
+            .expect_err("missing mapping");
+        assert_eq!(missing_err.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn authorize_receive_pack_rejects_invalid_nip98_event() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let upstream = Arc::new(MockUpstreamClient::new(UpstreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"upstream"),
+        }));
+        let state = GitHttpAppState {
+            auth: test_auth(),
+            repositories,
+            upstream,
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        };
+        let body = Bytes::from_static(b"payload");
+        let uri: axum::http::Uri = "/npub1test/repo.git/git-receive-pack"
+            .parse()
+            .expect("uri");
+        let url = format!("http://localhost{uri}");
+        let event = signed_event(&url, "GET", &body, super::unix_timestamp());
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event"));
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost".parse().expect("host"));
+        headers.insert(AUTH_HEADER, format!("Nostr {token}").parse().expect("auth"));
+        let err = super::authorize_receive_pack(
+            &state,
+            &sample_normalized_repo(&"11".repeat(32)),
+            &headers,
+            &Method::POST,
+            &uri,
+            &body,
+        )
+        .await
+        .expect_err("invalid nip98");
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn resolve_maintainers_maps_storage_errors() {
+        let repo = sample_normalized_repo(&"11".repeat(32));
+        let unavailable = unavailable_postgres_repositories();
+        let err = super::resolve_maintainers(&unavailable, &repo)
+            .await
+            .expect_err("storage error");
+        assert_eq!(err.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[test]
     fn observability_init_returns_registry() {
-        let handle = OBSERVABILITY.get_or_init(init_observability_for_test);
-        assert!(handle.prometheus_registry().is_some());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_value("GITTREE_METRICS_ENABLED", None, || {
+            let handle = OBSERVABILITY.get_or_init(init_observability_for_test);
+            assert!(handle.prometheus_registry().is_some());
+        });
     }
 
     #[test]
     fn observability_init_second_call_reports_error_variant() {
-        let _ = OBSERVABILITY.get_or_init(init_observability_for_test);
-        let err = init_observability().expect_err("second init should fail");
-        assert_eq!(git_http_error_label(&err), "observability");
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_value("GITTREE_METRICS_ENABLED", None, || {
+            let _ = OBSERVABILITY.get_or_init(init_observability_for_test);
+            let err = init_observability().expect_err("second init should fail");
+            assert_eq!(git_http_error_label(&err), "observability");
+        });
     }
 
     #[test]
     fn metrics_record_accepts_requests() {
-        let _handle = OBSERVABILITY.get_or_init(init_observability_for_test);
-        let metrics = GitHttpMetrics::new();
-        let route = GitHttpRoute::NotFound;
-        metrics.record(&route, 200, Duration::from_millis(5));
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_value("GITTREE_METRICS_ENABLED", None, || {
+            let _handle = OBSERVABILITY.get_or_init(init_observability_for_test);
+            let metrics = GitHttpMetrics::new();
+            let route = GitHttpRoute::NotFound;
+            metrics.record(&route, 200, Duration::from_millis(5));
+        });
     }
 
     #[tokio::test]
@@ -2429,6 +2656,17 @@ mod tests {
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body, Bytes::from_static(b"upstream"));
         handle.join().expect("server join");
+    }
+
+    #[test]
+    fn reqwest_upstream_client_new_maps_builder_errors() {
+        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| {
+            Err("builder failed".to_string())
+        });
+        assert!(result.is_err());
+        let err = result.err().expect("builder error expected");
+        assert_eq!(git_http_error_label(&err), "upstream");
+        assert!(err.to_string().contains("builder failed"));
     }
 
     #[tokio::test]

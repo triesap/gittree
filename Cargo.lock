@@ -2145,6 +2145,7 @@ dependencies = [
  "gittree-observability",
  "gittree-storage",
  "hex",
+ "http-body 1.0.1",
  "opentelemetry 0.23.0",
  "reqwest 0.12.28",
  "secp256k1",

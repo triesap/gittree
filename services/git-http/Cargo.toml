@@ -24,5 +24,6 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+http-body = "1"
 secp256k1 = "0.29"
 tower = "0.4"
