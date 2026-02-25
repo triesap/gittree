@@ -450,9 +450,11 @@ impl StateCache {
         match cached {
             Some(entry) if self.is_fresh(&entry) => Some(entry.value),
             Some(_) => {
-                if let Ok(mut entries) = self.state_entries.write() {
-                    entries.remove(key);
-                }
+                let _ = self
+                    .state_entries
+                    .write()
+                    .ok()
+                    .map(|mut entries| entries.remove(key));
                 None
             }
             None => None,
@@ -486,9 +488,11 @@ impl StateCache {
         match cached {
             Some(entry) if self.is_fresh(&entry) => Some(entry.value),
             Some(_) => {
-                if let Ok(mut entries) = self.maintainer_entries.write() {
-                    entries.remove(key);
-                }
+                let _ = self
+                    .maintainer_entries
+                    .write()
+                    .ok()
+                    .map(|mut entries| entries.remove(key));
                 None
             }
             None => None,
@@ -522,9 +526,11 @@ impl StateCache {
         match cached {
             Some(entry) if self.is_fresh(&entry) => Some(entry.value),
             Some(_) => {
-                if let Ok(mut entries) = self.relay_entries.write() {
-                    entries.remove(key);
-                }
+                let _ = self
+                    .relay_entries
+                    .write()
+                    .ok()
+                    .map(|mut entries| entries.remove(key));
                 None
             }
             None => None,
