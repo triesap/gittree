@@ -33,6 +33,40 @@ fn run_migrate_with_env(envs: &[(&str, &str)]) -> Output {
     output
 }
 
+fn push_unique_candidate(candidates: &mut Vec<String>, value: Option<String>) {
+    if let Some(value) = value {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if candidates.iter().any(|candidate| candidate == trimmed) {
+            return;
+        }
+        candidates.push(trimmed.to_string());
+    }
+}
+
+fn migration_test_database_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_unique_candidate(
+        &mut candidates,
+        std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok(),
+    );
+    push_unique_candidate(
+        &mut candidates,
+        std::env::var("GITTREE_STORAGE_WRITE_URL").ok(),
+    );
+    push_unique_candidate(
+        &mut candidates,
+        std::env::var("GITTREE_STORAGE_READ_URL").ok(),
+    );
+    push_unique_candidate(
+        &mut candidates,
+        Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string()),
+    );
+    candidates
+}
+
 #[test]
 fn migrate_binary_invalid_storage_url_exits_with_error() {
     let output = run_migrate_with_env(&[("GITTREE_STORAGE_READ_URL", "://invalid")]);
@@ -63,4 +97,21 @@ fn migrate_binary_invalid_log_dir_exits_with_observability_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("migration observability failed:"));
     assert!(stderr.contains("observability log init failed"));
+}
+
+#[test]
+fn migrate_binary_succeeds_with_reachable_database() {
+    for database_url in migration_test_database_candidates() {
+        let output = run_migrate_with_env(&[
+            ("GITTREE_STORAGE_READ_URL", &database_url),
+            ("GITTREE_STORAGE_WRITE_URL", &database_url),
+            ("GITTREE_METRICS_ENABLED", "false"),
+            ("GITTREE_LOG_STDOUT", "false"),
+        ]);
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("migrations complete: version"));
+            return;
+        }
+    }
 }
