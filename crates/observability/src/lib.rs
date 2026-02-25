@@ -365,7 +365,7 @@ mod tests {
         std::env::temp_dir().join(format!("{prefix}-{nanos}"))
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -396,11 +396,11 @@ mod tests {
     #[test]
     fn env_config_reads_flags() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_OTLP_ENDPOINT", "http://localhost:4317", || {
-            with_env_var("GITTREE_LOG_JSON", "true", || {
-                with_env_var("GITTREE_LOG_DIR", "logs-test", || {
-                    with_env_var("GITTREE_LOG_STDOUT", "false", || {
-                        with_env_var("GITTREE_METRICS_ENABLED", "false", || {
+        with_env_var("GITTREE_OTLP_ENDPOINT", "http://localhost:4317", &mut || {
+            with_env_var("GITTREE_LOG_JSON", "true", &mut || {
+                with_env_var("GITTREE_LOG_DIR", "logs-test", &mut || {
+                    with_env_var("GITTREE_LOG_STDOUT", "false", &mut || {
+                        with_env_var("GITTREE_METRICS_ENABLED", "false", &mut || {
                             let config = ObservabilityConfig::from_env("svc").expect("config");
                             assert_eq!(config.service_name, "svc");
                             assert_eq!(
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn env_config_allows_empty_log_dir() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_DIR", "", || {
+        with_env_var("GITTREE_LOG_DIR", "", &mut || {
             let config = ObservabilityConfig::from_env("svc").expect("config");
             assert_eq!(config.log_dir, None);
         });
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn env_config_rejects_invalid_bool() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "maybe", || {
+        with_env_var("GITTREE_LOG_JSON", "maybe", &mut || {
             let err = ObservabilityConfig::from_env("svc").expect_err("invalid");
             assert!(err.to_string().contains("GITTREE_LOG_JSON"));
         });
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn env_config_rejects_invalid_log_stdout_bool() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_STDOUT", "maybe", || {
+        with_env_var("GITTREE_LOG_STDOUT", "maybe", &mut || {
             let err = ObservabilityConfig::from_env("svc").expect_err("invalid");
             assert!(err.to_string().contains("GITTREE_LOG_STDOUT"));
         });
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn env_config_rejects_invalid_metrics_enabled_bool() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_METRICS_ENABLED", "maybe", || {
+        with_env_var("GITTREE_METRICS_ENABLED", "maybe", &mut || {
             let err = ObservabilityConfig::from_env("svc").expect_err("invalid");
             assert!(err.to_string().contains("GITTREE_METRICS_ENABLED"));
         });
@@ -457,9 +457,9 @@ mod tests {
     #[test]
     fn env_config_uses_defaults_for_empty_bool_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "", || {
-            with_env_var("GITTREE_LOG_STDOUT", "", || {
-                with_env_var("GITTREE_METRICS_ENABLED", "", || {
+        with_env_var("GITTREE_LOG_JSON", "", &mut || {
+            with_env_var("GITTREE_LOG_STDOUT", "", &mut || {
+                with_env_var("GITTREE_METRICS_ENABLED", "", &mut || {
                     let config = ObservabilityConfig::from_env("svc").expect("config");
                     assert!(!config.log_json);
                     assert!(config.log_stdout);
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn env_config_handles_empty_and_absent_otlp_endpoint() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_OTLP_ENDPOINT", "", || {
+        with_env_var("GITTREE_OTLP_ENDPOINT", "", &mut || {
             let config = ObservabilityConfig::from_env("svc").expect("config");
             assert!(config.otlp_endpoint.is_none());
         });
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn init_with_subscriber_accepts_valid_rust_log_env_filter() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("RUST_LOG", "debug", || {
+        with_env_var("RUST_LOG", "debug", &mut || {
             assert!(tracing_subscriber::EnvFilter::try_from_default_env().is_ok());
             let mut config = ObservabilityConfig::default();
             config.log_dir = None;
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn init_with_subscriber_falls_back_for_invalid_rust_log_env_filter() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("RUST_LOG", "=", || {
+        with_env_var("RUST_LOG", "=", &mut || {
             assert!(tracing_subscriber::EnvFilter::try_from_default_env().is_err());
             let mut config = ObservabilityConfig::default();
             config.log_dir = None;
@@ -697,7 +697,7 @@ mod tests {
         unsafe {
             std::env::set_var("GITTREE_TEST_OBS_KEY", "before");
         }
-        with_env_var("GITTREE_TEST_OBS_KEY", "after", || {
+        with_env_var("GITTREE_TEST_OBS_KEY", "after", &mut || {
             assert_eq!(
                 std::env::var("GITTREE_TEST_OBS_KEY").ok().as_deref(),
                 Some("after")
