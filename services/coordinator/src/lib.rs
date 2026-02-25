@@ -2057,11 +2057,11 @@ mod tests {
 
         let init_err = super::create_bare_repo_with_git(&repo_path, "gittree-missing-git")
             .expect_err("missing git binary should fail");
-        assert!(matches!(init_err, super::RepoInitError::Io(_)));
+        assert!(init_err.to_string().contains("repo init io error"));
 
         let config_err = super::apply_git_config_with_git(&repo_path, &entry, "gittree-missing-git")
             .expect_err("missing git binary should fail");
-        assert!(matches!(config_err, super::RepoInitError::Io(_)));
+        assert!(config_err.to_string().contains("repo init io error"));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2128,7 +2128,7 @@ mod tests {
             post_receive_source: temp_dir.join("missing-post-receive"),
         };
         let err = super::install_hooks(&plan, &config).expect_err("missing post source");
-        assert!(matches!(err, super::HookInstallError::MissingSource(_)));
+        assert!(err.to_string().contains("missing hook source"));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2147,23 +2147,70 @@ mod tests {
             post_receive_source: post_source,
         };
         let create_err = super::install_hooks(&plan, &config).expect_err("create dir should fail");
-        assert!(matches!(create_err, super::HookInstallError::Io(_)));
+        assert!(create_err.to_string().contains("hook install io error"));
 
         let copy_err = super::install_hook(&pre_source, &temp_dir.join("missing").join("hook"))
             .expect_err("copy should fail");
-        assert!(matches!(copy_err, super::HookInstallError::Io(_)));
+        assert!(copy_err.to_string().contains("hook install io error"));
 
         let metadata_err =
             super::ensure_executable(Path::new("/path/that/does/not/exist")).expect_err("missing path");
-        assert!(matches!(metadata_err, super::HookInstallError::Io(_)));
+        assert!(metadata_err.to_string().contains("hook install io error"));
 
         #[cfg(unix)]
         {
             let chmod_err = super::ensure_executable(Path::new("/dev/null"))
                 .expect_err("permission change should fail");
-            assert!(matches!(chmod_err, super::HookInstallError::Io(_)));
+            assert!(chmod_err.to_string().contains("hook install io error"));
         }
 
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn install_hooks_reports_first_and_second_install_failures() {
+        let temp_dir = temp_dir("gittree-hook-install-failures");
+        let plan = sample_plan(temp_dir.join("repo.git"));
+        fs::create_dir_all(&plan.hooks_dir).expect("hooks dir");
+
+        let pre_source_dir = temp_dir.join("pre-dir");
+        fs::create_dir_all(&pre_source_dir).expect("pre source dir");
+        let post_source_file = temp_dir.join("post-receive");
+        fs::write(&post_source_file, "#!/bin/sh\necho post\n").expect("post source");
+        let first_fail = HookInstallConfig {
+            pre_receive_source: pre_source_dir,
+            post_receive_source: post_source_file.clone(),
+        };
+        let first_err = super::install_hooks(&plan, &first_fail).expect_err("first install fails");
+        assert!(first_err.to_string().contains("hook install io error"));
+
+        let pre_source_file = temp_dir.join("pre-receive");
+        fs::write(&pre_source_file, "#!/bin/sh\necho pre\n").expect("pre source");
+        let post_source_dir = temp_dir.join("post-dir");
+        fs::create_dir_all(&post_source_dir).expect("post source dir");
+        let second_fail = HookInstallConfig {
+            pre_receive_source: pre_source_file,
+            post_receive_source: post_source_dir,
+        };
+        let second_err =
+            super::install_hooks(&plan, &second_fail).expect_err("second install fails");
+        assert!(second_err.to_string().contains("hook install io error"));
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_hook_maps_ensure_executable_failure_after_copy() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = temp_dir("gittree-hook-symlink-perm");
+        let source = temp_dir.join("pre-receive");
+        fs::write(&source, "#!/bin/sh\necho pre\n").expect("source");
+        let destination = temp_dir.join("pre-link");
+        symlink("/dev/null", &destination).expect("symlink");
+        let err = super::install_hook(&source, &destination).expect_err("chmod failure");
+        assert!(err.to_string().contains("hook install io error"));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
