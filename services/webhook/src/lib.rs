@@ -666,12 +666,9 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_removed_env_var("GITTREE_STORAGE_READ_URL", &mut || {
             let err = WebhookConfig::from_env().expect_err("missing read url");
-            assert!(matches!(
-                err,
-                WebhookConfigError::Storage(StorageConfigError::MissingEnv(
-                    "GITTREE_STORAGE_READ_URL"
-                ))
-            ));
+            assert!(err
+                .to_string()
+                .contains("missing env GITTREE_STORAGE_READ_URL"));
         });
 
         with_env_var(
@@ -681,13 +678,7 @@ mod tests {
                 with_env_var("GITTREE_SYNC_URL", "   ", &mut || {
                     with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
                         let err = WebhookConfig::from_env().expect_err("invalid sync url");
-                        assert!(matches!(
-                            err,
-                            WebhookConfigError::InvalidEnv {
-                                key: "GITTREE_SYNC_URL",
-                                ..
-                            }
-                        ));
+                        assert!(err.to_string().contains("invalid env GITTREE_SYNC_URL"));
                     });
                 });
             },
@@ -706,35 +697,22 @@ mod tests {
                         with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "nope", &mut || {
                             let err =
                                 WebhookConfig::from_env().expect_err("invalid max connections");
-                            assert!(matches!(
-                                err,
-                                WebhookConfigError::Storage(StorageConfigError::InvalidEnv {
-                                    key: "GITTREE_STORAGE_MAX_CONNECTIONS",
-                                    ..
-                                })
-                            ));
+                            assert!(err
+                                .to_string()
+                                .contains("invalid env GITTREE_STORAGE_MAX_CONNECTIONS"));
                         });
                         with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", &mut || {
                             with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", &mut || {
                                 let err =
                                     WebhookConfig::from_env().expect_err("invalid pool bounds");
-                                assert!(matches!(
-                                    err,
-                                    WebhookConfigError::Storage(StorageConfigError::InvalidConfig(
-                                        _
-                                    ))
-                                ));
+                                assert!(err.to_string().contains("webhook storage config error"));
                             });
                         });
                         with_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "invalid", &mut || {
                             let err = WebhookConfig::from_env().expect_err("invalid idle timeout");
-                            assert!(matches!(
-                                err,
-                                WebhookConfigError::Storage(StorageConfigError::InvalidEnv {
-                                    key: "GITTREE_STORAGE_IDLE_TIMEOUT_SECS",
-                                    ..
-                                })
-                            ));
+                            assert!(err
+                                .to_string()
+                                .contains("invalid env GITTREE_STORAGE_IDLE_TIMEOUT_SECS"));
                         });
                     });
                 });
@@ -810,22 +788,15 @@ mod tests {
         with_removed_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", &mut || {
             let err = super::env_required_string("GITTREE_WEBHOOK_TEST_REQUIRED")
                 .expect_err("missing env");
-            assert!(matches!(
-                err,
-                WebhookConfigError::MissingEnv("GITTREE_WEBHOOK_TEST_REQUIRED")
-            ));
+            assert_eq!(err.to_string(), "missing env GITTREE_WEBHOOK_TEST_REQUIRED");
         });
 
         with_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", "   ", &mut || {
             let err = super::env_required_string("GITTREE_WEBHOOK_TEST_REQUIRED")
                 .expect_err("invalid env");
-            assert!(matches!(
-                err,
-                WebhookConfigError::InvalidEnv {
-                    key: "GITTREE_WEBHOOK_TEST_REQUIRED",
-                    ..
-                }
-            ));
+            assert!(err
+                .to_string()
+                .contains("invalid env GITTREE_WEBHOOK_TEST_REQUIRED"));
         });
     }
 
@@ -899,7 +870,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", &mut || {
             let err = super::init_observability().expect_err("invalid observability env");
-            assert!(matches!(err, WebhookError::ObservabilityConfig(_)));
+            assert!(err.to_string().contains("webhook observability config error"));
         });
     }
 
@@ -937,7 +908,7 @@ mod tests {
             let err = runtime
                 .block_on(super::serve(config))
                 .expect_err("observability config error");
-            assert!(matches!(err, WebhookError::ObservabilityConfig(_)));
+            assert!(err.to_string().contains("webhook observability config error"));
         });
     }
 
@@ -1300,7 +1271,7 @@ mod tests {
             forgejo_secret: "secret".to_string(),
         };
         let err = super::build_repositories(&config).expect_err("expected error");
-        assert!(matches!(err, WebhookError::Storage(_)));
+        assert!(err.to_string().contains("webhook storage error"));
     }
 
     #[tokio::test]
@@ -1362,7 +1333,8 @@ mod tests {
             "http://localhost:8084",
             Err::<reqwest::Client, _>("builder failed"),
         );
-        assert!(matches!(result, Err(message) if message.contains("builder failed")));
+        let message = result.err().expect("builder error");
+        assert!(message.contains("builder failed"));
     }
 
     #[tokio::test]
@@ -1413,7 +1385,7 @@ mod tests {
         let err = super::serve_with_init(config, || Ok(()))
             .await
             .expect_err("serve error");
-        assert!(matches!(err, WebhookError::Serve(_)));
+        assert!(err.to_string().contains("webhook serve error"));
     }
 
     #[tokio::test]
@@ -1451,6 +1423,6 @@ mod tests {
     fn map_serve_result_maps_io_errors() {
         let err = super::map_serve_result(Err(std::io::Error::other("boom")))
             .expect_err("serve error");
-        assert!(matches!(err, WebhookError::Serve(message) if message.contains("boom")));
+        assert_eq!(err.to_string(), "webhook serve error: boom");
     }
 }
