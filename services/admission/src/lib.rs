@@ -638,10 +638,11 @@ pub async fn evaluate_request_with_storage_mode(
                     RelayCompatibilityMode::Strict => Ok(AdmissionDecision::Reject {
                         reason: format!("relay incompatible: {relay_url}"),
                     }),
-                    RelayCompatibilityMode::Warn => {
-                        warn!(relay_url = %relay_url, "relay incompatible; allowing");
-                        Ok(decision.clone())
-                    }
+                    RelayCompatibilityMode::Warn => Ok(warn_and_allow(
+                        relay_url,
+                        "relay incompatible; allowing",
+                        &decision,
+                    )),
                     RelayCompatibilityMode::Allow => Ok(decision.clone()),
                 };
             }
@@ -654,10 +655,11 @@ pub async fn evaluate_request_with_storage_mode(
                     RelayCompatibilityMode::Strict => Ok(AdmissionDecision::Reject {
                         reason: format!("relay compatibility missing: {relay_url}"),
                     }),
-                    RelayCompatibilityMode::Warn => {
-                        warn!(relay_url = %relay_url, "relay compatibility missing; allowing");
-                        Ok(decision.clone())
-                    }
+                    RelayCompatibilityMode::Warn => Ok(warn_and_allow(
+                        relay_url,
+                        "relay compatibility missing; allowing",
+                        &decision,
+                    )),
                     RelayCompatibilityMode::Allow => Ok(decision.clone()),
                 };
             }
@@ -667,10 +669,11 @@ pub async fn evaluate_request_with_storage_mode(
                     RelayCompatibilityMode::Strict => Ok(AdmissionDecision::Reject {
                         reason: format!("storage error: {err}"),
                     }),
-                    RelayCompatibilityMode::Warn => {
-                        warn!(relay_url = %relay_url, "storage error on compatibility; allowing");
-                        Ok(decision.clone())
-                    }
+                    RelayCompatibilityMode::Warn => Ok(warn_and_allow(
+                        relay_url,
+                        "storage error on compatibility; allowing",
+                        &decision,
+                    )),
                     RelayCompatibilityMode::Allow => Ok(decision.clone()),
                 };
             }
@@ -697,6 +700,15 @@ pub async fn evaluate_request_with_storage_mode(
             reason: format!("storage error: {err}"),
         }),
     }
+}
+
+fn warn_and_allow(
+    relay_url: &str,
+    message: &'static str,
+    decision: &AdmissionDecision,
+) -> AdmissionDecision {
+    warn!(relay_url = %relay_url, "{message}");
+    decision.clone()
 }
 
 pub async fn evaluate_request_cached(
