@@ -2,10 +2,10 @@ use gittree_state::{StateConfig, StateError, serve};
 use std::future::Future;
 use std::io::Write;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let mut stderr = std::io::stderr();
-    let exit_code = main_impl(&mut stderr).await;
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let exit_code = runtime.block_on(main_impl(&mut stderr));
     maybe_exit(exit_code, std::process::exit);
 }
 
@@ -67,7 +67,7 @@ fn handle_main_result(result: Result<(), StateError>, stderr: &mut impl Write) -
 
 fn maybe_exit<T>(exit_code: i32, exit_fn: impl FnOnce(i32) -> T) {
     if exit_code != 0 {
-        let _ = exit_fn(exit_code);
+        exit_fn(exit_code);
     }
 }
 
