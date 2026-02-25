@@ -765,7 +765,7 @@ mod tests {
         ENV_LOCK.lock().expect("env lock poisoned")
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -782,7 +782,7 @@ mod tests {
         }
     }
 
-    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
+    fn without_env_var(key: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -803,10 +803,10 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_SYNC_BIND", "127.0.0.1:9092", || {
-                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                        with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
+            &mut || {
+                with_env_var("GITTREE_SYNC_BIND", "127.0.0.1:9092", &mut || {
+                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                        with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
                             let config = SyncConfig::from_env().expect("config");
                             assert_eq!(config.bind, "127.0.0.1:9092");
                             assert_eq!(
@@ -828,12 +828,12 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
-                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
-                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
-                            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
+                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", &mut || {
+                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", &mut || {
+                            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                                     let config = SyncConfig::from_env().expect("config");
                                     assert_eq!(config.storage.max_connections, 10);
                                     assert_eq!(config.storage.min_connections, 2);
@@ -851,9 +851,9 @@ mod tests {
     #[test]
     fn config_requires_storage_read_url() {
         let _guard = env_guard();
-        with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-            with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
-                without_env_var(ENV_STORAGE_READ_URL, || {
+        with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+            with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
+                without_env_var(ENV_STORAGE_READ_URL, &mut || {
                     let err = SyncConfig::from_env().expect_err("missing storage read url");
                     assert!(matches!(
                         err,
@@ -872,9 +872,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    without_env_var(super::ENV_SYNC_REPO_ROOT, || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    without_env_var(super::ENV_SYNC_REPO_ROOT, &mut || {
                         let err = SyncConfig::from_env().expect_err("missing repo root");
                         assert!(matches!(
                             err,
@@ -892,10 +892,10 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
-                        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
+                        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "oops", &mut || {
                             let err = SyncConfig::from_env().expect_err("invalid max connections");
                             assert!(matches!(
                                 err,
@@ -906,7 +906,7 @@ mod tests {
                             ));
                         });
 
-                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", &mut || {
                             let err = SyncConfig::from_env().expect_err("invalid idle timeout");
                             assert!(matches!(
                                 err,
@@ -924,9 +924,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var(super::ENV_SYNC_REPO_ROOT, "   ", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "   ", &mut || {
                         let err = SyncConfig::from_env().expect_err("blank repo root");
                         assert!(matches!(
                             err,
@@ -947,11 +947,11 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
-                        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
+                        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                                 let err = SyncConfig::from_env().expect_err("invalid pool bounds");
                                 assert!(matches!(
                                     err,
@@ -971,9 +971,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", || {
-                    with_env_var("GITTREE_RELAY_URLS", "not-a-url", || {
+            &mut || {
+                with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
+                    with_env_var("GITTREE_RELAY_URLS", "not-a-url", &mut || {
                         let err = SyncConfig::from_env().expect_err("invalid relay url");
                         assert!(matches!(err, SyncConfigError::Config(_)));
                     });
@@ -989,7 +989,7 @@ mod tests {
         unsafe {
             std::env::set_var(KEY, "before");
         }
-        with_env_var(KEY, "during", || {
+        with_env_var(KEY, "during", &mut || {
             assert_eq!(std::env::var(KEY).ok().as_deref(), Some("during"));
         });
         assert_eq!(std::env::var(KEY).ok().as_deref(), Some("before"));
@@ -1002,8 +1002,8 @@ mod tests {
     fn without_env_var_restores_previous_value() {
         let _guard = env_guard();
         const KEY: &str = "GITTREE_SYNC_TEST_ENV_RESTORE";
-        with_env_var(KEY, "before", || {
-            without_env_var(KEY, || {
+        with_env_var(KEY, "before", &mut || {
+            without_env_var(KEY, &mut || {
                 assert!(std::env::var(KEY).is_err());
             });
             assert_eq!(std::env::var(KEY).ok().as_deref(), Some("before"));
@@ -1700,7 +1700,7 @@ mod tests {
     #[test]
     fn observability_init_returns_registry() {
         let _guard = env_guard();
-        without_env_var("GITTREE_LOG_JSON", || {
+        without_env_var("GITTREE_LOG_JSON", &mut || {
             let _ = init_observability();
             let second = init_observability();
             assert!(matches!(
@@ -1715,7 +1715,7 @@ mod tests {
     #[test]
     fn observability_init_reports_config_error() {
         let _guard = env_guard();
-        with_env_var("GITTREE_LOG_JSON", "not-a-bool", || {
+        with_env_var("GITTREE_LOG_JSON", "not-a-bool", &mut || {
             let err = super::load_observability_config().expect_err("invalid observability config");
             assert!(matches!(
                 err,
