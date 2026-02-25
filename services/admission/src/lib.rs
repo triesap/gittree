@@ -18,7 +18,7 @@ use gittree_storage::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -840,13 +840,13 @@ impl<R> Clone for AdmissionAppState<R> {
     }
 }
 
-async fn serve_with<InitFn, InitOut, ServeFn, ServeFut>(
+async fn serve_with<InitFn, ServeFn, ServeFut>(
     config: AdmissionConfig,
     init_fn: InitFn,
     serve_fn: ServeFn,
 ) -> Result<(), AdmissionError>
 where
-    InitFn: FnOnce() -> Result<InitOut, AdmissionError>,
+    InitFn: FnOnce() -> Result<(), AdmissionError>,
     ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
     ServeFut: Future<Output = Result<(), std::io::Error>>,
 {
@@ -870,14 +870,14 @@ where
 }
 
 pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
-    serve_with(config, init_observability, run_axum_server).await
+    serve_with(config, || init_observability().map(|_| ()), run_axum_server).await
 }
 
 fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
 ) -> impl Future<Output = Result<(), std::io::Error>> {
-    async move { axum::serve(listener, router).await }
+    axum::serve(listener, router).into_future()
 }
 
 fn build_router<R>(state: AdmissionAppState<R>) -> Router
@@ -1111,16 +1111,20 @@ mod tests {
             super::ENV_STORAGE_READ_URL,
             "postgres://localhost/test",
             &mut || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "not-a-number", &mut || {
-                    let err = AdmissionConfig::from_env().expect_err("invalid max connections");
-                    assert!(matches!(
-                        err,
-                        AdmissionConfigError::Storage(StorageConfigError::InvalidEnv {
-                            key: super::ENV_STORAGE_MAX_CONNECTIONS,
-                            ..
-                        })
-                    ));
-                });
+                with_env_var(
+                    super::ENV_STORAGE_MAX_CONNECTIONS,
+                    "not-a-number",
+                    &mut || {
+                        let err = AdmissionConfig::from_env().expect_err("invalid max connections");
+                        assert!(matches!(
+                            err,
+                            AdmissionConfigError::Storage(StorageConfigError::InvalidEnv {
+                                key: super::ENV_STORAGE_MAX_CONNECTIONS,
+                                ..
+                            })
+                        ));
+                    },
+                );
 
                 with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "NaN", &mut || {
                     let err = AdmissionConfig::from_env().expect_err("invalid idle timeout");
