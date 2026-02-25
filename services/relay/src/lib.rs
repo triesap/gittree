@@ -468,12 +468,12 @@ mod tests {
         }
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let _restore = EnvRestore::set(key, value);
         f();
     }
 
-    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
+    fn without_env_var(key: &str, f: &mut dyn FnMut()) {
         let _restore = EnvRestore::clear(key);
         f();
     }
@@ -495,7 +495,7 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 let config = RelayConfig::from_env().expect("config");
                 assert_eq!(config.bind, "0.0.0.0:8080");
                 assert_eq!(
@@ -512,10 +512,10 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
-                    with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "9", || {
-                        with_env_var(ENV_ADMISSION_FALLBACK, "accept", || {
+            &mut || {
+                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", &mut || {
+                    with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "9", &mut || {
+                        with_env_var(ENV_ADMISSION_FALLBACK, "accept", &mut || {
                             let config = RelayConfig::from_env().expect("config");
                             let admission = config.admission.expect("admission config");
                             assert_eq!(admission.endpoint, "http://localhost:8081/decide");
@@ -534,9 +534,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
-                    with_env_var(ENV_ADMISSION_FALLBACK, "nope", || {
+            &mut || {
+                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", &mut || {
+                    with_env_var(ENV_ADMISSION_FALLBACK, "nope", &mut || {
                         let err = RelayConfig::from_env().unwrap_err();
                         assert!(err.to_string().contains("invalid admission fallback"));
                     });
@@ -551,9 +551,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                         let config = RelayConfig::from_env().expect("config");
                         assert_eq!(config.storage.idle_timeout_secs, None);
                         assert_eq!(config.storage.max_lifetime_secs, None);
@@ -569,8 +569,8 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "", || {
+            &mut || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "", &mut || {
                     let config = RelayConfig::from_env().expect("config");
                     assert_eq!(config.storage.max_connections, 10);
                 });
@@ -584,8 +584,8 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "bad", || {
+            &mut || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "bad", &mut || {
                     let err = RelayConfig::from_env().expect_err("invalid max connections");
                     assert!(matches!(
                         err,
@@ -605,12 +605,12 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_STORAGE_APP_NAME, "gittree-relay", || {
-                    with_env_var("GITTREE_RELAY_POLICY_MAX_MESSAGE_BYTES", "4096", || {
-                        with_env_var("GITTREE_RELAY_POLICY_MAX_SUBSCRIPTIONS", "7", || {
-                            with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "120", || {
-                                with_env_var("GITTREE_RELAY_POLICY_AUTH_REQUIRED", "true", || {
+            &mut || {
+                with_env_var(ENV_STORAGE_APP_NAME, "gittree-relay", &mut || {
+                    with_env_var("GITTREE_RELAY_POLICY_MAX_MESSAGE_BYTES", "4096", &mut || {
+                        with_env_var("GITTREE_RELAY_POLICY_MAX_SUBSCRIPTIONS", "7", &mut || {
+                            with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "120", &mut || {
+                                with_env_var("GITTREE_RELAY_POLICY_AUTH_REQUIRED", "true", &mut || {
                                     let config = RelayConfig::from_env().expect("config");
                                     let policy = Policy::default();
                                     let doc = build_nip11_document(&config, &policy, None);
@@ -645,7 +645,7 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 let config = RelayConfig::from_env().expect("config");
                 let policy = Policy::default();
                 let tenant = RelayTenantRecord::new(
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn config_requires_storage_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        without_env_var(ENV_STORAGE_READ_URL, || {
+        without_env_var(ENV_STORAGE_READ_URL, &mut || {
             let err = RelayConfig::from_env().unwrap_err();
             assert!(err.to_string().contains("missing env"));
             assert!(err.to_string().contains(ENV_STORAGE_READ_URL));
@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn observability_init_reports_invalid_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "definitely-not-bool", || {
+        with_env_var("GITTREE_LOG_JSON", "definitely-not-bool", &mut || {
             let err = init_observability().expect_err("invalid observability env");
             assert!(err.to_string().contains("observability config error"));
         });
@@ -753,7 +753,7 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 let path = write_temp_services_config(
                     r#"
 [services.relay]
@@ -773,13 +773,13 @@ bind = "127.0.0.1:9010"
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_ADMISSION_URL, " ", || {
+            &mut || {
+                with_env_var(ENV_ADMISSION_URL, " ", &mut || {
                     let err = RelayConfig::from_env().expect_err("invalid endpoint");
                     assert!(err.to_string().contains("invalid admission endpoint"));
                 });
-                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
-                    with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "bad", || {
+                with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", &mut || {
+                    with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "bad", &mut || {
                         let err = RelayConfig::from_env().expect_err("invalid timeout");
                         assert!(err.to_string().contains("invalid admission timeout"));
                     });
@@ -794,16 +794,16 @@ bind = "127.0.0.1:9010"
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", &mut || {
                     let err = RelayConfig::from_env().expect_err("invalid timeout");
                     assert!(
                         err.to_string()
                             .contains(super::ENV_STORAGE_IDLE_TIMEOUT_SECS)
                     );
                 });
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = RelayConfig::from_env().expect_err("invalid config");
                         assert!(err.to_string().contains("min_connections"));
                     });
@@ -818,8 +818,8 @@ bind = "127.0.0.1:9010"
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "bad", || {
+            &mut || {
+                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "bad", &mut || {
                     let err = RelayConfig::from_env().expect_err("invalid min connections");
                     assert!(matches!(
                         err,
@@ -829,7 +829,7 @@ bind = "127.0.0.1:9010"
                         })
                     ));
                 });
-                with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "bad", || {
+                with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "bad", &mut || {
                     let err = RelayConfig::from_env().expect_err("invalid max lifetime");
                     assert!(matches!(
                         err,
@@ -849,7 +849,7 @@ bind = "127.0.0.1:9010"
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 let mut path = std::env::temp_dir();
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -868,8 +868,8 @@ bind = "127.0.0.1:9010"
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", &mut || {
                     let err = RelayConfig::from_env().expect_err("invalid policy");
                     assert!(err.to_string().contains("config error"));
                 });
@@ -887,7 +887,7 @@ bind = "127.0.0.1:9010"
 "#,
         );
 
-        without_env_var(ENV_STORAGE_READ_URL, || {
+        without_env_var(ENV_STORAGE_READ_URL, &mut || {
             let err = RelayConfig::from_toml_file(&path).expect_err("missing storage env");
             assert!(err.to_string().contains("missing env"));
             assert!(err.to_string().contains(ENV_STORAGE_READ_URL));
@@ -896,12 +896,12 @@ bind = "127.0.0.1:9010"
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_POLICY_MAX_LIMIT", "bad", &mut || {
                     let err = RelayConfig::from_toml_file(&path).expect_err("invalid policy");
                     assert!(err.to_string().contains("config error"));
                 });
-                with_env_var(ENV_ADMISSION_URL, " ", || {
+                with_env_var(ENV_ADMISSION_URL, " ", &mut || {
                     let err = RelayConfig::from_toml_file(&path).expect_err("invalid admission");
                     assert!(err.to_string().contains("invalid admission endpoint"));
                 });
@@ -917,9 +917,9 @@ bind = "127.0.0.1:9010"
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "3", || {
-                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "42", || {
+            &mut || {
+                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "3", &mut || {
+                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "42", &mut || {
                         let config = RelayConfig::from_env().expect("config");
                         assert_eq!(config.storage.min_connections, 3);
                         assert_eq!(config.storage.max_lifetime_secs, Some(42));
@@ -984,14 +984,14 @@ bind = "127.0.0.1:9010"
     #[test]
     fn admission_env_defaults_and_empty_fallback_resolve_to_reject() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
-            without_env_var(ENV_ADMISSION_FALLBACK, || {
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", &mut || {
+            without_env_var(ENV_ADMISSION_FALLBACK, &mut || {
                 let config = super::admission_from_env()
                     .expect("admission")
                     .expect("configured");
                 assert_eq!(config.fallback, AdmissionFallback::Reject);
             });
-            with_env_var(ENV_ADMISSION_FALLBACK, "", || {
+            with_env_var(ENV_ADMISSION_FALLBACK, "", &mut || {
                 let config = super::admission_from_env()
                     .expect("admission")
                     .expect("configured");
@@ -1003,8 +1003,8 @@ bind = "127.0.0.1:9010"
     #[test]
     fn admission_env_empty_timeout_uses_default_timeout() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
-            with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "", || {
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", &mut || {
+            with_env_var(ENV_ADMISSION_TIMEOUT_SECS, "", &mut || {
                 let config = super::admission_from_env()
                     .expect("admission")
                     .expect("configured");
@@ -1019,8 +1019,8 @@ bind = "127.0.0.1:9010"
     #[test]
     fn admission_env_fallback_parsing_trims_and_ignores_case() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
-            with_env_var(ENV_ADMISSION_FALLBACK, "  AcCePt  ", || {
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", &mut || {
+            with_env_var(ENV_ADMISSION_FALLBACK, "  AcCePt  ", &mut || {
                 let config = super::admission_from_env()
                     .expect("admission")
                     .expect("configured");
@@ -1032,8 +1032,8 @@ bind = "127.0.0.1:9010"
     #[test]
     fn admission_env_fallback_parses_explicit_reject() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", || {
-            with_env_var(ENV_ADMISSION_FALLBACK, " reject ", || {
+        with_env_var(ENV_ADMISSION_URL, "http://localhost:8081/decide", &mut || {
+            with_env_var(ENV_ADMISSION_FALLBACK, " reject ", &mut || {
                 let config = super::admission_from_env()
                     .expect("admission")
                     .expect("configured");
@@ -1045,7 +1045,7 @@ bind = "127.0.0.1:9010"
     #[test]
     fn admission_env_without_url_disables_hook() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        without_env_var(ENV_ADMISSION_URL, || {
+        without_env_var(ENV_ADMISSION_URL, &mut || {
             let config = super::admission_from_env().expect("admission");
             assert!(config.is_none());
         });
@@ -1059,14 +1059,14 @@ bind = "127.0.0.1:9010"
         unsafe {
             std::env::set_var(restore_key, "before");
         }
-        with_env_var(restore_key, "during", || {
+        with_env_var(restore_key, "during", &mut || {
             let current = std::env::var(restore_key).expect("var during");
             assert_eq!(current, "during");
         });
         let after = std::env::var(restore_key).expect("var after with_env_var");
         assert_eq!(after, "before");
 
-        without_env_var(restore_key, || {
+        without_env_var(restore_key, &mut || {
             assert!(std::env::var(restore_key).is_err());
         });
         let restored = std::env::var(restore_key).expect("var after without_env_var");
@@ -1090,11 +1090,11 @@ bind = "127.0.0.1:9010"
         );
         assert!(storage_err.source().is_some());
 
-        with_env_var("GITTREE_RELAY_BIND", "bad-bind", || {
+        with_env_var("GITTREE_RELAY_BIND", "bad-bind", &mut || {
             with_env_var(
                 ENV_STORAGE_READ_URL,
                 "postgres://user:pass@localhost:5432/gittree",
-                || {
+                &mut || {
                     let err = RelayConfig::from_env().expect_err("invalid relay bind");
                     assert!(err.to_string().contains("config error"));
                     assert!(err.source().is_some());
