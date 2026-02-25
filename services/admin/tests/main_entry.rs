@@ -139,6 +139,28 @@ fn admin_binary_create_user_uses_control_endpoint() {
 }
 
 #[test]
+fn admin_binary_create_user_without_email_omits_suffix() {
+    let (base_url, handle) = start_mock_http_server("200 OK", r#"{"username":"alice"}"#);
+    let output = run_admin(
+        &[
+            "create-user",
+            "--username",
+            "alice",
+            "--email",
+            "alice@example.com",
+            "--password",
+            "secret",
+        ],
+        Some(&base_url),
+        &[],
+    );
+    assert!(output.status.success());
+    handle.join().expect("request");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "created user alice\n");
+}
+
+#[test]
 fn admin_binary_create_org_uses_control_endpoint() {
     let (base_url, handle) =
         start_mock_http_server("200 OK", r#"{"name":"acme","full_name":"Acme Org"}"#);
@@ -152,6 +174,20 @@ fn admin_binary_create_org_uses_control_endpoint() {
     assert!(request.contains("POST /control/orgs"));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("created org acme"));
+}
+
+#[test]
+fn admin_binary_create_org_without_full_name_omits_suffix() {
+    let (base_url, handle) = start_mock_http_server("200 OK", r#"{"name":"acme"}"#);
+    let output = run_admin(
+        &["create-org", "--owner", "alice", "--name", "acme"],
+        Some(&base_url),
+        &[],
+    );
+    assert!(output.status.success());
+    handle.join().expect("request");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "created org acme\n");
 }
 
 #[test]
@@ -170,6 +206,21 @@ fn admin_binary_create_repo_uses_control_endpoint() {
     assert!(request.contains("POST /control/repos"));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("created repo repo"));
+}
+
+#[test]
+fn admin_binary_create_repo_without_html_url_omits_suffix() {
+    let (base_url, handle) =
+        start_mock_http_server("200 OK", r#"{"owner":"alice","name":"repo"}"#);
+    let output = run_admin(
+        &["create-repo", "--owner", "alice", "--name", "repo"],
+        Some(&base_url),
+        &[],
+    );
+    assert!(output.status.success());
+    handle.join().expect("request");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "created repo repo (alice)\n");
 }
 
 #[test]
@@ -200,6 +251,117 @@ fn admin_binary_create_pull_uses_control_endpoint() {
     assert!(request.contains("POST /control/pulls"));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("created pull #1"));
+}
+
+#[test]
+fn admin_binary_create_pull_without_html_url_omits_suffix() {
+    let (base_url, handle) =
+        start_mock_http_server("200 OK", r#"{"number":1,"url":"http://example/pulls/1"}"#);
+    let output = run_admin(
+        &[
+            "create-pull",
+            "--owner",
+            "alice",
+            "--repo",
+            "repo",
+            "--head",
+            "feature",
+            "--base",
+            "main",
+            "--title",
+            "my pull",
+        ],
+        Some(&base_url),
+        &[],
+    );
+    assert!(output.status.success());
+    handle.join().expect("request");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "created pull #1 (http://example/pulls/1)\n");
+}
+
+#[test]
+fn admin_binary_create_commands_require_control_token() {
+    for args in [
+        vec![
+            "create-user",
+            "--username",
+            "alice",
+            "--email",
+            "alice@example.com",
+            "--password",
+            "secret",
+        ],
+        vec!["create-org", "--owner", "alice", "--name", "acme"],
+        vec!["create-repo", "--owner", "alice", "--name", "repo"],
+        vec![
+            "create-pull",
+            "--owner",
+            "alice",
+            "--repo",
+            "repo",
+            "--head",
+            "feature",
+            "--base",
+            "main",
+            "--title",
+            "my pull",
+        ],
+    ] {
+        let output = run_admin(
+            &args,
+            Some("http://127.0.0.1:9"),
+            &[("GITTREE_CONTROL_TOKEN", " ")],
+        );
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("admin control config error: missing env GITTREE_CONTROL_TOKEN"));
+    }
+}
+
+#[test]
+fn admin_binary_create_commands_map_control_response_errors() {
+    for args in [
+        vec![
+            "create-user",
+            "--username",
+            "alice",
+            "--email",
+            "alice@example.com",
+            "--password",
+            "secret",
+        ],
+        vec!["create-org", "--owner", "alice", "--name", "acme"],
+        vec!["create-repo", "--owner", "alice", "--name", "repo"],
+        vec![
+            "create-pull",
+            "--owner",
+            "alice",
+            "--repo",
+            "repo",
+            "--head",
+            "feature",
+            "--base",
+            "main",
+            "--title",
+            "my pull",
+        ],
+    ] {
+        let (base_url, handle) = start_mock_http_server("401 Unauthorized", "nope");
+        let output = run_admin(&args, Some(&base_url), &[]);
+        assert!(!output.status.success());
+        handle.join().expect("request");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("admin control response error"));
+    }
+}
+
+#[test]
+fn admin_binary_invalid_flag_reports_cli_parse_error() {
+    let output = run_admin(&["--definitely-invalid"], None, &[]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("admin cli error"));
 }
 
 #[test]
