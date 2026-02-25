@@ -1,10 +1,12 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gittree_config::AuthConfig;
 use gittree_git_http::{
-    GitHttpConfigError, GitHttpError, GitHttpRequest, GitHttpRoute, GitHttpRouter, GitHttpService,
-    ReqwestUpstreamClient, StorageConfigError, UpstreamError,
+    GitHttpConfig, GitHttpConfigError, GitHttpError, GitHttpRequest, GitHttpRoute, GitHttpRouter,
+    GitHttpService, ReqwestUpstreamClient, StorageConfigError, UpstreamError, serve as serve_git_http,
 };
+use gittree_storage::StorageConfig;
 
 const TEST_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
@@ -83,6 +85,13 @@ fn stop_git_http_server(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn fallback_storage_url() -> String {
+    std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "postgres://user:pass@127.0.0.1:1/gittree".to_string())
 }
 
 #[tokio::test]
@@ -170,4 +179,30 @@ fn git_http_public_surface_covers_non_test_runtime_instantiations() {
     ));
 
     let _client = ReqwestUpstreamClient::new(Duration::from_millis(10)).expect("client");
+}
+
+#[tokio::test]
+async fn git_http_serve_covers_default_builder_path() {
+    let storage_url = fallback_storage_url();
+    let config = GitHttpConfig {
+        bind: "invalid-bind".to_string(),
+        upstream_url: "http://127.0.0.1:1".to_string(),
+        timeout: Duration::from_secs(1),
+        auth: AuthConfig {
+            email_domain: "example.com".to_string(),
+            max_skew_seconds: 300,
+        },
+        storage: StorageConfig {
+            read_connection: storage_url.clone(),
+            write_connection: Some(storage_url),
+            max_connections: 10,
+            min_connections: 1,
+            idle_timeout_secs: Some(1),
+            max_lifetime_secs: Some(60),
+            application_name: Some("gittree-git-http-runtime".to_string()),
+        },
+    };
+
+    let err = serve_git_http(config).await.expect_err("serve error");
+    assert!(matches!(err, GitHttpError::Serve(_)));
 }
