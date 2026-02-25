@@ -448,7 +448,7 @@ pub struct CoordinatorEventPayload {
     pub tags: Vec<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CoordinatorActionPayload {
     Provisioned { repo_path: String },
@@ -1693,12 +1693,7 @@ mod tests {
             with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
                 with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                     let err = CoordinatorConfig::from_env().expect_err("invalid pool range");
-                    assert!(matches!(
-                        err,
-                        super::CoordinatorConfigError::Storage(
-                            super::StorageConfigError::InvalidConfig(_)
-                        )
-                    ));
+                    assert!(err.to_string().contains("coordinator storage config error"));
                 });
             });
 
@@ -1716,12 +1711,12 @@ mod tests {
         with_required_coordinator_envs(&mut || {
             with_env_var("GITTREE_RELAY_URLS", "not-a-url", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("invalid relay target");
-                assert!(matches!(err, super::CoordinatorConfigError::Config(_)));
+                assert!(err.to_string().contains("coordinator config error"));
             });
 
             with_unset_env_var("GITTREE_FORGEJO_OWNER", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("missing forgejo owner");
-                assert!(matches!(err, super::CoordinatorConfigError::Config(_)));
+                assert!(err.to_string().contains("coordinator config error"));
             });
         });
     }
@@ -1869,13 +1864,7 @@ mod tests {
         };
         let invalid_config = sample_coordinator_config(invalid_storage);
         let invalid = super::build_repositories(&invalid_config).expect_err("invalid config");
-        assert!(matches!(
-            invalid,
-            super::CoordinatorError::Storage(StorageError::InvalidPoolConfig {
-                field: "max_connections",
-                value: 0
-            })
-        ));
+        assert!(invalid.to_string().contains("coordinator storage error"));
 
         let valid_config = sample_coordinator_config(sample_storage_config(
             "postgres://user:pass@localhost:5432/gittree",
@@ -1980,11 +1969,11 @@ mod tests {
 
         let non_utf8 = PathBuf::from(OsString::from_vec(vec![0xff, b'a']));
         let init_err = super::create_bare_repo(&non_utf8).expect_err("invalid path");
-        assert!(matches!(init_err, super::RepoInitError::InvalidPath(_)));
+        assert!(init_err.to_string().contains("repo path is not utf-8"));
 
         let entry = super::GitConfigEntry::new("core.bare", "true");
         let config_err = super::apply_git_config(&non_utf8, &entry).expect_err("invalid path");
-        assert!(matches!(config_err, super::RepoInitError::InvalidPath(_)));
+        assert!(config_err.to_string().contains("repo path is not utf-8"));
     }
 
     #[test]
@@ -2074,9 +2063,19 @@ mod tests {
         };
         let repo_root = temp_dir.join("repos");
         let action = handle_announcement_event(&repo_root, &hooks, &event).expect("handle");
-        assert!(matches!(action, CoordinatorAction::Provisioned { .. }));
+        assert_eq!(
+            CoordinatorActionPayload::from(action),
+            CoordinatorActionPayload::Provisioned {
+                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+            }
+        );
         let again = handle_announcement_event(&repo_root, &hooks, &event).expect("handle");
-        assert!(matches!(again, CoordinatorAction::SkippedExisting { .. }));
+        assert_eq!(
+            CoordinatorActionPayload::from(again),
+            CoordinatorActionPayload::SkippedExisting {
+                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+            }
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2093,7 +2092,7 @@ mod tests {
         ));
 
         let ignored_payload = CoordinatorActionPayload::from(CoordinatorAction::Ignored);
-        assert!(matches!(ignored_payload, CoordinatorActionPayload::Ignored));
+        assert_eq!(ignored_payload, CoordinatorActionPayload::Ignored);
     }
 
     #[tokio::test]
@@ -2161,10 +2160,7 @@ mod tests {
                 .await
                 .expect("body");
             let text = String::from_utf8(body.to_vec()).expect("utf8");
-            assert!(
-                text.contains(expected_body_fragment),
-                "body `{text}` did not contain `{expected_body_fragment}`"
-            );
+            assert!(text.contains(expected_body_fragment));
         }
     }
 
@@ -2228,7 +2224,7 @@ mod tests {
             post_receive_source: temp_dir.join("post-receive"),
         };
         let action = handle_announcement_event(&temp_dir, &hooks, &event).expect("ignored");
-        assert!(matches!(action, CoordinatorAction::Ignored));
+        assert_eq!(CoordinatorActionPayload::from(action), CoordinatorActionPayload::Ignored);
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2255,7 +2251,7 @@ mod tests {
             handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
                 .await
                 .expect("ignored");
-        assert!(matches!(action, CoordinatorAction::Ignored));
+        assert_eq!(CoordinatorActionPayload::from(action), CoordinatorActionPayload::Ignored);
         assert!(transport.requests().is_empty());
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -2280,7 +2276,7 @@ mod tests {
             handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &invalid)
                 .await
                 .expect_err("parse error expected");
-        assert!(matches!(err, super::CoordinatorEventError::Parse(_)));
+        assert!(err.to_string().contains("missing required field"));
         assert!(transport.requests().is_empty());
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -2301,10 +2297,7 @@ mod tests {
         };
         let parse_error = handle_announcement_event(&temp_dir, &hooks, &invalid)
             .expect_err("parse error expected");
-        assert!(matches!(
-            parse_error,
-            super::CoordinatorEventError::Parse(_)
-        ));
+        assert!(parse_error.to_string().contains("missing required field"));
 
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
@@ -2327,10 +2320,7 @@ mod tests {
         };
         let missing_npub_error = handle_announcement_event(&temp_dir, &hooks, &missing_npub)
             .expect_err("missing npub expected");
-        assert!(matches!(
-            missing_npub_error,
-            super::CoordinatorEventError::MissingNpub
-        ));
+        assert_eq!(missing_npub_error.to_string(), "missing npub in clone urls");
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2341,18 +2331,12 @@ mod tests {
         fs::write(&repo_path, "not a dir").expect("repo file");
         let plan = sample_plan(repo_path.clone());
         let non_dir_error = super::init_repo(&plan).expect_err("non-directory should fail");
-        assert!(matches!(
-            non_dir_error,
-            super::RepoInitError::InvalidRepo(_)
-        ));
+        assert!(non_dir_error.to_string().contains("is not a directory"));
 
         fs::remove_file(&repo_path).expect("remove file");
         fs::create_dir_all(&repo_path).expect("repo dir");
         let missing_head_error = super::init_repo(&plan).expect_err("missing head should fail");
-        assert!(matches!(
-            missing_head_error,
-            super::RepoInitError::InvalidRepo(_)
-        ));
+        assert!(missing_head_error.to_string().contains("missing HEAD"));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2364,14 +2348,12 @@ mod tests {
         fs::write(&parent_file, "not a directory").expect("parent file");
         let git_init_plan = sample_plan(parent_file.join("repo.git"));
         let git_init_error = super::init_repo(&git_init_plan).expect_err("git init should fail");
-        assert!(matches!(git_init_error, super::RepoInitError::Git(_)));
         assert!(format!("{git_init_error}").contains("git init failed"));
 
         let mut git_config_plan = sample_plan(temp_dir.join("config-repo.git"));
         git_config_plan.git_config = vec![super::GitConfigEntry::new("bad key", "value")];
         let git_config_error =
             super::init_repo(&git_config_plan).expect_err("git config should fail");
-        assert!(matches!(git_config_error, super::RepoInitError::Git(_)));
         assert!(format!("{git_config_error}").contains("git config failed"));
 
         let _ = fs::remove_dir_all(temp_dir);
@@ -2468,10 +2450,7 @@ mod tests {
             post_receive_source: temp_dir.join("missing-post"),
         };
         let hook_error = super::install_hooks(&plan, &config).expect_err("missing source");
-        assert!(matches!(
-            hook_error,
-            super::HookInstallError::MissingSource(_)
-        ));
+        assert!(hook_error.to_string().contains("missing hook source"));
 
         let transport = MockTransport::default();
         let request = ForgejoRequest {
@@ -2606,7 +2585,30 @@ mod tests {
         let err = super::serve_with_init(config, init_ok)
             .await
             .expect_err("bind error");
-        assert!(matches!(err, super::CoordinatorError::Serve(_)));
+        assert!(err.to_string().contains("coordinator serve error"));
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_maps_storage_build_errors() {
+        let mut storage = sample_storage_config("postgres://user:pass@localhost:5432/gittree");
+        storage.max_connections = 0;
+        let config = sample_coordinator_config(storage);
+        let err = super::serve_with_init(config, init_ok)
+            .await
+            .expect_err("storage build error");
+        assert!(err.to_string().contains("coordinator storage error"));
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_maps_forgejo_client_errors() {
+        let mut config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        config.forgejo.api_token = "   ".to_string();
+        let err = super::serve_with_init(config, init_ok)
+            .await
+            .expect_err("forgejo client error");
+        assert!(err.to_string().contains("coordinator forgejo error"));
     }
 
     fn init_ok() -> Result<(), super::CoordinatorError> {
@@ -2636,10 +2638,7 @@ mod tests {
             let err = runtime
                 .block_on(super::serve(config))
                 .expect_err("observability config");
-            assert!(matches!(
-                err,
-                super::CoordinatorError::ObservabilityConfig(_)
-            ));
+            assert!(err.to_string().contains("coordinator observability config error"));
         });
     }
 
@@ -2673,7 +2672,7 @@ mod tests {
     fn map_serve_result_maps_io_errors() {
         let err = super::map_serve_result(Err(std::io::Error::other("serve failed")))
             .expect_err("io error");
-        assert!(matches!(err, super::CoordinatorError::Serve(_)));
+        assert_eq!(err.to_string(), "coordinator serve error: serve failed");
     }
 
     #[test]
@@ -3141,7 +3140,12 @@ mod tests {
             handle_announcement_event_with_storage(&repo_root, &hooks, &storage, &forgejo, &event)
                 .await
                 .expect("handle");
-        assert!(matches!(action, CoordinatorAction::Provisioned { .. }));
+        assert_eq!(
+            CoordinatorActionPayload::from(action),
+            CoordinatorActionPayload::Provisioned {
+                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+            }
+        );
         assert_eq!(transport.requests().len(), 4);
         let pubkey_bytes = hex::decode(&event.pubkey).expect("decode");
         let stored = storage
@@ -3308,10 +3312,12 @@ mod tests {
             .await
             .expect("body");
         let action: CoordinatorActionPayload = serde_json::from_slice(&body).expect("action");
-        assert!(matches!(
+        assert_eq!(
             action,
-            CoordinatorActionPayload::Provisioned { .. }
-        ));
+            CoordinatorActionPayload::Provisioned {
+                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+            }
+        );
         assert!(repo_root.join(npub).join("repo.git").exists());
         let mapping = repositories
             .mapping_by_repo(&pubkey_bytes, "repo")
@@ -3336,15 +3342,12 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_JSON", "invalid-bool", &mut || {
             let err = init_observability().expect_err("invalid observability config");
-            assert!(matches!(
-                err,
-                super::CoordinatorError::ObservabilityConfig(_)
-            ));
+            assert!(err.to_string().contains("coordinator observability config error"));
         });
 
         let _ = LazyLock::force(&OBSERVABILITY);
         let err = init_observability().expect_err("reinit should fail");
-        assert!(matches!(err, super::CoordinatorError::Observability(_)));
+        assert!(err.to_string().contains("coordinator observability error"));
     }
 
     #[test]
