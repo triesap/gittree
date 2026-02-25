@@ -5,10 +5,10 @@ use std::pin::Pin;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), AdmissionError>>>>;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let mut stderr = std::io::stderr();
-    let exit_code = main_impl(&mut stderr).await;
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let exit_code = runtime.block_on(main_impl(&mut stderr));
     exit_if_needed(exit_code, std::process::exit);
 }
 
@@ -65,7 +65,7 @@ where
     F: FnOnce(i32) -> R,
 {
     if exit_code != 0 {
-        let _ = exit_fn(exit_code);
+        exit_fn(exit_code);
     }
 }
 
