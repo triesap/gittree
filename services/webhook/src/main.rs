@@ -6,9 +6,7 @@ use std::io::Write;
 async fn main() {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr).await;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
+    maybe_exit(exit_code, std::process::exit);
 }
 
 async fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -67,9 +65,15 @@ fn handle_main_result(result: Result<(), WebhookError>, stderr: &mut impl Write)
     }
 }
 
+fn maybe_exit<T>(exit_code: i32, exit_fn: impl FnOnce(i32) -> T) {
+    if exit_code != 0 {
+        let _ = exit_fn(exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, main_impl_with, run_with};
+    use super::{handle_main_result, main_impl_with, maybe_exit, run_with};
     use gittree_webhook::WebhookError;
 
     async fn serve_ok(_: ()) -> Result<(), WebhookError> {
@@ -152,5 +156,17 @@ mod tests {
         )
         .await;
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn maybe_exit_calls_exit_for_non_zero_code() {
+        let captured = std::cell::Cell::new(None);
+        maybe_exit(3, |code| captured.set(Some(code)));
+        assert_eq!(captured.get(), Some(3));
+    }
+
+    #[test]
+    fn maybe_exit_skips_exit_for_zero_code() {
+        maybe_exit(0, std::mem::drop);
     }
 }
