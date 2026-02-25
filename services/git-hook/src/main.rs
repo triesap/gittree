@@ -72,6 +72,7 @@ mod tests {
         HookServiceError,
     };
     use clap::Parser;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
@@ -115,6 +116,47 @@ mod tests {
         }
     }
 
+    fn with_service_bind_env_cleared(run: &mut dyn FnMut()) {
+        const SERVICE_BIND_KEYS: [&str; 10] = [
+            "GITTREE_RELAY_BIND",
+            "GITTREE_ADMISSION_BIND",
+            "GITTREE_STATE_BIND",
+            "GITTREE_COORDINATOR_BIND",
+            "GITTREE_SYNC_BIND",
+            "GITTREE_GIT_HTTP_BIND",
+            "GITTREE_UI_BIND",
+            "GITTREE_WEBHOOK_BIND",
+            "GITTREE_CONTROL_BIND",
+            "GITTREE_AUTH_BIND",
+        ];
+
+        let _guard = env_lock().lock().expect("lock env");
+        let previous: Vec<(&str, Option<OsString>)> = SERVICE_BIND_KEYS
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
+
+        for key in SERVICE_BIND_KEYS {
+            // SAFETY: tests mutate process env under a global lock and always restore state.
+            unsafe { std::env::remove_var(key) };
+        }
+
+        run();
+
+        for (key, previous) in previous {
+            match previous {
+                Some(value) => {
+                    // SAFETY: tests mutate process env under a global lock and always restore state.
+                    unsafe { std::env::set_var(key, value) };
+                }
+                None => {
+                    // SAFETY: tests mutate process env under a global lock and always restore state.
+                    unsafe { std::env::remove_var(key) };
+                }
+            }
+        }
+    }
+
     #[test]
     fn try_main_reports_observability_error() {
         let err = try_main(|| Err::<(), _>("obs boom".to_string()), noop_run)
@@ -140,21 +182,23 @@ mod tests {
 
     #[test]
     fn run_with_cli_propagates_runner_error() {
-        let cli = HookCli::try_parse_from([
-            "gittree-git-hook",
-            "--mode",
-            "pre-receive",
-            "--state-url",
-            "http://127.0.0.1:8082",
-            "--sync-url",
-            "http://127.0.0.1:8088",
-        ])
-        .expect("parse");
-        let err = run_with_cli(cli, |_, _| {
-            Err(HookServiceError::Core("runner boom".to_string()))
-        })
-        .expect_err("runner should fail");
-        assert_eq!(hook_service_error_kind(&err), "core");
+        with_service_bind_env_cleared(&mut || {
+            let cli = HookCli::try_parse_from([
+                "gittree-git-hook",
+                "--mode",
+                "pre-receive",
+                "--state-url",
+                "http://127.0.0.1:8082",
+                "--sync-url",
+                "http://127.0.0.1:8088",
+            ])
+            .expect("parse");
+            let err = run_with_cli(cli, |_, _| {
+                Err(HookServiceError::Core("runner boom".to_string()))
+            })
+            .expect_err("runner should fail");
+            assert_eq!(hook_service_error_kind(&err), "core");
+        });
     }
 
     #[test]
@@ -177,28 +221,30 @@ mod tests {
 
     #[test]
     fn run_with_cli_passes_stdin_file_to_runner() {
-        let cli = HookCli::try_parse_from([
-            "gittree-git-hook",
-            "--mode",
-            "pre-receive",
-            "--state-url",
-            "http://127.0.0.1:8082",
-            "--sync-url",
-            "http://127.0.0.1:8088",
-            "--stdin-file",
-            "updates.txt",
-        ])
-        .expect("parse");
-        let mut seen_path: Option<PathBuf> = None;
-        run_with_cli(cli, |_, stdin_file| {
-            seen_path = stdin_file.map(|path| path.to_path_buf());
-            Ok(())
-        })
-        .expect("runner");
-        assert_eq!(
-            seen_path.as_deref(),
-            Some(std::path::Path::new("updates.txt"))
-        );
+        with_service_bind_env_cleared(&mut || {
+            let cli = HookCli::try_parse_from([
+                "gittree-git-hook",
+                "--mode",
+                "pre-receive",
+                "--state-url",
+                "http://127.0.0.1:8082",
+                "--sync-url",
+                "http://127.0.0.1:8088",
+                "--stdin-file",
+                "updates.txt",
+            ])
+            .expect("parse");
+            let mut seen_path: Option<PathBuf> = None;
+            run_with_cli(cli, |_, stdin_file| {
+                seen_path = stdin_file.map(|path| path.to_path_buf());
+                Ok(())
+            })
+            .expect("runner");
+            assert_eq!(
+                seen_path.as_deref(),
+                Some(std::path::Path::new("updates.txt"))
+            );
+        });
     }
 
     #[test]
