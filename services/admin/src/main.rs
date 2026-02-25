@@ -521,7 +521,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -538,7 +538,7 @@ mod tests {
         }
     }
 
-    fn with_env_var_opt<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+    fn with_env_var_opt(key: &str, value: Option<&str>, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         match value {
             Some(value) => {
@@ -571,9 +571,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                         let config = storage_from_env().expect("config");
                         assert_eq!(config.idle_timeout_secs, None);
                         assert_eq!(config.max_lifetime_secs, None);
@@ -586,8 +586,8 @@ mod tests {
     #[test]
     fn control_config_uses_default_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_CONTROL_TOKEN, "token", || {
-            with_env_var(ENV_CONTROL_URL, "", || {
+        with_env_var(ENV_CONTROL_TOKEN, "token", &mut || {
+            with_env_var(ENV_CONTROL_URL, "", &mut || {
                 let config = ControlClientConfig::from_env().expect("config");
                 assert_eq!(config.base_url, DEFAULT_CONTROL_URL);
             });
@@ -597,8 +597,8 @@ mod tests {
     #[test]
     fn control_config_uses_env_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_CONTROL_TOKEN, "token", || {
-            with_env_var(ENV_CONTROL_URL, "http://localhost:9090", || {
+        with_env_var(ENV_CONTROL_TOKEN, "token", &mut || {
+            with_env_var(ENV_CONTROL_URL, "http://localhost:9090", &mut || {
                 let config = ControlClientConfig::from_env().expect("config");
                 assert_eq!(config.base_url, "http://localhost:9090");
             });
@@ -608,14 +608,14 @@ mod tests {
     #[test]
     fn control_config_requires_non_empty_token() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var_opt(ENV_CONTROL_TOKEN, None, || {
+        with_env_var_opt(ENV_CONTROL_TOKEN, None, &mut || {
             let err = ControlClientConfig::from_env().expect_err("missing token");
             assert!(matches!(
                 err,
                 AdminError::ControlConfig(ControlConfigError::MissingEnv(ENV_CONTROL_TOKEN))
             ));
         });
-        with_env_var(ENV_CONTROL_TOKEN, "   ", || {
+        with_env_var(ENV_CONTROL_TOKEN, "   ", &mut || {
             let err = ControlClientConfig::from_env().expect_err("empty token");
             assert!(matches!(
                 err,
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn control_client_from_env_requires_token() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var_opt(ENV_CONTROL_TOKEN, None, || {
+        with_env_var_opt(ENV_CONTROL_TOKEN, None, &mut || {
             let result = control_client_from_env();
             assert!(matches!(result, Err(AdminError::ControlConfig(_))));
         });
@@ -636,30 +636,30 @@ mod tests {
     #[test]
     fn env_numeric_helpers_cover_missing_empty_and_invalid() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var_opt("GITTREE_TEST_U32", None, || {
+        with_env_var_opt("GITTREE_TEST_U32", None, &mut || {
             assert_eq!(env_u32("GITTREE_TEST_U32").expect("missing"), None);
         });
-        with_env_var("GITTREE_TEST_U32", "", || {
+        with_env_var("GITTREE_TEST_U32", "", &mut || {
             assert_eq!(env_u32("GITTREE_TEST_U32").expect("empty"), None);
         });
-        with_env_var("GITTREE_TEST_U32", "42", || {
+        with_env_var("GITTREE_TEST_U32", "42", &mut || {
             assert_eq!(env_u32("GITTREE_TEST_U32").expect("valid"), Some(42));
         });
-        with_env_var("GITTREE_TEST_U32", "bad", || {
+        with_env_var("GITTREE_TEST_U32", "bad", &mut || {
             let err = env_u32("GITTREE_TEST_U32").expect_err("invalid");
             assert!(matches!(err, AdminError::StorageConfig(_)));
         });
 
-        with_env_var_opt("GITTREE_TEST_U64", None, || {
+        with_env_var_opt("GITTREE_TEST_U64", None, &mut || {
             assert_eq!(env_u64("GITTREE_TEST_U64").expect("missing"), None);
         });
-        with_env_var("GITTREE_TEST_U64", "", || {
+        with_env_var("GITTREE_TEST_U64", "", &mut || {
             assert_eq!(env_u64("GITTREE_TEST_U64").expect("empty"), None);
         });
-        with_env_var("GITTREE_TEST_U64", "84", || {
+        with_env_var("GITTREE_TEST_U64", "84", &mut || {
             assert_eq!(env_u64("GITTREE_TEST_U64").expect("valid"), Some(84));
         });
-        with_env_var("GITTREE_TEST_U64", "bad", || {
+        with_env_var("GITTREE_TEST_U64", "bad", &mut || {
             let err = env_u64("GITTREE_TEST_U64").expect_err("invalid");
             assert!(matches!(err, AdminError::StorageConfig(_)));
         });
@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn storage_config_reports_missing_and_invalid_bounds() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var_opt(ENV_STORAGE_READ_URL, None, || {
+        with_env_var_opt(ENV_STORAGE_READ_URL, None, &mut || {
             let err = storage_from_env().expect_err("missing read");
             assert!(matches!(
                 err,
@@ -678,9 +678,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = storage_from_env().expect_err("invalid bounds");
                         assert!(matches!(err, AdminError::StorageConfig(_)));
                     });
@@ -759,8 +759,8 @@ mod tests {
     #[test]
     fn with_env_helpers_restore_existing_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_TEST_RESTORE", "before", || {
-            with_env_var("GITTREE_TEST_RESTORE", "during", || {
+        with_env_var("GITTREE_TEST_RESTORE", "before", &mut || {
+            with_env_var("GITTREE_TEST_RESTORE", "during", &mut || {
                 assert_eq!(
                     std::env::var("GITTREE_TEST_RESTORE").expect("during value"),
                     "during"
@@ -772,8 +772,8 @@ mod tests {
             );
         });
 
-        with_env_var("GITTREE_TEST_RESTORE_OPT", "before", || {
-            with_env_var_opt("GITTREE_TEST_RESTORE_OPT", Some("during"), || {
+        with_env_var("GITTREE_TEST_RESTORE_OPT", "before", &mut || {
+            with_env_var_opt("GITTREE_TEST_RESTORE_OPT", Some("during"), &mut || {
                 assert_eq!(
                     std::env::var("GITTREE_TEST_RESTORE_OPT").expect("during value"),
                     "during"
@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn init_observability_reports_reinit_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "false", || {
+        with_env_var("GITTREE_LOG_JSON", "false", &mut || {
             let _ = init_observability();
             let second = init_observability();
             assert!(second.is_err());
