@@ -483,7 +483,7 @@ mod tests {
             .collect()
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -500,7 +500,7 @@ mod tests {
         }
     }
 
-    fn with_env_var_unset<F: FnOnce()>(key: &str, f: F) {
+    fn with_env_var_unset(key: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn resolve_targets_requires_env_list() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_RELAY_URLS", "", || {
+        with_env_var("GITTREE_RELAY_URLS", "", &mut || {
             let cli = ProbeCli::parse(os_args(&["probe", "--all"])).expect("cli");
             let err = resolve_targets(&cli).unwrap_err();
             assert_eq!(err.to_string(), "GITTREE_RELAY_URLS is empty");
@@ -786,7 +786,7 @@ mod tests {
         with_env_var(
             "GITTREE_RELAY_URLS",
             "wss://relay.one,wss://relay.two",
-            || {
+            &mut || {
                 let cli = ProbeCli::parse(os_args(&["probe", "--all"])).expect("cli");
                 let targets = resolve_targets(&cli).expect("targets");
                 assert_eq!(
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn resolve_targets_reports_invalid_relay_url_in_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_RELAY_URLS", "not-a-relay", || {
+        with_env_var("GITTREE_RELAY_URLS", "not-a-relay", &mut || {
             let cli = ProbeCli::parse(os_args(&["probe", "--all"])).expect("cli");
             let err = resolve_targets(&cli).expect_err("invalid env relay url");
             assert!(err.to_string().contains("invalid relay url"));
@@ -823,9 +823,9 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                         let config = storage_from_env().expect("config");
                         assert_eq!(config.idle_timeout_secs, None);
                         assert_eq!(config.max_lifetime_secs, None);
@@ -841,11 +841,11 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
-                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", &mut || {
+                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                                 let config = storage_from_env().expect("config");
                                 assert_eq!(config.max_connections, 10);
                                 assert_eq!(config.min_connections, 2);
@@ -865,12 +865,12 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 with_env_var(
                     super::ENV_STORAGE_WRITE_URL,
                     "postgres://user:pass@localhost:5432/gittree-write",
-                    || {
-                        with_env_var(super::ENV_STORAGE_APP_NAME, "relay-probe-tests", || {
+                    &mut || {
+                        with_env_var(super::ENV_STORAGE_APP_NAME, "relay-probe-tests", &mut || {
                             let config = storage_from_env().expect("config");
                             assert_eq!(
                                 config.write_connection.as_deref(),
@@ -893,9 +893,9 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "5", || {
-                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "120", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "5", &mut || {
+                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "120", &mut || {
                         let config = storage_from_env().expect("config");
                         assert_eq!(config.min_connections, 5);
                         assert_eq!(config.max_lifetime_secs, Some(120));
@@ -911,9 +911,9 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "20", || {
-                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "30", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "20", &mut || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "30", &mut || {
                         let config = storage_from_env().expect("config");
                         assert_eq!(config.max_connections, 20);
                         assert_eq!(config.idle_timeout_secs, Some(30));
@@ -929,8 +929,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "invalid", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "invalid", &mut || {
                     let err = storage_from_env().expect_err("invalid max connections");
                     assert!(matches!(
                         err,
@@ -950,8 +950,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "invalid", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "invalid", &mut || {
                     let err = storage_from_env().expect_err("invalid min connections");
                     assert!(matches!(
                         err,
@@ -971,8 +971,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "invalid", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "invalid", &mut || {
                     let err = storage_from_env().expect_err("invalid idle timeout");
                     assert!(matches!(
                         err,
@@ -992,8 +992,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "invalid", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "invalid", &mut || {
                     let err = storage_from_env().expect_err("invalid max lifetime");
                     assert!(matches!(
                         err,
@@ -1013,9 +1013,9 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = storage_from_env().expect_err("invalid pool bounds");
                         assert!(err.to_string().contains("min_connections"));
                     });
@@ -1030,8 +1030,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "  ", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "  ", &mut || {
                     let config = storage_from_env().expect("config");
                     assert_eq!(config.max_connections, 10);
                 });
@@ -1047,7 +1047,7 @@ mod tests {
         unsafe {
             std::env::set_var(key, "original");
         }
-        with_env_var(key, "temporary", || {
+        with_env_var(key, "temporary", &mut || {
             assert_eq!(std::env::var(key).ok().as_deref(), Some("temporary"));
         });
         assert_eq!(std::env::var(key).ok().as_deref(), Some("original"));
@@ -1065,7 +1065,7 @@ mod tests {
         unsafe {
             std::env::set_var(key, "original");
         }
-        with_env_var_unset(key, || {
+        with_env_var_unset(key, &mut || {
             assert!(std::env::var(key).is_err());
         });
         assert_eq!(std::env::var(key).ok().as_deref(), Some("original"));
@@ -1257,7 +1257,7 @@ mod tests {
             )),
         };
 
-        with_env_var(super::ENV_STORAGE_READ_URL, "", || {
+        with_env_var(super::ENV_STORAGE_READ_URL, "", &mut || {
             let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
                 .expect_err("store mode should fail without storage env");
             assert!(err.to_string().contains("relay probe storage"));
@@ -1291,7 +1291,7 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://gittree:gittree@127.0.0.1:1/gittree",
-            || {
+            &mut || {
                 let err = execute_probe_with_client(&cli, &probe_config, &runtime, &client)
                     .expect_err("store mode should fail when database is unreachable");
                 assert!(err.to_string().contains("relay probe storage error"));
@@ -1305,7 +1305,7 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://gittree:gittree@127.0.0.1:1/gittree",
-            || {
+            &mut || {
                 let result = run_with_args(os_args(&[
                     "probe",
                     "--relay",
@@ -1321,7 +1321,7 @@ mod tests {
     #[test]
     fn run_with_args_reports_storage_config_error_when_store_read_url_missing() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(super::ENV_STORAGE_READ_URL, "", || {
+        with_env_var(super::ENV_STORAGE_READ_URL, "", &mut || {
             let result = run_with_args(os_args(&[
                 "probe",
                 "--relay",
@@ -1336,8 +1336,8 @@ mod tests {
     #[test]
     fn run_with_cli_with_client_applies_cli_overrides_and_emits_output() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_RELAY_PROBE_ACTIVE", "1", || {
-            with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "10", || {
+        with_env_var("GITTREE_RELAY_PROBE_ACTIVE", "1", &mut || {
+            with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "10", &mut || {
                 let cli = ProbeCli {
                     relay: Some("wss://relay.example".to_string()),
                     all: false,
@@ -1388,7 +1388,7 @@ mod tests {
     #[test]
     fn run_with_cli_with_client_maps_probe_config_validation_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "5", || {
+        with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "5", &mut || {
             let cli = ProbeCli {
                 relay: Some("wss://relay.example".to_string()),
                 all: false,
@@ -1498,7 +1498,7 @@ mod tests {
     #[test]
     fn store_probe_result_reports_storage_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(super::ENV_STORAGE_READ_URL, "", || {
+        with_env_var(super::ENV_STORAGE_READ_URL, "", &mut || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             let err = runtime
                 .block_on(store_probe_result(&sample_probe_result()))
@@ -1510,7 +1510,7 @@ mod tests {
     #[test]
     fn store_probe_result_reports_missing_storage_read_url_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var_unset(super::ENV_STORAGE_READ_URL, || {
+        with_env_var_unset(super::ENV_STORAGE_READ_URL, &mut || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             let err = runtime
                 .block_on(store_probe_result(&sample_probe_result()))
@@ -1539,7 +1539,7 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://gittree:gittree@127.0.0.1:1/gittree",
-            || {
+            &mut || {
                 let runtime = tokio::runtime::Runtime::new().expect("runtime");
                 let db_error_result = runtime.block_on(store_probe_result(&sample_probe_result()));
                 assert_store_result_or_skip_database_error(db_error_result);
@@ -1564,14 +1564,14 @@ mod tests {
             with_env_var(
                 "GITTREE_STORAGE_TEST_DATABASE_URL",
                 test_database_url,
-                || {
+                &mut || {
                     let database_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok()
                     {
                         Some(value) if !value.trim().is_empty() => value,
                         _ => "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
                     };
-                    with_env_var(super::ENV_STORAGE_READ_URL, &database_url, || {
-                        with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
+                    with_env_var(super::ENV_STORAGE_READ_URL, &database_url, &mut || {
+                        with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, &mut || {
                             let mut invalid = sample_probe_result();
                             invalid.report.relay_url = " ".to_string();
                             let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -1598,15 +1598,15 @@ mod tests {
             with_env_var(
                 "GITTREE_STORAGE_TEST_DATABASE_URL",
                 test_database_url,
-                || {
+                &mut || {
                     let database_url = match std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok()
                     {
                         Some(value) if !value.trim().is_empty() => value,
                         _ => "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
                     };
 
-                    with_env_var(super::ENV_STORAGE_READ_URL, &database_url, || {
-                        with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, || {
+                    with_env_var(super::ENV_STORAGE_READ_URL, &database_url, &mut || {
+                        with_env_var(super::ENV_STORAGE_WRITE_URL, &database_url, &mut || {
                             let runtime = tokio::runtime::Runtime::new().expect("runtime");
                             let result =
                                 runtime.block_on(store_probe_result(&sample_probe_result()));
@@ -1761,7 +1761,7 @@ mod tests {
     #[test]
     fn run_with_args_reports_probe_config_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "0", || {
+        with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "0", &mut || {
             let err = run_with_args(os_args(&["probe", "--relay", "wss://relay.example"]))
                 .expect_err("invalid relay probe config");
             assert!(err.to_string().contains("relay probe config error"));
@@ -1771,7 +1771,7 @@ mod tests {
     #[test]
     fn run_with_args_reports_missing_targets_for_all_mode() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_RELAY_URLS", "", || {
+        with_env_var("GITTREE_RELAY_URLS", "", &mut || {
             let err = run_with_args(os_args(&["probe", "--all"])).expect_err("missing targets");
             assert_eq!(err.to_string(), "GITTREE_RELAY_URLS is empty");
         });
