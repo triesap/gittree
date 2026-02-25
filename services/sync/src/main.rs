@@ -215,7 +215,7 @@ mod tests {
         with_env_var("GITTREE_SYNC_BIND", "not-a-socket", || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             let err = runtime.block_on(super::run()).expect_err("config error");
-            assert!(matches!(err, SyncError::Config(_)));
+            assert!(err.to_string().contains("sync config error"));
         });
     }
 

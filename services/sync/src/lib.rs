@@ -823,6 +823,28 @@ mod tests {
     }
 
     #[test]
+    fn config_reads_explicit_min_connections_and_max_lifetime() {
+        let _guard = env_guard();
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
+                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "3", &mut || {
+                            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "180", &mut || {
+                                let config = SyncConfig::from_env().expect("config");
+                                assert_eq!(config.storage.min_connections, 3);
+                                assert_eq!(config.storage.max_lifetime_secs, Some(180));
+                            });
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn config_ignores_empty_pool_timeouts() {
         let _guard = env_guard();
         with_env_var(
@@ -953,10 +975,11 @@ mod tests {
                         with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
                             with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                                 let err = SyncConfig::from_env().expect_err("invalid pool bounds");
-                                assert!(matches!(
-                                    err,
-                                    SyncConfigError::Storage(StorageConfigError::InvalidConfig(_))
-                                ));
+                                assert!(
+                                    err.to_string().contains(
+                                        "sync storage config error: invalid pool config min_connections"
+                                    )
+                                );
                             });
                         });
                     });
@@ -975,7 +998,7 @@ mod tests {
                 with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
                     with_env_var("GITTREE_RELAY_URLS", "not-a-url", &mut || {
                         let err = SyncConfig::from_env().expect_err("invalid relay url");
-                        assert!(matches!(err, SyncConfigError::Config(_)));
+                        assert!(err.to_string().contains("sync config error"));
                     });
                 });
             },
@@ -1133,18 +1156,18 @@ mod tests {
         failure.arg("-c").arg("exit 1");
         let failed = run_with_timeout(failure, std::time::Duration::from_millis(200))
             .expect_err("command failure");
-        assert!(matches!(failed, GitExecError::CommandFailed(_)));
+        assert!(failed.to_string().contains("git command failed with status"));
 
         let mut timeout = Command::new("sh");
         timeout.arg("-c").arg("sleep 1");
         let timed_out =
             run_with_timeout(timeout, std::time::Duration::from_millis(20)).expect_err("timeout");
-        assert!(matches!(timed_out, GitExecError::Timeout));
+        assert_eq!(timed_out.to_string(), "git command timed out");
 
         let missing_command = Command::new("/definitely/missing/command");
         let spawn_err = run_with_timeout(missing_command, std::time::Duration::from_millis(20))
             .expect_err("spawn should fail");
-        assert!(matches!(spawn_err, GitExecError::Io(_)));
+        assert!(spawn_err.to_string().contains("git io error"));
 
         let executor = CommandGitExecutor;
         let repo_path = std::path::Path::new("/definitely/missing/repo");
@@ -1155,17 +1178,17 @@ mod tests {
                 std::time::Duration::from_secs(1),
             )
             .expect_err("missing repo should fail");
-        assert!(matches!(fetch_err, GitExecError::CommandFailed(_)));
+        assert!(fetch_err.to_string().contains("git command failed with status"));
 
         let update_err = executor
             .update_ref(repo_path, "refs/heads/main", &"11".repeat(20))
             .expect_err("missing repo should fail update");
-        assert!(matches!(update_err, GitExecError::CommandFailed(_)));
+        assert!(update_err.to_string().contains("git command failed with status"));
 
         let delete_err = executor
             .delete_ref(repo_path, "refs/heads/main")
             .expect_err("missing repo should fail delete");
-        assert!(matches!(delete_err, GitExecError::CommandFailed(_)));
+        assert!(delete_err.to_string().contains("git command failed with status"));
     }
 
     #[test]
@@ -1193,7 +1216,7 @@ mod tests {
         let value = OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0xbc]);
         let path = PathBuf::from(value);
         let err = path_to_str(&path).expect_err("invalid utf8 path");
-        assert!(matches!(err, GitExecError::InvalidPath(_)));
+        assert_eq!(err.to_string(), "repo path is not utf-8");
     }
 
     #[cfg(unix)]
@@ -1209,17 +1232,17 @@ mod tests {
                 std::time::Duration::from_secs(1),
             )
             .expect_err("invalid path should fail fetch");
-        assert!(matches!(fetch_err, GitExecError::InvalidPath(_)));
+        assert_eq!(fetch_err.to_string(), "repo path is not utf-8");
 
         let update_err = executor
             .update_ref(&path, "refs/heads/main", &"11".repeat(20))
             .expect_err("invalid path should fail update");
-        assert!(matches!(update_err, GitExecError::InvalidPath(_)));
+        assert_eq!(update_err.to_string(), "repo path is not utf-8");
 
         let delete_err = executor
             .delete_ref(&path, "refs/heads/main")
             .expect_err("invalid path should fail delete");
-        assert!(matches!(delete_err, GitExecError::InvalidPath(_)));
+        assert_eq!(delete_err.to_string(), "repo path is not utf-8");
     }
 
     #[tokio::test]
@@ -1245,7 +1268,7 @@ mod tests {
         let err = super::serve_with(config, || Ok(()), super::run_axum_server)
             .await
             .expect_err("bind error");
-        assert!(matches!(err, SyncError::Serve(_)));
+        assert!(err.to_string().starts_with("sync serve error:"));
     }
 
     #[tokio::test]
@@ -1271,7 +1294,7 @@ mod tests {
         )
         .await
         .expect_err("serve error");
-        assert!(matches!(err, SyncError::Serve(message) if message.contains("boom")));
+        assert_eq!(err.to_string(), "sync serve error: boom");
     }
 
     #[tokio::test]
@@ -1318,10 +1341,12 @@ mod tests {
         let err = super::serve(config)
             .await
             .expect_err("expected serve error");
-        assert!(matches!(
-            err,
-            SyncError::Serve(_) | SyncError::Observability(_) | SyncError::ObservabilityConfig(_)
-        ));
+        let message = err.to_string();
+        assert!(
+            message.starts_with("sync serve error:")
+                || message.starts_with("sync observability error:")
+                || message.starts_with("sync observability config error:")
+        );
     }
 
     #[tokio::test]
@@ -1703,12 +1728,8 @@ mod tests {
         without_env_var("GITTREE_LOG_JSON", &mut || {
             let _ = init_observability();
             let second = init_observability();
-            assert!(matches!(
-                second,
-                Err(SyncError::Observability(
-                    ObservabilityError::SubscriberInit(_)
-                ))
-            ));
+            let err = second.expect_err("second init should fail");
+            assert!(err.to_string().contains("sync observability error"));
         });
     }
 
@@ -1717,10 +1738,16 @@ mod tests {
         let _guard = env_guard();
         with_env_var("GITTREE_LOG_JSON", "not-a-bool", &mut || {
             let err = super::load_observability_config().expect_err("invalid observability config");
-            assert!(matches!(
-                err,
-                SyncError::ObservabilityConfig(ObservabilityConfigError::InvalidEnv { .. })
-            ));
+            assert!(err.to_string().contains("sync observability config error"));
+        });
+    }
+
+    #[test]
+    fn init_observability_maps_config_errors() {
+        let _guard = env_guard();
+        with_env_var("GITTREE_LOG_JSON", "not-a-bool", &mut || {
+            let err = super::init_observability().expect_err("invalid observability env");
+            assert!(err.to_string().contains("sync observability config error"));
         });
     }
 }
