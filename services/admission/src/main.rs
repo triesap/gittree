@@ -11,7 +11,7 @@ async fn main() {
     }
 }
 
-async fn main_impl(stderr: &mut impl Write) -> i32 {
+async fn main_impl(stderr: &mut dyn Write) -> i32 {
     main_impl_with(
         || {
             dotenvy::dotenv().ok();
@@ -25,7 +25,7 @@ async fn main_impl(stderr: &mut impl Write) -> i32 {
 async fn main_impl_with<DotenvFn, RunFn, RunFut>(
     load_dotenv: DotenvFn,
     run_fn: RunFn,
-    stderr: &mut impl Write,
+    stderr: &mut dyn Write,
 ) -> i32
 where
     DotenvFn: FnOnce(),
@@ -57,7 +57,7 @@ where
     serve_fn(config).await
 }
 
-fn handle_main_result(result: Result<(), AdmissionError>, stderr: &mut impl Write) -> i32 {
+fn handle_main_result(result: Result<(), AdmissionError>, stderr: &mut dyn Write) -> i32 {
     match result {
         Ok(()) => 0,
         Err(err) => {
@@ -78,7 +78,7 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn with_env_var(key: &str, value: &str, run: impl FnOnce()) {
+    fn with_env_var(key: &str, value: &str, run: &mut dyn FnMut()) {
         let _guard = env_lock().lock().expect("env lock");
         let previous = std::env::var_os(key);
         // SAFETY: test-only env mutation guarded by a process-wide lock.
@@ -137,7 +137,7 @@ mod tests {
         const KEY: &str = "GITTREE_TEST_ADMISSION_MAIN_ENV";
         // SAFETY: test-only env mutation for a unique key.
         unsafe { std::env::set_var(KEY, "before") };
-        with_env_var(KEY, "after", || {
+        with_env_var(KEY, "after", &mut || {
             assert_eq!(std::env::var(KEY).expect("set"), "after");
         });
         assert_eq!(std::env::var(KEY).expect("restored"), "before");
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn run_reports_config_error_for_invalid_bind_env() {
-        with_env_var("GITTREE_ADMISSION_BIND", "not-a-socket", || {
+        with_env_var("GITTREE_ADMISSION_BIND", "not-a-socket", &mut || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             let err = runtime.block_on(super::run()).expect_err("config error");
             assert!(matches!(err, AdmissionError::Config(_)));
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn main_impl_reports_config_error_for_invalid_bind_env() {
-        with_env_var("GITTREE_ADMISSION_BIND", "not-a-socket", || {
+        with_env_var("GITTREE_ADMISSION_BIND", "not-a-socket", &mut || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             let mut stderr = Vec::new();
             let exit_code = runtime.block_on(super::main_impl(&mut stderr));

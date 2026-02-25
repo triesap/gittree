@@ -1076,8 +1076,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://localhost/test",
-            || {
-                with_env_var(super::ENV_CONTROL_ADMIN_KEYS, "alpha, beta", || {
+            &mut || {
+                with_env_var(super::ENV_CONTROL_ADMIN_KEYS, "alpha, beta", &mut || {
                     let config = AdmissionConfig::from_env().expect("config");
                     let services = ServicesConfig::from_env_validated().expect("services");
                     assert_eq!(config.bind, services.admission.bind);
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn config_requires_storage_read_url() {
-        with_env_removed(super::ENV_STORAGE_READ_URL, || {
+        with_env_removed(super::ENV_STORAGE_READ_URL, &mut || {
             let err = AdmissionConfig::from_env().expect_err("missing read url");
             assert!(matches!(
                 err,
@@ -1110,8 +1110,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://localhost/test",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "not-a-number", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "not-a-number", &mut || {
                     let err = AdmissionConfig::from_env().expect_err("invalid max connections");
                     assert!(matches!(
                         err,
@@ -1122,7 +1122,7 @@ mod tests {
                     ));
                 });
 
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "NaN", || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "NaN", &mut || {
                     let err = AdmissionConfig::from_env().expect_err("invalid idle timeout");
                     assert!(matches!(
                         err,
@@ -1141,10 +1141,10 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://localhost/test",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "   ", || {
-                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, " ", || {
-                        with_env_removed(super::ENV_CONTROL_ADMIN_KEYS, || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "   ", &mut || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, " ", &mut || {
+                        with_env_removed(super::ENV_CONTROL_ADMIN_KEYS, &mut || {
                             let config = AdmissionConfig::from_env().expect("config");
                             assert_eq!(config.storage.max_connections, 10);
                             assert_eq!(config.storage.idle_timeout_secs, None);
@@ -1161,9 +1161,9 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://localhost/test",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = AdmissionConfig::from_env().expect_err("invalid pool bounds");
                         assert!(matches!(
                             err,
@@ -1592,7 +1592,7 @@ mod tests {
 
     #[test]
     fn init_observability_reports_invalid_env() {
-        with_env_var("GITTREE_LOG_JSON", "not-bool", || {
+        with_env_var("GITTREE_LOG_JSON", "not-bool", &mut || {
             let err = super::init_observability().expect_err("invalid observability env");
             assert!(matches!(err, AdmissionError::ObservabilityConfig(_)));
         });
@@ -1600,7 +1600,7 @@ mod tests {
 
     #[test]
     fn serve_returns_bind_error_for_invalid_bind() {
-        with_env_removed("GITTREE_LOG_JSON", || {
+        with_env_removed("GITTREE_LOG_JSON", &mut || {
             let config = AdmissionConfig {
                 bind: "invalid-bind".to_string(),
                 compatibility: RelayCompatibilityConfig::default(),
@@ -2613,7 +2613,7 @@ mod tests {
 
     #[test]
     fn restore_env_var_covers_some_and_none_paths() {
-        with_env_scope(|| {
+        with_env_scope(&mut || {
             restore_env_var("GITTREE_ADMISSION_TEST_ENV", Some("value".to_string()));
             assert_eq!(
                 std::env::var("GITTREE_ADMISSION_TEST_ENV").ok().as_deref(),
@@ -2770,8 +2770,8 @@ mod tests {
         assert!(limiter.check(&request).is_none());
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
-        with_env_scope(|| {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
+        with_env_scope(&mut || {
             let previous = std::env::var(key).ok();
             unsafe {
                 std::env::set_var(key, value);
@@ -2781,8 +2781,8 @@ mod tests {
         });
     }
 
-    fn with_env_removed<F: FnOnce()>(key: &str, f: F) {
-        with_env_scope(|| {
+    fn with_env_removed(key: &str, f: &mut dyn FnMut()) {
+        with_env_scope(&mut || {
             let previous = std::env::var(key).ok();
             unsafe {
                 std::env::remove_var(key);
@@ -2792,7 +2792,7 @@ mod tests {
         });
     }
 
-    fn with_env_scope<F: FnOnce()>(f: F) {
+    fn with_env_scope(f: &mut dyn FnMut()) {
         struct EnvDepthGuard;
 
         impl Drop for EnvDepthGuard {
