@@ -12,6 +12,19 @@ fn run_migrate_with_env(envs: &[(&str, &str)]) -> Output {
     std::fs::create_dir_all(&run_dir).expect("create temp run dir");
     let mut command = Command::new(env!("CARGO_BIN_EXE_gittree-migrate"));
     command.current_dir(&run_dir);
+    for key in [
+        "GITTREE_STORAGE_READ_URL",
+        "GITTREE_STORAGE_WRITE_URL",
+        "GITTREE_STORAGE_MAX_CONNECTIONS",
+        "GITTREE_STORAGE_MIN_CONNECTIONS",
+        "GITTREE_STORAGE_IDLE_TIMEOUT_SECS",
+        "GITTREE_STORAGE_MAX_LIFETIME_SECS",
+        "GITTREE_STORAGE_APPLICATION_NAME",
+        "GITTREE_LOG_JSON",
+        "GITTREE_LOG_DIR",
+    ] {
+        command.env_remove(key);
+    }
     for (key, value) in envs {
         command.env(key, value);
     }

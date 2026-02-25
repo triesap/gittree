@@ -38,6 +38,7 @@ where
     RunFut: Future<Output = Result<i64, gittree_migrate::MigrationError>>,
 {
     let _observability = init_fn().map_err(MainError::Observability)?;
+    #[cfg(not(test))]
     tracing::info!("starting migrations");
     run_fn()
         .await
@@ -68,6 +69,7 @@ fn handle_main_outcome(
 ) -> i32 {
     match result {
         Ok(version) => {
+            #[cfg(not(test))]
             tracing::info!(version, "migrations complete");
             let _ = writeln!(stdout, "migrations complete: version {version}");
             0
@@ -77,6 +79,7 @@ fn handle_main_outcome(
             1
         }
         Err(err @ MainError::Migration(_)) => {
+            #[cfg(not(test))]
             tracing::error!(error = %err, "migration failed");
             let _ = writeln!(stderr, "migration failed: {err}");
             1
@@ -122,6 +125,22 @@ async fn main() -> ExitCode {
 mod tests {
     use super::{MainError, handle_main_outcome, main_impl_with, main_result_with, run_migrations};
     use gittree_migrate::{MigrationConfigError, MigrationError};
+    use std::sync::Once;
+
+    fn init_test_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let config = gittree_observability::ObservabilityConfig {
+                service_name: "gittree-migrate-tests".to_string(),
+                otlp_endpoint: None,
+                log_json: false,
+                log_dir: None,
+                log_stdout: false,
+                metrics_enabled: false,
+            };
+            let _ = gittree_observability::init(&config);
+        });
+    }
 
     fn init_ok() -> Result<(), String> {
         Ok(())
@@ -157,6 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_migrations_returns_version_on_success() {
+        init_test_tracing();
         let version = run_migrations(init_ok, migration_version_12)
             .await
             .expect("version");
@@ -197,6 +217,7 @@ mod tests {
 
     #[test]
     fn handle_main_outcome_writes_success() {
+        init_test_tracing();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let exit_code = handle_main_outcome(Ok(7), &mut out, &mut err);
@@ -227,6 +248,7 @@ mod tests {
 
     #[test]
     fn handle_main_outcome_writes_migration_error() {
+        init_test_tracing();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let exit_code = handle_main_outcome(

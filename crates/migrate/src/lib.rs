@@ -67,26 +67,25 @@ impl std::error::Error for MigrationError {
     }
 }
 
+impl From<StorageError> for MigrationError {
+    fn from(err: StorageError) -> Self {
+        MigrationError::Storage(err)
+    }
+}
+
 pub async fn run() -> Result<i64, MigrationError> {
     let config = MigrationConfig::from_env().map_err(MigrationError::Config)?;
     run_with_config(&config).await
 }
 
 async fn run_with_config(config: &MigrationConfig) -> Result<i64, MigrationError> {
-    let options = config
-        .storage
-        .write_connect_options()
-        .map_err(MigrationError::Storage)?;
+    let options = config.storage.write_connect_options()?;
     let mut connection = PgConnection::connect_with(&options)
         .await
         .map_err(StorageError::from)
         .map_err(MigrationError::Storage)?;
-    let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())
-        .map_err(MigrationError::Storage)?;
-    let version = runner
-        .run(&mut connection)
-        .await
-        .map_err(MigrationError::Storage)?;
+    let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())?;
+    let version = runner.run(&mut connection).await?;
     Ok(version)
 }
 
@@ -204,6 +203,24 @@ mod tests {
     }
 
     #[test]
+    fn config_reads_optional_storage_envs() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "3", &mut || {
+                    with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "180", &mut || {
+                        let config = MigrationConfig::from_env().expect("config");
+                        assert_eq!(config.storage.min_connections, 3);
+                        assert_eq!(config.storage.max_lifetime_secs, Some(180));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn config_ignores_empty_optional_envs() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
@@ -266,6 +283,27 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_invalid_min_connections_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "nope", &mut || {
+                    let err = MigrationConfig::from_env().unwrap_err();
+                    assert!(matches!(
+                        err,
+                        MigrationConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MIN_CONNECTIONS,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
     fn config_rejects_invalid_u64_numbers() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
@@ -278,6 +316,27 @@ mod tests {
                         err,
                         MigrationConfigError::InvalidEnv {
                             key: super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
+                            ..
+                        }
+                    ));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn config_rejects_invalid_max_lifetime_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "nope", &mut || {
+                    let err = MigrationConfig::from_env().unwrap_err();
+                    assert!(matches!(
+                        err,
+                        MigrationConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MAX_LIFETIME_SECS,
                             ..
                         }
                     ));
@@ -476,25 +535,24 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_config_applies_core_migrations_when_database_is_reachable() {
-        if let Some(database_url) =
-            database_url_or_skip_message(first_reachable_migration_database_url().await)
-        {
-            let config = MigrationConfig {
-                storage: StorageConfig {
-                    read_connection: database_url.clone(),
-                    write_connection: Some(database_url),
-                    max_connections: 5,
-                    min_connections: 1,
-                    idle_timeout_secs: None,
-                    max_lifetime_secs: None,
-                    application_name: Some("gittree-migrate-test".to_string()),
-                },
-            };
-            let version = run_with_config(&config)
-                .await
-                .expect("run migrations against reachable postgres");
-            assert!(version >= 0);
-        }
+        let database_url = first_reachable_migration_database_url()
+            .await
+            .expect("postgres must be reachable for db-backed migrate tests");
+        let config = MigrationConfig {
+            storage: StorageConfig {
+                read_connection: database_url.clone(),
+                write_connection: Some(database_url),
+                max_connections: 5,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: Some("gittree-migrate-test".to_string()),
+            },
+        };
+        let version = run_with_config(&config)
+            .await
+            .expect("run migrations against reachable postgres");
+        assert!(version >= 0);
     }
 
     #[test]
