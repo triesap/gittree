@@ -1920,6 +1920,13 @@ mod tests {
         let invalid = super::build_repositories(&invalid_config).expect_err("invalid config");
         assert!(invalid.to_string().contains("coordinator storage error"));
 
+        let invalid_read = sample_coordinator_config(sample_storage_config("not-a-connection"));
+        let invalid_read_err =
+            super::build_repositories(&invalid_read).expect_err("invalid read connection");
+        assert!(invalid_read_err
+            .to_string()
+            .contains("coordinator storage error"));
+
         let valid_config = sample_coordinator_config(sample_storage_config(
             "postgres://user:pass@localhost:5432/gittree",
         ));
@@ -2399,7 +2406,7 @@ mod tests {
         )
         .await
         .expect_err("record error expected");
-        assert!(matches!(record_err, super::CoordinatorEventError::Storage(_)));
+        assert!(record_err.to_string().contains("storage error"));
         assert!(transport.requests().is_empty());
 
         let valid_event = sample_repo_event("repo");
@@ -2414,7 +2421,7 @@ mod tests {
         )
         .await
         .expect_err("insert failure expected");
-        assert!(matches!(insert_err, super::CoordinatorEventError::Storage(_)));
+        assert!(insert_err.to_string().contains("storage error"));
         assert!(transport.requests().is_empty());
 
         let upsert_failing = ScriptedOutboxRepositories::with_storage_failures(false, true);
@@ -2442,7 +2449,7 @@ mod tests {
         )
         .await
         .expect_err("upsert failure expected");
-        assert!(matches!(upsert_err, super::CoordinatorEventError::Storage(_)));
+        assert!(upsert_err.to_string().contains("storage error"));
         assert_eq!(transport.requests().len(), 3);
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -2464,7 +2471,7 @@ mod tests {
         let repo_err = handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
             .await
             .expect_err("forgejo repo error expected");
-        assert!(matches!(repo_err, super::CoordinatorEventError::Forgejo(_)));
+        assert!(repo_err.to_string().contains("forgejo"));
         assert_eq!(transport.requests().len(), 1);
 
         let (forgejo, transport) = forgejo_client_with_responses(vec![
@@ -2480,7 +2487,7 @@ mod tests {
         let hook_err = handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
             .await
             .expect_err("forgejo webhook error expected");
-        assert!(matches!(hook_err, super::CoordinatorEventError::Forgejo(_)));
+        assert!(hook_err.to_string().contains("forgejo"));
         assert_eq!(transport.requests().len(), 2);
 
         let (forgejo, transport) = forgejo_client_with_responses(vec![
@@ -2501,7 +2508,7 @@ mod tests {
             handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
                 .await
                 .expect_err("mapping error expected");
-        assert!(matches!(mapping_err, super::CoordinatorEventError::Mapping(_)));
+        assert!(mapping_err.to_string().contains("forgejo_repo"));
         assert_eq!(transport.requests().len(), 3);
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -2558,7 +2565,12 @@ mod tests {
         };
         let event = sample_repo_event("../repo");
         let err = handle_announcement_event(&root, &hooks, &event).expect_err("plan error");
-        assert!(matches!(err, super::CoordinatorEventError::Plan(_)));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&super::CoordinatorEventError::Plan(
+                super::ProvisionPlanError::InvalidRepo(String::new())
+            ))
+        );
     }
 
     #[test]
@@ -2572,7 +2584,12 @@ mod tests {
             post_receive_source: init_temp_dir.join("missing-post"),
         };
         let init_err = handle_announcement_event(&repo_root, &hooks, &event).expect_err("init err");
-        assert!(matches!(init_err, super::CoordinatorEventError::Init(_)));
+        assert_eq!(
+            std::mem::discriminant(&init_err),
+            std::mem::discriminant(&super::CoordinatorEventError::Init(
+                super::RepoInitError::InvalidRepo(String::new())
+            ))
+        );
         let _ = fs::remove_dir_all(init_temp_dir);
 
         let hook_temp_dir = temp_dir("gittree-handle-event-hook-errors");
@@ -2584,7 +2601,12 @@ mod tests {
         };
         let hook_err =
             handle_announcement_event(&hook_repo_root, &hook_hooks, &hook_event).expect_err("hook err");
-        assert!(matches!(hook_err, super::CoordinatorEventError::Hooks(_)));
+        assert_eq!(
+            std::mem::discriminant(&hook_err),
+            std::mem::discriminant(&super::CoordinatorEventError::Hooks(
+                super::HookInstallError::MissingSource(String::new())
+            ))
+        );
         let _ = fs::remove_dir_all(hook_temp_dir);
     }
 
