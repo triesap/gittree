@@ -589,25 +589,29 @@ pub fn evaluate_request_with_admin_keys(
     })
 }
 
-pub async fn evaluate_request_with_storage<S>(
-    request: &AdmissionRequest,
-    storage: &S,
-) -> Result<AdmissionDecision, AdmissionError>
-where
-    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
+pub trait AdmissionStorage:
+    AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync
 {
+}
+
+impl<T> AdmissionStorage for T where
+    T: AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync
+{
+}
+
+pub async fn evaluate_request_with_storage(
+    request: &AdmissionRequest,
+    storage: &dyn AdmissionStorage,
+) -> Result<AdmissionDecision, AdmissionError> {
     evaluate_request_with_storage_mode(request, storage, RelayCompatibilityMode::Strict, &[]).await
 }
 
-pub async fn evaluate_request_with_storage_mode<S>(
+pub async fn evaluate_request_with_storage_mode(
     request: &AdmissionRequest,
-    storage: &S,
+    storage: &dyn AdmissionStorage,
     mode: RelayCompatibilityMode,
     admin_keys: &[String],
-) -> Result<AdmissionDecision, AdmissionError>
-where
-    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
-{
+) -> Result<AdmissionDecision, AdmissionError> {
     let decision = evaluate_request_with_admin_keys(request, admin_keys)?;
     if let Some(relay_url) = request.relay_host() {
         let metrics = RelayCompatibilityMetrics::new();
@@ -679,27 +683,21 @@ where
     }
 }
 
-pub async fn evaluate_request_cached<S>(
+pub async fn evaluate_request_cached(
     request: &AdmissionRequest,
-    storage: &S,
+    storage: &dyn AdmissionStorage,
     cache: &AdmissionCache,
-) -> Result<AdmissionDecision, AdmissionError>
-where
-    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
-{
+) -> Result<AdmissionDecision, AdmissionError> {
     evaluate_request_cached_mode(request, storage, cache, RelayCompatibilityMode::Strict, &[]).await
 }
 
-pub async fn evaluate_request_cached_mode<S>(
+pub async fn evaluate_request_cached_mode(
     request: &AdmissionRequest,
-    storage: &S,
+    storage: &dyn AdmissionStorage,
     cache: &AdmissionCache,
     mode: RelayCompatibilityMode,
     admin_keys: &[String],
-) -> Result<AdmissionDecision, AdmissionError>
-where
-    S: AnnouncementRepository + RelayCompatibilityRepository + StateRepository,
-{
+) -> Result<AdmissionDecision, AdmissionError> {
     let key = cache.cache_key(request);
     if let Some(cached) = cache.get(&key) {
         return Ok(cached);
@@ -747,10 +745,10 @@ fn repo_address_from_filters(filters: &[EventFilter]) -> Option<RepoAddress> {
     None
 }
 
-async fn repo_exists<S>(storage: &S, address: &RepoAddress) -> Result<bool, StorageError>
-where
-    S: AnnouncementRepository + StateRepository,
-{
+async fn repo_exists(
+    storage: &dyn AdmissionStorage,
+    address: &RepoAddress,
+) -> Result<bool, StorageError> {
     let pubkey = hex::decode(&address.pubkey).map_err(|_| StorageError::InvalidHex {
         field: "pubkey",
         value: address.pubkey.clone(),
@@ -822,14 +820,14 @@ pub fn build_repositories(
     Ok(CachedRepositories::new(repos))
 }
 
-struct AdmissionAppState<R> {
-    repositories: Arc<R>,
+struct AdmissionAppState {
+    repositories: Arc<dyn AdmissionStorage>,
     cache: Arc<AdmissionCache>,
     compatibility: RelayCompatibilityMode,
     control_admin_keys: Vec<String>,
 }
 
-impl<R> Clone for AdmissionAppState<R> {
+impl Clone for AdmissionAppState {
     fn clone(&self) -> Self {
         Self {
             repositories: Arc::clone(&self.repositories),
@@ -880,15 +878,7 @@ fn run_axum_server(
     axum::serve(listener, router).into_future()
 }
 
-fn build_router<R>(state: AdmissionAppState<R>) -> Router
-where
-    R: AnnouncementRepository
-        + RelayCompatibilityRepository
-        + StateRepository
-        + Send
-        + Sync
-        + 'static,
-{
+fn build_router(state: AdmissionAppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/decide", post(decide_handler))
@@ -998,13 +988,10 @@ impl IntoResponse for AdmissionHttpError {
     }
 }
 
-async fn decide_handler<R>(
-    State(state): State<AdmissionAppState<R>>,
+async fn decide_handler(
+    State(state): State<AdmissionAppState>,
     Json(payload): Json<AdmissionRequestPayload>,
-) -> Result<Json<AdmissionDecisionPayload>, AdmissionHttpError>
-where
-    R: AnnouncementRepository + RelayCompatibilityRepository + StateRepository + Send + Sync,
-{
+) -> Result<Json<AdmissionDecisionPayload>, AdmissionHttpError> {
     let request = AdmissionRequest::new(
         payload.kind,
         payload.pubkey,
