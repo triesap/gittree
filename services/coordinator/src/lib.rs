@@ -19,6 +19,7 @@ use gittree_storage::{
 use serde::{Deserialize, Serialize};
 use std::future::{Future, pending};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -37,6 +38,8 @@ const ENV_COORDINATOR_POST_RECEIVE_HOOK: &str = "GITTREE_COORDINATOR_POST_RECEIV
 const OUTBOX_POLL_SECS: u64 = 2;
 const OUTBOX_RETRY_BASE_SECS: i64 = 30;
 const OUTBOX_RETRY_MAX_SECS: i64 = 30 * 60;
+type PublishRelayFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+type PublishRelayFn = Arc<dyn Fn(String, SignedNostrEvent) -> PublishRelayFuture + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinatorConfig {
@@ -310,10 +313,11 @@ where
         + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
+    let publish: PublishRelayFn = Arc::new(publish_to_relay_boxed);
     tokio::spawn(publish_outbox_loop_with_delay_and_publish(
         state,
         StdDuration::from_secs(OUTBOX_POLL_SECS),
-        publish_to_relay,
+        publish,
     ))
 }
 
@@ -361,10 +365,14 @@ async fn publish_to_relay(relay_url: String, event: SignedNostrEvent) -> Result<
         .map_err(|err| err.to_string())
 }
 
-async fn publish_outbox_loop_with_delay_and_publish<R, T, Publish, PublishFut>(
+fn publish_to_relay_boxed(relay_url: String, event: SignedNostrEvent) -> PublishRelayFuture {
+    Box::pin(publish_to_relay(relay_url, event))
+}
+
+async fn publish_outbox_loop_with_delay_and_publish<R, T>(
     state: CoordinatorAppState<R, T>,
     poll_delay: StdDuration,
-    publish: Publish,
+    publish: PublishRelayFn,
 ) where
     R: RelayPublishRepository
         + AnnouncementRepository
@@ -373,8 +381,6 @@ async fn publish_outbox_loop_with_delay_and_publish<R, T, Publish, PublishFut>(
         + Sync
         + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
-    Publish: Fn(String, SignedNostrEvent) -> PublishFut + Send + Sync + 'static,
-    PublishFut: Future<Output = Result<(), String>> + Send,
 {
     loop {
         let now = OffsetDateTime::now_utc();
@@ -1234,6 +1240,18 @@ mod tests {
         Err("publish failed".to_string())
     }
 
+    fn publish_ok_fn() -> super::PublishRelayFn {
+        Arc::new(|relay_url, event| Box::pin(publish_ok(relay_url, event)))
+    }
+
+    fn publish_err_fn() -> super::PublishRelayFn {
+        Arc::new(|relay_url, event| Box::pin(publish_err(relay_url, event)))
+    }
+
+    fn publish_to_relay_fn() -> super::PublishRelayFn {
+        Arc::new(super::publish_to_relay_boxed)
+    }
+
     #[async_trait]
     impl ForgejoTransport for MockTransport {
         async fn send(
@@ -1925,7 +1943,8 @@ mod tests {
             maintainers: Vec::new(),
         };
         let root = std::path::Path::new("/var/lib/gittree");
-        let err = build_provision_plan(root, "npub-invalid", &announcement).expect_err("invalid npub");
+        let err =
+            build_provision_plan(root, "npub-invalid", &announcement).expect_err("invalid npub");
         assert!(matches!(err, super::ProvisionPlanError::InvalidRepo(_)));
     }
 
@@ -2701,7 +2720,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_ok,
+            publish_ok_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
@@ -2737,7 +2756,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_ok,
+            publish_ok_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
@@ -2773,7 +2792,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_ok,
+            publish_ok_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
@@ -2809,7 +2828,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_err,
+            publish_err_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
@@ -2848,7 +2867,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_ok,
+            publish_ok_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
@@ -2882,7 +2901,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_ok,
+            publish_ok_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
@@ -2916,7 +2935,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_ok,
+            publish_ok_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
@@ -2944,7 +2963,7 @@ mod tests {
             super::publish_outbox_loop_with_delay_and_publish(
                 state,
                 StdDuration::from_secs(super::OUTBOX_POLL_SECS),
-                super::publish_to_relay,
+                publish_to_relay_fn(),
             ),
         )
         .await;
@@ -2972,7 +2991,7 @@ mod tests {
             super::publish_outbox_loop_with_delay_and_publish(
                 state,
                 StdDuration::from_millis(1),
-                super::publish_to_relay,
+                publish_to_relay_fn(),
             ),
         )
         .await;
@@ -3013,7 +3032,7 @@ mod tests {
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            super::publish_to_relay,
+            publish_to_relay_fn(),
         ));
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         task.abort();
