@@ -24,4 +24,5 @@ gittree-observability = { path = "../../crates/observability" }
 gittree-storage = { path = "../../crates/storage" }
 
 [dev-dependencies]
+async-trait = "0.1"
 tower = "0.4"

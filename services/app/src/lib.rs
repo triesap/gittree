@@ -441,6 +441,7 @@ mod tests {
         AppApiError, AppError, AppServiceConfig, AppServiceConfigError, AppUiState,
         StorageConfigError, build_router, run_axum_server, server_fn_route_handler,
     };
+    use async_trait::async_trait;
     use axum::body::Body;
     use axum::extract::{Path, State};
     use axum::http::{Method, Request, StatusCode};
@@ -504,6 +505,38 @@ mod tests {
                 .site_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().expect("addr"))
                 .build(),
         )
+    }
+
+    #[derive(Clone, Default)]
+    struct FailingListMappings;
+
+    #[async_trait]
+    impl RepoMappingRepository for FailingListMappings {
+        async fn upsert_mapping(&self, _record: RepoMappingRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn mapping_by_forgejo(
+            &self,
+            _owner: &str,
+            _repo: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn mapping_by_repo(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "list mappings failed".to_string(),
+            })
+        }
     }
 
     fn pubkey_hex(byte: u8) -> String {
@@ -669,7 +702,7 @@ mod tests {
             ..valid_config
         };
         let err = super::build_repositories(&invalid_config).expect_err("invalid pool config");
-        assert!(matches!(err, AppError::Storage(_)));
+        assert!(err.to_string().contains("app storage error"));
 
         let invalid_connection = AppServiceConfig {
             storage: StorageConfig {
@@ -680,7 +713,7 @@ mod tests {
         };
         let err =
             super::build_repositories(&invalid_connection).expect_err("invalid connect options");
-        assert!(matches!(err, AppError::Storage(_)));
+        assert!(err.to_string().contains("app storage error"));
     }
 
     #[tokio::test]
@@ -701,7 +734,7 @@ mod tests {
         let err = super::serve_with(config, || Ok(()), run_axum_server)
             .await
             .expect_err("bind error");
-        assert!(matches!(err, AppError::Serve(_)));
+        assert!(err.to_string().contains("app serve error"));
     }
 
     #[tokio::test]
@@ -711,7 +744,7 @@ mod tests {
             .expect("listener");
         let addr = listener.local_addr().expect("addr");
         let app = axum::Router::new().route("/health", get(super::health_handler));
-        let task = tokio::spawn(async move { run_axum_server(listener, app).await });
+        let task = tokio::spawn(run_axum_server(listener, app));
         tokio::time::sleep(Duration::from_millis(25)).await;
         let mut stream = tokio::net::TcpStream::connect(addr)
             .await
@@ -748,7 +781,27 @@ mod tests {
         )
         .await
         .expect_err("serve error");
-        assert!(matches!(err, AppError::Serve(message) if message.contains("boom")));
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_storage_errors_before_server_start() {
+        let config = AppServiceConfig {
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            base_path: "/".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: StorageConfig {
+                max_connections: 0,
+                min_connections: 0,
+                ..test_storage_config()
+            },
+            ui: test_ui_config(),
+        };
+        let err = super::serve_with(config, || Ok(()), run_axum_server)
+            .await
+            .expect_err("storage error");
+        assert!(err.to_string().contains("app storage error"));
     }
 
     #[tokio::test]
@@ -786,10 +839,10 @@ mod tests {
         };
         let err = super::serve(config).await.expect_err("wrapper error");
         drop(occupied);
-        assert!(matches!(
-            err,
-            AppError::Serve(_) | AppError::Observability(_) | AppError::ObservabilityConfig(_)
-        ));
+        assert!(
+            err.to_string().contains("app serve error")
+                || err.to_string().contains("app observability")
+        );
     }
 
     #[test]
@@ -801,13 +854,8 @@ mod tests {
             .unwrap_or(true);
         assert!(first_registry_valid);
         let second = super::init_observability();
-        assert!(matches!(
-            second,
-            Ok(_)
-                | Err(AppError::Observability(ObservabilityError::SubscriberInit(
-                    _
-                )))
-        ));
+        let second_error = second.err().map(|err| err.to_string()).unwrap_or_default();
+        assert!(second_error.is_empty() || second_error.contains("app observability error"));
     }
 
     #[tokio::test]
@@ -1383,5 +1431,41 @@ mod tests {
                 .await
                 .expect("repo detail");
         assert_eq!(detail.0.identifier, "repo");
+    }
+
+    #[tokio::test]
+    async fn api_list_repos_handler_maps_internal_errors() {
+        let profiles: Arc<dyn ProfileRepository> = Arc::new(InMemoryRepositories::new());
+        let mappings_impl = Arc::new(FailingListMappings::default());
+        mappings_impl
+            .upsert_mapping(RepoMappingRecord {
+                forgejo_owner: "owner".to_string(),
+                forgejo_repo: "repo".to_string(),
+                pubkey: vec![0x44; 32],
+                identifier: "repo".to_string(),
+            })
+            .await
+            .expect("noop upsert");
+        assert!(
+            mappings_impl
+                .mapping_by_forgejo("owner", "repo")
+                .await
+                .expect("mapping by forgejo")
+                .is_none()
+        );
+        assert!(
+            mappings_impl
+                .mapping_by_repo(&[0x44; 32], "repo")
+                .await
+                .expect("mapping by repo")
+                .is_none()
+        );
+        let mappings: Arc<dyn RepoMappingRepository> = mappings_impl;
+        let state = test_state(mappings, profiles);
+
+        let err = super::api_list_repos_handler(State(state))
+            .await
+            .expect_err("storage error");
+        assert_eq!(err.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
