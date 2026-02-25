@@ -675,10 +675,14 @@ pub fn init_repo(plan: &RepoProvisionPlan) -> Result<RepoInitReport, RepoInitErr
 }
 
 fn create_bare_repo(path: &Path) -> Result<(), RepoInitError> {
+    create_bare_repo_with_git(path, "git")
+}
+
+fn create_bare_repo_with_git(path: &Path, git_bin: &str) -> Result<(), RepoInitError> {
     let path_str = path
         .to_str()
         .ok_or_else(|| RepoInitError::InvalidPath("repo path is not utf-8".to_string()))?;
-    let output = Command::new("git")
+    let output = Command::new(git_bin)
         .arg("init")
         .arg("--bare")
         .arg(path_str)
@@ -694,10 +698,18 @@ fn create_bare_repo(path: &Path) -> Result<(), RepoInitError> {
 }
 
 fn apply_git_config(path: &Path, entry: &GitConfigEntry) -> Result<(), RepoInitError> {
+    apply_git_config_with_git(path, entry, "git")
+}
+
+fn apply_git_config_with_git(
+    path: &Path,
+    entry: &GitConfigEntry,
+    git_bin: &str,
+) -> Result<(), RepoInitError> {
     let path_str = path
         .to_str()
         .ok_or_else(|| RepoInitError::InvalidPath("repo path is not utf-8".to_string()))?;
-    let output = Command::new("git")
+    let output = Command::new(git_bin)
         .arg("-C")
         .arg(path_str)
         .arg("config")
@@ -1060,7 +1072,7 @@ mod tests {
     };
     use std::collections::VecDeque;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, LazyLock, Mutex};
     use std::time::Duration as StdDuration;
     use time::{Duration as TimeDuration, OffsetDateTime};
@@ -2038,6 +2050,22 @@ mod tests {
     }
 
     #[test]
+    fn repo_init_helpers_report_spawn_errors() {
+        let temp_dir = temp_dir("gittree-repo-init-spawn-error");
+        let repo_path = temp_dir.join("repo.git");
+        let entry = super::GitConfigEntry::new("core.bare", "true");
+
+        let init_err = super::create_bare_repo_with_git(&repo_path, "gittree-missing-git")
+            .expect_err("missing git binary should fail");
+        assert!(matches!(init_err, super::RepoInitError::Io(_)));
+
+        let config_err = super::apply_git_config_with_git(&repo_path, &entry, "gittree-missing-git")
+            .expect_err("missing git binary should fail");
+        assert!(matches!(config_err, super::RepoInitError::Io(_)));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
     fn install_hooks_is_idempotent() {
         let announcement = RepoAnnouncement {
             identifier: "repo".to_string(),
@@ -2086,6 +2114,56 @@ mod tests {
         }
         let second = install_hooks(&plan, &config).expect("install again");
         assert_eq!(second.installed, 2);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn install_hooks_reports_post_source_missing_after_pre_source_check() {
+        let temp_dir = temp_dir("gittree-hook-post-source-missing");
+        let plan = sample_plan(temp_dir.join("repo.git"));
+        let pre_source = temp_dir.join("pre-receive");
+        fs::write(&pre_source, "#!/bin/sh\necho pre\n").expect("pre source");
+        let config = HookInstallConfig {
+            pre_receive_source: pre_source,
+            post_receive_source: temp_dir.join("missing-post-receive"),
+        };
+        let err = super::install_hooks(&plan, &config).expect_err("missing post source");
+        assert!(matches!(err, super::HookInstallError::MissingSource(_)));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn install_hooks_and_permissions_report_io_errors() {
+        let temp_dir = temp_dir("gittree-hook-io-errors");
+        let hooks_file = temp_dir.join("repo.git");
+        fs::write(&hooks_file, "not a directory").expect("hooks file");
+        let plan = sample_plan(hooks_file);
+        let pre_source = temp_dir.join("pre-receive");
+        let post_source = temp_dir.join("post-receive");
+        fs::write(&pre_source, "#!/bin/sh\necho pre\n").expect("pre source");
+        fs::write(&post_source, "#!/bin/sh\necho post\n").expect("post source");
+        let config = HookInstallConfig {
+            pre_receive_source: pre_source.clone(),
+            post_receive_source: post_source,
+        };
+        let create_err = super::install_hooks(&plan, &config).expect_err("create dir should fail");
+        assert!(matches!(create_err, super::HookInstallError::Io(_)));
+
+        let copy_err = super::install_hook(&pre_source, &temp_dir.join("missing").join("hook"))
+            .expect_err("copy should fail");
+        assert!(matches!(copy_err, super::HookInstallError::Io(_)));
+
+        let metadata_err =
+            super::ensure_executable(Path::new("/path/that/does/not/exist")).expect_err("missing path");
+        assert!(matches!(metadata_err, super::HookInstallError::Io(_)));
+
+        #[cfg(unix)]
+        {
+            let chmod_err = super::ensure_executable(Path::new("/dev/null"))
+                .expect_err("permission change should fail");
+            assert!(matches!(chmod_err, super::HookInstallError::Io(_)));
+        }
+
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2859,6 +2937,136 @@ mod tests {
         assert_eq!(mapping.forgejo_owner, "owner");
         assert_eq!(mapping.forgejo_repo, "repo");
         assert!(repo_root.join(npub).join("repo.git").exists());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn finalize_outbox_job_maps_storage_forgejo_mapping_and_hook_errors() {
+        let temp_dir = temp_dir("gittree-finalize-error-maps");
+        let repo_root = temp_dir.join("repos");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("missing-pre"),
+            post_receive_source: temp_dir.join("missing-post"),
+        };
+        let tags = sample_repo_announcement("repo").to_tags();
+
+        let mut invalid_record_job = sample_publish_job(KIND_GIT_REPO_ANNOUNCEMENT.0, tags.clone(), "repo");
+        invalid_record_job.pubkey = vec![0x22; 31];
+        let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
+        let record_state = super::CoordinatorAppState {
+            repositories: Arc::new(InMemoryRepositories::new()),
+            repo_root: repo_root.clone(),
+            hooks: hooks.clone(),
+            forgejo,
+        };
+        let record_err = super::finalize_outbox_job(&record_state, &invalid_record_job)
+            .await
+            .expect_err("record error expected");
+        assert!(record_err.to_string().contains("storage error"));
+        assert!(transport.requests().is_empty());
+
+        let valid_job = sample_publish_job(KIND_GIT_REPO_ANNOUNCEMENT.0, tags.clone(), "repo");
+        let insert_state = super::CoordinatorAppState {
+            repositories: Arc::new(ScriptedOutboxRepositories::with_storage_failures(true, false)),
+            repo_root: repo_root.clone(),
+            hooks: hooks.clone(),
+            forgejo: forgejo_client_with_responses(Vec::new()).0,
+        };
+        let insert_err = super::finalize_outbox_job(&insert_state, &valid_job)
+            .await
+            .expect_err("insert error expected");
+        assert!(insert_err.to_string().contains("storage error"));
+
+        let (forgejo, transport) = forgejo_client_with_responses(vec![ForgejoResponse {
+            status: 500,
+            body: "boom".to_string(),
+        }]);
+        let repo_state = super::CoordinatorAppState {
+            repositories: Arc::new(InMemoryRepositories::new()),
+            repo_root: repo_root.clone(),
+            hooks: hooks.clone(),
+            forgejo,
+        };
+        let repo_err = super::finalize_outbox_job(&repo_state, &valid_job)
+            .await
+            .expect_err("forgejo repo error expected");
+        assert!(repo_err.to_string().contains("forgejo"));
+        assert_eq!(transport.requests().len(), 1);
+
+        let (forgejo, transport) = forgejo_client_with_responses(vec![
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("owner", "repo"),
+            },
+            ForgejoResponse {
+                status: 500,
+                body: "boom".to_string(),
+            },
+        ]);
+        let webhook_state = super::CoordinatorAppState {
+            repositories: Arc::new(InMemoryRepositories::new()),
+            repo_root: repo_root.clone(),
+            hooks: hooks.clone(),
+            forgejo,
+        };
+        let webhook_err = super::finalize_outbox_job(&webhook_state, &valid_job)
+            .await
+            .expect_err("forgejo webhook error expected");
+        assert!(webhook_err.to_string().contains("forgejo"));
+        assert_eq!(transport.requests().len(), 2);
+
+        let (forgejo, transport) = forgejo_client_with_responses(vec![
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("bad owner", "repo"),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
+            },
+        ]);
+        let mapping_state = super::CoordinatorAppState {
+            repositories: Arc::new(InMemoryRepositories::new()),
+            repo_root: repo_root.clone(),
+            hooks: hooks.clone(),
+            forgejo,
+        };
+        let mapping_err = super::finalize_outbox_job(&mapping_state, &valid_job)
+            .await
+            .expect_err("mapping error expected");
+        assert!(mapping_err.to_string().contains("forgejo_repo"));
+        assert_eq!(transport.requests().len(), 3);
+
+        let (forgejo, transport) = forgejo_client_with_responses(vec![
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("owner", "repo"),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
+            },
+        ]);
+        let upsert_state = super::CoordinatorAppState {
+            repositories: Arc::new(ScriptedOutboxRepositories::with_storage_failures(false, true)),
+            repo_root: repo_root.clone(),
+            hooks: hooks.clone(),
+            forgejo,
+        };
+        let upsert_err = super::finalize_outbox_job(&upsert_state, &valid_job)
+            .await
+            .expect_err("upsert error expected");
+        assert!(upsert_err.to_string().contains("storage error"));
+        assert_eq!(transport.requests().len(), 3);
+
         let _ = fs::remove_dir_all(temp_dir);
     }
 
