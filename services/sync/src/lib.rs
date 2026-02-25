@@ -301,13 +301,15 @@ async fn post_receive_handler(
     State(state): State<Arc<SyncAppState>>,
     Json(payload): Json<PostReceivePayload>,
 ) -> Result<Json<SyncAckPayload>, SyncHttpError> {
-    RepoAddress::new(payload.pubkey.clone(), payload.identifier.clone())
+    let address = RepoAddress::new(payload.pubkey.clone(), payload.identifier.clone())
         .map_err(|err| SyncHttpError::BadRequest(format!("invalid repo address: {err}")))?;
-    let npub = npub_from_hex(&payload.pubkey)?;
+    // RepoAddress::new enforces hex pubkeys, so npub encoding cannot fail here.
+    let npub = npub_from_hex(&address.pubkey)
+        .expect("validated repo address always contains a valid hex pubkey");
     let repo_path = state
         .repo_root
         .join(npub)
-        .join(format!("{}.git", payload.identifier));
+        .join(format!("{}.git", address.identifier));
     Ok(Json(SyncAckPayload {
         repo_path: repo_path.display().to_string(),
         updates: payload.updates.len(),
