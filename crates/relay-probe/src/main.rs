@@ -72,10 +72,6 @@ impl ProbeCli {
                 _ if value.starts_with("--relay=") => {
                     relay = Some(value.trim_start_matches("--relay=").to_string());
                 }
-                "--help" | "-h" => {
-                    print_help();
-                    exit(0);
-                }
                 other => {
                     return Err(RelayProbeError::InvalidRelayUrl(format!(
                         "unknown flag {other}"
@@ -114,7 +110,7 @@ fn print_help() {
 
 fn main() {
     dotenvy::dotenv().ok();
-    exit(handle_main_result(run()));
+    exit(handle_main_result(run_with_args(std::env::args_os().collect())));
 }
 
 fn handle_main_result(result: Result<(), ProbeCommandError>) -> i32 {
@@ -134,11 +130,16 @@ where
     }
 }
 
-fn run() -> Result<(), ProbeCommandError> {
-    run_with_args(std::env::args_os().collect())
-}
-
 fn run_with_args(args: Vec<std::ffi::OsString>) -> Result<(), ProbeCommandError> {
+    if args.iter().any(|arg| {
+        matches!(
+            arg.to_str(),
+            Some("--help") | Some("-h")
+        )
+    }) {
+        print_help();
+        return Ok(());
+    }
     let cli = ProbeCli::parse(args).map_err(ProbeCommandError::Cli)?;
     run_with_cli(cli)
 }
