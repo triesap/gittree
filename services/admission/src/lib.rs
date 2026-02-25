@@ -1172,10 +1172,10 @@ mod tests {
                 with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
                     with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = AdmissionConfig::from_env().expect_err("invalid pool bounds");
-                        assert!(matches!(
-                            err,
-                            AdmissionConfigError::Storage(StorageConfigError::InvalidConfig(_))
-                        ));
+                        assert!(
+                            err.to_string()
+                                .contains("admission storage config error: invalid pool config min_connections")
+                        );
                     });
                 });
             },
@@ -1263,7 +1263,7 @@ mod tests {
             .await
             .expect("body");
         let decision: AdmissionDecisionPayload = serde_json::from_slice(&body).expect("decision");
-        assert!(matches!(decision, AdmissionDecisionPayload::Accept));
+        assert_eq!(decision, AdmissionDecisionPayload::Accept);
     }
 
     #[tokio::test]
@@ -1325,7 +1325,7 @@ mod tests {
     fn request_rejects_empty_tag() {
         let err =
             AdmissionRequest::new(1, "pubkey", "event", vec![vec![]], None, None).unwrap_err();
-        assert!(matches!(err, super::AdmissionRequestError::InvalidTag));
+        assert_eq!(err.to_string(), "invalid admission tag");
     }
 
     #[test]
@@ -1339,7 +1339,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(matches!(err, super::AdmissionRequestError::InvalidRelayUrl));
+        assert_eq!(err.to_string(), "invalid admission relay url");
     }
 
     #[test]
@@ -1369,7 +1369,7 @@ mod tests {
         .expect("request");
         let decision = evaluate_request_with_admin_keys(&request, &["adminpub".to_string()])
             .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 
     #[test]
@@ -1385,13 +1385,18 @@ mod tests {
         .expect("request");
         let decision = evaluate_request_with_admin_keys(&request, &["adminpub".to_string()])
             .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+        assert_eq!(
+            decision,
+            AdmissionDecision::Reject {
+                reason: "control event not authorized".to_string()
+            }
+        );
     }
 
     #[test]
     fn decision_reject_requires_reason() {
         let err = AdmissionDecision::reject(" ").unwrap_err();
-        assert!(matches!(err, super::AdmissionDecisionError::MissingReason));
+        assert_eq!(err.to_string(), "missing admission rejection reason");
     }
 
     #[test]
@@ -1406,7 +1411,7 @@ mod tests {
     #[test]
     fn decision_requires_filters() {
         let err = AdmissionDecision::requires_related(Vec::new()).unwrap_err();
-        assert!(matches!(err, super::AdmissionDecisionError::MissingFilters));
+        assert_eq!(err.to_string(), "missing related event filters");
     }
 
     #[test]
@@ -1594,14 +1599,20 @@ mod tests {
         config.storage.max_connections = 1;
         config.storage.min_connections = 2;
         let err = super::build_repositories(&config).expect_err("invalid pool settings");
-        assert!(matches!(err, AdmissionError::Storage(_)));
+        assert!(
+            err.to_string()
+                .contains("admission storage error: invalid pool config min_connections")
+        );
     }
 
     #[test]
     fn init_observability_reports_invalid_env() {
         with_env_var("GITTREE_LOG_JSON", "not-bool", &mut || {
             let err = super::init_observability().expect_err("invalid observability env");
-            assert!(matches!(err, AdmissionError::ObservabilityConfig(_)));
+            assert!(
+                err.to_string()
+                    .contains("admission observability config error")
+            );
         });
     }
 
@@ -1624,10 +1635,12 @@ mod tests {
             };
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             let result = runtime.block_on(super::serve(config));
-            assert!(matches!(
-                result,
-                Err(AdmissionError::Serve(_)) | Err(AdmissionError::Observability(_))
-            ));
+            let err = result.expect_err("expected serve error");
+            let message = err.to_string();
+            assert!(
+                message.starts_with("admission serve error:")
+                    || message.starts_with("admission observability error:")
+            );
         });
     }
 
@@ -1684,7 +1697,7 @@ mod tests {
         let err = super::serve_with(config, init_ok, serve_err)
             .await
             .expect_err("server error");
-        assert!(matches!(err, AdmissionError::Serve(_)));
+        assert!(err.to_string().starts_with("admission serve error:"));
     }
 
     #[tokio::test]
@@ -1764,7 +1777,7 @@ mod tests {
         )
         .expect("request");
         let decision = evaluate_request(&request).expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Accept));
+        assert_eq!(decision, AdmissionDecision::Accept);
     }
 
     #[test]
@@ -1779,10 +1792,9 @@ mod tests {
         )
         .expect("request");
         let decision = evaluate_request(&request).expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[test]
@@ -1816,7 +1828,10 @@ mod tests {
         )
         .expect("request");
         let err = evaluate_request(&request).unwrap_err();
-        assert!(matches!(err, super::AdmissionError::Request(_)));
+        assert!(
+            err.to_string()
+                .contains("admission request error: invalid admission kind")
+        );
     }
 
     fn hex_32(byte: u8) -> String {
@@ -1874,7 +1889,9 @@ mod tests {
         let decision = evaluate_request_with_storage(&request, &storage)
             .await
             .expect("decision");
-        assert!(matches!(decision, AdmissionDecision::Reject { .. }));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"reject\""));
     }
 
     #[tokio::test]
@@ -1931,10 +1948,9 @@ mod tests {
         let decision = evaluate_request_with_storage(&request, &storage)
             .await
             .expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[tokio::test]
@@ -1996,10 +2012,9 @@ mod tests {
         )
         .await
         .expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[tokio::test]
@@ -2025,10 +2040,9 @@ mod tests {
         )
         .await
         .expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[tokio::test]
@@ -2060,10 +2074,9 @@ mod tests {
         )
         .await
         .expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[tokio::test]
@@ -2089,10 +2102,9 @@ mod tests {
         )
         .await
         .expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[tokio::test]
@@ -2314,18 +2326,21 @@ mod tests {
             &sample_announcement("repo"),
         )
         .expect("announcement");
-        assert!(matches!(
-            storage.insert_announcement(announcement).await,
-            Err(StorageError::Internal { .. })
-        ));
-        assert!(matches!(
-            storage.list_announcements(&pubkey, "repo").await,
-            Err(StorageError::Internal { .. })
-        ));
-        assert!(matches!(
-            storage.latest_announcement(&pubkey, "repo").await,
-            Err(StorageError::Internal { .. })
-        ));
+        let err = storage
+            .insert_announcement(announcement)
+            .await
+            .expect_err("insert_announcement");
+        assert_eq!(err.to_string(), "internal error: fail");
+        let err = storage
+            .list_announcements(&pubkey, "repo")
+            .await
+            .expect_err("list_announcements");
+        assert_eq!(err.to_string(), "internal error: fail");
+        let err = storage
+            .latest_announcement(&pubkey, "repo")
+            .await
+            .expect_err("latest_announcement");
+        assert_eq!(err.to_string(), "internal error: fail");
 
         let mut state_map = std::collections::HashMap::new();
         state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
@@ -2339,20 +2354,23 @@ mod tests {
         };
         let state = gittree_storage::RepoStateRecord::new(&hex_32(0x43), &hex_32(0x42), 1, &state)
             .expect("state");
-        assert!(matches!(
-            storage.insert_state(state).await,
-            Err(StorageError::Internal { .. })
-        ));
-        assert!(matches!(
-            storage.latest_state(&pubkey, "repo").await,
-            Err(StorageError::Internal { .. })
-        ));
+        let err = storage
+            .insert_state(state)
+            .await
+            .expect_err("insert_state");
+        assert_eq!(err.to_string(), "internal error: fail");
+        let err = storage
+            .latest_state(&pubkey, "repo")
+            .await
+            .expect_err("latest_state");
+        assert_eq!(err.to_string(), "internal error: fail");
 
         let compat = sample_compat_record("wss://relay.example", true);
-        assert!(matches!(
-            storage.upsert_relay_compatibility(compat).await,
-            Err(StorageError::Internal { .. })
-        ));
+        let err = storage
+            .upsert_relay_compatibility(compat)
+            .await
+            .expect_err("upsert_relay_compatibility");
+        assert_eq!(err.to_string(), "internal error: fail");
     }
 
     #[tokio::test]
@@ -2402,10 +2420,9 @@ mod tests {
         )
         .await
         .expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[tokio::test]
@@ -2431,10 +2448,9 @@ mod tests {
         )
         .await
         .expect("decision");
-        assert!(matches!(
-            decision,
-            AdmissionDecision::RequiresRelatedEvents { .. }
-        ));
+        let payload = AdmissionDecisionPayload::from(decision);
+        let payload = serde_json::to_string(&payload).expect("payload");
+        assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
     #[derive(Debug, Default)]
@@ -2565,22 +2581,26 @@ mod tests {
         let round_trip = super::AdmissionFilter::from(&event_filter);
         assert_eq!(round_trip.tags, tags);
 
-        assert!(matches!(
+        assert_eq!(
             super::AdmissionDecisionPayload::from(AdmissionDecision::Accept),
             super::AdmissionDecisionPayload::Accept
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             super::AdmissionDecisionPayload::from(AdmissionDecision::Reject {
                 reason: "nope".to_string()
             }),
-            super::AdmissionDecisionPayload::Reject { .. }
-        ));
-        assert!(matches!(
+            super::AdmissionDecisionPayload::Reject {
+                reason: "nope".to_string()
+            }
+        );
+        assert_eq!(
             super::AdmissionDecisionPayload::from(AdmissionDecision::RequiresRelatedEvents {
-                filters: vec![event_filter]
+                filters: vec![event_filter.clone()]
             }),
-            super::AdmissionDecisionPayload::RequiresRelatedEvents { .. }
-        ));
+            super::AdmissionDecisionPayload::RequiresRelatedEvents {
+                filters: vec![super::AdmissionFilter::from(&event_filter)]
+            }
+        );
     }
 
     #[test]
