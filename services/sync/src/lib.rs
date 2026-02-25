@@ -13,7 +13,7 @@ use gittree_observability::{
 use gittree_storage::{RelayCompatibilityRecord, StorageConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -247,7 +247,7 @@ fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
 ) -> impl Future<Output = Result<(), std::io::Error>> {
-    async move { axum::serve(listener, router).await }
+    axum::serve(listener, router).into_future()
 }
 
 fn build_router(state: SyncAppState) -> Router {

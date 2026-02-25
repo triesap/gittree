@@ -164,10 +164,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, WebhookConfigError> {
 }
 
 fn env_required_string(key: &'static str) -> Result<String, WebhookConfigError> {
-    let value = match std::env::var(key) {
-        Ok(value) => value,
-        Err(_) => return Err(WebhookConfigError::MissingEnv(key)),
-    };
+    let value = std::env::var(key).map_err(|_| WebhookConfigError::MissingEnv(key))?;
     if value.trim().is_empty() {
         return Err(WebhookConfigError::InvalidEnv { key, value });
     }
@@ -247,14 +244,29 @@ pub struct HttpSyncNotifier {
 
 impl HttpSyncNotifier {
     pub fn new(endpoint: impl Into<String>) -> Result<Self, String> {
-        let client = match reqwest::Client::builder().build() {
+        Self::from_builder_result(endpoint.into(), reqwest::Client::builder().build())
+    }
+
+    fn from_builder_result<E: ToString>(
+        endpoint: String,
+        result: Result<reqwest::Client, E>,
+    ) -> Result<Self, String> {
+        let client = match result {
             Ok(client) => client,
             Err(err) => return Err(err.to_string()),
         };
         Ok(Self {
-            endpoint: endpoint.into(),
+            endpoint,
             client,
         })
+    }
+
+    #[cfg(test)]
+    fn new_with_result<E: ToString>(
+        endpoint: impl Into<String>,
+        result: Result<reqwest::Client, E>,
+    ) -> Result<Self, String> {
+        Self::from_builder_result(endpoint.into(), result)
     }
 }
 
@@ -327,13 +339,17 @@ async fn run_http_server_with_shutdown<Shutdown>(
 where
     Shutdown: Future<Output = ()> + Send + 'static,
 {
-    if let Err(err) = axum::serve(listener, router)
+    let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
-        .await
-    {
-        return Err(WebhookError::Serve(err.to_string()));
+        .await;
+    map_serve_result(result)
+}
+
+fn map_serve_result(result: std::io::Result<()>) -> Result<(), WebhookError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => Err(WebhookError::Serve(err.to_string())),
     }
-    Ok(())
 }
 
 fn build_router<R, N>(state: WebhookAppState<R, N>) -> Router
@@ -801,6 +817,31 @@ mod tests {
             super::env_u64("GITTREE_STORAGE_IDLE_TIMEOUT_SECS").expect("u64"),
             None
         );
+    }
+
+    #[test]
+    fn env_required_string_rejects_missing_and_empty_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_removed_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", || {
+            let err = super::env_required_string("GITTREE_WEBHOOK_TEST_REQUIRED")
+                .expect_err("missing env");
+            assert!(matches!(
+                err,
+                WebhookConfigError::MissingEnv("GITTREE_WEBHOOK_TEST_REQUIRED")
+            ));
+        });
+
+        with_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", "   ", || {
+            let err = super::env_required_string("GITTREE_WEBHOOK_TEST_REQUIRED")
+                .expect_err("invalid env");
+            assert!(matches!(
+                err,
+                WebhookConfigError::InvalidEnv {
+                    key: "GITTREE_WEBHOOK_TEST_REQUIRED",
+                    ..
+                }
+            ));
+        });
     }
 
     #[test]
@@ -1330,6 +1371,15 @@ mod tests {
         assert!(!err.is_empty());
     }
 
+    #[test]
+    fn http_sync_notifier_new_maps_builder_errors() {
+        let result = HttpSyncNotifier::new_with_result(
+            "http://localhost:8084",
+            Err::<reqwest::Client, _>("builder failed"),
+        );
+        assert!(matches!(result, Err(message) if message.contains("builder failed")));
+    }
+
     #[tokio::test]
     async fn error_repo_mapping_repository_methods_are_callable() {
         let repo = ErrorRepoMappingRepository;
@@ -1409,5 +1459,12 @@ mod tests {
             .expect("bind listener");
         let result = super::run_http_server_with_shutdown(listener, Router::new(), async {}).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn map_serve_result_maps_io_errors() {
+        let err = super::map_serve_result(Err(std::io::Error::other("boom")))
+            .expect_err("serve error");
+        assert!(matches!(err, WebhookError::Serve(message) if message.contains("boom")));
     }
 }
