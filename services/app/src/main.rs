@@ -3,6 +3,9 @@
 use gittree_app::{AppError, AppServiceConfig, serve};
 use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
+
+type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), AppError>>>>;
 
 #[tokio::main]
 async fn main() {
@@ -14,27 +17,24 @@ async fn main() {
     exit_if_needed(exit_code, &mut exit_process);
 }
 
-async fn main_impl(stderr: &mut impl Write) -> i32 {
+async fn main_impl(stderr: &mut dyn Write) -> i32 {
+    let mut load_dotenv = || {
+        dotenvy::dotenv().ok();
+    };
+    let mut run_fn = || -> MainRunFuture { Box::pin(run()) };
     main_impl_with(
-        || {
-            dotenvy::dotenv().ok();
-        },
-        run,
+        &mut load_dotenv,
+        &mut run_fn,
         stderr,
     )
     .await
 }
 
-async fn main_impl_with<DotenvFn, RunFn, RunFut>(
-    load_dotenv: DotenvFn,
-    run_fn: RunFn,
-    stderr: &mut impl Write,
-) -> i32
-where
-    DotenvFn: FnOnce(),
-    RunFn: FnOnce() -> RunFut,
-    RunFut: Future<Output = Result<(), AppError>>,
-{
+async fn main_impl_with(
+    load_dotenv: &mut dyn FnMut(),
+    run_fn: &mut dyn FnMut() -> MainRunFuture,
+    stderr: &mut dyn Write,
+) -> i32 {
     load_dotenv();
     handle_main_result(run_fn().await, stderr)
 }
@@ -60,7 +60,7 @@ where
     serve_fn(config).await
 }
 
-fn handle_main_result(result: Result<(), AppError>, stderr: &mut impl Write) -> i32 {
+fn handle_main_result(result: Result<(), AppError>, stderr: &mut dyn Write) -> i32 {
     match result {
         Ok(()) => 0,
         Err(err) => {
@@ -95,27 +95,23 @@ mod tests {
         )
         .await
         .expect_err("config error");
-        assert!(matches!(err, AppError::Serve(message) if message == "config failed"));
+        assert_eq!(err.to_string(), "app serve error: config failed");
     }
 
     #[tokio::test]
     async fn run_with_returns_serve_errors() {
         let err = run_with(
-            || Ok::<_, AppError>("config"),
+            || Ok::<_, AppError>(()),
             |_| async { Err::<(), AppError>(AppError::Serve("serve failed".to_string())) },
         )
         .await
         .expect_err("serve error");
-        assert!(matches!(err, AppError::Serve(message) if message == "serve failed"));
+        assert_eq!(err.to_string(), "app serve error: serve failed");
     }
 
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(
-            || Ok::<_, AppError>("config"),
-            |_| async { Ok::<(), AppError>(()) },
-        )
-        .await;
+        let result = run_with(|| Ok::<_, AppError>(()), |_| async { Ok::<(), AppError>(()) }).await;
         assert!(result.is_ok());
     }
 
@@ -141,13 +137,12 @@ mod tests {
     #[tokio::test]
     async fn main_impl_with_reports_errors() {
         let mut stderr = Vec::new();
+        let mut load_dotenv = || {};
+        let mut run_fn = || -> super::MainRunFuture {
+            Box::pin(async { Err::<(), AppError>(AppError::Serve("boom".to_string())) })
+        };
 
-        let exit_code = main_impl_with(
-            || {},
-            || async { Err::<(), AppError>(AppError::Serve("boom".to_string())) },
-            &mut stderr,
-        )
-        .await;
+        let exit_code = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
 
         assert_eq!(exit_code, 1);
         let message = String::from_utf8(stderr).expect("utf8");
@@ -180,15 +175,12 @@ mod tests {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let loader_called = called.clone();
         let mut stderr = Vec::new();
+        let mut load_dotenv = move || {
+            loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+        let mut run_fn = || -> super::MainRunFuture { Box::pin(async { Ok::<(), AppError>(()) }) };
 
-        let _ = main_impl_with(
-            move || {
-                loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
-            },
-            || async { Ok::<(), AppError>(()) },
-            &mut stderr,
-        )
-        .await;
+        let _ = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
 
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
     }
