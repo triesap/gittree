@@ -1,6 +1,9 @@
 use gittree_admission::{AdmissionConfig, AdmissionError, serve};
 use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
+
+type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), AdmissionError>>>>;
 
 #[tokio::main]
 async fn main() {
@@ -12,26 +15,18 @@ async fn main() {
 }
 
 async fn main_impl(stderr: &mut dyn Write) -> i32 {
-    main_impl_with(
-        || {
-            dotenvy::dotenv().ok();
-        },
-        run,
-        stderr,
-    )
-    .await
+    let mut load_dotenv = || {
+        dotenvy::dotenv().ok();
+    };
+    let mut run_fn = || -> MainRunFuture { Box::pin(run()) };
+    main_impl_with(&mut load_dotenv, &mut run_fn, stderr).await
 }
 
-async fn main_impl_with<DotenvFn, RunFn, RunFut>(
-    load_dotenv: DotenvFn,
-    run_fn: RunFn,
+async fn main_impl_with(
+    load_dotenv: &mut dyn FnMut(),
+    run_fn: &mut dyn FnMut() -> MainRunFuture,
     stderr: &mut dyn Write,
-) -> i32
-where
-    DotenvFn: FnOnce(),
-    RunFn: FnOnce() -> RunFut,
-    RunFut: Future<Output = Result<(), AdmissionError>>,
-{
+) -> i32 {
     load_dotenv();
     handle_main_result(run_fn().await, stderr)
 }
@@ -168,12 +163,11 @@ mod tests {
     #[tokio::test]
     async fn main_impl_with_reports_errors() {
         let mut stderr = Vec::new();
-        let exit_code = main_impl_with(
-            || {},
-            || async { Err::<(), AdmissionError>(AdmissionError::Serve("boom".to_string())) },
-            &mut stderr,
-        )
-        .await;
+        let mut load_dotenv = || {};
+        let mut run_fn = || -> super::MainRunFuture {
+            Box::pin(async { Err::<(), AdmissionError>(AdmissionError::Serve("boom".to_string())) })
+        };
+        let exit_code = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
         assert_eq!(exit_code, 1);
         let message = String::from_utf8(stderr).expect("utf8");
         assert!(message.contains("admission serve error: boom"));
@@ -184,14 +178,11 @@ mod tests {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let loader_called = called.clone();
         let mut stderr = Vec::new();
-        let _ = main_impl_with(
-            move || {
-                loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
-            },
-            || async { Ok::<(), AdmissionError>(()) },
-            &mut stderr,
-        )
-        .await;
+        let mut load_dotenv = move || {
+            loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+        let mut run_fn = || -> super::MainRunFuture { Box::pin(async { Ok::<(), AdmissionError>(()) }) };
+        let _ = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
     }
 

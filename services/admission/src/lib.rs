@@ -19,7 +19,6 @@ use gittree_storage::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, IntoFuture};
-use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -243,10 +242,7 @@ impl AdmissionCache {
         }
     }
 
-    fn evict_if_needed<K>(&self, map: &mut HashMap<K, AdmissionCacheEntry>)
-    where
-        K: Clone + Eq + Hash,
-    {
+    fn evict_if_needed(&self, map: &mut HashMap<String, AdmissionCacheEntry>) {
         let max_entries = self.config.max_entries;
         if max_entries == 0 {
             map.clear();
@@ -256,7 +252,7 @@ impl AdmissionCache {
             return;
         }
         let remove_count = map.len() - max_entries;
-        let mut oldest: Vec<(std::time::Instant, K)> = map
+        let mut oldest: Vec<(std::time::Instant, String)> = map
             .iter()
             .map(|(key, entry)| (entry.stored_at, key.clone()))
             .collect();
@@ -439,12 +435,28 @@ impl AdmissionRequest {
         relay_url: Option<String>,
         source_ip: Option<String>,
     ) -> Result<Self, AdmissionRequestError> {
-        let pubkey = pubkey.into();
+        Self::new_with_strings(
+            kind,
+            pubkey.into(),
+            event_id.into(),
+            tags,
+            relay_url,
+            source_ip,
+        )
+    }
+
+    fn new_with_strings(
+        kind: u64,
+        pubkey: String,
+        event_id: String,
+        tags: Vec<Vec<String>>,
+        relay_url: Option<String>,
+        source_ip: Option<String>,
+    ) -> Result<Self, AdmissionRequestError> {
         if pubkey.is_empty() {
             return Err(AdmissionRequestError::MissingField("pubkey"));
         }
 
-        let event_id = event_id.into();
         if event_id.is_empty() {
             return Err(AdmissionRequestError::MissingField("event_id"));
         }
@@ -492,7 +504,10 @@ pub enum AdmissionDecision {
 
 impl AdmissionDecision {
     pub fn reject(reason: impl Into<String>) -> Result<Self, AdmissionDecisionError> {
-        let reason = reason.into();
+        Self::reject_with_string(reason.into())
+    }
+
+    fn reject_with_string(reason: String) -> Result<Self, AdmissionDecisionError> {
         if reason.trim().is_empty() {
             return Err(AdmissionDecisionError::MissingReason);
         }
