@@ -1081,10 +1081,22 @@ mod tests {
     };
     use gittree_storage::{RelayProbeMetadata, StateRepository, StorageConfig, StorageError};
     use std::sync::Arc;
+    use std::sync::Once;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;
+
+    static WARN_LOG_INIT: Once = Once::new();
+
+    fn init_warn_logging() {
+        WARN_LOG_INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_test_writer()
+                .with_max_level(tracing::Level::WARN)
+                .try_init();
+        });
+    }
 
     #[test]
     fn config_loads_from_env() {
@@ -2181,6 +2193,7 @@ mod tests {
 
     #[tokio::test]
     async fn storage_integration_warns_on_incompatible_relay() {
+        init_warn_logging();
         let storage = InMemoryRepositories::new();
         let record = sample_compat_record("wss://relay.example", false);
         storage
@@ -2277,6 +2290,7 @@ mod tests {
 
     #[tokio::test]
     async fn storage_integration_warns_on_missing_compatibility() {
+        init_warn_logging();
         let storage = InMemoryRepositories::new();
         let pubkey = hex_32(0x11);
         let address = format!("30617:{pubkey}:repo");
@@ -2741,6 +2755,7 @@ mod tests {
 
     #[tokio::test]
     async fn storage_integration_warns_on_compatibility_error() {
+        init_warn_logging();
         let storage = FailingStorage;
         let pubkey = hex_32(0x11);
         let address = format!("30617:{pubkey}:repo");
@@ -3120,6 +3135,18 @@ mod tests {
         let cache = AdmissionCache::new(AdmissionCacheConfig::new(Some(Duration::from_secs(0)), 8));
         let key = "stale".to_string();
         cache.insert(key.clone(), AdmissionDecision::Accept);
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn cache_get_stale_entry_handles_poisoned_write_lock() {
+        let cache = AdmissionCache::new(AdmissionCacheConfig::new(Some(Duration::from_secs(0)), 8));
+        let key = "stale".to_string();
+        cache.insert(key.clone(), AdmissionDecision::Accept);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.entries.write().expect("write lock");
+            panic!("poison admission cache lock");
+        }));
         assert!(cache.get(&key).is_none());
     }
 
