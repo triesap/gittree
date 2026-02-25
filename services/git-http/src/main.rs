@@ -6,7 +6,8 @@ use std::io::Write;
 async fn main() {
     dotenvy::dotenv().ok();
     let exit_code = handle_main_result(run().await, &mut std::io::stderr());
-    maybe_exit(exit_code, std::process::exit);
+    let mut exit_fn = |code| std::process::exit(code);
+    maybe_exit(exit_code, &mut exit_fn);
 }
 
 async fn run() -> Result<(), GitHttpError> {
@@ -40,9 +41,9 @@ fn handle_main_result(result: Result<(), GitHttpError>, stderr: &mut dyn Write) 
     }
 }
 
-fn maybe_exit<T>(exit_code: i32, exit_fn: impl FnOnce(i32) -> T) {
+fn maybe_exit(exit_code: i32, exit_fn: &mut dyn FnMut(i32)) {
     if exit_code != 0 {
-        let _ = exit_fn(exit_code);
+        exit_fn(exit_code);
     }
 }
 
@@ -68,6 +69,10 @@ mod tests {
 
     async fn serve_ok(_: GitHttpConfig) -> Result<(), GitHttpError> {
         Ok(())
+    }
+
+    async fn serve_err(_: GitHttpConfig) -> Result<(), GitHttpError> {
+        Err(GitHttpError::Serve("boom".to_string()))
     }
 
     fn test_config() -> GitHttpConfig {
@@ -108,10 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_returns_serve_errors() {
-        let err = run_with(
-            || Ok(test_config()),
-            |_| async { Err(GitHttpError::Serve("boom".to_string())) },
-        )
+        let err = run_with(|| Ok(test_config()), serve_err)
         .await
         .expect_err("serve error");
         assert_eq!(git_http_error_label(&err), "serve");
@@ -175,12 +177,14 @@ mod tests {
     #[test]
     fn maybe_exit_calls_exit_for_non_zero_codes() {
         let captured = Cell::new(None);
-        maybe_exit(2, |code| captured.set(Some(code)));
+        let mut exit_fn = |code| captured.set(Some(code));
+        maybe_exit(2, &mut exit_fn);
         assert_eq!(captured.get(), Some(2));
     }
 
     #[test]
     fn maybe_exit_ignores_zero_code() {
-        maybe_exit(0, std::mem::drop);
+        let mut exit_fn = |_code| ();
+        maybe_exit(0, &mut exit_fn);
     }
 }
