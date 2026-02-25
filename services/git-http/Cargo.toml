@@ -26,4 +26,5 @@ url = "2"
 [dev-dependencies]
 http-body = "1"
 secp256k1 = "0.29"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 tower = "0.4"

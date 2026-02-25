@@ -2151,6 +2151,7 @@ dependencies = [
  "secp256k1",
  "serde_json",
  "sha2",
+ "sqlx",
  "tokio",
  "tower 0.4.13",
  "tracing",
