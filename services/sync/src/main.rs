@@ -2,6 +2,7 @@ use gittree_sync::{SyncConfig, SyncError, serve};
 use std::future::Future;
 use std::io::Write;
 
+#[cfg(not(test))]
 fn main() {
     let mut stderr = std::io::stderr();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -144,6 +145,17 @@ mod tests {
     }
 
     #[test]
+    fn with_env_var_restores_missing_value() {
+        const KEY: &str = "GITTREE_TEST_SYNC_MAIN_ENV_MISSING";
+        // SAFETY: test-only env cleanup for a unique key.
+        unsafe { std::env::remove_var(KEY) };
+        with_env_var(KEY, "set", || {
+            assert_eq!(std::env::var(KEY).expect("set"), "set");
+        });
+        assert!(std::env::var(KEY).is_err());
+    }
+
+    #[test]
     fn handle_main_result_returns_zero_on_success() {
         let mut stderr = Vec::new();
         let exit_code = handle_main_result(Ok(()), &mut stderr);
@@ -175,6 +187,11 @@ mod tests {
             *seen_code.lock().expect("seen code") = Some(code);
         });
         assert_eq!(*seen.lock().expect("seen code"), Some(7));
+    }
+
+    #[test]
+    fn maybe_exit_invokes_drop_for_non_zero_code() {
+        maybe_exit(7, std::mem::drop);
     }
 
     #[tokio::test]
