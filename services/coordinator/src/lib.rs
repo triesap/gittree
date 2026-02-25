@@ -369,6 +369,10 @@ fn publish_to_relay_boxed(relay_url: String, event: SignedNostrEvent) -> Publish
     Box::pin(publish_to_relay(relay_url, event))
 }
 
+fn log_outbox_error(err: &impl std::fmt::Display, context: &'static str) {
+    tracing::error!(error = %err, context, "outbox error");
+}
+
 async fn publish_outbox_loop_with_delay_and_publish<R, T>(
     state: CoordinatorAppState<R, T>,
     poll_delay: StdDuration,
@@ -387,7 +391,7 @@ async fn publish_outbox_loop_with_delay_and_publish<R, T>(
         let job = match state.repositories.claim_relay_publish(now).await {
             Ok(job) => job,
             Err(err) => {
-                tracing::error!(error = %err, "outbox claim failed");
+                log_outbox_error(&err, "outbox claim failed");
                 tokio::time::sleep(poll_delay).await;
                 continue;
             }
@@ -406,7 +410,7 @@ async fn publish_outbox_loop_with_delay_and_publish<R, T>(
                     .mark_relay_publish_succeeded(job.id)
                     .await
                 {
-                    tracing::error!(error = %err, "outbox mark succeeded failed");
+                    log_outbox_error(&err, "outbox mark succeeded failed");
                     continue;
                 }
                 match state
@@ -417,11 +421,11 @@ async fn publish_outbox_loop_with_delay_and_publish<R, T>(
                     Ok(0) => {
                         let _ = finalize_outbox_job(&state, &job)
                             .await
-                            .map_err(|err| tracing::error!(error = %err, "outbox finalize failed"));
+                            .map_err(|err| log_outbox_error(&err, "outbox finalize failed"));
                     }
                     Ok(_) => {}
                     Err(err) => {
-                        tracing::error!(error = %err, "outbox pending count failed");
+                        log_outbox_error(&err, "outbox pending count failed");
                     }
                 }
             }
@@ -432,7 +436,7 @@ async fn publish_outbox_loop_with_delay_and_publish<R, T>(
                     .mark_relay_publish_failed(job.id, &err, retry_at)
                     .await
                 {
-                    tracing::error!(error = %storage_err, "outbox mark failed failed");
+                    log_outbox_error(&storage_err, "outbox mark failed failed");
                 }
             }
         }
