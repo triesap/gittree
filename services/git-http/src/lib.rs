@@ -1014,7 +1014,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -1031,7 +1031,7 @@ mod tests {
         }
     }
 
-    fn with_env_value<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+    fn with_env_value(key: &str, value: Option<&str>, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         match value {
             Some(value) => unsafe { std::env::set_var(key, value) },
@@ -1170,10 +1170,10 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var("GITTREE_GIT_HTTP_BIND", "127.0.0.1:9090", || {
-                        with_env_var(ENV_TIMEOUT_SECS, "15", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var("GITTREE_GIT_HTTP_BIND", "127.0.0.1:9090", &mut || {
+                        with_env_var(ENV_TIMEOUT_SECS, "15", &mut || {
                             let config = GitHttpConfig::from_env().expect("config");
                             assert_eq!(config.bind, "127.0.0.1:9090");
                             assert_eq!(config.upstream_url, "https://git.example");
@@ -1191,9 +1191,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_TIMEOUT_SECS, "", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_TIMEOUT_SECS, "", &mut || {
                         let config = GitHttpConfig::from_env().expect("config");
                         assert_eq!(
                             config.timeout,
@@ -1211,8 +1211,8 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "not-a-url", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "not-a-url", &mut || {
                     let err = GitHttpConfig::from_env().expect_err("invalid upstream");
                     assert_eq!(config_error_label(&err), "invalid_env");
                 });
@@ -1226,9 +1226,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_TIMEOUT_SECS, "bad-timeout", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_TIMEOUT_SECS, "bad-timeout", &mut || {
                         let err = GitHttpConfig::from_env().expect_err("invalid timeout");
                         assert_eq!(config_error_label(&err), "invalid_env");
                     });
@@ -1243,8 +1243,8 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_value(ENV_UPSTREAM_URL, None, || {
+            &mut || {
+                with_env_value(ENV_UPSTREAM_URL, None, &mut || {
                     let err = GitHttpConfig::from_env().expect_err("missing upstream");
                     assert!(matches!(
                         err,
@@ -1261,9 +1261,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var("GITTREE_AUTH_MAX_SKEW_SECONDS", "0", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var("GITTREE_AUTH_MAX_SKEW_SECONDS", "0", &mut || {
                         let err = GitHttpConfig::from_env().expect_err("auth config error");
                         assert_eq!(config_error_label(&err), "config");
                     });
@@ -1278,9 +1278,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "oops", &mut || {
                         let err = GitHttpConfig::from_env().expect_err("invalid storage value");
                         assert_eq!(config_error_label(&err), "storage");
                     });
@@ -1295,9 +1295,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "oops", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "oops", &mut || {
                         let err = GitHttpConfig::from_env().expect_err("invalid min connections");
                         assert_eq!(config_error_label(&err), "storage");
                     });
@@ -1308,9 +1308,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "oops", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "oops", &mut || {
                         let err = GitHttpConfig::from_env().expect_err("invalid max lifetime");
                         assert_eq!(config_error_label(&err), "storage");
                     });
@@ -1325,9 +1325,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "oops", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "oops", &mut || {
                         let err = GitHttpConfig::from_env().expect_err("invalid storage timeout");
                         assert_eq!(config_error_label(&err), "storage");
                     });
@@ -1342,10 +1342,10 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                        with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                        with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                             let err = GitHttpConfig::from_env().expect_err("invalid bounds");
                             assert_eq!(config_error_label(&err), "storage");
                         });
@@ -1358,8 +1358,8 @@ mod tests {
     #[test]
     fn config_requires_storage_read_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_value(ENV_STORAGE_READ_URL, None, || {
-            with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
+        with_env_value(ENV_STORAGE_READ_URL, None, &mut || {
+            with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
                 let err = GitHttpConfig::from_env().expect_err("missing read url");
                 assert_eq!(config_error_label(&err), "storage");
             });
@@ -1372,12 +1372,12 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(ENV_UPSTREAM_URL, "https://git.example", || {
-                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "", || {
-                        with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "", || {
-                            with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                                with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "", &mut || {
+                        with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "", &mut || {
+                            with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                                with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                                     let config = GitHttpConfig::from_env().expect("config");
                                     assert_eq!(config.storage.max_connections, 10);
                                     assert_eq!(config.storage.min_connections, 2);
@@ -1946,22 +1946,22 @@ mod tests {
             std::env::set_var(key, "before");
             std::env::remove_var(missing_key);
         }
-        with_env_var(key, "during", || {
+        with_env_var(key, "during", &mut || {
             assert_eq!(std::env::var(key).ok().as_deref(), Some("during"));
         });
         assert_eq!(std::env::var(key).ok().as_deref(), Some("before"));
 
-        with_env_value(key, Some("value"), || {
+        with_env_value(key, Some("value"), &mut || {
             assert_eq!(std::env::var(key).ok().as_deref(), Some("value"));
         });
         assert_eq!(std::env::var(key).ok().as_deref(), Some("before"));
 
-        with_env_var(missing_key, "during", || {
+        with_env_var(missing_key, "during", &mut || {
             assert_eq!(std::env::var(missing_key).ok().as_deref(), Some("during"));
         });
         assert!(std::env::var(missing_key).is_err());
 
-        with_env_value(missing_key, Some("value"), || {
+        with_env_value(missing_key, Some("value"), &mut || {
             assert_eq!(std::env::var(missing_key).ok().as_deref(), Some("value"));
         });
         assert!(std::env::var(missing_key).is_err());
@@ -2423,7 +2423,7 @@ mod tests {
     #[test]
     fn observability_init_returns_registry() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_value("GITTREE_METRICS_ENABLED", None, || {
+        with_env_value("GITTREE_METRICS_ENABLED", None, &mut || {
             let handle = OBSERVABILITY.get_or_init(init_observability_for_test);
             assert!(handle.prometheus_registry().is_some());
         });
@@ -2432,7 +2432,7 @@ mod tests {
     #[test]
     fn observability_init_second_call_reports_error_variant() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_value("GITTREE_METRICS_ENABLED", None, || {
+        with_env_value("GITTREE_METRICS_ENABLED", None, &mut || {
             let _ = OBSERVABILITY.get_or_init(init_observability_for_test);
             let err = init_observability().expect_err("second init should fail");
             assert_eq!(git_http_error_label(&err), "observability");
@@ -2442,7 +2442,7 @@ mod tests {
     #[test]
     fn metrics_record_accepts_requests() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_value("GITTREE_METRICS_ENABLED", None, || {
+        with_env_value("GITTREE_METRICS_ENABLED", None, &mut || {
             let _handle = OBSERVABILITY.get_or_init(init_observability_for_test);
             let metrics = GitHttpMetrics::new();
             let route = GitHttpRoute::NotFound;
@@ -2595,7 +2595,7 @@ mod tests {
     fn serve_maps_observability_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", &mut || {
             let config = GitHttpConfig {
                 bind: "127.0.0.1:0".to_string(),
                 upstream_url: "https://git.example".to_string(),
