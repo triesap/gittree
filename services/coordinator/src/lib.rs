@@ -40,6 +40,8 @@ const OUTBOX_RETRY_BASE_SECS: i64 = 30;
 const OUTBOX_RETRY_MAX_SECS: i64 = 30 * 60;
 type PublishRelayFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 type PublishRelayFn = Arc<dyn Fn(String, SignedNostrEvent) -> PublishRelayFuture + Send + Sync>;
+type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type InitFn = fn() -> Result<(), CoordinatorError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinatorConfig {
@@ -278,13 +280,14 @@ where
 }
 
 pub async fn serve(config: CoordinatorConfig) -> Result<(), CoordinatorError> {
-    serve_with_init(config, init_observability).await
+    serve_with_init(config, init_observability_unit).await
 }
 
-async fn serve_with_init<I, O>(config: CoordinatorConfig, init: I) -> Result<(), CoordinatorError>
-where
-    I: FnOnce() -> Result<O, CoordinatorError>,
-{
+fn init_observability_unit() -> Result<(), CoordinatorError> {
+    init_observability().map(|_| ())
+}
+
+async fn serve_with_init(config: CoordinatorConfig, init: InitFn) -> Result<(), CoordinatorError> {
     let _observability = init()?;
     let repositories = build_repositories(&config)?;
     let forgejo = ForgejoClient::new(config.forgejo).map_err(CoordinatorError::Forgejo)?;
@@ -300,7 +303,7 @@ where
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| CoordinatorError::Serve(err.to_string()))?;
-    run_http_server_with_shutdown(listener, router, pending()).await
+    run_http_server_with_shutdown(listener, router, Box::pin(pending())).await
 }
 
 fn spawn_publish_outbox<R, T>(state: CoordinatorAppState<R, T>) -> tokio::task::JoinHandle<()>
@@ -321,14 +324,11 @@ where
     ))
 }
 
-async fn run_http_server_with_shutdown<Shutdown>(
+async fn run_http_server_with_shutdown(
     listener: tokio::net::TcpListener,
     router: Router,
-    shutdown: Shutdown,
-) -> Result<(), CoordinatorError>
-where
-    Shutdown: Future<Output = ()> + Send + 'static,
-{
+    shutdown: ShutdownFuture,
+) -> Result<(), CoordinatorError> {
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await;
@@ -2604,10 +2604,14 @@ mod tests {
             "postgres://user:pass@localhost:5432/gittree",
         ));
         config.bind = "invalid-bind".to_string();
-        let err = super::serve_with_init(config, || Ok(()))
+        let err = super::serve_with_init(config, init_ok)
             .await
             .expect_err("bind error");
         assert!(matches!(err, super::CoordinatorError::Serve(_)));
+    }
+
+    fn init_ok() -> Result<(), super::CoordinatorError> {
+        Ok(())
     }
 
     #[tokio::test]
@@ -2616,7 +2620,7 @@ mod tests {
             "postgres://user:pass@localhost:5432/gittree",
         ));
         config.bind = "127.0.0.1:0".to_string();
-        let task = tokio::spawn(super::serve_with_init(config, || Ok(())));
+        let task = tokio::spawn(super::serve_with_init(config, init_ok));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
         let _ = task.await;
@@ -2645,7 +2649,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
-        let result = super::run_http_server_with_shutdown(listener, Router::new(), async {}).await;
+        let result =
+            super::run_http_server_with_shutdown(listener, Router::new(), Box::pin(async {})).await;
         assert!(result.is_ok());
     }
 
@@ -2657,7 +2662,7 @@ mod tests {
         let task = tokio::spawn(super::run_http_server_with_shutdown(
             listener,
             Router::new(),
-            std::future::pending(),
+            Box::pin(std::future::pending()),
         ));
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         task.abort();
