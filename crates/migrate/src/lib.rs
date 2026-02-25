@@ -157,7 +157,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -193,7 +193,7 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 let config = MigrationConfig::from_env().expect("config");
                 assert_eq!(config.storage.max_connections, 10);
                 assert_eq!(config.storage.min_connections, 2);
@@ -209,11 +209,11 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
-                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", &mut || {
+                        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                                 let config = MigrationConfig::from_env().expect("config");
                                 assert_eq!(config.storage.max_connections, 10);
                                 assert_eq!(config.storage.min_connections, 2);
@@ -233,9 +233,9 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = MigrationConfig::from_env().unwrap_err();
                         assert!(err.to_string().contains("min_connections"));
                     });
@@ -250,8 +250,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "nope", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "nope", &mut || {
                     let err = MigrationConfig::from_env().unwrap_err();
                     assert!(matches!(
                         err,
@@ -271,8 +271,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "nope", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "nope", &mut || {
                     let err = MigrationConfig::from_env().unwrap_err();
                     assert!(matches!(
                         err,
@@ -424,15 +424,15 @@ mod tests {
     #[test]
     fn migration_test_database_candidates_dedupes_and_skips_empty_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_STORAGE_TEST_DATABASE_URL", " ", || {
+        with_env_var("GITTREE_STORAGE_TEST_DATABASE_URL", " ", &mut || {
             with_env_var(
                 super::ENV_STORAGE_WRITE_URL,
                 "postgres://gittree:gittree@127.0.0.1:5432/gittree",
-                || {
+                &mut || {
                     with_env_var(
                         super::ENV_STORAGE_READ_URL,
                         "postgres://gittree:gittree@127.0.0.1:5432/gittree",
-                        || {
+                        &mut || {
                             let candidates = migration_test_database_candidates();
                             assert_eq!(candidates.len(), 1);
                             assert_eq!(
@@ -516,7 +516,7 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 assert_eq!(
                     std::env::var(super::ENV_STORAGE_READ_URL).as_deref(),
                     Ok("postgres://user:pass@localhost:5432/gittree")
