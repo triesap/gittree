@@ -97,6 +97,14 @@ fn admin_binary_help_exits_successfully() {
 }
 
 #[test]
+fn admin_binary_requires_command() {
+    let output = run_admin(&[], None, &[]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gittree-admin failed: admin cli error: missing command"));
+}
+
+#[test]
 fn admin_binary_reports_observability_init_error() {
     let output = run_admin(&["--help"], None, &[("GITTREE_LOG_JSON", "invalid-bool")]);
     assert!(!output.status.success());

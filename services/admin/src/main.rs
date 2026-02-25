@@ -217,13 +217,6 @@ async fn run() -> Result<(), AdminError> {
             identifier,
         } => {
             let forgejo = ForgejoRepo::parse(&forgejo).map_err(AdminError::Core)?;
-            tracing::info!(
-                owner = %forgejo.owner,
-                name = %forgejo.name,
-                pubkey = %pubkey,
-                identifier = %identifier,
-                "upserting repo mapping"
-            );
             let mapping = RepoMapping::new(forgejo.owner, forgejo.name, pubkey, identifier)
                 .map_err(AdminError::Core)?;
             let record = RepoMappingRecord::new(&mapping).map_err(AdminError::Storage)?;
@@ -242,11 +235,6 @@ async fn run() -> Result<(), AdminError> {
             repo.upsert_mapping(record)
                 .await
                 .map_err(AdminError::Storage)?;
-            tracing::info!(
-                owner = %mapping.forgejo.owner,
-                name = %mapping.forgejo.name,
-                "repo mapping stored"
-            );
         }
         AdminCommand::CreateUser {
             username,
@@ -512,6 +500,7 @@ mod tests {
     use super::DEFAULT_CONTROL_URL;
     use super::ENV_CONTROL_TOKEN;
     use super::ENV_CONTROL_URL;
+    use super::init_observability;
     use super::ENV_STORAGE_IDLE_TIMEOUT_SECS;
     use super::ENV_STORAGE_MAX_CONNECTIONS;
     use super::ENV_STORAGE_MAX_LIFETIME_SECS;
@@ -794,6 +783,16 @@ mod tests {
                 std::env::var("GITTREE_TEST_RESTORE_OPT").expect("restored value"),
                 "before"
             );
+        });
+    }
+
+    #[test]
+    fn init_observability_reports_reinit_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_JSON", "false", || {
+            let _ = init_observability();
+            let second = init_observability();
+            assert!(second.is_err());
         });
     }
 
