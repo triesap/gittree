@@ -800,7 +800,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -817,7 +817,7 @@ mod tests {
         }
     }
 
-    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
+    fn without_env_var(key: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -1003,9 +1003,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", &mut || {
                         let config = StateConfig::from_env().expect("config");
                         assert_eq!(config.bind, "127.0.0.1:8082");
                         assert_eq!(
@@ -1025,10 +1025,10 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
-                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
-                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", || {
+            &mut || {
+                with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", &mut || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "", &mut || {
                             let config = StateConfig::from_env().expect("config");
                             assert_eq!(config.storage.idle_timeout_secs, None);
                             assert_eq!(config.storage.max_lifetime_secs, None);
@@ -1042,9 +1042,9 @@ mod tests {
     #[test]
     fn config_requires_storage_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
-            with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                without_env_var(ENV_STORAGE_READ_URL, || {
+        with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", &mut || {
+            with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                without_env_var(ENV_STORAGE_READ_URL, &mut || {
                     let err = StateConfig::from_env().unwrap_err();
                     assert!(matches!(
                         err,
@@ -1061,9 +1061,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "oops", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "oops", &mut || {
                         let err = StateConfig::from_env().expect_err("invalid max connections");
                         assert!(matches!(
                             err,
@@ -1073,7 +1073,7 @@ mod tests {
                             })
                         ));
                     });
-                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "nope", || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "nope", &mut || {
                         let err = StateConfig::from_env().expect_err("invalid idle timeout");
                         assert!(matches!(
                             err,
@@ -1094,10 +1094,10 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                             let err = StateConfig::from_env().expect_err("invalid bounds");
                             assert!(matches!(
                                 err,
@@ -1116,9 +1116,9 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", &mut || {
                         let config = StateConfig::from_env().expect("config");
                         assert_eq!(config.storage.min_connections, 2);
                     });
@@ -1133,15 +1133,15 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
-                    with_env_var("GITTREE_STATE_BIND", "invalid-bind", || {
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var("GITTREE_STATE_BIND", "invalid-bind", &mut || {
                         let err = StateConfig::from_env().expect_err("invalid bind");
                         assert!(matches!(err, StateConfigError::Config(_)));
                     });
                 });
-                with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", || {
-                    with_env_var("GITTREE_RELAY_URLS", "not-a-url", || {
+                with_env_var("GITTREE_STATE_BIND", "127.0.0.1:8082", &mut || {
+                    with_env_var("GITTREE_RELAY_URLS", "not-a-url", &mut || {
                         let err = StateConfig::from_env().expect_err("invalid relay targets");
                         assert!(matches!(err, StateConfigError::Config(_)));
                     });
@@ -2037,13 +2037,13 @@ mod tests {
         unsafe {
             std::env::set_var(KEY, "original");
         }
-        with_env_var(KEY, "override", || {
+        with_env_var(KEY, "override", &mut || {
             assert_eq!(std::env::var(KEY).ok().as_deref(), Some("override"));
         });
         assert_eq!(std::env::var(KEY).ok().as_deref(), Some("original"));
 
-        with_env_var(KEY, "original", || {
-            without_env_var(KEY, || {
+        with_env_var(KEY, "original", &mut || {
+            without_env_var(KEY, &mut || {
                 assert!(std::env::var(KEY).is_err());
             });
         });
@@ -2056,7 +2056,7 @@ mod tests {
     #[test]
     fn observability_init_reports_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_STDOUT", "invalid-bool", || {
+        with_env_var("GITTREE_LOG_STDOUT", "invalid-bool", &mut || {
             let err = init_observability().expect_err("invalid observability config");
             assert!(matches!(err, StateError::ObservabilityConfig(_)));
         });
