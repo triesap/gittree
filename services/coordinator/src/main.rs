@@ -5,10 +5,10 @@ use std::pin::Pin;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), CoordinatorError>>>>;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let mut stderr = std::io::stderr();
-    let exit_code = main_impl(&mut stderr).await;
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let exit_code = runtime.block_on(main_impl(&mut stderr));
     let mut exit_fn = |code| std::process::exit(code);
     exit_if_needed(exit_code, &mut exit_fn);
 }
