@@ -20,6 +20,16 @@ fn run_hook_binary_with_env(
         "GITTREE_HOOK_STDIN_FILE",
         "GITTREE_STATE_URL",
         "GITTREE_SYNC_URL",
+        "GITTREE_RELAY_BIND",
+        "GITTREE_ADMISSION_BIND",
+        "GITTREE_STATE_BIND",
+        "GITTREE_COORDINATOR_BIND",
+        "GITTREE_SYNC_BIND",
+        "GITTREE_GIT_HTTP_BIND",
+        "GITTREE_UI_BIND",
+        "GITTREE_WEBHOOK_BIND",
+        "GITTREE_CONTROL_BIND",
+        "GITTREE_AUTH_BIND",
     ] {
         command.env_remove(key);
     }

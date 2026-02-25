@@ -121,18 +121,21 @@ mod tests {
 
     #[test]
     fn run_config_maps_post_receive_mode() {
-        let cli = HookCli::try_parse_from([
-            "gittree-git-hook",
-            "--mode",
-            "post-receive",
-            "--state-url",
-            "http://127.0.0.1:8082",
-            "--sync-url",
-            "http://127.0.0.1:8088",
-        ])
-        .expect("parse cli");
-        let config = HookRunConfig::from_env(cli).expect("config");
-        assert_eq!(config.hook.mode, HookModeArg::PostReceive.into());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_AUTH_BIND", "127.0.0.1:8089", || {
+            let cli = HookCli::try_parse_from([
+                "gittree-git-hook",
+                "--mode",
+                "post-receive",
+                "--state-url",
+                "http://127.0.0.1:8082",
+                "--sync-url",
+                "http://127.0.0.1:8088",
+            ])
+            .expect("parse cli");
+            let config = HookRunConfig::from_env(cli).expect("config");
+            assert_eq!(config.hook.mode, HookModeArg::PostReceive.into());
+        });
     }
 
     #[test]
