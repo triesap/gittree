@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, IntoFuture};
 use std::hash::Hash;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -838,16 +839,15 @@ impl Clone for AdmissionAppState {
     }
 }
 
-async fn serve_with<InitFn, ServeFn, ServeFut>(
+type ServeFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
+type InitFn = fn() -> Result<(), AdmissionError>;
+type ServeFn = fn(tokio::net::TcpListener, Router) -> ServeFuture;
+
+async fn serve_with(
     config: AdmissionConfig,
     init_fn: InitFn,
     serve_fn: ServeFn,
-) -> Result<(), AdmissionError>
-where
-    InitFn: FnOnce() -> Result<(), AdmissionError>,
-    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
-    ServeFut: Future<Output = Result<(), std::io::Error>>,
-{
+) -> Result<(), AdmissionError> {
     let _observability = init_fn()?;
     let repositories = build_repositories(&config)?;
     let cache = Arc::new(AdmissionCache::new(AdmissionCacheConfig::default()));
@@ -867,15 +867,16 @@ where
     Ok(())
 }
 
-pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
-    serve_with(config, || init_observability().map(|_| ()), run_axum_server).await
+fn init_observability_unit() -> Result<(), AdmissionError> {
+    init_observability().map(|_| ())
 }
 
-fn run_axum_server(
-    listener: tokio::net::TcpListener,
-    router: Router,
-) -> impl Future<Output = Result<(), std::io::Error>> {
-    axum::serve(listener, router).into_future()
+pub async fn serve(config: AdmissionConfig) -> Result<(), AdmissionError> {
+    serve_with(config, init_observability_unit, run_axum_server).await
+}
+
+fn run_axum_server(listener: tokio::net::TcpListener, router: Router) -> ServeFuture {
+    Box::pin(axum::serve(listener, router).into_future())
 }
 
 fn build_router(state: AdmissionAppState) -> Router {
@@ -1615,6 +1616,18 @@ mod tests {
         });
     }
 
+    fn init_ok() -> Result<(), AdmissionError> {
+        Ok(())
+    }
+
+    fn serve_ok(_listener: tokio::net::TcpListener, _router: axum::Router) -> super::ServeFuture {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn serve_err(_listener: tokio::net::TcpListener, _router: axum::Router) -> super::ServeFuture {
+        Box::pin(async { Err(std::io::Error::other("boom")) })
+    }
+
     #[tokio::test]
     async fn serve_with_returns_ok_when_server_finishes_cleanly() {
         let config = AdmissionConfig {
@@ -1632,12 +1645,7 @@ mod tests {
             control_admin_keys: Vec::new(),
         };
 
-        let result = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
-        )
-        .await;
+        let result = super::serve_with(config, init_ok, serve_ok).await;
         assert!(result.is_ok());
     }
 
@@ -1658,13 +1666,9 @@ mod tests {
             control_admin_keys: Vec::new(),
         };
 
-        let err = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Err(std::io::Error::other("boom")) },
-        )
-        .await
-        .expect_err("server error");
+        let err = super::serve_with(config, init_ok, serve_err)
+            .await
+            .expect_err("server error");
         assert!(matches!(err, AdmissionError::Serve(_)));
     }
 
