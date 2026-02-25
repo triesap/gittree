@@ -151,7 +151,7 @@ fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
 }
 
 fn new_http_probe_client() -> Result<Box<dyn RelayProbeClient>, RelayProbeError> {
-    Ok(Box::new(HttpRelayProbeClient::new()?))
+    Ok(Box::new(HttpRelayProbeClient::default()))
 }
 
 fn run_with_cli_with_client_factory(
