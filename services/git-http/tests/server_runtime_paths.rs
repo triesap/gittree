@@ -10,7 +10,7 @@ fn reserve_local_port() -> u16 {
     port
 }
 
-fn start_git_http_server(port: u16) -> (Child, String) {
+fn start_git_http_server(port: u16) -> (Child, String, bool) {
     let temp_dir = std::env::temp_dir().join(format!(
         "gittree-git-http-runtime-{}",
         SystemTime::now()
@@ -20,6 +20,15 @@ fn start_git_http_server(port: u16) -> (Child, String) {
     ));
     std::fs::create_dir_all(&temp_dir).expect("create temp dir");
 
+    let storage_url = std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let has_runtime_database = storage_url.is_some();
+    let storage_url = storage_url.unwrap_or_else(|| {
+        // Fall back to an unreachable local URL so routes that require storage fail fast.
+        "postgres://user:pass@127.0.0.1:1/gittree".to_string()
+    });
+
     let base_url = format!("http://127.0.0.1:{port}");
     let mut command = Command::new(env!("CARGO_BIN_EXE_gittree-git-http"));
     command
@@ -28,10 +37,7 @@ fn start_git_http_server(port: u16) -> (Child, String) {
         // Use a local closed port and short timeout to keep upstream failures deterministic.
         .env("GITTREE_GIT_HTTP_UPSTREAM_URL", "http://127.0.0.1:1")
         .env("GITTREE_GIT_HTTP_TIMEOUT_SECS", "1")
-        .env(
-            "GITTREE_STORAGE_READ_URL",
-            "postgres://user:pass@127.0.0.1:1/gittree?connect_timeout=1",
-        )
+        .env("GITTREE_STORAGE_READ_URL", storage_url)
         .env("GITTREE_LOG_STDOUT", "false")
         .env("GITTREE_METRICS_ENABLED", "false")
         .env("GITTREE_LOG_DIR", temp_dir.join("logs"))
@@ -40,7 +46,7 @@ fn start_git_http_server(port: u16) -> (Child, String) {
         .stderr(Stdio::null());
 
     let child = command.spawn().expect("spawn git-http");
-    (child, base_url)
+    (child, base_url, has_runtime_database)
 }
 
 async fn wait_for_health(base_url: &str) {
@@ -60,6 +66,16 @@ async fn wait_for_health(base_url: &str) {
 }
 
 fn stop_git_http_server(child: &mut Child) {
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status();
+    for _ in 0..20 {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -67,7 +83,7 @@ fn stop_git_http_server(child: &mut Child) {
 #[tokio::test]
 async fn git_http_binary_runtime_routes_cover_non_test_monomorphizations() {
     let port = reserve_local_port();
-    let (mut child, base_url) = start_git_http_server(port);
+    let (mut child, base_url, has_runtime_database) = start_git_http_server(port);
     wait_for_health(&base_url).await;
 
     let client = reqwest::Client::builder()
@@ -89,6 +105,23 @@ async fn git_http_binary_runtime_routes_cover_non_test_monomorphizations() {
         .await
         .expect("invalid info refs response");
     assert_eq!(invalid_info_refs.status(), reqwest::StatusCode::NOT_FOUND);
+
+    if has_runtime_database {
+        // Exercise the concrete info/refs path when a runtime database is available.
+        let valid_info_refs = client
+            .get(format!(
+                "{base_url}/{TEST_NPUB}/repo.git/info/refs?service=git-upload-pack"
+            ))
+            .send()
+            .await
+            .expect("valid info refs response");
+        assert!(matches!(
+            valid_info_refs.status(),
+            reqwest::StatusCode::NOT_FOUND
+                | reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                | reqwest::StatusCode::BAD_GATEWAY
+        ));
+    }
 
     let wrong_method_receive_pack = client
         .get(format!("{base_url}/{TEST_NPUB}/repo.git/git-receive-pack"))
