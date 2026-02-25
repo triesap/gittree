@@ -200,7 +200,7 @@ mod tests {
         with_env_var("GITTREE_ADMISSION_BIND", "not-a-socket", &mut || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             let err = runtime.block_on(super::run()).expect_err("config error");
-            assert!(matches!(err, AdmissionError::Config(_)));
+            assert!(err.to_string().contains("admission config error"));
         });
     }
 
