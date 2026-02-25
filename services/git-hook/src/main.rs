@@ -329,6 +329,11 @@ mod tests {
     }
 
     #[test]
+    fn exit_if_needed_allows_noop_exit_when_code_is_non_zero() {
+        exit_if_needed(17, noop_exit);
+    }
+
+    #[test]
     fn exit_if_needed_calls_exit_when_code_is_non_zero() {
         let mut seen = None;
         exit_if_needed(17, |code| seen = Some(code));
