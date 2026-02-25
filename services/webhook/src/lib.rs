@@ -289,23 +289,14 @@ impl SyncNotifier for HttpSyncNotifier {
     }
 }
 
-struct WebhookAppState<R, N> {
-    repositories: Arc<R>,
-    notifier: N,
-    forgejo_secret: String,
-}
+type DynRepoMappingRepository = dyn RepoMappingRepository + Send + Sync;
+type DynSyncNotifier = dyn SyncNotifier + Send + Sync;
 
-impl<R, N> Clone for WebhookAppState<R, N>
-where
-    N: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            repositories: Arc::clone(&self.repositories),
-            notifier: self.notifier.clone(),
-            forgejo_secret: self.forgejo_secret.clone(),
-        }
-    }
+#[derive(Clone)]
+struct WebhookAppState {
+    repositories: Arc<DynRepoMappingRepository>,
+    notifier: Arc<DynSyncNotifier>,
+    forgejo_secret: String,
 }
 
 pub async fn serve(config: WebhookConfig) -> Result<(), WebhookError> {
@@ -317,10 +308,11 @@ where
     I: FnOnce() -> Result<O, WebhookError>,
 {
     let _observability = init()?;
-    let repositories = build_repositories(&config)?;
-    let notifier = HttpSyncNotifier::new(config.sync_url.clone()).map_err(WebhookError::Notify)?;
+    let repositories: Arc<DynRepoMappingRepository> = Arc::new(build_repositories(&config)?);
+    let notifier: Arc<DynSyncNotifier> =
+        Arc::new(HttpSyncNotifier::new(config.sync_url.clone()).map_err(WebhookError::Notify)?);
     let state = WebhookAppState {
-        repositories: Arc::new(repositories),
+        repositories,
         notifier,
         forgejo_secret: config.forgejo_secret,
     };
@@ -352,11 +344,7 @@ fn map_serve_result(result: std::io::Result<()>) -> Result<(), WebhookError> {
     }
 }
 
-fn build_router<R, N>(state: WebhookAppState<R, N>) -> Router
-where
-    R: RepoMappingRepository + Send + Sync + 'static,
-    N: SyncNotifier + Clone + Send + Sync + 'static,
-{
+fn build_router(state: WebhookAppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/", post(forgejo_handler))
@@ -395,14 +383,11 @@ impl IntoResponse for WebhookHttpError {
     }
 }
 
-async fn forgejo_handler<R, N>(
-    State(state): State<Arc<WebhookAppState<R, N>>>,
+async fn forgejo_handler(
+    State(state): State<Arc<WebhookAppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<WebhookAckPayload>, WebhookHttpError>
-where
-    R: RepoMappingRepository + Send + Sync,
-    N: SyncNotifier + Send + Sync,
 {
     let signature = extract_signature(&headers)?;
     verify_forgejo_signature(&state.forgejo_secret, &body, signature)
@@ -962,7 +947,7 @@ mod tests {
         let notifier = MockNotifier::default();
         let state = WebhookAppState {
             repositories,
-            notifier,
+            notifier: Arc::new(notifier),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -991,7 +976,7 @@ mod tests {
         let notifier = MockNotifier::default();
         let state = WebhookAppState {
             repositories: repositories.clone(),
-            notifier: notifier.clone(),
+            notifier: Arc::new(notifier.clone()),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1027,7 +1012,7 @@ mod tests {
         let notifier = MockNotifier::default();
         let state = WebhookAppState {
             repositories,
-            notifier,
+            notifier: Arc::new(notifier),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1058,7 +1043,7 @@ mod tests {
         let notifier = MockNotifier::default();
         let state = WebhookAppState {
             repositories,
-            notifier,
+            notifier: Arc::new(notifier),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1080,7 +1065,7 @@ mod tests {
         let repositories = Arc::new(InMemoryRepositories::new());
         let state = WebhookAppState {
             repositories,
-            notifier: MockNotifier::default(),
+            notifier: Arc::new(MockNotifier::default()),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1103,7 +1088,7 @@ mod tests {
         let repositories = Arc::new(InMemoryRepositories::new());
         let state = WebhookAppState {
             repositories,
-            notifier: MockNotifier::default(),
+            notifier: Arc::new(MockNotifier::default()),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1123,7 +1108,7 @@ mod tests {
         let repositories = Arc::new(InMemoryRepositories::new());
         let state = WebhookAppState {
             repositories,
-            notifier: MockNotifier::default(),
+            notifier: Arc::new(MockNotifier::default()),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1141,7 +1126,7 @@ mod tests {
         let repositories = Arc::new(InMemoryRepositories::new());
         let state = WebhookAppState {
             repositories,
-            notifier: MockNotifier::default(),
+            notifier: Arc::new(MockNotifier::default()),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1165,7 +1150,7 @@ mod tests {
             .expect("insert mapping");
         let state = WebhookAppState {
             repositories,
-            notifier: FailingNotifier,
+            notifier: Arc::new(FailingNotifier),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1186,7 +1171,7 @@ mod tests {
     async fn forgejo_webhook_returns_internal_on_mapping_error() {
         let state = WebhookAppState {
             repositories: Arc::new(ErrorRepoMappingRepository),
-            notifier: MockNotifier::default(),
+            notifier: Arc::new(MockNotifier::default()),
             forgejo_secret: "secret".to_string(),
         };
         let app = build_router(state);
@@ -1397,10 +1382,11 @@ mod tests {
 
     #[test]
     fn webhook_app_state_clone_copies_fields() {
-        let repositories = Arc::new(InMemoryRepositories::new());
+        let repositories: Arc<super::DynRepoMappingRepository> =
+            Arc::new(InMemoryRepositories::new());
         let state = WebhookAppState {
             repositories: Arc::clone(&repositories),
-            notifier: MockNotifier::default(),
+            notifier: Arc::new(MockNotifier::default()),
             forgejo_secret: "secret".to_string(),
         };
         let cloned = state.clone();
