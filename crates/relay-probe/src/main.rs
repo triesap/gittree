@@ -112,16 +112,17 @@ fn print_help() {
 #[cfg(not(test))]
 fn main() {
     dotenvy::dotenv().ok();
+    let mut write_error = |message: &str| eprintln!("{message}");
     exit(handle_main_result_with(
         run_with_args(std::env::args_os().collect()),
-        |message| eprintln!("{message}"),
+        &mut write_error,
     ));
 }
 
-fn handle_main_result_with<F>(result: Result<(), ProbeCommandError>, mut write_error: F) -> i32
-where
-    F: FnMut(&str),
-{
+fn handle_main_result_with(
+    result: Result<(), ProbeCommandError>,
+    write_error: &mut dyn FnMut(&str),
+) -> i32 {
     match result {
         Ok(()) => 0,
         Err(err) => {
@@ -146,19 +147,19 @@ fn run_with_args(args: Vec<std::ffi::OsString>) -> Result<(), ProbeCommandError>
 }
 
 fn run_with_cli(cli: ProbeCli) -> Result<(), ProbeCommandError> {
-    run_with_cli_with_client_factory(cli, HttpRelayProbeClient::new)
+    run_with_cli_with_client_factory(cli, new_http_probe_client)
 }
 
-fn run_with_cli_with_client_factory<C, Factory>(
+fn new_http_probe_client() -> Result<Box<dyn RelayProbeClient>, RelayProbeError> {
+    Ok(Box::new(HttpRelayProbeClient::new()?))
+}
+
+fn run_with_cli_with_client_factory(
     cli: ProbeCli,
-    client_factory: Factory,
-) -> Result<(), ProbeCommandError>
-where
-    C: RelayProbeClient,
-    Factory: FnOnce() -> Result<C, RelayProbeError>,
-{
+    client_factory: fn() -> Result<Box<dyn RelayProbeClient>, RelayProbeError>,
+) -> Result<(), ProbeCommandError> {
     let client = client_factory().map_err(ProbeCommandError::Cli)?;
-    run_with_cli_with_client(cli, &client)
+    run_with_cli_with_client(cli, client.as_ref())
 }
 
 fn run_with_cli_with_client(
@@ -168,14 +169,11 @@ fn run_with_cli_with_client(
     run_with_cli_with_client_and_runtime(cli, client, tokio::runtime::Runtime::new)
 }
 
-fn run_with_cli_with_client_and_runtime<RuntimeBuilder>(
+fn run_with_cli_with_client_and_runtime(
     cli: ProbeCli,
     client: &dyn RelayProbeClient,
-    runtime_builder: RuntimeBuilder,
-) -> Result<(), ProbeCommandError>
-where
-    RuntimeBuilder: FnOnce() -> Result<tokio::runtime::Runtime, std::io::Error>,
-{
+    runtime_builder: fn() -> Result<tokio::runtime::Runtime, std::io::Error>,
+) -> Result<(), ProbeCommandError> {
     let runtime = runtime_builder().map_err(|err| ProbeCommandError::Runtime(err.to_string()))?;
     let mut probe_config = RelayProbeConfig::from_env().map_err(ProbeCommandError::Config)?;
     if let Some(active) = cli.active {
@@ -271,8 +269,8 @@ async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeComman
     Ok(())
 }
 
-async fn store_probe_result_with_repo<R: RelayCompatibilityRepository>(
-    repo: &R,
+async fn store_probe_result_with_repo(
+    repo: &dyn RelayCompatibilityRepository,
     result: &RelayProbeResult,
     checked_at: i64,
 ) -> Result<(), StorageError> {
@@ -462,10 +460,11 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, StorageConfigError> {
 mod tests {
     use super::{
         ProbeCli, ProbeCommandError, RelayProbeError, RelayProbeResult, StorageConfigError,
-        execute_probe_with_client, handle_main_result_with, now_unix_timestamp, print_help,
-        render_probe_output, resolve_targets, run_with_args, run_with_cli_with_client,
-        run_with_cli_with_client_and_runtime, run_with_cli_with_client_factory, storage_from_env,
-        store_probe_result, store_probe_result_with_repo,
+        execute_probe_with_client, handle_main_result_with, new_http_probe_client,
+        now_unix_timestamp, print_help, render_probe_output, resolve_targets, run_with_args,
+        run_with_cli_with_client, run_with_cli_with_client_and_runtime,
+        run_with_cli_with_client_factory, storage_from_env, store_probe_result,
+        store_probe_result_with_repo,
     };
     use async_trait::async_trait;
     use gittree_config::RelayProbeConfig;
@@ -557,6 +556,12 @@ mod tests {
         ]))
         .expect("cli");
         assert_eq!(cli.timeout_secs, Some(12));
+    }
+
+    #[test]
+    fn new_http_probe_client_constructs() {
+        let client = new_http_probe_client().expect("http client");
+        let _ = client;
     }
 
     #[test]
@@ -1416,9 +1421,11 @@ mod tests {
             secret_key: None,
         };
 
-        let err = run_with_cli_with_client_factory::<StubProbeClient, _>(cli, || {
+        fn client_factory_error() -> Result<Box<dyn RelayProbeClient>, RelayProbeError> {
             Err(RelayProbeError::Http("client init failed".to_string()))
-        })
+        }
+
+        let err = run_with_cli_with_client_factory(cli, client_factory_error)
         .expect_err("client error");
         assert_eq!(
             err.to_string(),
@@ -1616,13 +1623,15 @@ mod tests {
         fn ignore_message(_: &str) {}
         ignore_message("noop");
         let mut messages = Vec::new();
-        let ok_code = handle_main_result_with(Ok(()), ignore_message);
+        let mut ignore = ignore_message;
+        let ok_code = handle_main_result_with(Ok(()), &mut ignore);
         assert_eq!(ok_code, 0);
         assert!(messages.is_empty());
 
+        let mut capture = |message: &str| messages.push(message.to_string());
         let err_code = handle_main_result_with(
             Err(ProbeCommandError::Runtime("runtime down".to_string())),
-            |message| messages.push(message.to_string()),
+            &mut capture,
         );
         assert_eq!(err_code, 1);
         assert_eq!(messages.len(), 1);
