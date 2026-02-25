@@ -1,7 +1,10 @@
 use std::io::Write;
 #[cfg(not(test))]
 use std::process::ExitCode;
+use std::pin::Pin;
 use std::{fmt, future::Future};
+
+type MainResultFuture = Pin<Box<dyn Future<Output = Result<i64, MainError>>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MainError {
@@ -60,8 +63,8 @@ async fn main_result() -> Result<i64, MainError> {
 
 fn handle_main_outcome(
     result: Result<i64, MainError>,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> i32 {
     match result {
         Ok(version) => {
@@ -83,28 +86,25 @@ fn handle_main_outcome(
 
 #[cfg(not(test))]
 async fn main_impl(stdout: &mut impl Write, stderr: &mut impl Write) -> i32 {
+    let mut load_dotenv = || {
+        dotenvy::dotenv().ok();
+    };
+    let mut result_fn = || -> MainResultFuture { Box::pin(main_result()) };
     main_impl_with(
-        || {
-            dotenvy::dotenv().ok();
-        },
-        main_result,
+        &mut load_dotenv,
+        &mut result_fn,
         stdout,
         stderr,
     )
     .await
 }
 
-async fn main_impl_with<DotenvFn, ResultFn, ResultFut>(
-    load_dotenv: DotenvFn,
-    result_fn: ResultFn,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> i32
-where
-    DotenvFn: FnOnce(),
-    ResultFn: FnOnce() -> ResultFut,
-    ResultFut: Future<Output = Result<i64, MainError>>,
-{
+async fn main_impl_with(
+    load_dotenv: &mut dyn FnMut(),
+    result_fn: &mut dyn FnMut() -> MainResultFuture,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
     load_dotenv();
     handle_main_outcome(result_fn().await, stdout, stderr)
 }
@@ -168,7 +168,7 @@ mod tests {
         let err = run_migrations(init_observer_down, noop_migration_runner)
             .await
             .expect_err("observability error");
-        assert!(matches!(err, MainError::Observability(message) if message == "observer down"));
+        assert_eq!(err.to_string(), "observer down");
     }
 
     #[tokio::test]
@@ -176,9 +176,7 @@ mod tests {
         let err = run_migrations(init_ok, migration_config_error)
             .await
             .expect_err("migration error");
-        assert!(
-            matches!(err, MainError::Migration(message) if message.contains("migration config error"))
-        );
+        assert!(err.to_string().contains("migration config error"));
     }
 
     #[tokio::test]
@@ -194,7 +192,7 @@ mod tests {
         let err = main_result_with(init_observer_down, noop_migration_runner)
             .await
             .expect_err("error");
-        assert!(matches!(err, MainError::Observability(message) if message == "observer down"));
+        assert_eq!(err.to_string(), "observer down");
     }
 
     #[test]
@@ -262,16 +260,12 @@ mod tests {
         let loader_called = called.clone();
         let mut out = Vec::new();
         let mut err = Vec::new();
+        let mut load_dotenv = move || {
+            loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+        let mut result_fn = || -> super::MainResultFuture { Box::pin(async { Ok::<i64, MainError>(3) }) };
 
-        let _ = main_impl_with(
-            move || {
-                loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
-            },
-            || async { Ok::<i64, MainError>(3) },
-            &mut out,
-            &mut err,
-        )
-        .await;
+        let _ = main_impl_with(&mut load_dotenv, &mut result_fn, &mut out, &mut err).await;
 
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
     }
@@ -280,13 +274,11 @@ mod tests {
     async fn main_impl_with_maps_result_to_output() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let exit_code = main_impl_with(
-            || {},
-            || async { Err::<i64, MainError>(MainError::Migration("db down".to_string())) },
-            &mut out,
-            &mut err,
-        )
-        .await;
+        let mut load_dotenv = || {};
+        let mut result_fn = || -> super::MainResultFuture {
+            Box::pin(async { Err::<i64, MainError>(MainError::Migration("db down".to_string())) })
+        };
+        let exit_code = main_impl_with(&mut load_dotenv, &mut result_fn, &mut out, &mut err).await;
         assert_eq!(exit_code, 1);
         assert!(out.is_empty());
         assert_eq!(
