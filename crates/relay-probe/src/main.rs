@@ -8,6 +8,7 @@ use gittree_storage::{
     PostgresRepositories, RelayCompatibilityRecord, RelayCompatibilityRepository,
     RelayProbeMetadata, StorageConfig, StorageError,
 };
+#[cfg(not(test))]
 use std::process::exit;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -108,13 +109,13 @@ fn print_help() {
     );
 }
 
+#[cfg(not(test))]
 fn main() {
     dotenvy::dotenv().ok();
-    exit(handle_main_result(run_with_args(std::env::args_os().collect())));
-}
-
-fn handle_main_result(result: Result<(), ProbeCommandError>) -> i32 {
-    handle_main_result_with(result, |message| eprintln!("{message}"))
+    exit(handle_main_result_with(
+        run_with_args(std::env::args_os().collect()),
+        |message| eprintln!("{message}"),
+    ));
 }
 
 fn handle_main_result_with<F>(result: Result<(), ProbeCommandError>, mut write_error: F) -> i32
