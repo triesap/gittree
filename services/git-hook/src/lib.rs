@@ -720,7 +720,7 @@ mod tests {
         }
     }
 
-    fn with_env_var(key: &str, value: Option<&str>, run: impl FnOnce()) {
+    fn with_env_var(key: &str, value: Option<&str>, run: &mut dyn FnMut()) {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -737,7 +737,7 @@ mod tests {
             }
         }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run()));
 
         match previous {
             Some(value) => {
@@ -755,7 +755,7 @@ mod tests {
         }
     }
 
-    fn with_env_vars<R>(vars: &[(&str, Option<&str>)], run: impl FnOnce() -> R) -> R {
+    fn with_env_vars(vars: &[(&str, Option<&str>)], run: &mut dyn FnMut()) {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -777,7 +777,7 @@ mod tests {
             }
         }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run()));
 
         for (key, previous) in previous {
             match previous {
@@ -792,9 +792,8 @@ mod tests {
             }
         }
 
-        match result {
-            Ok(result) => result,
-            Err(payload) => std::panic::resume_unwind(payload),
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -862,7 +861,7 @@ mod tests {
 
     #[test]
     fn hook_mode_from_env_defaults_to_pre_receive() {
-        with_env_var(super::ENV_HOOK_MODE, None, || {
+        with_env_var(super::ENV_HOOK_MODE, None, &mut || {
             let mode = HookMode::from_env().expect("mode");
             assert_eq!(mode, HookMode::PreReceive);
         });
@@ -870,7 +869,7 @@ mod tests {
 
     #[test]
     fn hook_mode_from_env_accepts_post_receive() {
-        with_env_var(super::ENV_HOOK_MODE, Some("post-receive"), || {
+        with_env_var(super::ENV_HOOK_MODE, Some("post-receive"), &mut || {
             let mode = HookMode::from_env().expect("mode");
             assert_eq!(mode, HookMode::PostReceive);
         });
@@ -878,7 +877,7 @@ mod tests {
 
     #[test]
     fn hook_mode_from_env_rejects_unknown_mode() {
-        with_env_var(super::ENV_HOOK_MODE, Some("bad-mode"), || {
+        with_env_var(super::ENV_HOOK_MODE, Some("bad-mode"), &mut || {
             let err = HookMode::from_env().expect_err("invalid mode");
             assert_eq!(hook_config_error_kind(&err), ("invalid_mode", None));
         });
@@ -892,10 +891,10 @@ mod tests {
 
     #[test]
     fn env_path_ignores_empty_values() {
-        with_env_var("GITTREE_TEST_PATH", Some("   "), || {
+        with_env_var("GITTREE_TEST_PATH", Some("   "), &mut || {
             assert!(env_path("GITTREE_TEST_PATH").is_none());
         });
-        with_env_var("GITTREE_TEST_PATH", Some("/tmp/input.txt"), || {
+        with_env_var("GITTREE_TEST_PATH", Some("/tmp/input.txt"), &mut || {
             assert_eq!(
                 env_path("GITTREE_TEST_PATH"),
                 Some(std::path::PathBuf::from("/tmp/input.txt"))
@@ -905,7 +904,7 @@ mod tests {
 
     #[test]
     fn env_path_returns_none_for_missing_value() {
-        with_env_var("GITTREE_TEST_PATH", None, || {
+        with_env_var("GITTREE_TEST_PATH", None, &mut || {
             assert!(env_path("GITTREE_TEST_PATH").is_none());
         });
     }
@@ -978,7 +977,7 @@ mod tests {
     fn with_env_var_restores_existing_values() {
         // SAFETY: dedicated test key avoids collisions with non-test code.
         unsafe { std::env::set_var("GITTREE_TEST_RESTORE", "before") };
-        with_env_var("GITTREE_TEST_RESTORE", Some("after"), || {
+        with_env_var("GITTREE_TEST_RESTORE", Some("after"), &mut || {
             assert_eq!(
                 std::env::var("GITTREE_TEST_RESTORE").ok().as_deref(),
                 Some("after")
@@ -999,7 +998,7 @@ mod tests {
             panic!("poison env lock");
         });
 
-        with_env_var("GITTREE_TEST_POISONED_LOCK", Some("after"), || {
+        with_env_var("GITTREE_TEST_POISONED_LOCK", Some("after"), &mut || {
             assert_eq!(
                 std::env::var("GITTREE_TEST_POISONED_LOCK").ok().as_deref(),
                 Some("after")
@@ -1014,7 +1013,7 @@ mod tests {
     fn with_env_vars_restores_existing_values() {
         // SAFETY: dedicated test key avoids collisions with non-test code.
         unsafe { std::env::set_var("GITTREE_TEST_RESTORE_VARS", "before") };
-        with_env_vars(&[("GITTREE_TEST_RESTORE_VARS", Some("after"))], || {
+        with_env_vars(&[("GITTREE_TEST_RESTORE_VARS", Some("after"))], &mut || {
             assert_eq!(
                 std::env::var("GITTREE_TEST_RESTORE_VARS").ok().as_deref(),
                 Some("after")
@@ -1031,7 +1030,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "with_env_var panic path")]
     fn with_env_var_resumes_panics() {
-        with_env_var("GITTREE_TEST_RESTORE_PANIC", Some("during"), || {
+        with_env_var("GITTREE_TEST_RESTORE_PANIC", Some("during"), &mut || {
             panic!("with_env_var panic path");
         });
     }
@@ -1041,7 +1040,7 @@ mod tests {
     fn with_env_vars_resumes_panics() {
         with_env_vars(
             &[("GITTREE_TEST_RESTORE_VARS_PANIC", Some("during"))],
-            || {
+            &mut || {
                 panic!("with_env_vars panic path");
             },
         );
@@ -1055,7 +1054,7 @@ mod tests {
                 (super::ENV_HOOK_MODE, Some("pre-receive")),
                 (super::ENV_SYNC_URL, None),
             ],
-            || {
+            &mut || {
                 let config = super::HookConfig::from_env().expect("config");
                 assert_eq!(config.state_url, "http://127.0.0.1:8082");
                 assert_eq!(config.mode, HookMode::PreReceive);
@@ -1072,7 +1071,7 @@ mod tests {
                 (super::ENV_HOOK_MODE, Some("post-receive")),
                 (super::ENV_SYNC_URL, None),
             ],
-            || {
+            &mut || {
                 let err = super::HookConfig::from_env().expect_err("missing sync url");
                 assert_eq!(
                     hook_config_error_kind(&err),
@@ -1084,7 +1083,7 @@ mod tests {
 
     #[test]
     fn hook_config_reports_invalid_env_mode() {
-        with_env_vars(&[(super::ENV_HOOK_MODE, Some("invalid-mode"))], || {
+        with_env_vars(&[(super::ENV_HOOK_MODE, Some("invalid-mode"))], &mut || {
             let err = super::HookConfig::from_env_with_overrides(
                 None,
                 Some("http://127.0.0.1:8082".to_string()),
@@ -1384,7 +1383,7 @@ mod tests {
                     Some(updates_path.to_str().expect("updates path")),
                 ),
             ],
-            || {
+            &mut || {
                 super::run_hook_from_env(HookMode::PreReceive).expect("run hook");
             },
         );
@@ -1407,8 +1406,9 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
-            || {
-                let err = super::run_hook(config, Some(&updates_path)).expect_err("parse error");
+            &mut || {
+                let err = super::run_hook(config.clone(), Some(&updates_path))
+                    .expect_err("parse error");
                 assert_eq!(hook_service_error_kind(&err), "parse");
             },
         );
@@ -1431,8 +1431,9 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
-            || {
-                super::run_hook(config, Some(&updates_path)).expect("post receive parse errors");
+            &mut || {
+                super::run_hook(config.clone(), Some(&updates_path))
+                    .expect("post receive parse errors");
             },
         );
         let _ = std::fs::remove_file(updates_path);
@@ -1455,8 +1456,9 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
-            || {
-                let err = super::run_hook(config, Some(&updates_path)).expect_err("missing sync");
+            &mut || {
+                let err = super::run_hook(config.clone(), Some(&updates_path))
+                    .expect_err("missing sync");
                 assert_eq!(hook_service_error_kind(&err), "config");
             },
         );
@@ -1482,8 +1484,8 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
-            || {
-                super::run_hook(config, Some(&updates_path)).expect("run hook");
+            &mut || {
+                super::run_hook(config.clone(), Some(&updates_path)).expect("run hook");
             },
         );
         handle.join().expect("server join");
@@ -1509,8 +1511,8 @@ mod tests {
                 (super::ENV_HOOK_REPO_PATH, None),
                 ("GIT_DIR", Some(repo_path.to_str().expect("repo path"))),
             ],
-            || {
-                super::run_hook(config, Some(&updates_path)).expect("run hook");
+            &mut || {
+                super::run_hook(config.clone(), Some(&updates_path)).expect("run hook");
             },
         );
         handle.join().expect("server join");
@@ -1539,8 +1541,9 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
-            || {
-                let err = super::run_hook(config, Some(&updates_path)).expect_err("reject");
+            &mut || {
+                let err = super::run_hook(config.clone(), Some(&updates_path))
+                    .expect_err("reject");
                 assert_eq!(hook_service_error_kind(&err), "reject");
             },
         );
@@ -1564,8 +1567,9 @@ mod tests {
         };
         with_env_vars(
             &[(super::ENV_HOOK_REPO_PATH, None), ("GIT_DIR", None)],
-            || {
-                let err = super::run_hook(config, Some(&updates_path)).expect_err("invalid cwd");
+            &mut || {
+                let err = super::run_hook(config.clone(), Some(&updates_path))
+                    .expect_err("invalid cwd");
                 assert_eq!(hook_service_error_kind(&err), "core");
             },
         );
@@ -1586,9 +1590,8 @@ mod tests {
             sync_url: None,
             mode: HookMode::PreReceive,
         };
-        let result = with_env_vars(
-            &[(super::ENV_HOOK_REPO_PATH, None), ("GIT_DIR", None)],
-            || {
+        let mut result: Option<Result<(), super::HookServiceError>> = None;
+        with_env_vars(&[(super::ENV_HOOK_REPO_PATH, None), ("GIT_DIR", None)], &mut || {
                 let original_dir = std::env::current_dir().expect("current dir");
                 let temp = std::env::temp_dir().join(format!(
                     "gittree-hook-cwd-{}",
@@ -1600,12 +1603,13 @@ mod tests {
                 std::fs::create_dir_all(&temp).expect("create temp dir");
                 std::env::set_current_dir(&temp).expect("set current dir");
                 std::fs::remove_dir_all(&temp).expect("remove temp dir");
-                let outcome = super::run_hook(config, Some(&updates_path));
+                let outcome = super::run_hook(config.clone(), Some(&updates_path));
                 std::env::set_current_dir(&original_dir).expect("restore current dir");
-                outcome
-            },
-        );
-        let err = result.expect_err("expected current dir failure");
+                result = Some(outcome);
+            });
+        let err = result
+            .expect("expected hook result")
+            .expect_err("expected current dir failure");
         assert_eq!(hook_service_error_kind(&err), "core");
         let _ = std::fs::remove_file(updates_path);
     }
@@ -1625,8 +1629,8 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
-            || {
-                super::run_hook(config, None).expect("stdin read should not fail");
+            &mut || {
+                super::run_hook(config.clone(), None).expect("stdin read should not fail");
             },
         );
     }
@@ -1658,8 +1662,8 @@ mod tests {
                 super::ENV_HOOK_REPO_PATH,
                 Some(repo_path.to_str().expect("repo path")),
             )],
-            || {
-                let err = super::run_hook_with_terminal(config, Some(missing), false)
+            &mut || {
+                let err = super::run_hook_with_terminal(config.clone(), Some(missing), false)
                     .expect_err("missing stdin file should fail");
                 assert_eq!(hook_service_error_kind(&err), "core");
             },

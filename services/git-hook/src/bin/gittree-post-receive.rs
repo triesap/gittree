@@ -74,10 +74,7 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn with_env_var<F>(key: &str, value: Option<&str>, run: F)
-    where
-        F: FnOnce(),
-    {
+    fn with_env_var(key: &str, value: Option<&str>, run: &mut dyn FnMut()) {
         let _guard = env_lock().lock().expect("lock env");
         let previous = std::env::var(key).ok();
         match value {
@@ -158,7 +155,7 @@ mod tests {
 
     #[test]
     fn init_observability_reports_invalid_log_env() {
-        with_env_var("GITTREE_LOG_JSON", Some("invalid-bool"), || {
+        with_env_var("GITTREE_LOG_JSON", Some("invalid-bool"), &mut || {
             let result = init_observability("gittree-post-receive");
             assert!(result.is_err());
         });
@@ -166,14 +163,14 @@ mod tests {
 
     #[test]
     fn init_observability_invokes_runtime_init_path() {
-        with_env_var("GITTREE_LOG_JSON", Some("false"), || {
+        with_env_var("GITTREE_LOG_JSON", Some("false"), &mut || {
             let _ = init_observability("gittree-post-receive");
         });
     }
 
     #[test]
     fn init_observability_second_call_reports_error_path() {
-        with_env_var("GITTREE_LOG_JSON", Some("false"), || {
+        with_env_var("GITTREE_LOG_JSON", Some("false"), &mut || {
             let _ = init_observability("gittree-post-receive");
             let second = init_observability("gittree-post-receive");
             assert!(second.is_err());
@@ -186,14 +183,14 @@ mod tests {
 
         // SAFETY: test-only env mutation for a unique key.
         unsafe { std::env::set_var(KEY, "before") };
-        with_env_var(KEY, None, || {
+        with_env_var(KEY, None, &mut || {
             assert!(std::env::var(KEY).is_err());
         });
         assert_eq!(std::env::var(KEY).expect("restored"), "before");
         // SAFETY: test-only env cleanup for a unique key.
         unsafe { std::env::remove_var(KEY) };
 
-        with_env_var(KEY, None, || {
+        with_env_var(KEY, None, &mut || {
             assert!(std::env::var(KEY).is_err());
         });
         assert!(std::env::var(KEY).is_err());

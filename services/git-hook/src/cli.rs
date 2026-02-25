@@ -75,13 +75,13 @@ mod tests {
         }
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, run: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded behind the env lock, and we restore the value after.
         unsafe {
             std::env::set_var(key, value);
         }
-        f();
+        run();
         match previous {
             Some(old) => unsafe {
                 std::env::set_var(key, old);
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn run_config_uses_env_state_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", || {
+        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", &mut || {
             let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
             let config = HookRunConfig::from_env(cli).expect("config");
             assert_eq!(config.hook.state_url, "http://127.0.0.1:8082");
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn run_config_maps_post_receive_mode() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_AUTH_BIND", "127.0.0.1:8089", || {
+        with_env_var("GITTREE_AUTH_BIND", "127.0.0.1:8089", &mut || {
             let cli = HookCli::try_parse_from([
                 "gittree-git-hook",
                 "--mode",
@@ -141,8 +141,8 @@ mod tests {
     #[test]
     fn run_config_reads_stdin_file_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", || {
-            with_env_var("GITTREE_HOOK_STDIN_FILE", "fixtures.txt", || {
+        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", &mut || {
+            with_env_var("GITTREE_HOOK_STDIN_FILE", "fixtures.txt", &mut || {
                 let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
                 let config = HookRunConfig::from_env(cli).expect("config");
                 assert_eq!(
@@ -156,8 +156,8 @@ mod tests {
     #[test]
     fn run_config_ignores_empty_stdin_file_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", || {
-            with_env_var("GITTREE_HOOK_STDIN_FILE", "   ", || {
+        with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", &mut || {
+            with_env_var("GITTREE_HOOK_STDIN_FILE", "   ", &mut || {
                 let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
                 let config = HookRunConfig::from_env(cli).expect("config");
                 assert!(config.stdin_file.is_none());
@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn run_config_propagates_nested_config_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_AUTH_BIND", "not-a-socket", || {
-            with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", || {
+        with_env_var("GITTREE_AUTH_BIND", "not-a-socket", &mut || {
+            with_env_var("GITTREE_STATE_URL", "http://127.0.0.1:8082", &mut || {
                 let cli = HookCli::try_parse_from(["gittree-git-hook"]).expect("parse cli");
                 let err = HookRunConfig::from_env(cli).expect_err("invalid services config");
                 assert_eq!(hook_config_error_kind(&err), "config");
@@ -200,7 +200,7 @@ mod tests {
     fn with_env_var_restores_existing_values() {
         // SAFETY: dedicated test key avoids collisions with non-test code.
         unsafe { std::env::set_var("GITTREE_CLI_TEST_KEY", "before") };
-        with_env_var("GITTREE_CLI_TEST_KEY", "after", || {
+        with_env_var("GITTREE_CLI_TEST_KEY", "after", &mut || {
             assert_eq!(
                 std::env::var("GITTREE_CLI_TEST_KEY").ok().as_deref(),
                 Some("after")
