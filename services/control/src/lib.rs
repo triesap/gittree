@@ -1788,7 +1788,7 @@ mod tests {
         }
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         unsafe {
             std::env::set_var(key, value);
@@ -1797,7 +1797,7 @@ mod tests {
         restore_env_var(key, previous);
     }
 
-    fn without_env_var<F: FnOnce()>(key: &str, f: F) {
+    fn without_env_var(key: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         unsafe {
             std::env::remove_var(key);
@@ -1806,28 +1806,28 @@ mod tests {
         restore_env_var(key, previous);
     }
 
-    fn with_minimal_control_env<F: FnOnce()>(f: F) {
-        with_env_var("GITTREE_CONTROL_TOKEN", "token", || {
-            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
-                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
-                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+    fn with_minimal_control_env(f: &mut dyn FnMut()) {
+        with_env_var("GITTREE_CONTROL_TOKEN", "token", &mut || {
+            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", &mut || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", &mut || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", &mut || {
                         with_env_var(
                             "GITTREE_FORGEJO_WEBHOOK_URL",
                             "http://localhost:8087/",
-                            || {
-                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                            &mut || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
                                     with_env_var(
                                         "GITTREE_STORAGE_READ_URL",
                                         "postgres://user:pass@localhost:5432/gittree",
-                                        || {
+                                        &mut || {
                                             with_env_var(
                                                 "GITTREE_RELAY_URLS",
                                                 "ws://relay.local",
-                                                || {
+                                                &mut || {
                                                     with_env_var(
                                                         "GITTREE_UI_REPO_ROOT",
                                                         "/tmp/repos",
-                                                        || {
+                                                        &mut || {
                                                             with_env_var(
                                                                 "GITTREE_UI_PUBLIC_GIT_URL",
                                                                 "http://localhost:8085",
@@ -1997,31 +1997,31 @@ mod tests {
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_CONTROL_TOKEN", "token", || {
-            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
-                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
-                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+        with_env_var("GITTREE_CONTROL_TOKEN", "token", &mut || {
+            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", &mut || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", &mut || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", &mut || {
                         with_env_var(
                             "GITTREE_FORGEJO_WEBHOOK_URL",
                             "http://localhost:8087/",
-                            || {
-                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                            &mut || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
                                     with_env_var(
                                         "GITTREE_STORAGE_READ_URL",
                                         "postgres://user:pass@localhost:5432/gittree",
-                                        || {
+                                        &mut || {
                                             with_env_var(
                                                 "GITTREE_RELAY_URLS",
                                                 "ws://relay.local",
-                                                || {
+                                                &mut || {
                                                     with_env_var(
                                                         "GITTREE_UI_REPO_ROOT",
                                                         "/tmp/repos",
-                                                        || {
+                                                        &mut || {
                                                             with_env_var(
                                                                 "GITTREE_UI_PUBLIC_GIT_URL",
                                                                 "http://localhost:8085",
-                                                                || {
+                                                                &mut || {
                                                                     let config =
                                                                         ControlConfig::from_env()
                                                                             .expect("config");
@@ -2048,24 +2048,24 @@ mod tests {
     #[test]
     fn config_rejects_missing_storage_read_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_CONTROL_TOKEN", "token", || {
-            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
-                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
-                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+        with_env_var("GITTREE_CONTROL_TOKEN", "token", &mut || {
+            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", &mut || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", &mut || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", &mut || {
                         with_env_var(
                             "GITTREE_FORGEJO_WEBHOOK_URL",
                             "http://localhost:8087/",
-                            || {
-                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                                    with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", || {
-                                        with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", || {
+                            &mut || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
+                                    with_env_var("GITTREE_RELAY_URLS", "ws://relay.local", &mut || {
+                                        with_env_var("GITTREE_UI_REPO_ROOT", "/tmp/repos", &mut || {
                                             with_env_var(
                                                 "GITTREE_UI_PUBLIC_GIT_URL",
                                                 "http://localhost:8085",
-                                                || {
+                                                &mut || {
                                                     without_env_var(
                                                         "GITTREE_STORAGE_READ_URL",
-                                                        || {
+                                                        &mut || {
                                                             let err = ControlConfig::from_env()
                                                                 .expect_err("config");
                                                             assert!(matches!(
@@ -2094,35 +2094,35 @@ mod tests {
     #[test]
     fn config_rejects_invalid_storage_numeric_override() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_CONTROL_TOKEN", "token", || {
-            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
-                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
-                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+        with_env_var("GITTREE_CONTROL_TOKEN", "token", &mut || {
+            with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", &mut || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", &mut || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", &mut || {
                         with_env_var(
                             "GITTREE_FORGEJO_WEBHOOK_URL",
                             "http://localhost:8087/",
-                            || {
-                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+                            &mut || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
                                     with_env_var(
                                         "GITTREE_STORAGE_READ_URL",
                                         "postgres://user:pass@localhost:5432/gittree",
-                                        || {
+                                        &mut || {
                                             with_env_var(
                                                 "GITTREE_STORAGE_MAX_CONNECTIONS",
                                                 "bad",
-                                                || {
+                                                &mut || {
                                                     with_env_var(
                                                         "GITTREE_RELAY_URLS",
                                                         "ws://relay.local",
-                                                        || {
+                                                        &mut || {
                                                             with_env_var(
                                                                 "GITTREE_UI_REPO_ROOT",
                                                                 "/tmp/repos",
-                                                                || {
+                                                                &mut || {
                                                                     with_env_var(
                                                                         "GITTREE_UI_PUBLIC_GIT_URL",
                                                                         "http://localhost:8085",
-                                                                        || {
+                                                                        &mut || {
                                                                             let err =
                                                                     ControlConfig::from_env().expect_err("config");
                                                                             assert!(matches!(
@@ -2156,25 +2156,25 @@ mod tests {
     #[test]
     fn config_from_env_maps_config_errors_from_all_components() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_minimal_control_env(|| {
-            with_env_var("GITTREE_CONTROL_BIND", "bad-bind", || {
+        with_minimal_control_env(&mut || {
+            with_env_var("GITTREE_CONTROL_BIND", "bad-bind", &mut || {
                 let err = ControlConfig::from_env().expect_err("invalid bind should fail");
                 assert!(is_control_config_config_error(&err));
             });
-            without_env_var("GITTREE_CONTROL_TOKEN", || {
+            without_env_var("GITTREE_CONTROL_TOKEN", &mut || {
                 let err = ControlConfig::from_env().expect_err("missing auth token should fail");
                 assert!(is_control_config_config_error(&err));
             });
-            without_env_var("GITTREE_FORGEJO_BASE_URL", || {
+            without_env_var("GITTREE_FORGEJO_BASE_URL", &mut || {
                 let err =
                     ControlConfig::from_env().expect_err("missing forgejo base url should fail");
                 assert!(is_control_config_config_error(&err));
             });
-            with_env_var("GITTREE_RELAY_URLS", "ftp://relay.local", || {
+            with_env_var("GITTREE_RELAY_URLS", "ftp://relay.local", &mut || {
                 let err = ControlConfig::from_env().expect_err("invalid relay urls should fail");
                 assert!(is_control_config_config_error(&err));
             });
-            without_env_var("GITTREE_UI_REPO_ROOT", || {
+            without_env_var("GITTREE_UI_REPO_ROOT", &mut || {
                 let err = ControlConfig::from_env().expect_err("missing ui repo root should fail");
                 assert!(is_control_config_config_error(&err));
             });
@@ -2184,7 +2184,7 @@ mod tests {
     #[test]
     fn init_observability_reports_config_error_for_invalid_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "not-a-bool", || {
+        with_env_var("GITTREE_LOG_JSON", "not-a-bool", &mut || {
             let err = super::init_observability().expect_err("invalid observability env");
             assert!(is_control_error_observability_config(&err));
         });
@@ -2193,7 +2193,7 @@ mod tests {
     #[test]
     fn serve_reports_bind_error_for_invalid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "false", || {
+        with_env_var("GITTREE_LOG_JSON", "false", &mut || {
             let config = ControlConfig {
                 bind: "127.0.0.1:99999".to_string(),
                 auth: ControlAuthConfig {
@@ -2265,7 +2265,7 @@ mod tests {
     fn serve_maps_observability_and_storage_errors_before_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
 
-        with_env_var("GITTREE_LOG_JSON", "not-a-bool", || {
+        with_env_var("GITTREE_LOG_JSON", "not-a-bool", &mut || {
             let config = ControlConfig {
                 bind: "127.0.0.1:0".to_string(),
                 auth: ControlAuthConfig {
@@ -2295,7 +2295,7 @@ mod tests {
             assert!(is_control_error_observability_config(&err));
         });
 
-        with_env_var("GITTREE_LOG_JSON", "false", || {
+        with_env_var("GITTREE_LOG_JSON", "false", &mut || {
             let config = ControlConfig {
                 bind: "127.0.0.1:0".to_string(),
                 auth: ControlAuthConfig {
@@ -2329,7 +2329,7 @@ mod tests {
     #[test]
     fn serve_maps_invalid_forgejo_api_token_to_forgejo_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "false", || {
+        with_env_var("GITTREE_LOG_JSON", "false", &mut || {
             let config = ControlConfig {
                 bind: "127.0.0.1:0".to_string(),
                 auth: ControlAuthConfig {
@@ -2401,7 +2401,7 @@ mod tests {
         }
 
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "false", || {
+        with_env_var("GITTREE_LOG_JSON", "false", &mut || {
             let exe = std::env::current_exe().expect("current exe");
             let status = Command::new(exe)
                 .arg("--exact")
@@ -2698,15 +2698,15 @@ mod tests {
     #[test]
     fn storage_env_helpers_handle_empty_and_invalid_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, " ", || {
+        with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, " ", &mut || {
             let value = super::env_u32(super::ENV_STORAGE_MAX_CONNECTIONS).expect("env_u32");
             assert!(value.is_none());
         });
-        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, " ", || {
+        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, " ", &mut || {
             let value = super::env_u64(super::ENV_STORAGE_IDLE_TIMEOUT_SECS).expect("env_u64");
             assert!(value.is_none());
         });
-        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", &mut || {
             let err = super::env_u64(super::ENV_STORAGE_IDLE_TIMEOUT_SECS).unwrap_err();
             assert!(matches!(
                 err,
@@ -2716,7 +2716,7 @@ mod tests {
                 })
             ));
         });
-        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", || {
+        with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", &mut || {
             let value = super::env_u64(super::ENV_STORAGE_IDLE_TIMEOUT_SECS).expect("env_u64");
             assert_eq!(value, Some(60));
         });
@@ -2728,9 +2728,9 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                    with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = super::storage_from_env().expect_err("invalid pool bounds");
                         assert!(is_control_config_storage_invalid_config(&err));
                     });
@@ -2745,10 +2745,10 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "3", || {
-                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", || {
-                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "300", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "3", &mut || {
+                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "60", &mut || {
+                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "300", &mut || {
                             let config = super::storage_from_env().expect("storage config");
                             assert_eq!(config.min_connections, 3);
                             assert_eq!(config.idle_timeout_secs, Some(60));
@@ -2766,8 +2766,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", &mut || {
                     let err = super::storage_from_env().expect_err("invalid min connections");
                     assert!(is_control_config_storage_invalid_env(
                         &err,
@@ -2784,8 +2784,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", &mut || {
                     let err = super::storage_from_env().expect_err("invalid idle timeout");
                     assert!(is_control_config_storage_invalid_env(
                         &err,
@@ -2802,8 +2802,8 @@ mod tests {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", || {
+            &mut || {
+                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", &mut || {
                     let err = super::storage_from_env().expect_err("invalid max lifetime");
                     assert!(is_control_config_storage_invalid_env(
                         &err,
@@ -3061,7 +3061,7 @@ mod tests {
         unsafe {
             std::env::set_var(key, "before");
         }
-        without_env_var(key, || {
+        without_env_var(key, &mut || {
             assert!(std::env::var(key).is_err());
         });
         assert_eq!(std::env::var(key).expect("restored"), "before");
@@ -3077,7 +3077,7 @@ mod tests {
         unsafe {
             std::env::set_var(key, "before");
         }
-        with_env_var(key, "during", || {
+        with_env_var(key, "during", &mut || {
             assert_eq!(std::env::var(key).expect("set"), "during");
         });
         assert_eq!(std::env::var(key).expect("restored"), "before");
@@ -3093,7 +3093,7 @@ mod tests {
         unsafe {
             std::env::remove_var(key);
         }
-        without_env_var(key, || {
+        without_env_var(key, &mut || {
             assert!(std::env::var(key).is_err());
         });
         assert!(std::env::var_os(key).is_none());
@@ -3106,7 +3106,7 @@ mod tests {
         unsafe {
             std::env::remove_var(key);
         }
-        with_env_var(key, "during", || {
+        with_env_var(key, "during", &mut || {
             assert_eq!(std::env::var(key).expect("set"), "during");
         });
         assert!(std::env::var_os(key).is_none());
