@@ -888,14 +888,14 @@ where
         announcement.identifier.clone(),
     )
     .map_err(CoordinatorEventError::Mapping)?;
-    let record = RepoMappingRecord::new(&mapping).map_err(CoordinatorEventError::Storage)?;
+    // RepoMapping::new validates pubkey as strict 64-char hex before storage conversion.
+    let record = RepoMappingRecord::new(&mapping).expect("validated mapping pubkey");
     state
         .repositories
         .upsert_mapping(record)
         .await
         .map_err(CoordinatorEventError::Storage)?;
-    let _ = handle_announcement_event(&state.repo_root, &state.hooks, &event)?;
-    Ok(())
+    handle_announcement_event(&state.repo_root, &state.hooks, &event).map(|_| ())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1027,7 +1027,8 @@ where
         announcement.identifier.clone(),
     )
     .map_err(CoordinatorEventError::Mapping)?;
-    let record = RepoMappingRecord::new(&mapping).map_err(CoordinatorEventError::Storage)?;
+    // RepoMapping::new validates pubkey as strict 64-char hex before storage conversion.
+    let record = RepoMappingRecord::new(&mapping).expect("validated mapping pubkey");
     storage
         .upsert_mapping(record)
         .await
