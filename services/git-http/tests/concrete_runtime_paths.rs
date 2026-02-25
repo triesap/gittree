@@ -18,6 +18,7 @@ use sha2::Digest;
 use sqlx::{Connection, PgConnection};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TEST_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
@@ -128,9 +129,15 @@ async fn wait_for_health(base_url: &str) {
     panic!("git-http server never became ready");
 }
 
-fn signed_event(url: &str, method: &str, body: &Bytes, created_at: i64) -> Nip98Event {
+fn signed_event_with_secret(
+    url: &str,
+    method: &str,
+    body: &Bytes,
+    created_at: i64,
+    secret_fill: u8,
+) -> Nip98Event {
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&[4u8; 32]).expect("secret");
+    let secret_key = SecretKey::from_slice(&[secret_fill; 32]).expect("secret");
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
     let pubkey_hex = hex::encode(pubkey.serialize());
@@ -171,6 +178,45 @@ fn signed_event(url: &str, method: &str, body: &Bytes, created_at: i64) -> Nip98
     event.id = event_id;
     event.sig = hex::encode(signature.as_ref());
     event
+}
+
+fn signed_event(url: &str, method: &str, body: &Bytes, created_at: i64) -> Nip98Event {
+    signed_event_with_secret(url, method, body, created_at, 4)
+}
+
+async fn send_http10_without_host(
+    address: &str,
+    path: &str,
+    authorization: &str,
+    body: &Bytes,
+) -> u16 {
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect raw stream");
+    let request = format!(
+        "POST {path} HTTP/1.0\r\nauthorization: {authorization}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    stream.write_all(body).await.expect("write body");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let first_line = String::from_utf8_lossy(&response)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    first_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .expect("status code")
 }
 
 #[tokio::test]
@@ -271,13 +317,77 @@ async fn git_http_serve_exercises_concrete_runtime_paths_with_postgres_backing()
 
     let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
     let receive_pack = client
-        .post(receive_url)
+        .post(receive_url.clone())
         .header("authorization", format!("Nostr {token}"))
-        .body(body)
+        .body(body.clone())
         .send()
         .await
         .expect("receive-pack response");
     assert_eq!(receive_pack.status(), StatusCode::OK);
+
+    let missing_mapping = client
+        .get(format!(
+            "{base_url}/{TEST_NPUB}/missing-{unique}.git/info/refs?service=git-upload-pack"
+        ))
+        .send()
+        .await
+        .expect("missing mapping response");
+    assert_eq!(missing_mapping.status(), StatusCode::NOT_FOUND);
+
+    let unauthorized_event = signed_event_with_secret(&receive_url, "POST", &body, created_at, 7);
+    let unauthorized_token =
+        BASE64_STANDARD.encode(serde_json::to_vec(&unauthorized_event).expect("event json"));
+    let unauthorized = client
+        .post(receive_url.clone())
+        .header("authorization", format!("Nostr {unauthorized_token}"))
+        .body(body.clone())
+        .send()
+        .await
+        .expect("unauthorized response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let same_as_repo_announcement = RepoAnnouncement {
+        identifier: identifier.clone(),
+        name: None,
+        description: None,
+        root_commit: None,
+        clone: vec![format!("https://gittr.ee/owner/{forgejo_repo}.git")],
+        web: Vec::new(),
+        relays: vec!["wss://gittr.ee".to_string()],
+        blossoms: Vec::new(),
+        hashtags: Vec::new(),
+        maintainers: vec![parsed.pubkey.clone()],
+    };
+    repositories
+        .insert_announcement(
+            RepoAnnouncementRecord::new(
+                &unique_hex32(),
+                &parsed.pubkey,
+                created_at + 1,
+                &same_as_repo_announcement,
+            )
+            .expect("announcement record"),
+        )
+        .await
+        .expect("insert announcement");
+    let same_as_repo = client
+        .post(receive_url.clone())
+        .header("authorization", format!("Nostr {token}"))
+        .body(body.clone())
+        .send()
+        .await
+        .expect("same maintainer response");
+    assert_eq!(same_as_repo.status(), StatusCode::UNAUTHORIZED);
+
+    let raw_token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event json"));
+    let raw_status = send_http10_without_host(
+        &format!("127.0.0.1:{bind_port}"),
+        &receive_path,
+        &format!("Nostr {raw_token}"),
+        &body,
+    )
+    .await;
+    assert_eq!(raw_status, StatusCode::BAD_REQUEST.as_u16());
 
     server_task.abort();
     let _ = server_task.await;

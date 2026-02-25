@@ -18,7 +18,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 use sha2::Digest;
 use std::collections::HashSet;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -302,7 +302,7 @@ fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
 ) -> impl Future<Output = Result<(), std::io::Error>> + Send + 'static {
-    async move { axum::serve(listener, router).await }
+    axum::serve(listener, router).into_future()
 }
 
 async fn serve_with<Obs, InitObs, ServeFn, ServeFut>(
@@ -315,10 +315,31 @@ where
     ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
     ServeFut: Future<Output = Result<(), std::io::Error>>,
 {
+    serve_with_upstream_builder(
+        config,
+        init_observability_fn,
+        serve_fn,
+        ReqwestUpstreamClient::new,
+    )
+    .await
+}
+
+async fn serve_with_upstream_builder<Obs, InitObs, ServeFn, ServeFut, BuildUpstreamFn>(
+    config: GitHttpConfig,
+    init_observability_fn: InitObs,
+    serve_fn: ServeFn,
+    build_upstream_fn: BuildUpstreamFn,
+) -> Result<(), GitHttpError>
+where
+    InitObs: FnOnce() -> Result<Obs, GitHttpError>,
+    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
+    ServeFut: Future<Output = Result<(), std::io::Error>>,
+    BuildUpstreamFn: FnOnce(Duration) -> Result<ReqwestUpstreamClient, GitHttpError>,
+{
     let _observability = init_observability_fn()?;
     let metrics = Arc::new(GitHttpMetrics::new());
     let repositories = build_repositories(&config)?;
-    let upstream = ReqwestUpstreamClient::new(config.timeout)?;
+    let upstream = build_upstream_fn(config.timeout)?;
     let auth = config.auth;
     let state = GitHttpAppState {
         repositories: Arc::new(repositories),
@@ -411,23 +432,21 @@ pub struct ReqwestUpstreamClient {
 
 impl ReqwestUpstreamClient {
     pub fn new(timeout: Duration) -> Result<Self, GitHttpError> {
-        Self::from_builder_result(
-            reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .map_err(|err| err.to_string()),
-        )
+        Self::from_builder_result(reqwest::Client::builder().timeout(timeout).build())
     }
 
-    fn from_builder_result(result: Result<reqwest::Client, String>) -> Result<Self, GitHttpError> {
-        let client = result.map_err(GitHttpError::Upstream)?;
+    fn from_builder_result<E: ToString>(
+        result: Result<reqwest::Client, E>,
+    ) -> Result<Self, GitHttpError> {
+        let client = result.map_err(|err| GitHttpError::Upstream(err.to_string()))?;
         Ok(Self { client })
     }
 
     #[cfg(test)]
-    fn new_with<F>(timeout: Duration, build_client: F) -> Result<Self, GitHttpError>
+    fn new_with<F, E>(timeout: Duration, build_client: F) -> Result<Self, GitHttpError>
     where
-        F: FnOnce(Duration) -> Result<reqwest::Client, String>,
+        F: FnOnce(Duration) -> Result<reqwest::Client, E>,
+        E: ToString,
     {
         Self::from_builder_result(build_client(timeout))
     }
@@ -2408,6 +2427,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authorize_receive_pack_with_postgres_state_maps_missing_host_to_bad_request() {
+        let state = postgres_state();
+        let body = Bytes::from_static(b"payload");
+        let uri: axum::http::Uri = "/npub1test/repo.git/git-receive-pack".parse().expect("uri");
+        let event = signed_event(
+            &format!("http://localhost{uri}"),
+            "POST",
+            &body,
+            super::unix_timestamp(),
+        );
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event"));
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTH_HEADER, format!("Nostr {token}").parse().expect("auth"));
+        let err = super::authorize_receive_pack(
+            &state,
+            &sample_normalized_repo(&"11".repeat(32)),
+            &headers,
+            &Method::POST,
+            &uri,
+            &body,
+        )
+        .await
+        .expect_err("missing host");
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authorize_receive_pack_with_postgres_state_maps_invalid_repo_pubkey_to_internal() {
+        let state = postgres_state();
+        let body = Bytes::from_static(b"payload");
+        let uri: axum::http::Uri = "/npub1test/repo.git/git-receive-pack".parse().expect("uri");
+        let event = signed_event(
+            &format!("http://localhost{uri}"),
+            "POST",
+            &body,
+            super::unix_timestamp(),
+        );
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&event).expect("event"));
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost".parse().expect("host"));
+        headers.insert(AUTH_HEADER, format!("Nostr {token}").parse().expect("auth"));
+        let err = super::authorize_receive_pack(
+            &state,
+            &sample_normalized_repo("not-hex"),
+            &headers,
+            &Method::POST,
+            &uri,
+            &body,
+        )
+        .await
+        .expect_err("invalid repo pubkey");
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_maintainers_maps_storage_errors() {
         let repo = sample_normalized_repo(&"11".repeat(32));
         let unavailable = unavailable_postgres_repositories();
@@ -2577,6 +2654,31 @@ mod tests {
         };
         let result = super::serve_with(config, init_ok_handle, noop_server).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_upstream_build_error_before_bind() {
+        let config = GitHttpConfig {
+            bind: "127.0.0.1:0".to_string(),
+            upstream_url: "https://git.example".to_string(),
+            timeout: Duration::from_secs(1),
+            auth: test_auth(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+        };
+        let err = super::serve_with_upstream_builder(config, init_ok_handle, noop_server, |_| {
+            Err(super::GitHttpError::Upstream("builder failed".to_string()))
+        })
+        .await
+        .expect_err("upstream build error");
+        assert_eq!(git_http_error_label(&err), "upstream");
     }
 
     #[tokio::test]
@@ -2865,7 +2967,9 @@ mod tests {
             .timeout(Duration::from_secs(1))
             .build()
             .expect("client");
-        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| Ok(client));
+        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| {
+            Ok::<reqwest::Client, String>(client)
+        });
         assert!(result.is_ok());
     }
 
