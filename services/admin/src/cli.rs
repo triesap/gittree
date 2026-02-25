@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_command_and_missing_split_value() {
         let unknown = AdminCli::parse(["gittree-admin", "nope"]).expect_err("unknown command");
-        assert!(matches!(unknown, AdminCliError::UnknownCommand(_)));
+        assert!(unknown.to_string().contains("unknown command"));
 
         let missing = AdminCli::parse(["gittree-admin", "map", "--forgejo"])
             .expect_err("missing split value");

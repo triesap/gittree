@@ -1,5 +1,5 @@
 use gittree_admin::{AdminCli, AdminCliError, AdminCommand};
-use gittree_core::{ForgejoRepo, RepoMapping};
+use gittree_core::{CoreError, ForgejoRepo, RepoMapping};
 use gittree_observability::ObservabilityHandle;
 use gittree_storage::{
     PostgresRepositories, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
@@ -60,14 +60,12 @@ struct ControlClient {
 }
 
 impl ControlClient {
-    fn new(config: ControlClientConfig) -> Result<Self, AdminError> {
-        let client =
-            map_control_client_build(Client::builder().user_agent("gittree-admin").build())?;
-        Ok(Self {
+    fn new(config: ControlClientConfig) -> Self {
+        Self {
             base_url: config.base_url,
             token: config.token,
-            client,
-        })
+            client: Client::new(),
+        }
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -82,6 +80,7 @@ impl ControlClient {
         let response = self
             .client
             .post(self.endpoint(path))
+            .header(reqwest::header::USER_AGENT, "gittree-admin")
             .bearer_auth(&self.token)
             .json(payload)
             .send()
@@ -115,10 +114,6 @@ impl ControlClient {
     async fn create_pull(&self, payload: ControlCreatePull) -> Result<ControlPull, AdminError> {
         self.post("/control/pulls", &payload).await
     }
-}
-
-fn map_control_client_build(result: Result<Client, reqwest::Error>) -> Result<Client, AdminError> {
-    result.map_err(AdminError::ControlRequest)
 }
 
 #[tokio::main]
@@ -218,25 +213,25 @@ async fn run() -> Result<(), AdminError> {
             pubkey,
             identifier,
         } => {
-            let forgejo = ForgejoRepo::parse(&forgejo).map_err(AdminError::Core)?;
-            let mapping = RepoMapping::new(forgejo.owner, forgejo.name, pubkey, identifier)
-                .map_err(AdminError::Core)?;
-            let record = RepoMappingRecord::new(&mapping).map_err(AdminError::Storage)?;
+            let forgejo = map_core(ForgejoRepo::parse(&forgejo))?;
+            let mapping = map_core(RepoMapping::new(
+                forgejo.owner,
+                forgejo.name,
+                pubkey,
+                identifier,
+            ))?;
+            let record = map_storage(RepoMappingRecord::new(&mapping))?;
             let storage = storage_from_env()?;
-            let options = storage
-                .write_connect_options()
-                .map_err(AdminError::Storage)?;
-            let pool = storage
-                .pool_options()
-                .map_err(AdminError::Storage)?
-                .connect_with(options)
-                .await
-                .map_err(StorageError::from)
-                .map_err(AdminError::Storage)?;
+            let options = map_storage(storage.write_connect_options())?;
+            let pool_options = map_storage(storage.pool_options())?;
+            let pool = map_storage(
+                pool_options
+                    .connect_with(options)
+                    .await
+                    .map_err(StorageError::from),
+            )?;
             let repo = PostgresRepositories::new(pool);
-            repo.upsert_mapping(record)
-                .await
-                .map_err(AdminError::Storage)?;
+            map_storage(repo.upsert_mapping(record).await)?;
         }
         AdminCommand::CreateUser {
             username,
@@ -458,7 +453,15 @@ fn storage_from_env() -> Result<StorageConfig, AdminError> {
 
 fn control_client_from_env() -> Result<ControlClient, AdminError> {
     let config = ControlClientConfig::from_env()?;
-    ControlClient::new(config)
+    Ok(ControlClient::new(config))
+}
+
+fn map_core<T>(result: Result<T, CoreError>) -> Result<T, AdminError> {
+    result.map_err(AdminError::Core)
+}
+
+fn map_storage<T>(result: Result<T, StorageError>) -> Result<T, AdminError> {
+    result.map_err(AdminError::Storage)
 }
 
 fn env_u32(key: &'static str) -> Result<Option<u32>, AdminError> {
@@ -492,7 +495,6 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AdminError> {
 #[cfg(test)]
 mod tests {
     use super::AdminError;
-    use super::map_control_client_build;
     use super::ControlClient;
     use super::ControlClientConfig;
     use super::ControlConfigError;
@@ -503,7 +505,6 @@ mod tests {
     use super::DEFAULT_CONTROL_URL;
     use super::ENV_CONTROL_TOKEN;
     use super::ENV_CONTROL_URL;
-    use super::init_observability;
     use super::ENV_STORAGE_IDLE_TIMEOUT_SECS;
     use super::ENV_STORAGE_MAX_CONNECTIONS;
     use super::ENV_STORAGE_MAX_LIFETIME_SECS;
@@ -515,8 +516,10 @@ mod tests {
     use super::control_client_from_env;
     use super::env_u32;
     use super::env_u64;
+    use super::init_observability;
+    use super::map_core;
+    use super::map_storage;
     use super::storage_from_env;
-    use reqwest::Client;
     use serde::{Deserialize, Serialize};
     use std::error::Error;
     use std::io::{Read, Write};
@@ -696,9 +699,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var_opt(ENV_STORAGE_READ_URL, None, &mut || {
             let err = storage_from_env().expect_err("missing read");
-            assert!(err
-                .to_string()
-                .contains("missing env GITTREE_STORAGE_READ_URL"));
+            assert!(
+                err.to_string()
+                    .contains("missing env GITTREE_STORAGE_READ_URL")
+            );
         });
         with_env_var(
             ENV_STORAGE_READ_URL,
@@ -709,6 +713,28 @@ mod tests {
                         let err = storage_from_env().expect_err("invalid bounds");
                         assert!(err.to_string().contains("admin storage config error"));
                     });
+                });
+            },
+        );
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "bad", &mut || {
+                    let err = storage_from_env().expect_err("invalid max");
+                    assert!(err.to_string().contains("invalid env"));
+                });
+                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "bad", &mut || {
+                    let err = storage_from_env().expect_err("invalid min");
+                    assert!(err.to_string().contains("invalid env"));
+                });
+                with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", &mut || {
+                    let err = storage_from_env().expect_err("invalid idle timeout");
+                    assert!(err.to_string().contains("invalid env"));
+                });
+                with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "bad", &mut || {
+                    let err = storage_from_env().expect_err("invalid max lifetime");
+                    assert!(err.to_string().contains("invalid env"));
                 });
             },
         );
@@ -860,8 +886,7 @@ mod tests {
         let client = ControlClient::new(ControlClientConfig {
             base_url: "http://localhost:8088/".to_string(),
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         assert_eq!(
             client.endpoint("/control/users"),
             "http://localhost:8088/control/users"
@@ -875,8 +900,7 @@ mod tests {
         let ok_client = ControlClient::new(ControlClientConfig {
             base_url,
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let ok: TestPostResp = ok_client
             .post("/control/test", &TestPostReq { a: 1 })
             .await
@@ -889,8 +913,7 @@ mod tests {
         let err_client = ControlClient::new(ControlClientConfig {
             base_url,
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let err = err_client
             .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
             .await
@@ -905,8 +928,7 @@ mod tests {
         let client = ControlClient::new(ControlClientConfig {
             base_url,
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let err = client
             .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
             .await
@@ -920,20 +942,29 @@ mod tests {
         let client = ControlClient::new(ControlClientConfig {
             base_url: "http://127.0.0.1:1".to_string(),
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let err = client
             .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
             .await
             .expect_err("send error");
-        assert!(matches!(err, AdminError::ControlRequest(_)));
+        assert!(err.to_string().contains("admin control request error"));
     }
 
     #[test]
-    fn map_control_client_build_maps_builder_error() {
-        let build_result = Client::builder().user_agent("\ninvalid-agent").build();
-        let err = map_control_client_build(build_result).expect_err("builder error");
-        assert!(matches!(err, AdminError::ControlRequest(_)));
+    fn map_core_and_storage_helpers_cover_ok_and_err_paths() {
+        let ok_core = map_core::<()>(Ok(()));
+        assert!(ok_core.is_ok());
+        let core_err = map_core::<()>(Err(ForgejoRepo::parse("bad/repo/extra").expect_err("core")))
+            .expect_err("core error");
+        assert!(core_err.to_string().contains("admin mapping error"));
+
+        let ok_storage = map_storage::<()>(Ok(()));
+        assert!(ok_storage.is_ok());
+        let storage_err = map_storage::<()>(Err(StorageError::Internal {
+            message: "boom".to_string(),
+        }))
+        .expect_err("storage error");
+        assert!(storage_err.to_string().contains("admin storage error"));
     }
 
     #[tokio::test]
@@ -943,8 +974,7 @@ mod tests {
         let user_client = ControlClient::new(ControlClientConfig {
             base_url: user_url,
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let user = user_client
             .create_user(ControlCreateUser {
                 username: "alice".to_string(),
@@ -967,8 +997,7 @@ mod tests {
         let org_client = ControlClient::new(ControlClientConfig {
             base_url: org_url,
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let org = org_client
             .create_org(ControlCreateOrg {
                 owner: "alice".to_string(),
@@ -990,8 +1019,7 @@ mod tests {
         let repo_client = ControlClient::new(ControlClientConfig {
             base_url: repo_url,
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let repo = repo_client
             .create_repo(ControlCreateRepo {
                 owner: "alice".to_string(),
@@ -1013,8 +1041,7 @@ mod tests {
         let pull_client = ControlClient::new(ControlClientConfig {
             base_url: pull_url,
             token: "token".to_string(),
-        })
-        .expect("client");
+        });
         let pull = pull_client
             .create_pull(ControlCreatePull {
                 owner: "alice".to_string(),
