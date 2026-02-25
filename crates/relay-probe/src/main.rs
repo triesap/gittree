@@ -1699,6 +1699,56 @@ mod tests {
     }
 
     #[test]
+    fn run_with_args_rejects_unknown_flag() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let err = run_with_args(os_args(&["probe", "--relay", "wss://relay.example", "--wat"]))
+            .expect_err("unknown flag");
+        assert!(err.to_string().contains("unknown flag --wat"));
+    }
+
+    #[test]
+    fn run_with_args_rejects_invalid_timeout_flag_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let err = run_with_args(os_args(&[
+            "probe",
+            "--relay",
+            "wss://relay.example",
+            "--timeout-secs",
+            "invalid",
+        ]))
+        .expect_err("invalid timeout");
+        assert!(err.to_string().contains("invalid timeout value"));
+    }
+
+    #[test]
+    fn run_with_args_rejects_all_with_relay() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let err = run_with_args(os_args(&[
+            "probe",
+            "--all",
+            "--relay",
+            "wss://relay.example",
+        ]))
+        .expect_err("all with relay");
+        assert!(err.to_string().contains("cannot combine --all with --relay"));
+    }
+
+    #[test]
+    fn run_with_args_parses_inline_relay_timeout_and_no_active() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let err = run_with_args(os_args(&[
+            "probe",
+            "--relay=not-a-relay",
+            "--timeout-secs",
+            "2",
+            "--no-active",
+            "--json",
+        ]))
+        .expect_err("invalid relay");
+        assert!(err.to_string().contains("invalid relay url"));
+    }
+
+    #[test]
     fn run_with_args_reports_probe_config_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_RELAY_PROBE_TIMEOUT_SECS", "0", || {
