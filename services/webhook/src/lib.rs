@@ -620,7 +620,7 @@ mod tests {
         }
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         unsafe {
             std::env::set_var(key, value);
@@ -640,7 +640,7 @@ mod tests {
         }
     }
 
-    fn with_removed_env_var<F: FnOnce()>(key: &str, f: F) {
+    fn with_removed_env_var(key: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests in this module use ENV_LOCK when mutating process env values.
         unsafe {
@@ -661,10 +661,10 @@ mod tests {
         with_env_var(
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", || {
-                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                        with_env_var("GITTREE_WEBHOOK_BIND", "127.0.0.1:9099", || {
+            &mut || {
+                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", &mut || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
+                        with_env_var("GITTREE_WEBHOOK_BIND", "127.0.0.1:9099", &mut || {
                             let config = WebhookConfig::from_env().expect("config");
                             assert_eq!(config.bind, "127.0.0.1:9099");
                             assert_eq!(config.sync_url, "http://localhost:8084");
@@ -679,7 +679,7 @@ mod tests {
     #[test]
     fn config_reports_missing_and_invalid_required_env_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_removed_env_var("GITTREE_STORAGE_READ_URL", || {
+        with_removed_env_var("GITTREE_STORAGE_READ_URL", &mut || {
             let err = WebhookConfig::from_env().expect_err("missing read url");
             assert!(matches!(
                 err,
@@ -692,9 +692,9 @@ mod tests {
         with_env_var(
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_SYNC_URL", "   ", || {
-                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
+            &mut || {
+                with_env_var("GITTREE_SYNC_URL", "   ", &mut || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
                         let err = WebhookConfig::from_env().expect_err("invalid sync url");
                         assert!(matches!(
                             err,
@@ -715,10 +715,10 @@ mod tests {
         with_env_var(
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", || {
-                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "nope", || {
+            &mut || {
+                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", &mut || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
+                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "nope", &mut || {
                             let err =
                                 WebhookConfig::from_env().expect_err("invalid max connections");
                             assert!(matches!(
@@ -729,8 +729,8 @@ mod tests {
                                 })
                             ));
                         });
-                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", || {
-                            with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", || {
+                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", &mut || {
+                            with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", &mut || {
                                 let err =
                                     WebhookConfig::from_env().expect_err("invalid pool bounds");
                                 assert!(matches!(
@@ -741,7 +741,7 @@ mod tests {
                                 ));
                             });
                         });
-                        with_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "invalid", || {
+                        with_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "invalid", &mut || {
                             let err = WebhookConfig::from_env().expect_err("invalid idle timeout");
                             assert!(matches!(
                                 err,
@@ -763,11 +763,11 @@ mod tests {
         with_env_var(
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", || {
-                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                        with_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "   ", || {
-                            with_env_var("GITTREE_STORAGE_MAX_LIFETIME_SECS", "", || {
+            &mut || {
+                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", &mut || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
+                        with_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "   ", &mut || {
+                            with_env_var("GITTREE_STORAGE_MAX_LIFETIME_SECS", "", &mut || {
                                 let config = WebhookConfig::from_env().expect("config");
                                 assert_eq!(config.storage.idle_timeout_secs, None);
                                 assert_eq!(config.storage.max_lifetime_secs, None);
@@ -785,11 +785,11 @@ mod tests {
         with_env_var(
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", || {
-                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", || {
-                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", " ", || {
-                            with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "", || {
+            &mut || {
+                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", &mut || {
+                    with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", &mut || {
+                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", " ", &mut || {
+                            with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "", &mut || {
                                 let config = WebhookConfig::from_env().expect("config");
                                 assert_eq!(config.storage.max_connections, 10);
                                 assert_eq!(config.storage.min_connections, 2);
@@ -822,7 +822,7 @@ mod tests {
     #[test]
     fn env_required_string_rejects_missing_and_empty_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_removed_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", || {
+        with_removed_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", &mut || {
             let err = super::env_required_string("GITTREE_WEBHOOK_TEST_REQUIRED")
                 .expect_err("missing env");
             assert!(matches!(
@@ -831,7 +831,7 @@ mod tests {
             ));
         });
 
-        with_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", "   ", || {
+        with_env_var("GITTREE_WEBHOOK_TEST_REQUIRED", "   ", &mut || {
             let err = super::env_required_string("GITTREE_WEBHOOK_TEST_REQUIRED")
                 .expect_err("invalid env");
             assert!(matches!(
@@ -851,7 +851,7 @@ mod tests {
         unsafe {
             std::env::set_var("GITTREE_WEBHOOK_TEST_RESTORE", "before");
         }
-        with_env_var("GITTREE_WEBHOOK_TEST_RESTORE", "during", || {
+        with_env_var("GITTREE_WEBHOOK_TEST_RESTORE", "during", &mut || {
             assert_eq!(
                 std::env::var("GITTREE_WEBHOOK_TEST_RESTORE").expect("during value"),
                 "during"
@@ -874,7 +874,7 @@ mod tests {
         unsafe {
             std::env::set_var("GITTREE_WEBHOOK_TEST_REMOVED", "before");
         }
-        with_removed_env_var("GITTREE_WEBHOOK_TEST_REMOVED", || {
+        with_removed_env_var("GITTREE_WEBHOOK_TEST_REMOVED", &mut || {
             assert!(std::env::var("GITTREE_WEBHOOK_TEST_REMOVED").is_err());
         });
         assert_eq!(
@@ -895,7 +895,7 @@ mod tests {
             std::env::remove_var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING");
             std::env::remove_var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING");
         }
-        with_env_var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING", "during", || {
+        with_env_var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING", "during", &mut || {
             assert_eq!(
                 std::env::var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING").expect("transient value"),
                 "during"
@@ -903,7 +903,7 @@ mod tests {
         });
         assert!(std::env::var("GITTREE_WEBHOOK_TEST_RESTORE_MISSING").is_err());
 
-        with_removed_env_var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING", || {
+        with_removed_env_var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING", &mut || {
             assert!(std::env::var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING").is_err());
         });
         assert!(std::env::var("GITTREE_WEBHOOK_TEST_REMOVED_MISSING").is_err());
@@ -912,7 +912,7 @@ mod tests {
     #[test]
     fn init_observability_maps_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", &mut || {
             let err = super::init_observability().expect_err("invalid observability env");
             assert!(matches!(err, WebhookError::ObservabilityConfig(_)));
         });
@@ -921,8 +921,8 @@ mod tests {
     #[test]
     fn init_observability_succeeds_once() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_STDOUT", "false", || {
-            with_env_var("GITTREE_METRICS_ENABLED", "false", || {
+        with_env_var("GITTREE_LOG_STDOUT", "false", &mut || {
+            with_env_var("GITTREE_METRICS_ENABLED", "false", &mut || {
                 let _ = OBSERVABILITY.get_or_init(|| {
                     super::init_observability().expect("observability should initialize once")
                 });
@@ -934,7 +934,7 @@ mod tests {
     fn serve_maps_observability_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", &mut || {
             let config = WebhookConfig {
                 bind: "127.0.0.1:0".to_string(),
                 storage: StorageConfig {
