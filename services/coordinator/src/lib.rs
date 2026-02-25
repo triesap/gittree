@@ -576,12 +576,11 @@ impl std::fmt::Display for ProvisionPlanError {
 impl std::error::Error for ProvisionPlanError {}
 
 pub fn build_provision_plan(
-    root: impl AsRef<Path>,
+    root: &Path,
     npub: &str,
     announcement: &RepoAnnouncement,
 ) -> Result<RepoProvisionPlan, ProvisionPlanError> {
     let repo_path = root
-        .as_ref()
         .join(npub)
         .join(format!("{}.git", announcement.identifier));
     if let Err(err) = parse_repo_path(&repo_path) {
@@ -937,7 +936,7 @@ impl std::error::Error for CoordinatorEventError {
 }
 
 pub fn handle_announcement_event(
-    root: impl AsRef<Path>,
+    root: &Path,
     hooks: &HookInstallConfig,
     event: &RelayEvent,
 ) -> Result<CoordinatorAction, CoordinatorEventError> {
@@ -974,7 +973,7 @@ fn forgejo_repo_name(identifier: &str, pubkey: &str) -> String {
 }
 
 pub async fn handle_announcement_event_with_storage<S, T>(
-    root: impl AsRef<Path>,
+    root: &Path,
     hooks: &HookInstallConfig,
     storage: &S,
     forgejo: &ForgejoClient<T>,
@@ -1924,7 +1923,7 @@ mod tests {
         };
         let root = PathBuf::from("/var/lib/gittree");
         let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
-        let plan = build_provision_plan(root.clone(), npub, &announcement).expect("plan");
+        let plan = build_provision_plan(root.as_path(), npub, &announcement).expect("plan");
         assert_eq!(plan.repo_path, root.join(npub).join("repo.git"));
     }
 
@@ -3187,6 +3186,46 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn production_router_rejects_invalid_kind_before_storage_or_forgejo() {
+        let config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        let repositories = Arc::new(super::build_repositories(&config).expect("repositories"));
+        let forgejo = ForgejoClient::new(config.forgejo.clone()).expect("forgejo client");
+        let app = super::build_router(super::CoordinatorAppState {
+            repositories,
+            repo_root: config.repo_root,
+            hooks: config.hooks,
+            forgejo,
+        });
+
+        let payload = CoordinatorEventPayload {
+            kind: u64::MAX,
+            event_id: "44".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: Vec::new(),
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/announcement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8_lossy(&body).contains("invalid kind"));
     }
 
     #[tokio::test]
