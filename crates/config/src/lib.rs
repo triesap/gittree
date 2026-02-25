@@ -1555,7 +1555,7 @@ mod tests {
         }
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; callers hold ENV_LOCK.
         unsafe {
@@ -1621,7 +1621,7 @@ mod tests {
     #[test]
     fn env_config_overrides_relay_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_BIND, "127.0.0.1:9000", || {
+        with_env_var(ENV_RELAY_BIND, "127.0.0.1:9000", &mut || {
             let config = GittreeConfig::from_env();
             assert_eq!(config.relay_bind, "127.0.0.1:9000");
         });
@@ -1641,7 +1641,7 @@ mod tests {
     #[test]
     fn relay_targets_env_parses_list() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_URLS, "wss://relay.one, wss://relay.two ,", || {
+        with_env_var(ENV_RELAY_URLS, "wss://relay.one, wss://relay.two ,", &mut || {
             let config = RelayTargetsConfig::from_env_validated().expect("relay targets");
             assert_eq!(
                 config.relay_urls,
@@ -1653,7 +1653,7 @@ mod tests {
     #[test]
     fn relay_targets_env_rejects_invalid_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_URLS, "ftp://relay.example", || {
+        with_env_var(ENV_RELAY_URLS, "ftp://relay.example", &mut || {
             let err = RelayTargetsConfig::from_env_validated().unwrap_err();
             assert!(matches!(
                 err,
@@ -1682,7 +1682,7 @@ mod tests {
     #[test]
     fn relay_compat_mode_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_COMPAT_MODE, "warn", || {
+        with_env_var(ENV_RELAY_COMPAT_MODE, "warn", &mut || {
             let config = RelayCompatibilityConfig::from_env().expect("compat config");
             assert_eq!(config.mode, RelayCompatibilityMode::Warn);
         });
@@ -1691,7 +1691,7 @@ mod tests {
     #[test]
     fn relay_compat_mode_env_parses_allow() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_COMPAT_MODE, "allow", || {
+        with_env_var(ENV_RELAY_COMPAT_MODE, "allow", &mut || {
             let config = RelayCompatibilityConfig::from_env().expect("compat config");
             assert_eq!(config.mode, RelayCompatibilityMode::Allow);
         });
@@ -1700,7 +1700,7 @@ mod tests {
     #[test]
     fn relay_compat_mode_env_rejects_invalid() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_COMPAT_MODE, "nope", || {
+        with_env_var(ENV_RELAY_COMPAT_MODE, "nope", &mut || {
             let err = RelayCompatibilityConfig::from_env().unwrap_err();
             assert!(matches!(
                 err,
@@ -1712,9 +1712,9 @@ mod tests {
     #[test]
     fn relay_probe_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_PROBE_ACTIVE, "true", || {
-            with_env_var(ENV_RELAY_PROBE_TIMEOUT_SECS, "7", || {
-                with_env_var(ENV_RELAY_PROBE_SECRET_KEY, &"11".repeat(32), || {
+        with_env_var(ENV_RELAY_PROBE_ACTIVE, "true", &mut || {
+            with_env_var(ENV_RELAY_PROBE_TIMEOUT_SECS, "7", &mut || {
+                with_env_var(ENV_RELAY_PROBE_SECRET_KEY, &"11".repeat(32), &mut || {
                     let config = RelayProbeConfig::from_env().expect("probe config");
                     assert!(config.active);
                     assert_eq!(config.timeout_secs, 7);
@@ -1727,7 +1727,7 @@ mod tests {
     #[test]
     fn relay_probe_env_rejects_bad_secret() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_PROBE_SECRET_KEY, "bad", || {
+        with_env_var(ENV_RELAY_PROBE_SECRET_KEY, "bad", &mut || {
             let err = RelayProbeConfig::from_env().unwrap_err();
             assert!(matches!(
                 err,
@@ -1787,43 +1787,84 @@ secret_key = "22"
     #[test]
     fn relay_policy_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "9000", || {
-            with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "33", || {
-                with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "12", || {
-                    with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN, "120", || {
-                        with_env_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS, "30", || {
-                            with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "9", || {
-                                with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "200", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "9000", &mut || {
+            with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "33", &mut || {
+                with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "12", &mut || {
+                    with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN, "120", &mut || {
+                        with_env_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS, "30", &mut || {
+                            with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "9", &mut || {
+                                with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "200", &mut || {
                                     with_env_var(
                                         ENV_RELAY_POLICY_MAX_MESSAGE_BYTES,
                                         "9999",
-                                        || {
+                                        &mut || {
                                             with_env_var(
                                                 ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN,
                                                 "60",
-                                                || {
+                                                &mut || {
                                                     with_env_var(
                                                         ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN,
                                                         "30",
-                                                        || {
-                                                            with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "3600", || {
-                                                    with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "true", || {
-                                                        let config =
-                                                            RelayPolicyConfig::from_env().expect("policy");
-                                                        assert_eq!(config.max_content_len, 9000);
-                                                        assert_eq!(config.max_tags, 33);
-                                                        assert_eq!(config.max_tag_values, 12);
-                                                        assert_eq!(config.max_tag_value_len, 120);
-                                                        assert_eq!(config.max_future_seconds, 30);
-                                                        assert_eq!(config.max_subscriptions, Some(9));
-                                                        assert_eq!(config.max_limit, Some(200));
-                                                        assert_eq!(config.max_message_bytes, Some(9999));
-                                                        assert_eq!(config.max_events_per_min, Some(60));
-                                                        assert_eq!(config.max_requests_per_min, Some(30));
-                                                        assert_eq!(config.retention_max_age_seconds, Some(3600));
-                                                        assert!(config.auth_required);
-                                                    });
-                                                });
+                                                        &mut || {
+                                                            with_env_var(
+                                                                ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS,
+                                                                "3600",
+                                                                &mut || {
+                                                                    with_env_var(
+                                                                        ENV_RELAY_POLICY_AUTH_REQUIRED,
+                                                                        "true",
+                                                                        &mut || {
+                                                                            let config = RelayPolicyConfig::from_env()
+                                                                                .expect("policy");
+                                                                            assert_eq!(
+                                                                                config.max_content_len,
+                                                                                9000
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_tags,
+                                                                                33
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_tag_values,
+                                                                                12
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_tag_value_len,
+                                                                                120
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_future_seconds,
+                                                                                30
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_subscriptions,
+                                                                                Some(9)
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_limit,
+                                                                                Some(200)
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_message_bytes,
+                                                                                Some(9999)
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_events_per_min,
+                                                                                Some(60)
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.max_requests_per_min,
+                                                                                Some(30)
+                                                                            );
+                                                                            assert_eq!(
+                                                                                config.retention_max_age_seconds,
+                                                                                Some(3600)
+                                                                            );
+                                                                            assert!(config.auth_required);
+                                                                        },
+                                                                    );
+                                                                },
+                                                            );
                                                         },
                                                     );
                                                 },
@@ -1903,7 +1944,7 @@ secret_key = "22"
     #[test]
     fn relay_policy_env_rejects_zero() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "0", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "0", &mut || {
             let err = RelayPolicyConfig::from_env().unwrap_err();
             assert!(matches!(
                 err,
@@ -2114,7 +2155,7 @@ max_content_len = 0
     #[test]
     fn from_env_validated_returns_error_for_invalid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_BIND, "bad:addr", || {
+        with_env_var(ENV_RELAY_BIND, "bad:addr", &mut || {
             let result = GittreeConfig::from_env_validated();
             assert!(matches!(
                 result,
@@ -2126,7 +2167,7 @@ max_content_len = 0
     #[test]
     fn from_env_validated_accepts_valid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_BIND, "0.0.0.0:7000", || {
+        with_env_var(ENV_RELAY_BIND, "0.0.0.0:7000", &mut || {
             let config = GittreeConfig::from_env_validated();
             assert!(matches!(
                 config,
@@ -2140,7 +2181,7 @@ max_content_len = 0
     #[test]
     fn from_env_with_keys_reads_custom_key() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_BIND_TEST1, "127.0.0.1:8081", || {
+        with_env_var(ENV_RELAY_BIND_TEST1, "127.0.0.1:8081", &mut || {
             let config = GittreeConfig::from_env_with_keys(ENV_RELAY_BIND_TEST1);
             assert_eq!(config.relay_bind, "127.0.0.1:8081");
         });
@@ -2149,7 +2190,7 @@ max_content_len = 0
     #[test]
     fn from_env_with_keys_uses_default_when_key_is_missing() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_BIND_TEST1, "127.0.0.1:8999", || {
+        with_env_var(ENV_RELAY_BIND_TEST1, "127.0.0.1:8999", &mut || {
             // SAFETY: test holds ENV_LOCK and helper restores previous values.
             unsafe {
                 std::env::remove_var(ENV_RELAY_BIND_TEST1);
@@ -2162,7 +2203,7 @@ max_content_len = 0
     #[test]
     fn from_env_validated_with_keys_accepts_valid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_BIND_TEST2, "127.0.0.1:8082", || {
+        with_env_var(ENV_RELAY_BIND_TEST2, "127.0.0.1:8082", &mut || {
             let config = GittreeConfig::from_env_validated_with_keys(ENV_RELAY_BIND_TEST2);
             assert!(matches!(
                 config,
@@ -2174,7 +2215,7 @@ max_content_len = 0
     #[test]
     fn from_env_validated_with_keys_rejects_invalid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_BIND_TEST2, "bad-bind", || {
+        with_env_var(ENV_RELAY_BIND_TEST2, "bad-bind", &mut || {
             let err = GittreeConfig::from_env_validated_with_keys(ENV_RELAY_BIND_TEST2)
                 .expect_err("invalid bind should fail");
             assert!(matches!(
@@ -2293,7 +2334,7 @@ max_content_len = 0
     #[test]
     fn services_config_from_env_overrides_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_ADMISSION_BIND, "127.0.0.1:9091", || {
+        with_env_var(ENV_ADMISSION_BIND, "127.0.0.1:9091", &mut || {
             let services = ServicesConfig::from_env();
             assert_eq!(services.admission.bind, "127.0.0.1:9091");
         });
@@ -2489,7 +2530,7 @@ bind = "127.0.0.1:9101"
     #[test]
     fn services_config_from_env_validated_reports_invalid_bind() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_STATE_BIND, "bad", || {
+        with_env_var(ENV_STATE_BIND, "bad", &mut || {
             let err = ServicesConfig::from_env_validated().unwrap_err();
             assert!(matches!(
                 err,
@@ -2554,12 +2595,12 @@ bind = "127.0.0.1:9120"
     #[test]
     fn forgejo_config_from_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_FORGEJO_BASE_URL, "http://localhost:3000", || {
-            with_env_var(ENV_FORGEJO_API_TOKEN, "token", || {
-                with_env_var(ENV_FORGEJO_OWNER, "gittree", || {
-                    with_env_var(ENV_FORGEJO_WEBHOOK_URL, "http://localhost:8090/", || {
-                        with_env_var(ENV_FORGEJO_WEBHOOK_SECRET, "secret", || {
-                            with_env_var(ENV_FORGEJO_REPO_PRIVATE, "false", || {
+        with_env_var(ENV_FORGEJO_BASE_URL, "http://localhost:3000", &mut || {
+            with_env_var(ENV_FORGEJO_API_TOKEN, "token", &mut || {
+                with_env_var(ENV_FORGEJO_OWNER, "gittree", &mut || {
+                    with_env_var(ENV_FORGEJO_WEBHOOK_URL, "http://localhost:8090/", &mut || {
+                        with_env_var(ENV_FORGEJO_WEBHOOK_SECRET, "secret", &mut || {
+                            with_env_var(ENV_FORGEJO_REPO_PRIVATE, "false", &mut || {
                                 let config = ForgejoConfig::from_env().expect("forgejo");
                                 assert_eq!(config.base_url, "http://localhost:3000");
                                 assert_eq!(config.api_token, "token");
@@ -2774,8 +2815,8 @@ webhook_secret = "secret"
     #[test]
     fn ui_config_from_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
-            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", || {
+        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", &mut || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", &mut || {
                 let config = UiConfig::from_env().expect("ui");
                 assert_eq!(
                     config.repo_root,
@@ -2792,15 +2833,15 @@ webhook_secret = "secret"
     #[test]
     fn ui_config_from_env_reports_missing_required_fields() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_UI_REPO_ROOT, " ", || {
-            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", || {
+        with_env_var(ENV_UI_REPO_ROOT, " ", &mut || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", &mut || {
                 let err = UiConfig::from_env().expect_err("blank repo root should fail");
                 assert!(matches!(err, ConfigError::MissingEnv(ENV_UI_REPO_ROOT)));
             });
         });
 
-        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
-            with_env_var(ENV_UI_PUBLIC_GIT_URL, " ", || {
+        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", &mut || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, " ", &mut || {
                 let err = UiConfig::from_env().expect_err("blank public git url should fail");
                 assert!(matches!(
                     err,
@@ -2813,9 +2854,9 @@ webhook_secret = "secret"
     #[test]
     fn ui_config_from_env_rejects_invalid_urls() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", || {
-            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", || {
-                with_env_var(ENV_UI_AUTH_URL, "ws://localhost:8089", || {
+        with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", &mut || {
+            with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", &mut || {
+                with_env_var(ENV_UI_AUTH_URL, "ws://localhost:8089", &mut || {
                     let err = UiConfig::from_env().expect_err("invalid auth_url should fail");
                     assert!(matches!(
                         err,
@@ -2941,8 +2982,8 @@ auth_url = "ws://localhost:8089"
     #[test]
     fn control_auth_from_env_parses() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_CONTROL_TOKEN, "token", || {
-            with_env_var(ENV_CONTROL_ADMIN_KEYS, "npub1, npub2", || {
+        with_env_var(ENV_CONTROL_TOKEN, "token", &mut || {
+            with_env_var(ENV_CONTROL_ADMIN_KEYS, "npub1, npub2", &mut || {
                 let config = ControlAuthConfig::from_env().expect("control");
                 assert_eq!(config.token, "token");
                 assert_eq!(
@@ -2956,7 +2997,7 @@ auth_url = "ws://localhost:8089"
     #[test]
     fn control_auth_from_env_requires_token() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_CONTROL_TOKEN, " ", || {
+        with_env_var(ENV_CONTROL_TOKEN, " ", &mut || {
             let err = ControlAuthConfig::from_env().expect_err("blank token should fail");
             assert!(matches!(err, ConfigError::MissingEnv(ENV_CONTROL_TOKEN)));
         });
@@ -3034,8 +3075,8 @@ auth_url = "ws://localhost:8089"
     #[test]
     fn auth_config_env_overrides_apply() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_AUTH_EMAIL_DOMAIN, "example.test", || {
-            with_env_var(ENV_AUTH_MAX_SKEW_SECONDS, "120", || {
+        with_env_var(ENV_AUTH_EMAIL_DOMAIN, "example.test", &mut || {
+            with_env_var(ENV_AUTH_MAX_SKEW_SECONDS, "120", &mut || {
                 let config = AuthConfig::from_env().expect("auth");
                 assert_eq!(config.email_domain, "example.test");
                 assert_eq!(config.max_skew_seconds, 120);
@@ -3411,7 +3452,7 @@ repo_root = "/tmp/gittree-ui"
         ));
 
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_PROBE_ACTIVE, "maybe", || {
+        with_env_var(ENV_RELAY_PROBE_ACTIVE, "maybe", &mut || {
             let err = RelayProbeConfig::from_env().expect_err("invalid probe bool");
             assert!(matches!(
                 err,
@@ -3422,7 +3463,7 @@ repo_root = "/tmp/gittree-ui"
             ));
         });
 
-        with_env_var(ENV_RELAY_PROBE_TIMEOUT_SECS, "bad", || {
+        with_env_var(ENV_RELAY_PROBE_TIMEOUT_SECS, "bad", &mut || {
             let err = RelayProbeConfig::from_env().expect_err("invalid probe timeout");
             assert!(matches!(
                 err,
@@ -3461,7 +3502,7 @@ repo_root = "/tmp/gittree-ui"
     #[test]
     fn relay_policy_env_rejects_invalid_numeric_and_bool() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_CONTENT_LEN, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max content len");
             assert_eq!(
                 relay_policy_field(&err),
@@ -3469,12 +3510,12 @@ repo_root = "/tmp/gittree-ui"
             );
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_TAGS, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max tags");
             assert_eq!(relay_policy_field(&err), Some("relay_policy.max_tags"));
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUES, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max tag values");
             assert!(matches!(
                 err,
@@ -3485,7 +3526,7 @@ repo_root = "/tmp/gittree-ui"
             ));
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_TAG_VALUE_LEN, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max tag value len");
             assert!(matches!(
                 err,
@@ -3496,7 +3537,7 @@ repo_root = "/tmp/gittree-ui"
             ));
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_FUTURE_SECS, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max future seconds");
             assert!(matches!(
                 err,
@@ -3507,7 +3548,7 @@ repo_root = "/tmp/gittree-ui"
             ));
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_SUBSCRIPTIONS, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max subscriptions");
             assert!(matches!(
                 err,
@@ -3518,12 +3559,12 @@ repo_root = "/tmp/gittree-ui"
             ));
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_LIMIT, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max limit");
             assert_eq!(relay_policy_field(&err), Some("relay_policy.max_limit"));
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_MESSAGE_BYTES, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max message bytes");
             assert!(matches!(
                 err,
@@ -3534,7 +3575,7 @@ repo_root = "/tmp/gittree-ui"
             ));
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_EVENTS_PER_MIN, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max events per min");
             assert_eq!(
                 relay_policy_field(&err),
@@ -3542,7 +3583,7 @@ repo_root = "/tmp/gittree-ui"
             );
         });
 
-        with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_MAX_REQUESTS_PER_MIN, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid max requests per min");
             assert_eq!(
                 relay_policy_field(&err),
@@ -3550,7 +3591,7 @@ repo_root = "/tmp/gittree-ui"
             );
         });
 
-        with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "abc", || {
+        with_env_var(ENV_RELAY_POLICY_RETENTION_MAX_AGE_SECS, "abc", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid retention max age");
             assert!(matches!(
                 err,
@@ -3561,7 +3602,7 @@ repo_root = "/tmp/gittree-ui"
             ));
         });
 
-        with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "notabool", || {
+        with_env_var(ENV_RELAY_POLICY_AUTH_REQUIRED, "notabool", &mut || {
             let err = RelayPolicyConfig::from_env().expect_err("invalid auth required");
             assert!(matches!(
                 err,
@@ -3739,10 +3780,10 @@ repo_root = "/tmp/gittree-ui"
         ));
 
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_CONFIG_TEST_OPTIONAL_STRING", " ", || {
+        with_env_var("GITTREE_CONFIG_TEST_OPTIONAL_STRING", " ", &mut || {
             assert!(super::env_optional_string("GITTREE_CONFIG_TEST_OPTIONAL_STRING").is_none());
         });
-        with_env_var("GITTREE_CONFIG_TEST_OPTIONAL_STRING", "value", || {
+        with_env_var("GITTREE_CONFIG_TEST_OPTIONAL_STRING", "value", &mut || {
             assert_eq!(
                 super::env_optional_string("GITTREE_CONFIG_TEST_OPTIONAL_STRING"),
                 Some("value".to_string())
@@ -3780,15 +3821,15 @@ repo_root = "/tmp/gittree-ui"
         assert_eq!(value, "ok");
 
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var(super::ENV_RELAY_PROBE_ACTIVE, " ", || {
+        with_env_var(super::ENV_RELAY_PROBE_ACTIVE, " ", &mut || {
             let parsed = super::env_bool(super::ENV_RELAY_PROBE_ACTIVE).expect("blank bool");
             assert_eq!(parsed, None);
         });
-        with_env_var(super::ENV_RELAY_PROBE_TIMEOUT_SECS, " ", || {
+        with_env_var(super::ENV_RELAY_PROBE_TIMEOUT_SECS, " ", &mut || {
             let parsed = super::env_u64(super::ENV_RELAY_PROBE_TIMEOUT_SECS).expect("blank u64");
             assert_eq!(parsed, None);
         });
-        with_env_var(super::ENV_RELAY_POLICY_AUTH_REQUIRED, " ", || {
+        with_env_var(super::ENV_RELAY_POLICY_AUTH_REQUIRED, " ", &mut || {
             let parsed = super::env_bool_policy(
                 super::ENV_RELAY_POLICY_AUTH_REQUIRED,
                 "relay_policy.auth_required",
@@ -3796,7 +3837,7 @@ repo_root = "/tmp/gittree-ui"
             .expect("blank policy bool");
             assert_eq!(parsed, None);
         });
-        with_env_var(super::ENV_RELAY_POLICY_MAX_LIMIT, " ", || {
+        with_env_var(super::ENV_RELAY_POLICY_MAX_LIMIT, " ", &mut || {
             let parsed =
                 super::env_u64_policy(super::ENV_RELAY_POLICY_MAX_LIMIT, "relay_policy.max_limit")
                     .expect("blank policy u64");
@@ -3812,7 +3853,7 @@ repo_root = "/tmp/gittree-ui"
         unsafe {
             std::env::set_var(key, "before");
         }
-        with_env_var(key, "during", || {
+        with_env_var(key, "during", &mut || {
             assert_eq!(std::env::var(key).expect("during value"), "during");
         });
         assert_eq!(std::env::var(key).expect("restored value"), "before");
@@ -3830,7 +3871,7 @@ repo_root = "/tmp/gittree-ui"
         unsafe {
             std::env::remove_var(key);
         }
-        with_env_var(key, "during", || {
+        with_env_var(key, "during", &mut || {
             assert_eq!(std::env::var(key).expect("during value"), "during");
         });
         assert!(std::env::var_os(key).is_none());
