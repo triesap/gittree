@@ -9,9 +9,7 @@ type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), AdmissionError>>>>;
 async fn main() {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr).await;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
+    exit_if_needed(exit_code, std::process::exit);
 }
 
 async fn main_impl(stderr: &mut dyn Write) -> i32 {
@@ -62,9 +60,18 @@ fn handle_main_result(result: Result<(), AdmissionError>, stderr: &mut dyn Write
     }
 }
 
+fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
+where
+    F: FnOnce(i32) -> R,
+{
+    if exit_code != 0 {
+        let _ = exit_fn(exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, main_impl_with, run_with};
+    use super::{exit_if_needed, handle_main_result, main_impl_with, run_with};
     use gittree_admission::AdmissionError;
     use std::sync::{Mutex, OnceLock};
 
@@ -205,5 +212,19 @@ mod tests {
             let message = String::from_utf8(stderr).expect("utf8");
             assert!(message.contains("admission config error"));
         });
+    }
+
+    #[test]
+    fn exit_if_needed_skips_exit_for_zero_code() {
+        let mut called = false;
+        exit_if_needed(0, |_| called = true);
+        assert!(!called);
+    }
+
+    #[test]
+    fn exit_if_needed_calls_exit_for_non_zero_code() {
+        let mut called_with = None;
+        exit_if_needed(7, |code| called_with = Some(code));
+        assert_eq!(called_with, Some(7));
     }
 }
