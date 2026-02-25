@@ -1096,6 +1096,8 @@ mod tests {
         fail_mark_succeeded: bool,
         fail_pending: bool,
         fail_mark_failed: bool,
+        fail_insert_announcement: bool,
+        fail_upsert_mapping: bool,
     }
 
     impl ScriptedOutboxRepositories {
@@ -1111,6 +1113,20 @@ mod tests {
                 fail_mark_succeeded,
                 fail_pending,
                 fail_mark_failed,
+                fail_insert_announcement: false,
+                fail_upsert_mapping: false,
+            }
+        }
+
+        fn with_storage_failures(fail_insert_announcement: bool, fail_upsert_mapping: bool) -> Self {
+            Self {
+                inner: Arc::new(InMemoryRepositories::new()),
+                fail_claim: false,
+                fail_mark_succeeded: false,
+                fail_pending: false,
+                fail_mark_failed: false,
+                fail_insert_announcement,
+                fail_upsert_mapping,
             }
         }
     }
@@ -1121,6 +1137,11 @@ mod tests {
             &self,
             record: RepoAnnouncementRecord,
         ) -> Result<(), StorageError> {
+            if self.fail_insert_announcement {
+                return Err(StorageError::Internal {
+                    message: "insert failure".to_string(),
+                });
+            }
             self.inner.insert_announcement(record).await
         }
 
@@ -1144,6 +1165,11 @@ mod tests {
     #[async_trait]
     impl RepoMappingRepository for ScriptedOutboxRepositories {
         async fn upsert_mapping(&self, record: RepoMappingRecord) -> Result<(), StorageError> {
+            if self.fail_upsert_mapping {
+                return Err(StorageError::Internal {
+                    message: "upsert failure".to_string(),
+                });
+            }
             self.inner.upsert_mapping(record).await
         }
 
@@ -1348,6 +1374,34 @@ mod tests {
             identifier: identifier.to_string(),
             attempt_count: 1,
             publish_after: OffsetDateTime::from_unix_timestamp(0).expect("ts"),
+        }
+    }
+
+    fn sample_repo_announcement(identifier: &str) -> RepoAnnouncement {
+        RepoAnnouncement {
+            identifier: identifier.to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![
+                "https://gittr.ee/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git"
+                    .to_string(),
+            ],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        }
+    }
+
+    fn sample_repo_event(identifier: &str) -> RelayEvent {
+        RelayEvent {
+            kind: KIND_GIT_REPO_ANNOUNCEMENT.0,
+            event_id: "77".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: sample_repo_announcement(identifier).to_tags(),
         }
     }
 
@@ -2206,6 +2260,48 @@ mod tests {
         let _ = fs::remove_dir_all(temp_dir);
     }
 
+    #[tokio::test]
+    async fn announcement_endpoint_maps_handler_parse_errors() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let temp_dir = temp_dir("gittree-coordinator-http-parse-error");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let app = super::build_router(super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        });
+        let payload = CoordinatorEventPayload {
+            kind: u64::from(KIND_GIT_REPO_ANNOUNCEMENT.0),
+            event_id: "44".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: Vec::new(),
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/announcement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(text.contains("missing required field"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     #[test]
     fn handle_event_ignores_non_repo_nip34_events() {
         let list = UserGraspList {
@@ -2281,6 +2377,135 @@ mod tests {
         let _ = fs::remove_dir_all(temp_dir);
     }
 
+    #[tokio::test]
+    async fn handle_event_with_storage_maps_record_insert_and_upsert_errors() {
+        let temp_dir = temp_dir("gittree-storage-error-maps");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let invalid_record_event = RelayEvent {
+            pubkey: "11".repeat(31),
+            ..sample_repo_event("repo")
+        };
+        let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
+        let in_memory = InMemoryRepositories::new();
+        let record_err = handle_announcement_event_with_storage(
+            &temp_dir,
+            &hooks,
+            &in_memory,
+            &forgejo,
+            &invalid_record_event,
+        )
+        .await
+        .expect_err("record error expected");
+        assert!(matches!(record_err, super::CoordinatorEventError::Storage(_)));
+        assert!(transport.requests().is_empty());
+
+        let valid_event = sample_repo_event("repo");
+        let insert_failing = ScriptedOutboxRepositories::with_storage_failures(true, false);
+        let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
+        let insert_err = handle_announcement_event_with_storage(
+            &temp_dir,
+            &hooks,
+            &insert_failing,
+            &forgejo,
+            &valid_event,
+        )
+        .await
+        .expect_err("insert failure expected");
+        assert!(matches!(insert_err, super::CoordinatorEventError::Storage(_)));
+        assert!(transport.requests().is_empty());
+
+        let upsert_failing = ScriptedOutboxRepositories::with_storage_failures(false, true);
+        let forgejo_responses = vec![
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("gittree", "repo"),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
+            },
+        ];
+        let (forgejo, transport) = forgejo_client_with_responses(forgejo_responses);
+        let upsert_err = handle_announcement_event_with_storage(
+            &temp_dir,
+            &hooks,
+            &upsert_failing,
+            &forgejo,
+            &valid_event,
+        )
+        .await
+        .expect_err("upsert failure expected");
+        assert!(matches!(upsert_err, super::CoordinatorEventError::Storage(_)));
+        assert_eq!(transport.requests().len(), 3);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn handle_event_with_storage_maps_forgejo_and_mapping_errors() {
+        let temp_dir = temp_dir("gittree-storage-forgejo-mapping-errors");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let event = sample_repo_event("repo");
+        let storage = InMemoryRepositories::new();
+
+        let (forgejo, transport) = forgejo_client_with_responses(vec![ForgejoResponse {
+            status: 500,
+            body: "boom".to_string(),
+        }]);
+        let repo_err = handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
+            .await
+            .expect_err("forgejo repo error expected");
+        assert!(matches!(repo_err, super::CoordinatorEventError::Forgejo(_)));
+        assert_eq!(transport.requests().len(), 1);
+
+        let (forgejo, transport) = forgejo_client_with_responses(vec![
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("gittree", "repo"),
+            },
+            ForgejoResponse {
+                status: 500,
+                body: "boom".to_string(),
+            },
+        ]);
+        let hook_err = handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
+            .await
+            .expect_err("forgejo webhook error expected");
+        assert!(matches!(hook_err, super::CoordinatorEventError::Forgejo(_)));
+        assert_eq!(transport.requests().len(), 2);
+
+        let (forgejo, transport) = forgejo_client_with_responses(vec![
+            ForgejoResponse {
+                status: 200,
+                body: repo_json("bad owner", "repo"),
+            },
+            ForgejoResponse {
+                status: 200,
+                body: "[]".to_string(),
+            },
+            ForgejoResponse {
+                status: 201,
+                body: "created".to_string(),
+            },
+        ]);
+        let mapping_err =
+            handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
+                .await
+                .expect_err("mapping error expected");
+        assert!(matches!(mapping_err, super::CoordinatorEventError::Mapping(_)));
+        assert_eq!(transport.requests().len(), 3);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     #[test]
     fn handle_event_surfaces_parse_and_missing_npub_errors() {
         let invalid = RelayEvent {
@@ -2322,6 +2547,45 @@ mod tests {
             .expect_err("missing npub expected");
         assert_eq!(missing_npub_error.to_string(), "missing npub in clone urls");
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn handle_event_maps_plan_errors() {
+        let root = PathBuf::from("/tmp/gittree-plan-error-root");
+        let hooks = HookInstallConfig {
+            pre_receive_source: PathBuf::from("/tmp/pre-receive"),
+            post_receive_source: PathBuf::from("/tmp/post-receive"),
+        };
+        let event = sample_repo_event("../repo");
+        let err = handle_announcement_event(&root, &hooks, &event).expect_err("plan error");
+        assert!(matches!(err, super::CoordinatorEventError::Plan(_)));
+    }
+
+    #[test]
+    fn handle_event_maps_init_and_hook_errors() {
+        let init_temp_dir = temp_dir("gittree-handle-event-init-errors");
+        let event = sample_repo_event("repo");
+        let repo_root = init_temp_dir.join("repo-root-file");
+        fs::write(&repo_root, "not a directory").expect("repo root file");
+        let hooks = HookInstallConfig {
+            pre_receive_source: init_temp_dir.join("missing-pre"),
+            post_receive_source: init_temp_dir.join("missing-post"),
+        };
+        let init_err = handle_announcement_event(&repo_root, &hooks, &event).expect_err("init err");
+        assert!(matches!(init_err, super::CoordinatorEventError::Init(_)));
+        let _ = fs::remove_dir_all(init_temp_dir);
+
+        let hook_temp_dir = temp_dir("gittree-handle-event-hook-errors");
+        let hook_event = sample_repo_event("repo");
+        let hook_repo_root = hook_temp_dir.join("repos");
+        let hook_hooks = HookInstallConfig {
+            pre_receive_source: hook_temp_dir.join("missing-pre"),
+            post_receive_source: hook_temp_dir.join("missing-post"),
+        };
+        let hook_err =
+            handle_announcement_event(&hook_repo_root, &hook_hooks, &hook_event).expect_err("hook err");
+        assert!(matches!(hook_err, super::CoordinatorEventError::Hooks(_)));
+        let _ = fs::remove_dir_all(hook_temp_dir);
     }
 
     #[test]
