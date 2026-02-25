@@ -61,10 +61,8 @@ struct ControlClient {
 
 impl ControlClient {
     fn new(config: ControlClientConfig) -> Result<Self, AdminError> {
-        let client = Client::builder()
-            .user_agent("gittree-admin")
-            .build()
-            .map_err(AdminError::ControlRequest)?;
+        let client =
+            map_control_client_build(Client::builder().user_agent("gittree-admin").build())?;
         Ok(Self {
             base_url: config.base_url,
             token: config.token,
@@ -117,6 +115,10 @@ impl ControlClient {
     async fn create_pull(&self, payload: ControlCreatePull) -> Result<ControlPull, AdminError> {
         self.post("/control/pulls", &payload).await
     }
+}
+
+fn map_control_client_build(result: Result<Client, reqwest::Error>) -> Result<Client, AdminError> {
+    result.map_err(AdminError::ControlRequest)
 }
 
 #[tokio::main]
@@ -490,6 +492,7 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, AdminError> {
 #[cfg(test)]
 mod tests {
     use super::AdminError;
+    use super::map_control_client_build;
     use super::ControlClient;
     use super::ControlClientConfig;
     use super::ControlConfigError;
@@ -513,6 +516,7 @@ mod tests {
     use super::env_u32;
     use super::env_u64;
     use super::storage_from_env;
+    use reqwest::Client;
     use serde::{Deserialize, Serialize};
     use std::error::Error;
     use std::io::{Read, Write};
@@ -577,6 +581,27 @@ mod tests {
                         let config = storage_from_env().expect("config");
                         assert_eq!(config.idle_timeout_secs, None);
                         assert_eq!(config.max_lifetime_secs, None);
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn storage_config_reads_optional_pool_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "4", &mut || {
+                    with_env_var(ENV_STORAGE_IDLE_TIMEOUT_SECS, "30", &mut || {
+                        with_env_var(ENV_STORAGE_MAX_LIFETIME_SECS, "60", &mut || {
+                            let config = storage_from_env().expect("config");
+                            assert_eq!(config.min_connections, 4);
+                            assert_eq!(config.idle_timeout_secs, Some(30));
+                            assert_eq!(config.max_lifetime_secs, Some(60));
+                        });
                     });
                 });
             },
@@ -807,16 +832,15 @@ mod tests {
         let content_type = content_type.to_string();
         let body = body.to_string();
         let handle = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
         });
         (format!("http://{addr}"), handle)
     }
@@ -889,6 +913,27 @@ mod tests {
             .expect_err("invalid json");
         assert!(err.to_string().contains("admin control request error"));
         handle.join().expect("server join");
+    }
+
+    #[tokio::test]
+    async fn control_client_post_reports_send_error() {
+        let client = ControlClient::new(ControlClientConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            token: "token".to_string(),
+        })
+        .expect("client");
+        let err = client
+            .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
+            .await
+            .expect_err("send error");
+        assert!(matches!(err, AdminError::ControlRequest(_)));
+    }
+
+    #[test]
+    fn map_control_client_build_maps_builder_error() {
+        let build_result = Client::builder().user_agent("\ninvalid-agent").build();
+        let err = map_control_client_build(build_result).expect_err("builder error");
+        assert!(matches!(err, AdminError::ControlRequest(_)));
     }
 
     #[tokio::test]
