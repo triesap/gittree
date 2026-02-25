@@ -292,6 +292,22 @@ impl SyncNotifier for HttpSyncNotifier {
 type DynRepoMappingRepository = dyn RepoMappingRepository + Send + Sync;
 type DynSyncNotifier = dyn SyncNotifier + Send + Sync;
 
+fn build_http_notifier_with_result<E: ToString>(
+    endpoint: String,
+    result: Result<reqwest::Client, E>,
+) -> Result<Arc<DynSyncNotifier>, WebhookError> {
+    let notifier = HttpSyncNotifier::from_builder_result(endpoint, result)
+        .map_err(WebhookError::Notify)?;
+    Ok(Arc::new(notifier))
+}
+
+fn build_http_notifier(endpoint: String) -> Result<Arc<DynSyncNotifier>, WebhookError> {
+    if reqwest::Url::parse(&endpoint).is_err() {
+        return Err(WebhookError::Notify(format!("invalid sync url: {endpoint}")));
+    }
+    build_http_notifier_with_result(endpoint, reqwest::Client::builder().build())
+}
+
 #[derive(Clone)]
 struct WebhookAppState {
     repositories: Arc<DynRepoMappingRepository>,
@@ -309,8 +325,7 @@ where
 {
     let _observability = init()?;
     let repositories: Arc<DynRepoMappingRepository> = Arc::new(build_repositories(&config)?);
-    let notifier: Arc<DynSyncNotifier> =
-        Arc::new(HttpSyncNotifier::new(config.sync_url.clone()).map_err(WebhookError::Notify)?);
+    let notifier = build_http_notifier(config.sync_url.clone())?;
     let state = WebhookAppState {
         repositories,
         notifier,
@@ -579,16 +594,15 @@ mod tests {
         let content_type = content_type.to_string();
         let body = body.to_string();
         let handle = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
         });
         (format!("http://{addr}"), handle)
     }
@@ -640,6 +654,14 @@ mod tests {
         }
     }
 
+    fn ensure_observability_initialized() {
+        if OBSERVABILITY.get().is_some() {
+            return;
+        }
+        let handle = super::init_observability().expect("observability should initialize once");
+        let _ = OBSERVABILITY.set(handle);
+    }
+
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -681,6 +703,15 @@ mod tests {
                         assert!(err.to_string().contains("invalid env GITTREE_SYNC_URL"));
                     });
                 });
+                with_env_var("GITTREE_SYNC_URL", "http://localhost:8084", &mut || {
+                    with_removed_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", &mut || {
+                        let err = WebhookConfig::from_env().expect_err("missing webhook secret");
+                        assert!(
+                            err.to_string()
+                                .contains("missing env GITTREE_FORGEJO_WEBHOOK_SECRET")
+                        );
+                    });
+                });
             },
         );
     }
@@ -701,6 +732,13 @@ mod tests {
                                 .to_string()
                                 .contains("invalid env GITTREE_STORAGE_MAX_CONNECTIONS"));
                         });
+                        with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "bad", &mut || {
+                            let err =
+                                WebhookConfig::from_env().expect_err("invalid min connections");
+                            assert!(err
+                                .to_string()
+                                .contains("invalid env GITTREE_STORAGE_MIN_CONNECTIONS"));
+                        });
                         with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", &mut || {
                             with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", &mut || {
                                 let err =
@@ -713,6 +751,13 @@ mod tests {
                             assert!(err
                                 .to_string()
                                 .contains("invalid env GITTREE_STORAGE_IDLE_TIMEOUT_SECS"));
+                        });
+                        with_env_var("GITTREE_STORAGE_MAX_LIFETIME_SECS", "invalid", &mut || {
+                            let err =
+                                WebhookConfig::from_env().expect_err("invalid max lifetime");
+                            assert!(err
+                                .to_string()
+                                .contains("invalid env GITTREE_STORAGE_MAX_LIFETIME_SECS"));
                         });
                     });
                 });
@@ -879,9 +924,20 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_STDOUT", "false", &mut || {
             with_env_var("GITTREE_METRICS_ENABLED", "false", &mut || {
-                let _ = OBSERVABILITY.get_or_init(|| {
-                    super::init_observability().expect("observability should initialize once")
-                });
+                ensure_observability_initialized();
+                assert!(OBSERVABILITY.get().is_some());
+            });
+        });
+    }
+
+    #[test]
+    fn init_observability_maps_reinit_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_STDOUT", "false", &mut || {
+            with_env_var("GITTREE_METRICS_ENABLED", "false", &mut || {
+                ensure_observability_initialized();
+                let err = super::init_observability().expect_err("reinit error");
+                assert!(err.to_string().contains("webhook observability error"));
             });
         });
     }
@@ -1274,6 +1330,26 @@ mod tests {
         assert!(err.to_string().contains("webhook storage error"));
     }
 
+    #[test]
+    fn build_repositories_returns_storage_error_for_invalid_read_connection() {
+        let config = WebhookConfig {
+            bind: "127.0.0.1:8087".to_string(),
+            storage: StorageConfig {
+                read_connection: "not-a-connection".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            sync_url: "http://localhost:8084".to_string(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let err = super::build_repositories(&config).expect_err("expected read parse error");
+        assert!(err.to_string().contains("webhook storage error"));
+    }
+
     #[tokio::test]
     async fn build_repositories_accepts_valid_storage_config() {
         let config = WebhookConfig {
@@ -1337,6 +1413,25 @@ mod tests {
         assert!(message.contains("builder failed"));
     }
 
+    #[test]
+    fn build_http_notifier_with_result_maps_builder_errors() {
+        let result = super::build_http_notifier_with_result(
+            "http://localhost:8084".to_string(),
+            Err::<reqwest::Client, _>("builder failed"),
+        );
+        assert!(result.is_err());
+        let err = result.err().expect("builder error");
+        assert_eq!(err.to_string(), "webhook notify error: builder failed");
+    }
+
+    #[test]
+    fn build_http_notifier_rejects_invalid_endpoint() {
+        let result = super::build_http_notifier("not-a-url".to_string());
+        assert!(result.is_err());
+        let err = result.err().expect("invalid endpoint");
+        assert_eq!(err.to_string(), "webhook notify error: invalid sync url: not-a-url");
+    }
+
     #[tokio::test]
     async fn error_repo_mapping_repository_methods_are_callable() {
         let repo = ErrorRepoMappingRepository;
@@ -1386,6 +1481,50 @@ mod tests {
             .await
             .expect_err("serve error");
         assert!(err.to_string().contains("webhook serve error"));
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_maps_storage_error_before_binding() {
+        let config = WebhookConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "not-a-connection".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            sync_url: "http://localhost:8084".to_string(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let err = super::serve_with_init(config, || Ok(()))
+            .await
+            .expect_err("storage error");
+        assert!(err.to_string().contains("webhook storage error"));
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_maps_notifier_error_before_binding() {
+        let config = WebhookConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            sync_url: "not-a-url".to_string(),
+            forgejo_secret: "secret".to_string(),
+        };
+        let err = super::serve_with_init(config, || Ok(()))
+            .await
+            .expect_err("notifier error");
+        assert_eq!(err.to_string(), "webhook notify error: invalid sync url: not-a-url");
     }
 
     #[tokio::test]
