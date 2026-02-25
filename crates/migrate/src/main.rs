@@ -38,8 +38,6 @@ where
     RunFut: Future<Output = Result<i64, gittree_migrate::MigrationError>>,
 {
     let _observability = init_fn().map_err(MainError::Observability)?;
-    #[cfg(not(test))]
-    tracing::info!("starting migrations");
     run_fn()
         .await
         .map_err(|err| MainError::Migration(err.to_string()))
@@ -69,8 +67,6 @@ fn handle_main_outcome(
 ) -> i32 {
     match result {
         Ok(version) => {
-            #[cfg(not(test))]
-            tracing::info!(version, "migrations complete");
             let _ = writeln!(stdout, "migrations complete: version {version}");
             0
         }
@@ -79,8 +75,6 @@ fn handle_main_outcome(
             1
         }
         Err(err @ MainError::Migration(_)) => {
-            #[cfg(not(test))]
-            tracing::error!(error = %err, "migration failed");
             let _ = writeln!(stderr, "migration failed: {err}");
             1
         }
