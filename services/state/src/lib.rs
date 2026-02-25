@@ -1687,6 +1687,64 @@ mod tests {
     }
 
     #[test]
+    fn cache_stale_get_handles_poisoned_write_locks() {
+        let cache = StateCache::new(StateCacheConfig::new(Some(Duration::from_secs(0)), 10));
+
+        let state_key = StateCache::key("aa", "repo");
+        cache.insert_state(
+            state_key.clone(),
+            super::StateResponse {
+                event_id: "state-event".to_string(),
+                pubkey: "aa".to_string(),
+                identifier: "repo".to_string(),
+                created_at: 1,
+                state: HashMap::new(),
+            },
+        );
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.state_entries.write().expect("lock");
+            panic!("poison state write lock");
+        }));
+        assert!(cache.get_state(&state_key).is_none());
+
+        let maintainers_key = StateCache::key("bb", "repo");
+        cache.insert_maintainers(
+            maintainers_key.clone(),
+            super::MaintainersResponse {
+                identifier: "repo".to_string(),
+                maintainers: vec!["bb".to_string()],
+            },
+        );
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.maintainer_entries.write().expect("lock");
+            panic!("poison maintainers write lock");
+        }));
+        assert!(cache.get_maintainers(&maintainers_key).is_none());
+
+        let relay_key = StateCache::relay_key("wss://relay.example");
+        cache.insert_relay_compatibility(
+            relay_key.clone(),
+            super::RelayCompatibilityResponse {
+                relay_url: "wss://relay.example".to_string(),
+                compatible: true,
+                supported_capabilities: vec!["NIP-01".to_string()],
+                missing_required: Vec::new(),
+                missing_optional: Vec::new(),
+                nip11_url: None,
+                nip11_available: true,
+                active_probe_ok: Some(true),
+                active_probe_error: None,
+                checked_at: 1,
+            },
+        );
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.relay_entries.write().expect("lock");
+            panic!("poison relay write lock");
+        }));
+        assert!(cache.get_relay_compatibility(&relay_key).is_none());
+    }
+
+    #[test]
     fn cache_evicts_oldest_entries() {
         let cache = StateCache::new(StateCacheConfig::new(Some(Duration::from_secs(30)), 1));
         let old_key = StateCache::key("aa", "repo");
