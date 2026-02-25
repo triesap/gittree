@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -41,6 +41,52 @@ fn run_hook_binary_with_env(
 
 fn run_hook_binary(binary_path: &str, args: &[&str]) -> std::process::Output {
     run_hook_binary_with_env(binary_path, args, &[])
+}
+
+fn run_hook_binary_with_env_and_stdin(
+    binary_path: &str,
+    args: &[&str],
+    extra_env: &[(&str, String)],
+    stdin_input: &str,
+) -> std::process::Output {
+    let mut command = Command::new(binary_path);
+    command
+        .args(args)
+        .current_dir("/tmp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for key in [
+        "GIT_DIR",
+        "GITTREE_HOOK_MODE",
+        "GITTREE_HOOK_REPO_PATH",
+        "GITTREE_HOOK_STDIN_FILE",
+        "GITTREE_STATE_URL",
+        "GITTREE_SYNC_URL",
+        "GITTREE_RELAY_BIND",
+        "GITTREE_ADMISSION_BIND",
+        "GITTREE_STATE_BIND",
+        "GITTREE_COORDINATOR_BIND",
+        "GITTREE_SYNC_BIND",
+        "GITTREE_GIT_HTTP_BIND",
+        "GITTREE_UI_BIND",
+        "GITTREE_WEBHOOK_BIND",
+        "GITTREE_CONTROL_BIND",
+        "GITTREE_AUTH_BIND",
+    ] {
+        command.env_remove(key);
+    }
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+
+    let mut child = command.spawn().expect("spawn hook binary");
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(stdin_input.as_bytes())
+            .expect("write stdin input");
+    }
+    child.wait_with_output().expect("wait hook binary")
 }
 
 fn write_updates_file(contents: &str) -> std::path::PathBuf {
@@ -144,6 +190,20 @@ fn pre_receive_binary_succeeds_with_env_config() {
         ],
     );
     std::fs::remove_file(&updates_path).ok();
+    assert!(output.status.success());
+}
+
+#[test]
+fn pre_receive_binary_succeeds_with_piped_stdin() {
+    let output = run_hook_binary_with_env_and_stdin(
+        env!("CARGO_BIN_EXE_gittree-pre-receive"),
+        &[],
+        &[
+            ("GITTREE_STATE_URL", "http://127.0.0.1:8082".to_string()),
+            ("GITTREE_HOOK_REPO_PATH", sample_repo_path()),
+        ],
+        &nostr_updates_input(),
+    );
     assert!(output.status.success());
 }
 

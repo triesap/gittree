@@ -1,6 +1,11 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gittree_git_http::{
+    GitHttpConfigError, GitHttpError, GitHttpRequest, GitHttpRoute, GitHttpRouter, GitHttpService,
+    ReqwestUpstreamClient, StorageConfigError, UpstreamError,
+};
+
 const TEST_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
 fn reserve_local_port() -> u16 {
@@ -134,4 +139,35 @@ async fn git_http_binary_runtime_routes_cover_non_test_monomorphizations() {
     );
 
     stop_git_http_server(&mut child);
+}
+
+#[test]
+fn git_http_public_surface_covers_non_test_runtime_instantiations() {
+    let config_missing = GitHttpConfigError::MissingEnv("MISSING");
+    assert!(std::error::Error::source(&config_missing).is_none());
+    let config_storage = GitHttpConfigError::Storage(StorageConfigError::MissingEnv("READ_URL"));
+    assert!(std::error::Error::source(&config_storage).is_some());
+
+    let storage_invalid = StorageConfigError::InvalidConfig("invalid".to_string());
+    assert_eq!(storage_invalid.to_string(), "invalid");
+
+    let upstream = UpstreamError::Request("upstream".to_string());
+    assert_eq!(upstream.to_string(), "upstream");
+
+    let error = GitHttpError::Upstream("boom".to_string());
+    assert!(std::error::Error::source(&error).is_none());
+
+    let router = GitHttpRouter::new();
+    let info_refs_path = format!("/{TEST_NPUB}/repo.git/info/refs");
+    let request = GitHttpRequest::new("GET", &info_refs_path, Some("service=git-upload-pack"));
+    let route = router.route(&request);
+    assert!(matches!(
+        route,
+        GitHttpRoute::InfoRefs {
+            service: GitHttpService::UploadPack,
+            ..
+        }
+    ));
+
+    let _client = ReqwestUpstreamClient::new(Duration::from_millis(10)).expect("client");
 }
