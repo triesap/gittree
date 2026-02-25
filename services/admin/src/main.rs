@@ -610,17 +610,17 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var_opt(ENV_CONTROL_TOKEN, None, &mut || {
             let err = ControlClientConfig::from_env().expect_err("missing token");
-            assert!(matches!(
-                err,
-                AdminError::ControlConfig(ControlConfigError::MissingEnv(ENV_CONTROL_TOKEN))
-            ));
+            assert_eq!(
+                err.to_string(),
+                "admin control config error: missing env GITTREE_CONTROL_TOKEN"
+            );
         });
         with_env_var(ENV_CONTROL_TOKEN, "   ", &mut || {
             let err = ControlClientConfig::from_env().expect_err("empty token");
-            assert!(matches!(
-                err,
-                AdminError::ControlConfig(ControlConfigError::MissingEnv(ENV_CONTROL_TOKEN))
-            ));
+            assert_eq!(
+                err.to_string(),
+                "admin control config error: missing env GITTREE_CONTROL_TOKEN"
+            );
         });
     }
 
@@ -629,7 +629,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var_opt(ENV_CONTROL_TOKEN, None, &mut || {
             let result = control_client_from_env();
-            assert!(matches!(result, Err(AdminError::ControlConfig(_))));
+            let err = result.err().expect("missing token");
+            assert!(err.to_string().contains("admin control config error"));
         });
     }
 
@@ -647,7 +648,7 @@ mod tests {
         });
         with_env_var("GITTREE_TEST_U32", "bad", &mut || {
             let err = env_u32("GITTREE_TEST_U32").expect_err("invalid");
-            assert!(matches!(err, AdminError::StorageConfig(_)));
+            assert!(err.to_string().contains("admin storage config error"));
         });
 
         with_env_var_opt("GITTREE_TEST_U64", None, &mut || {
@@ -661,7 +662,7 @@ mod tests {
         });
         with_env_var("GITTREE_TEST_U64", "bad", &mut || {
             let err = env_u64("GITTREE_TEST_U64").expect_err("invalid");
-            assert!(matches!(err, AdminError::StorageConfig(_)));
+            assert!(err.to_string().contains("admin storage config error"));
         });
     }
 
@@ -670,10 +671,9 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var_opt(ENV_STORAGE_READ_URL, None, &mut || {
             let err = storage_from_env().expect_err("missing read");
-            assert!(matches!(
-                err,
-                AdminError::StorageConfig(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
-            ));
+            assert!(err
+                .to_string()
+                .contains("missing env GITTREE_STORAGE_READ_URL"));
         });
         with_env_var(
             ENV_STORAGE_READ_URL,
@@ -682,7 +682,7 @@ mod tests {
                 with_env_var(ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
                     with_env_var(ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                         let err = storage_from_env().expect_err("invalid bounds");
-                        assert!(matches!(err, AdminError::StorageConfig(_)));
+                        assert!(err.to_string().contains("admin storage config error"));
                     });
                 });
             },
@@ -871,7 +871,7 @@ mod tests {
             .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
             .await
             .expect_err("post should fail");
-        assert!(matches!(err, AdminError::ControlResponse(_)));
+        assert!(err.to_string().contains("admin control response error"));
         err_handle.join().expect("server join");
     }
 
@@ -887,7 +887,7 @@ mod tests {
             .post::<_, TestPostResp>("/control/test", &TestPostReq { a: 1 })
             .await
             .expect_err("invalid json");
-        assert!(matches!(err, AdminError::ControlRequest(_)));
+        assert!(err.to_string().contains("admin control request error"));
         handle.join().expect("server join");
     }
 
