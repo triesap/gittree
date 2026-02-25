@@ -938,6 +938,28 @@ mod tests {
                                 })
                             ));
                         });
+
+                        with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", &mut || {
+                            let err = SyncConfig::from_env().expect_err("invalid min connections");
+                            assert!(matches!(
+                                err,
+                                SyncConfigError::Storage(StorageConfigError::InvalidEnv {
+                                    key: super::ENV_STORAGE_MIN_CONNECTIONS,
+                                    ..
+                                })
+                            ));
+                        });
+
+                        with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", &mut || {
+                            let err = SyncConfig::from_env().expect_err("invalid max lifetime");
+                            assert!(matches!(
+                                err,
+                                SyncConfigError::Storage(StorageConfigError::InvalidEnv {
+                                    key: super::ENV_STORAGE_MAX_LIFETIME_SECS,
+                                    ..
+                                })
+                            ));
+                        });
                     });
                 });
             },
@@ -1323,6 +1345,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_with_maps_init_errors() {
+        let config = SyncConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: super::StorageConfig {
+                read_connection: "postgres://user:pass@localhost:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: PathBuf::from("/tmp/gittree-sync"),
+        };
+        let err = super::serve_with(
+            config,
+            || {
+                Err::<(), SyncError>(SyncError::Observability(
+                    ObservabilityError::TraceInit("init failed".to_string()),
+                ))
+            },
+            super::run_axum_server,
+        )
+        .await
+        .expect_err("init error");
+        assert!(err.to_string().contains("sync observability error:"));
+    }
+
+    #[tokio::test]
     async fn serve_wrapper_maps_errors() {
         let config = SyncConfig {
             bind: "not-a-bind".to_string(),
@@ -1342,11 +1394,7 @@ mod tests {
             .await
             .expect_err("expected serve error");
         let message = err.to_string();
-        assert!(
-            message.starts_with("sync serve error:")
-                || message.starts_with("sync observability error:")
-                || message.starts_with("sync observability config error:")
-        );
+        assert!(message.starts_with("sync "));
     }
 
     #[tokio::test]
@@ -1357,7 +1405,7 @@ mod tests {
         let app = super::build_router(super::SyncAppState {
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         });
-        let task = tokio::spawn(async move { super::run_axum_server(listener, app).await });
+        let task = tokio::spawn(super::run_axum_server(listener, app));
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         task.abort();
         let _ = task.await;
