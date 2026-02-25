@@ -6,6 +6,10 @@ if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "${COV_CLEAN:-1}" == "1" ]]; then
+  cargo llvm-cov clean --workspace
+fi
+
 if [[ -n "${COV_PACKAGES:-}" ]]; then
   read -r -a packages <<< "${COV_PACKAGES}"
 else

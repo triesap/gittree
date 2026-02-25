@@ -6,6 +6,10 @@ if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "${COV_CLEAN:-1}" == "1" ]]; then
+  cargo llvm-cov clean --workspace
+fi
+
 tmp_json="$(mktemp -t gittree-storage-cov-json.XXXXXX)"
 tmp_text="$(mktemp -t gittree-storage-cov-text.XXXXXX)"
 cleanup() {
