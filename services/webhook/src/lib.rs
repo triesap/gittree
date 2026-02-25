@@ -13,6 +13,7 @@ use gittree_observability::{ObservabilityConfigError, ObservabilityError, Observ
 use gittree_storage::{PostgresRepositories, RepoMappingRepository, StorageConfig, StorageError};
 use serde::{Deserialize, Serialize};
 use std::future::{Future, pending};
+use std::pin::Pin;
 use std::sync::Arc;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
@@ -335,17 +336,14 @@ where
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| WebhookError::Serve(err.to_string()))?;
-    run_http_server_with_shutdown(listener, router, pending()).await
+    run_http_server_with_shutdown(listener, router, Box::pin(pending())).await
 }
 
-async fn run_http_server_with_shutdown<Shutdown>(
+async fn run_http_server_with_shutdown(
     listener: tokio::net::TcpListener,
     router: Router,
-    shutdown: Shutdown,
-) -> Result<(), WebhookError>
-where
-    Shutdown: Future<Output = ()> + Send + 'static,
-{
+    shutdown: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+) -> Result<(), WebhookError> {
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await;
@@ -1425,6 +1423,15 @@ mod tests {
     }
 
     #[test]
+    fn build_http_notifier_with_result_accepts_success_result() {
+        let result = super::build_http_notifier_with_result(
+            "http://localhost:8084".to_string(),
+            Ok::<reqwest::Client, String>(reqwest::Client::new()),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn build_http_notifier_rejects_invalid_endpoint() {
         let result = super::build_http_notifier("not-a-url".to_string());
         assert!(result.is_err());
@@ -1554,7 +1561,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
-        let result = super::run_http_server_with_shutdown(listener, Router::new(), async {}).await;
+        let result =
+            super::run_http_server_with_shutdown(listener, Router::new(), Box::pin(async {}))
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1563,5 +1572,10 @@ mod tests {
         let err = super::map_serve_result(Err(std::io::Error::other("boom")))
             .expect_err("serve error");
         assert_eq!(err.to_string(), "webhook serve error: boom");
+    }
+
+    #[test]
+    fn map_serve_result_returns_ok_for_success() {
+        assert!(super::map_serve_result(Ok(())).is_ok());
     }
 }
