@@ -1065,7 +1065,7 @@ mod tests {
     use gittree_core::{RelayCapability, RelayCompatibilityReport, RepoState};
     use gittree_storage::{
         AnnouncementRepository, InMemoryRepositories, RelayCompatibilityRecord,
-        RelayCompatibilityRepository, RepoAnnouncementRecord,
+        RelayCompatibilityRepository, RepoAnnouncementRecord, RepoStateRecord,
     };
     use gittree_storage::{RelayProbeMetadata, StateRepository, StorageConfig, StorageError};
     use std::sync::Arc;
@@ -1139,6 +1139,28 @@ mod tests {
                         })
                     ));
                 });
+
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "NaN", &mut || {
+                    let err = AdmissionConfig::from_env().expect_err("invalid min connections");
+                    assert!(matches!(
+                        err,
+                        AdmissionConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MIN_CONNECTIONS,
+                            ..
+                        })
+                    ));
+                });
+
+                with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "NaN", &mut || {
+                    let err = AdmissionConfig::from_env().expect_err("invalid max lifetime");
+                    assert!(matches!(
+                        err,
+                        AdmissionConfigError::Storage(StorageConfigError::InvalidEnv {
+                            key: super::ENV_STORAGE_MAX_LIFETIME_SECS,
+                            ..
+                        })
+                    ));
+                });
             },
         );
     }
@@ -1151,7 +1173,7 @@ mod tests {
             &mut || {
                 with_env_var("GITTREE_RELAY_COMPAT_MODE", "invalid", &mut || {
                     let err = AdmissionConfig::from_env().expect_err("invalid compatibility mode");
-                    assert!(matches!(err, AdmissionConfigError::Config(_)));
+                    assert!(err.to_string().contains("admission config error"));
                 });
             },
         );
@@ -2422,10 +2444,131 @@ mod tests {
             .await
             .expect("repo exists after insert");
         assert!(exists);
+
+        let state_error_storage = LatestStateErrorStorage::default();
+        let pubkey_bytes = hex::decode(&pubkey).expect("pubkey bytes");
+        let announcement = RepoAnnouncementRecord::new(
+            &hex_32(0x35),
+            &pubkey,
+            1,
+            &sample_announcement("repo"),
+        )
+        .expect("announcement");
+        state_error_storage
+            .insert_announcement(announcement)
+            .await
+            .expect("insert announcement");
+        let listed = state_error_storage
+            .list_announcements(&pubkey_bytes, "repo")
+            .await
+            .expect("list announcements");
+        assert_eq!(listed.len(), 1);
+        let latest = state_error_storage
+            .latest_announcement(&pubkey_bytes, "repo")
+            .await
+            .expect("latest announcement");
+        assert!(latest.is_none());
+
+        let mut state_map = std::collections::HashMap::new();
+        state_map.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+        state_map.insert(
+            "refs/heads/main".to_string(),
+            "1111111111111111111111111111111111111111".to_string(),
+        );
+        let state = RepoState {
+            identifier: "repo".to_string(),
+            state: state_map,
+        };
+        let state_record = RepoStateRecord::new(&hex_32(0x36), &pubkey, 1, &state).expect("state");
+        state_error_storage
+            .insert_state(state_record)
+            .await
+            .expect("insert state");
+
+        let compat_record = sample_compat_record("wss://relay.example", true);
+        state_error_storage
+            .upsert_relay_compatibility(compat_record)
+            .await
+            .expect("upsert compat");
+        let compat = state_error_storage
+            .relay_compatibility("wss://relay.example")
+            .await
+            .expect("lookup compat");
+        assert!(compat.is_some());
+
+        let err = super::repo_exists(&state_error_storage, &address)
+            .await
+            .expect_err("state lookup should fail");
+        assert!(err.to_string().contains("state lookup failed"));
     }
 
     #[derive(Debug)]
     struct FailingStorage;
+
+    #[derive(Debug, Default)]
+    struct LatestStateErrorStorage {
+        inner: InMemoryRepositories,
+    }
+
+    #[async_trait]
+    impl AnnouncementRepository for LatestStateErrorStorage {
+        async fn insert_announcement(
+            &self,
+            record: RepoAnnouncementRecord,
+        ) -> Result<(), StorageError> {
+            self.inner.insert_announcement(record).await
+        }
+
+        async fn list_announcements(
+            &self,
+            pubkey: &[u8],
+            identifier: &str,
+        ) -> Result<Vec<RepoAnnouncementRecord>, StorageError> {
+            self.inner.list_announcements(pubkey, identifier).await
+        }
+
+        async fn latest_announcement(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoAnnouncementRecord>, StorageError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl StateRepository for LatestStateErrorStorage {
+        async fn insert_state(&self, record: RepoStateRecord) -> Result<(), StorageError> {
+            self.inner.insert_state(record).await
+        }
+
+        async fn latest_state(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoStateRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "state lookup failed".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RelayCompatibilityRepository for LatestStateErrorStorage {
+        async fn upsert_relay_compatibility(
+            &self,
+            record: RelayCompatibilityRecord,
+        ) -> Result<(), StorageError> {
+            self.inner.upsert_relay_compatibility(record).await
+        }
+
+        async fn relay_compatibility(
+            &self,
+            relay_url: &str,
+        ) -> Result<Option<RelayCompatibilityRecord>, StorageError> {
+            self.inner.relay_compatibility(relay_url).await
+        }
+    }
 
     #[async_trait]
     impl AnnouncementRepository for FailingStorage {
