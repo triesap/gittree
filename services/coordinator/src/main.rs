@@ -1,35 +1,31 @@
 use gittree_coordinator::{CoordinatorConfig, CoordinatorError, serve};
 use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
+
+type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), CoordinatorError>>>>;
 
 #[tokio::main]
 async fn main() {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr).await;
-    exit_if_needed(exit_code, std::process::exit);
+    let mut exit_fn = |code| std::process::exit(code);
+    exit_if_needed(exit_code, &mut exit_fn);
 }
 
-async fn main_impl(stderr: &mut impl Write) -> i32 {
-    main_impl_with(
-        || {
-            dotenvy::dotenv().ok();
-        },
-        run,
-        stderr,
-    )
-    .await
+async fn main_impl(stderr: &mut dyn Write) -> i32 {
+    let mut load_dotenv = || {
+        dotenvy::dotenv().ok();
+    };
+    let mut run_fn = || -> MainRunFuture { Box::pin(run()) };
+    main_impl_with(&mut load_dotenv, &mut run_fn, stderr).await
 }
 
-async fn main_impl_with<DotenvFn, RunFn, RunFut>(
-    load_dotenv: DotenvFn,
-    run_fn: RunFn,
-    stderr: &mut impl Write,
-) -> i32
-where
-    DotenvFn: FnOnce(),
-    RunFn: FnOnce() -> RunFut,
-    RunFut: Future<Output = Result<(), CoordinatorError>>,
-{
+async fn main_impl_with(
+    load_dotenv: &mut dyn FnMut(),
+    run_fn: &mut dyn FnMut() -> MainRunFuture,
+    stderr: &mut dyn Write,
+) -> i32 {
     load_dotenv();
     handle_main_result(run_fn().await, stderr)
 }
@@ -55,7 +51,7 @@ where
     serve_fn(config).await
 }
 
-fn handle_main_result(result: Result<(), CoordinatorError>, stderr: &mut impl Write) -> i32 {
+fn handle_main_result(result: Result<(), CoordinatorError>, stderr: &mut dyn Write) -> i32 {
     match result {
         Ok(()) => 0,
         Err(err) => {
@@ -65,12 +61,9 @@ fn handle_main_result(result: Result<(), CoordinatorError>, stderr: &mut impl Wr
     }
 }
 
-fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
-where
-    F: FnOnce(i32) -> R,
-{
+fn exit_if_needed(exit_code: i32, exit_fn: &mut dyn FnMut(i32)) {
     if exit_code != 0 {
-        let _ = exit_fn(exit_code);
+        exit_fn(exit_code);
     }
 }
 
@@ -138,12 +131,13 @@ mod tests {
     #[tokio::test]
     async fn main_impl_with_reports_errors() {
         let mut stderr = Vec::new();
-        let exit_code = main_impl_with(
-            || {},
-            || async { Err::<(), CoordinatorError>(CoordinatorError::Serve("boom".to_string())) },
-            &mut stderr,
-        )
-        .await;
+        let mut load_dotenv = || {};
+        let mut run_fn = || -> super::MainRunFuture {
+            Box::pin(async {
+                Err::<(), CoordinatorError>(CoordinatorError::Serve("boom".to_string()))
+            })
+        };
+        let exit_code = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
         assert_eq!(exit_code, 1);
         let message = String::from_utf8(stderr).expect("utf8");
         assert!(message.contains("coordinator serve error: boom"));
@@ -151,13 +145,15 @@ mod tests {
 
     #[test]
     fn exit_if_needed_skips_exit_when_code_is_zero() {
-        exit_if_needed(0, |_| ());
+        let mut exit_fn = |_| ();
+        exit_if_needed(0, &mut exit_fn);
     }
 
     #[test]
     fn exit_if_needed_calls_exit_when_code_is_non_zero() {
         let mut seen = None;
-        exit_if_needed(17, |code| seen = Some(code));
+        let mut exit_fn = |code| seen = Some(code);
+        exit_if_needed(17, &mut exit_fn);
         assert_eq!(seen, Some(17));
     }
 
@@ -166,14 +162,13 @@ mod tests {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let loader_called = called.clone();
         let mut stderr = Vec::new();
-        let _ = main_impl_with(
-            move || {
-                loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
-            },
-            || async { Ok::<(), CoordinatorError>(()) },
-            &mut stderr,
-        )
-        .await;
+        let mut load_dotenv = move || {
+            loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+        let mut run_fn = || -> super::MainRunFuture {
+            Box::pin(async { Ok::<(), CoordinatorError>(()) })
+        };
+        let _ = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
