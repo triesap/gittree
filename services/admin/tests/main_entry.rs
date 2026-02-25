@@ -385,6 +385,71 @@ fn admin_binary_map_rejects_invalid_forgejo_repo() {
 }
 
 #[test]
+fn admin_binary_map_rejects_invalid_pubkey() {
+    let output = run_admin(
+        &[
+            "map",
+            "--forgejo",
+            "alice/repo",
+            "--pubkey",
+            "not-a-pubkey",
+            "--identifier",
+            "repo",
+        ],
+        None,
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gittree-admin failed: admin mapping error:"));
+}
+
+#[test]
+fn admin_binary_map_requires_storage_read_connection() {
+    let output = run_admin(
+        &[
+            "map",
+            "--forgejo",
+            "alice/repo",
+            "--pubkey",
+            "11f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871a",
+            "--identifier",
+            "repo",
+        ],
+        None,
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(
+        "gittree-admin failed: admin storage config error: missing env GITTREE_STORAGE_READ_URL"
+    ));
+}
+
+#[test]
+fn admin_binary_map_reports_connect_error_after_option_build() {
+    let output = run_admin(
+        &[
+            "map",
+            "--forgejo",
+            "alice/repo",
+            "--pubkey",
+            "11f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871a",
+            "--identifier",
+            "repo",
+        ],
+        None,
+        &[(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://gittree:gittree@127.0.0.1:1/gittree",
+        )],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gittree-admin failed: admin storage error:"));
+}
+
+#[test]
 fn admin_binary_map_reports_invalid_write_connection_before_db_connect() {
     let output = run_admin(
         &[

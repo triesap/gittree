@@ -220,10 +220,12 @@ async fn run() -> Result<(), AdminError> {
                 pubkey,
                 identifier,
             ))?;
-            let record = map_storage(RepoMappingRecord::new(&mapping))?;
+            // RepoMapping::new already enforces a strict 64-char hex pubkey.
+            let record = RepoMappingRecord::new(&mapping).expect("validated mapping pubkey");
             let storage = storage_from_env()?;
             let options = map_storage(storage.write_connect_options())?;
-            let pool_options = map_storage(storage.pool_options())?;
+            // storage_from_env validates pool bounds before returning StorageConfig.
+            let pool_options = storage.pool_options().expect("validated storage pool options");
             let pool = map_storage(
                 pool_options
                     .connect_with(options)
@@ -231,7 +233,7 @@ async fn run() -> Result<(), AdminError> {
                     .map_err(StorageError::from),
             )?;
             let repo = PostgresRepositories::new(pool);
-            map_storage(repo.upsert_mapping(record).await)?;
+            return map_storage(repo.upsert_mapping(record).await);
         }
         AdminCommand::CreateUser {
             username,
