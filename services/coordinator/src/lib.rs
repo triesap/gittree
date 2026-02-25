@@ -1441,7 +1441,7 @@ mod tests {
         }
     }
 
-    fn with_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
+    fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -1458,7 +1458,7 @@ mod tests {
         }
     }
 
-    fn with_unset_env_var<F: FnOnce()>(key: &str, f: F) {
+    fn with_unset_env_var(key: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         // SAFETY: tests run single-threaded in this crate; we restore the previous value after.
         unsafe {
@@ -1473,14 +1473,14 @@ mod tests {
         }
     }
 
-    fn with_forgejo_envs<F: FnOnce()>(f: F) {
-        with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", || {
-            with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", || {
-                with_env_var("GITTREE_FORGEJO_OWNER", "gittree", || {
+    fn with_forgejo_envs(f: &mut dyn FnMut()) {
+        with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", &mut || {
+            with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", &mut || {
+                with_env_var("GITTREE_FORGEJO_OWNER", "gittree", &mut || {
                     with_env_var(
                         "GITTREE_FORGEJO_WEBHOOK_URL",
                         "http://localhost:8090/",
-                        || {
+                        &mut || {
                             with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", f);
                         },
                     );
@@ -1489,25 +1489,25 @@ mod tests {
         });
     }
 
-    fn with_required_coordinator_envs<F: FnOnce()>(f: F) {
+    fn with_required_coordinator_envs(f: &mut dyn FnMut()) {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091", || {
-                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+            &mut || {
+                with_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091", &mut || {
+                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
                         with_env_var(
                             super::ENV_COORDINATOR_REPO_ROOT,
                             "/tmp/gittree-repos",
-                            || {
+                            &mut || {
                                 with_env_var(
                                     super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
                                     "/tmp/gittree-pre-receive",
-                                    || {
+                                    &mut || {
                                         with_env_var(
                                             super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
                                             "/tmp/gittree-post-receive",
-                                            || {
+                                            &mut || {
                                                 with_forgejo_envs(f);
                                             },
                                         );
@@ -1527,22 +1527,22 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
-                with_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091", || {
-                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", || {
+            &mut || {
+                with_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091", &mut || {
+                    with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
                         with_env_var(
                             super::ENV_COORDINATOR_REPO_ROOT,
                             "/tmp/gittree-repos",
-                            || {
+                            &mut || {
                                 with_env_var(
                                     super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
                                     "/tmp/gittree-pre-receive",
-                                    || {
+                                    &mut || {
                                         with_env_var(
                                             super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
                                             "/tmp/gittree-post-receive",
-                                            || {
-                                                with_forgejo_envs(|| {
+                                            &mut || {
+                                                with_forgejo_envs(&mut || {
                                                     let config = CoordinatorConfig::from_env()
                                                         .expect("config");
                                                     assert_eq!(config.bind, "127.0.0.1:9091");
@@ -1590,22 +1590,22 @@ mod tests {
         with_env_var(
             ENV_STORAGE_READ_URL,
             "postgres://user:pass@localhost:5432/gittree",
-            || {
+            &mut || {
                 with_env_var(
                     super::ENV_COORDINATOR_REPO_ROOT,
                     "/tmp/gittree-repos",
-                    || {
-                        with_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, "/tmp/pre", || {
+                    &mut || {
+                        with_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, "/tmp/pre", &mut || {
                             with_env_var(
                                 super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
                                 "/tmp/post",
-                                || {
-                                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", || {
+                                &mut || {
+                                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
                                         with_env_var(
                                             super::ENV_STORAGE_MAX_LIFETIME_SECS,
                                             "",
-                                            || {
-                                                with_forgejo_envs(|| {
+                                            &mut || {
+                                                with_forgejo_envs(&mut || {
                                                     let config = CoordinatorConfig::from_env()
                                                         .expect("config");
                                                     assert_eq!(
@@ -1632,8 +1632,8 @@ mod tests {
     #[test]
     fn config_rejects_invalid_storage_integer_envs() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_required_coordinator_envs(|| {
-            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "nope", || {
+        with_required_coordinator_envs(&mut || {
+            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "nope", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("invalid max connections");
                 assert!(matches!(
                     err,
@@ -1643,7 +1643,7 @@ mod tests {
                     })
                 ));
             });
-            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", || {
+            with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "bad", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("invalid idle timeout");
                 assert!(matches!(
                     err,
@@ -1653,7 +1653,7 @@ mod tests {
                     })
                 ));
             });
-            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", || {
+            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("invalid min connections");
                 assert!(matches!(
                     err,
@@ -1663,7 +1663,7 @@ mod tests {
                     })
                 ));
             });
-            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", || {
+            with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("invalid max lifetime");
                 assert!(matches!(
                     err,
@@ -1679,8 +1679,8 @@ mod tests {
     #[test]
     fn config_rejects_missing_read_url_and_invalid_pool_ranges() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_required_coordinator_envs(|| {
-            with_unset_env_var(ENV_STORAGE_READ_URL, || {
+        with_required_coordinator_envs(&mut || {
+            with_unset_env_var(ENV_STORAGE_READ_URL, &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("missing read url");
                 assert!(matches!(
                     err,
@@ -1690,8 +1690,8 @@ mod tests {
                 ));
             });
 
-            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", || {
-                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", || {
+            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "1", &mut || {
+                with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "2", &mut || {
                     let err = CoordinatorConfig::from_env().expect_err("invalid pool range");
                     assert!(matches!(
                         err,
@@ -1702,7 +1702,7 @@ mod tests {
                 });
             });
 
-            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", || {
+            with_env_var(super::ENV_STORAGE_MAX_CONNECTIONS, "", &mut || {
                 let config =
                     CoordinatorConfig::from_env().expect("empty max connections uses default");
                 assert_eq!(config.storage.max_connections, 10);
@@ -1713,13 +1713,13 @@ mod tests {
     #[test]
     fn config_rejects_invalid_relay_and_missing_forgejo_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_required_coordinator_envs(|| {
-            with_env_var("GITTREE_RELAY_URLS", "not-a-url", || {
+        with_required_coordinator_envs(&mut || {
+            with_env_var("GITTREE_RELAY_URLS", "not-a-url", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("invalid relay target");
                 assert!(matches!(err, super::CoordinatorConfigError::Config(_)));
             });
 
-            with_unset_env_var("GITTREE_FORGEJO_OWNER", || {
+            with_unset_env_var("GITTREE_FORGEJO_OWNER", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("missing forgejo owner");
                 assert!(matches!(err, super::CoordinatorConfigError::Config(_)));
             });
@@ -1729,14 +1729,14 @@ mod tests {
     #[test]
     fn config_rejects_missing_and_empty_paths() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_unset_env_var(super::ENV_COORDINATOR_REPO_ROOT, || {
+        with_unset_env_var(super::ENV_COORDINATOR_REPO_ROOT, &mut || {
             let err = super::env_path(super::ENV_COORDINATOR_REPO_ROOT).expect_err("missing path");
             assert!(matches!(
                 err,
                 super::CoordinatorConfigError::MissingEnv(super::ENV_COORDINATOR_REPO_ROOT)
             ));
         });
-        with_env_var(super::ENV_COORDINATOR_REPO_ROOT, "  ", || {
+        with_env_var(super::ENV_COORDINATOR_REPO_ROOT, "  ", &mut || {
             let err = super::env_path(super::ENV_COORDINATOR_REPO_ROOT).expect_err("empty path");
             assert!(matches!(
                 err,
@@ -1751,15 +1751,15 @@ mod tests {
     #[test]
     fn config_rejects_missing_paths_during_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_required_coordinator_envs(|| {
-            with_unset_env_var(super::ENV_COORDINATOR_REPO_ROOT, || {
+        with_required_coordinator_envs(&mut || {
+            with_unset_env_var(super::ENV_COORDINATOR_REPO_ROOT, &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("missing repo root");
                 assert!(matches!(
                     err,
                     super::CoordinatorConfigError::MissingEnv(super::ENV_COORDINATOR_REPO_ROOT)
                 ));
             });
-            with_unset_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, || {
+            with_unset_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("missing pre-receive hook");
                 assert!(matches!(
                     err,
@@ -1768,7 +1768,7 @@ mod tests {
                     )
                 ));
             });
-            with_unset_env_var(super::ENV_COORDINATOR_POST_RECEIVE_HOOK, || {
+            with_unset_env_var(super::ENV_COORDINATOR_POST_RECEIVE_HOOK, &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("missing post-receive hook");
                 assert!(matches!(
                     err,
@@ -2629,7 +2629,7 @@ mod tests {
     fn serve_maps_observability_config_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", || {
+        with_env_var("GITTREE_METRICS_ENABLED", "invalid-bool", &mut || {
             let config = sample_coordinator_config(sample_storage_config(
                 "postgres://user:pass@localhost:5432/gittree",
             ));
@@ -3059,20 +3059,20 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let key = "GITTREE_COORDINATOR_ENV_HELPER_TEST";
 
-        with_unset_env_var(key, || {
-            with_env_var(key, "value", || {
+        with_unset_env_var(key, &mut || {
+            with_env_var(key, "value", &mut || {
                 assert_eq!(std::env::var(key).expect("set in closure"), "value");
             });
             assert!(std::env::var_os(key).is_none());
         });
 
-        with_env_var(key, "original", || {
-            with_env_var(key, "temporary", || {
+        with_env_var(key, "original", &mut || {
+            with_env_var(key, "temporary", &mut || {
                 assert_eq!(std::env::var(key).expect("temporary value"), "temporary");
             });
             assert_eq!(std::env::var(key).expect("restored original"), "original");
 
-            with_unset_env_var(key, || {
+            with_unset_env_var(key, &mut || {
                 assert!(std::env::var_os(key).is_none());
             });
             assert_eq!(
@@ -3325,7 +3325,7 @@ mod tests {
     #[test]
     fn observability_init_returns_registry() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_unset_env_var("GITTREE_LOG_JSON", || {
+        with_unset_env_var("GITTREE_LOG_JSON", &mut || {
             let handle = LazyLock::force(&OBSERVABILITY);
             assert!(handle.prometheus_registry().is_some());
         });
@@ -3334,7 +3334,7 @@ mod tests {
     #[test]
     fn observability_init_maps_invalid_env_and_reinit_errors() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        with_env_var("GITTREE_LOG_JSON", "invalid-bool", || {
+        with_env_var("GITTREE_LOG_JSON", "invalid-bool", &mut || {
             let err = init_observability().expect_err("invalid observability config");
             assert!(matches!(
                 err,
