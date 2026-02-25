@@ -84,17 +84,10 @@ async fn run_with_config(config: &MigrationConfig) -> Result<i64, MigrationError
         .await
         .map_err(StorageError::from)
         .map_err(MigrationError::Storage)?;
-    let runner = map_runner_build(MigrationRunner::new(
-        gittree_storage::migrations::core_migrations(),
-    ))?;
-    let version = map_runner_result(runner.run(&mut connection).await)?;
-    Ok(version)
-}
-
-fn map_runner_build(
-    result: Result<MigrationRunner, StorageError>,
-) -> Result<MigrationRunner, MigrationError> {
-    result.map_err(MigrationError::Storage)
+    // core migrations are static crate data; failure here indicates a code defect.
+    let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())
+        .expect("core migrations must be valid");
+    map_runner_result(runner.run(&mut connection).await)
 }
 
 fn map_runner_result(result: Result<i64, StorageError>) -> Result<i64, MigrationError> {
@@ -161,8 +154,8 @@ fn env_u64(key: &'static str) -> Result<Option<u64>, MigrationConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MigrationConfig, MigrationConfigError, MigrationError, MigrationRunner, run,
-        run_with_config,
+        MigrationConfig, MigrationConfigError, MigrationError, MigrationRunner, map_runner_result,
+        run, run_with_config,
     };
     use gittree_storage::{StorageConfig, StorageError};
     use sqlx::{Connection, PgConnection};
@@ -386,22 +379,14 @@ mod tests {
     }
 
     #[test]
-    fn runner_mappers_cover_ok_and_err_paths() {
-        let runner = super::map_runner_build(MigrationRunner::new(
-            gittree_storage::migrations::core_migrations(),
-        ))
-        .expect("runner");
-        let _ = runner;
+    fn runner_result_mapper_covers_ok_and_err_paths() {
+        let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())
+            .expect("runner");
+        assert!(runner.latest_version() > 0);
 
-        let build_err = super::map_runner_build(Err(StorageError::Internal {
-            message: "runner build failed".to_string(),
-        }))
-        .expect_err("build error");
-        assert!(build_err.to_string().contains("migration storage error"));
-
-        let ok = super::map_runner_result(Ok(7)).expect("ok result");
+        let ok = map_runner_result(Ok(7)).expect("ok result");
         assert_eq!(ok, 7);
-        let run_err = super::map_runner_result(Err(StorageError::Internal {
+        let run_err = map_runner_result(Err(StorageError::Internal {
             message: "runner run failed".to_string(),
         }))
         .expect_err("run error");
