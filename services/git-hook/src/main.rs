@@ -144,15 +144,12 @@ mod tests {
         run();
 
         for (key, previous) in previous {
-            match previous {
-                Some(value) => {
-                    // SAFETY: tests mutate process env under a global lock and always restore state.
-                    unsafe { std::env::set_var(key, value) };
-                }
-                None => {
-                    // SAFETY: tests mutate process env under a global lock and always restore state.
-                    unsafe { std::env::remove_var(key) };
-                }
+            // SAFETY: tests mutate process env under a global lock and always restore state.
+            unsafe {
+                previous.map_or_else(
+                    || std::env::remove_var(key),
+                    |value| std::env::set_var(key, value),
+                );
             }
         }
     }
