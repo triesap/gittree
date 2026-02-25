@@ -604,13 +604,23 @@ fn path_to_str(path: &Path) -> Result<&str, GitExecError> {
 }
 
 fn run_with_timeout(
+    command: std::process::Command,
+    timeout: Duration,
+) -> Result<(), GitExecError> {
+    run_with_timeout_with(command, timeout, |child| child.try_wait())
+}
+
+fn run_with_timeout_with(
     mut command: std::process::Command,
     timeout: Duration,
+    mut try_wait: impl FnMut(
+        &mut std::process::Child,
+    ) -> Result<Option<std::process::ExitStatus>, std::io::Error>,
 ) -> Result<(), GitExecError> {
     let mut child = command.spawn().map_err(GitExecError::Io)?;
     let start = Instant::now();
     loop {
-        if let Some(status) = child.try_wait().map_err(GitExecError::Io)? {
+        if let Some(status) = try_wait(&mut child).map_err(GitExecError::Io)? {
             if status.success() {
                 return Ok(());
             }
@@ -1192,6 +1202,16 @@ mod tests {
         let spawn_err = run_with_timeout(missing_command, std::time::Duration::from_millis(20))
             .expect_err("spawn should fail");
         assert!(spawn_err.to_string().contains("git io error"));
+
+        let mut try_wait_io = Command::new("sh");
+        try_wait_io.arg("-c").arg("sleep 1");
+        let io_err = super::run_with_timeout_with(
+            try_wait_io,
+            std::time::Duration::from_millis(200),
+            |_child| Err(std::io::Error::new(std::io::ErrorKind::Other, "try_wait boom")),
+        )
+        .expect_err("try_wait io path");
+        assert!(io_err.to_string().contains("git io error"));
 
         let executor = CommandGitExecutor;
         let repo_path = std::path::Path::new("/definitely/missing/repo");
