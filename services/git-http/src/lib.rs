@@ -20,6 +20,7 @@ use sha2::Digest;
 use std::collections::HashSet;
 use std::future::{Future, IntoFuture};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -298,22 +299,24 @@ pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
     serve_with(config, init_observability, run_axum_server).await
 }
 
+type ServeServerFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send + 'static>>;
+type ServeServerFn = fn(tokio::net::TcpListener, Router) -> ServeServerFuture;
+type UpstreamBuilderFn = fn(Duration) -> Result<ReqwestUpstreamClient, GitHttpError>;
+
 fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
-) -> impl Future<Output = Result<(), std::io::Error>> + Send + 'static {
-    axum::serve(listener, router).into_future()
+) -> ServeServerFuture {
+    Box::pin(async move { axum::serve(listener, router).into_future().await })
 }
 
-async fn serve_with<Obs, InitObs, ServeFn, ServeFut>(
+async fn serve_with<Obs, InitObs>(
     config: GitHttpConfig,
     init_observability_fn: InitObs,
-    serve_fn: ServeFn,
+    serve_fn: ServeServerFn,
 ) -> Result<(), GitHttpError>
 where
     InitObs: FnOnce() -> Result<Obs, GitHttpError>,
-    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
-    ServeFut: Future<Output = Result<(), std::io::Error>>,
 {
     serve_with_upstream_builder(
         config,
@@ -324,17 +327,14 @@ where
     .await
 }
 
-async fn serve_with_upstream_builder<Obs, InitObs, ServeFn, ServeFut, BuildUpstreamFn>(
+async fn serve_with_upstream_builder<Obs, InitObs>(
     config: GitHttpConfig,
     init_observability_fn: InitObs,
-    serve_fn: ServeFn,
-    build_upstream_fn: BuildUpstreamFn,
+    serve_fn: ServeServerFn,
+    build_upstream_fn: UpstreamBuilderFn,
 ) -> Result<(), GitHttpError>
 where
     InitObs: FnOnce() -> Result<Obs, GitHttpError>,
-    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
-    ServeFut: Future<Output = Result<(), std::io::Error>>,
-    BuildUpstreamFn: FnOnce(Duration) -> Result<ReqwestUpstreamClient, GitHttpError>,
 {
     let _observability = init_observability_fn()?;
     let metrics = Arc::new(GitHttpMetrics::new());
@@ -1063,22 +1063,26 @@ mod tests {
         }
     }
 
-    async fn noop_server(
+    fn noop_server(
         _listener: tokio::net::TcpListener,
         _router: Router,
-    ) -> Result<(), std::io::Error> {
-        Ok(())
+    ) -> super::ServeServerFuture {
+        Box::pin(async { Ok(()) })
     }
 
     fn init_ok_handle() -> Result<(), GitHttpError> {
         Ok(())
     }
 
-    async fn fail_server(
+    fn fail_server(
         _listener: tokio::net::TcpListener,
         _router: Router,
-    ) -> Result<(), std::io::Error> {
-        Err(std::io::Error::other("boom"))
+    ) -> super::ServeServerFuture {
+        Box::pin(async { Err(std::io::Error::other("boom")) })
+    }
+
+    fn fail_upstream_builder(_timeout: Duration) -> Result<ReqwestUpstreamClient, GitHttpError> {
+        Err(super::GitHttpError::Upstream("builder failed".to_string()))
     }
 
     fn init_observability_for_test() -> ObservabilityHandle {
@@ -2673,9 +2677,12 @@ mod tests {
                 application_name: None,
             },
         };
-        let err = super::serve_with_upstream_builder(config, init_ok_handle, noop_server, |_| {
-            Err(super::GitHttpError::Upstream("builder failed".to_string()))
-        })
+        let err = super::serve_with_upstream_builder(
+            config,
+            init_ok_handle,
+            noop_server,
+            fail_upstream_builder,
+        )
         .await
         .expect_err("upstream build error");
         assert_eq!(git_http_error_label(&err), "upstream");
