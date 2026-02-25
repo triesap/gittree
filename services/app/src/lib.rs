@@ -795,9 +795,11 @@ mod tests {
     #[test]
     fn init_observability_returns_registry() {
         let first = super::init_observability();
-        if let Ok(handle) = first.as_ref() {
-            assert!(handle.prometheus_registry().is_some());
-        }
+        let first_registry_valid = first
+            .as_ref()
+            .map(|handle| handle.prometheus_registry().is_some())
+            .unwrap_or(true);
+        assert!(first_registry_valid);
         let second = super::init_observability();
         assert!(matches!(
             second,
