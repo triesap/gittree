@@ -325,10 +325,14 @@ async fn run_http_server_with_shutdown<Shutdown>(
 where
     Shutdown: Future<Output = ()> + Send + 'static,
 {
-    if let Err(err) = axum::serve(listener, router)
+    let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
-        .await
-    {
+        .await;
+    map_serve_result(result)
+}
+
+fn map_serve_result(result: std::io::Result<()>) -> Result<(), CoordinatorError> {
+    if let Err(err) = result {
         return Err(CoordinatorError::Serve(err.to_string()));
     }
     Ok(())
@@ -1052,13 +1056,14 @@ mod tests {
     use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, LazyLock, Mutex};
     use std::time::Duration as StdDuration;
     use time::{Duration as TimeDuration, OffsetDateTime};
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
+    static OBSERVABILITY: LazyLock<ObservabilityHandle> =
+        LazyLock::new(|| init_observability().expect("init"));
 
     #[derive(Clone, Default)]
     struct MockTransport {
@@ -2641,6 +2646,19 @@ mod tests {
         assert!(join_err.is_cancelled());
     }
 
+    #[test]
+    fn map_serve_result_maps_io_errors() {
+        let err = super::map_serve_result(Err(std::io::Error::other("serve failed")))
+            .expect_err("io error");
+        assert!(matches!(err, super::CoordinatorError::Serve(_)));
+    }
+
+    #[test]
+    fn map_serve_result_passes_success() {
+        let result = super::map_serve_result(Ok(()));
+        assert!(result.is_ok());
+    }
+
     #[tokio::test]
     async fn spawn_publish_outbox_starts_loop() {
         let repositories = Arc::new(InMemoryRepositories::new());
@@ -3245,10 +3263,7 @@ mod tests {
     fn observability_init_returns_registry() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_unset_env_var("GITTREE_LOG_JSON", || {
-            if OBSERVABILITY.get().is_none() {
-                let _ = OBSERVABILITY.set(init_observability().expect("init"));
-            }
-            let handle = OBSERVABILITY.get().expect("observability handle");
+            let handle = LazyLock::force(&OBSERVABILITY);
             assert!(handle.prometheus_registry().is_some());
         });
     }
@@ -3264,7 +3279,7 @@ mod tests {
             ));
         });
 
-        let _ = OBSERVABILITY.get_or_init(|| init_observability().expect("init"));
+        let _ = LazyLock::force(&OBSERVABILITY);
         let err = init_observability().expect_err("reinit should fail");
         assert!(matches!(err, super::CoordinatorError::Observability(_)));
     }
