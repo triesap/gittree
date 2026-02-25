@@ -144,12 +144,16 @@ mod tests {
         run();
 
         for (key, previous) in previous {
-            // SAFETY: tests mutate process env under a global lock and always restore state.
-            unsafe {
-                previous.map_or_else(
-                    || std::env::remove_var(key),
-                    |value| std::env::set_var(key, value),
-                );
+            restore_env_var(key, previous);
+        }
+    }
+
+    fn restore_env_var(key: &str, previous: Option<OsString>) {
+        // SAFETY: tests mutate process env under a global lock and always restore state.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
             }
         }
     }
@@ -306,6 +310,17 @@ mod tests {
             assert!(std::env::var(KEY).is_err());
         });
         assert!(std::env::var(KEY).is_err());
+    }
+
+    #[test]
+    fn restore_env_var_covers_some_and_none_paths() {
+        const KEY: &str = "GITTREE_TEST_MAIN_HOOK_RESTORE_ENV";
+        with_env_var(KEY, None, &mut || {
+            restore_env_var(KEY, Some(OsString::from("restored")));
+            assert_eq!(std::env::var(KEY).expect("restored value"), "restored");
+            restore_env_var(KEY, None);
+            assert!(std::env::var(KEY).is_err());
+        });
     }
 
     #[test]
