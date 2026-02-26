@@ -2797,6 +2797,19 @@ mod tests {
         assert_eq!(output, decision);
     }
 
+    #[test]
+    fn warn_and_allow_returns_decision_when_warn_level_is_enabled() {
+        let decision = AdmissionDecision::Accept;
+        let subscriber = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let output = tracing::subscriber::with_default(subscriber, || {
+            warn_and_allow("wss://relay.example", "enabled warn path", &decision)
+        });
+        assert_eq!(output, decision);
+    }
+
     #[tokio::test]
     async fn storage_integration_allows_on_compatibility_error() {
         let storage = FailingStorage;
