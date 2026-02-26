@@ -60,11 +60,11 @@ impl AppServiceConfig {
         let bind = env_socket_addr(ENV_APP_BIND)?
             .unwrap_or_else(|| DEFAULT_APP_BIND.parse().expect("default app bind"));
         let base_path =
-            env_string(ENV_APP_BASE_PATH)?.unwrap_or_else(|| DEFAULT_APP_BASE_PATH.to_string());
+            env_string(ENV_APP_BASE_PATH).unwrap_or_else(|| DEFAULT_APP_BASE_PATH.to_string());
         let base_path = normalize_base_path(&base_path);
         let site_root =
-            env_path(ENV_APP_SITE_ROOT)?.unwrap_or_else(|| PathBuf::from(DEFAULT_APP_SITE_ROOT));
-        let site_pkg_dir = env_string(ENV_APP_SITE_PKG_DIR)?
+            env_path(ENV_APP_SITE_ROOT).unwrap_or_else(|| PathBuf::from(DEFAULT_APP_SITE_ROOT));
+        let site_pkg_dir = env_string(ENV_APP_SITE_PKG_DIR)
             .unwrap_or_else(|| DEFAULT_APP_SITE_PKG_DIR.to_string());
 
         Ok(Self {
@@ -202,20 +202,20 @@ fn env_socket_addr(key: &'static str) -> Result<Option<SocketAddr>, AppServiceCo
     }
 }
 
-fn env_string(key: &'static str) -> Result<Option<String>, AppServiceConfigError> {
+fn env_string(key: &'static str) -> Option<String> {
     match std::env::var(key) {
         Ok(value) => {
             if value.trim().is_empty() {
-                return Ok(None);
+                return None;
             }
-            Ok(Some(value))
+            Some(value)
         }
-        Err(_) => Ok(None),
+        Err(_) => None,
     }
 }
 
-fn env_path(key: &'static str) -> Result<Option<PathBuf>, AppServiceConfigError> {
-    env_string(key).map(|value| value.map(PathBuf::from))
+fn env_path(key: &'static str) -> Option<PathBuf> {
+    env_string(key).map(PathBuf::from)
 }
 
 fn normalize_base_path(base_path: &str) -> String {
@@ -358,7 +358,12 @@ fn build_router(state: AppUiState) -> Router {
             get(api_list_repos_by_owner_handler),
         )
         .route("/api/{*fn_name}", post(server_fn_route_handler))
-        .leptos_routes_with_context(&state, routes, provide_empty_context, gittree_app_ui::GittreeApp)
+        .leptos_routes_with_context(
+            &state,
+            routes,
+            provide_empty_context,
+            gittree_app_ui::GittreeApp,
+        )
         .fallback(leptos_axum::file_and_error_handler::<AppUiState, _>(shell));
 
     let app = app.with_state(state);
@@ -572,8 +577,8 @@ mod tests {
             super::env_socket_addr(missing_key).expect("env_socket_addr"),
             None
         );
-        assert_eq!(super::env_string(missing_key).expect("env_string"), None);
-        assert_eq!(super::env_path(missing_key).expect("env_path"), None);
+        assert_eq!(super::env_string(missing_key), None);
+        assert_eq!(super::env_path(missing_key), None);
     }
 
     #[test]
@@ -1426,10 +1431,9 @@ mod tests {
                 .expect("list owner repos");
         assert_eq!(listed_for_owner.0.items.len(), 1);
 
-        let detail =
-            super::api_repo_detail_handler(State(state), Path((npub, "repo".to_string())))
-                .await
-                .expect("repo detail");
+        let detail = super::api_repo_detail_handler(State(state), Path((npub, "repo".to_string())))
+            .await
+            .expect("repo detail");
         assert_eq!(detail.0.identifier, "repo");
     }
 
@@ -1466,6 +1470,9 @@ mod tests {
         let err = super::api_list_repos_handler(State(state))
             .await
             .expect_err("storage error");
-        assert_eq!(err.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

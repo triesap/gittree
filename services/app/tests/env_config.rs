@@ -165,6 +165,31 @@ fn app_service_config_from_env_reports_invalid_numeric_storage_env() {
 }
 
 #[test]
+fn app_service_config_from_env_reports_invalid_min_connections_storage_env() {
+    with_env_overrides(
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+            ),
+            ("GITTREE_STORAGE_MIN_CONNECTIONS", Some("invalid")),
+            ("GITTREE_UI_REPO_ROOT", Some("/tmp/gittree-ui")),
+            ("GITTREE_UI_PUBLIC_GIT_URL", Some("https://gittr.ee")),
+        ],
+        || {
+            let err = AppServiceConfig::from_env().expect_err("invalid min connections");
+            assert!(matches!(
+                err,
+                AppServiceConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key: "GITTREE_STORAGE_MIN_CONNECTIONS",
+                    ..
+                })
+            ));
+        },
+    );
+}
+
+#[test]
 fn app_service_config_from_env_reports_invalid_u64_storage_env() {
     with_env_overrides(
         &[
@@ -182,6 +207,31 @@ fn app_service_config_from_env_reports_invalid_u64_storage_env() {
                 err,
                 AppServiceConfigError::Storage(StorageConfigError::InvalidEnv {
                     key: "GITTREE_STORAGE_IDLE_TIMEOUT_SECS",
+                    ..
+                })
+            ));
+        },
+    );
+}
+
+#[test]
+fn app_service_config_from_env_reports_invalid_max_lifetime_storage_env() {
+    with_env_overrides(
+        &[
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+            ),
+            ("GITTREE_STORAGE_MAX_LIFETIME_SECS", Some("invalid")),
+            ("GITTREE_UI_REPO_ROOT", Some("/tmp/gittree-ui")),
+            ("GITTREE_UI_PUBLIC_GIT_URL", Some("https://gittr.ee")),
+        ],
+        || {
+            let err = AppServiceConfig::from_env().expect_err("invalid max lifetime");
+            assert!(matches!(
+                err,
+                AppServiceConfigError::Storage(StorageConfigError::InvalidEnv {
+                    key: "GITTREE_STORAGE_MAX_LIFETIME_SECS",
                     ..
                 })
             ));
