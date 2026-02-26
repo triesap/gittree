@@ -7,11 +7,7 @@ fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let exit_code = runtime.block_on(main_impl(&mut stderr));
-    let mut status = ExitCode::SUCCESS;
-    maybe_exit(exit_code, |code| {
-        status = exit_status(code);
-    });
-    status
+    exit_status(exit_code)
 }
 
 async fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -70,12 +66,6 @@ fn handle_main_result(result: Result<(), StateError>, stderr: &mut impl Write) -
     }
 }
 
-fn maybe_exit<T>(exit_code: i32, exit_fn: impl FnOnce(i32) -> T) {
-    if exit_code != 0 {
-        exit_fn(exit_code);
-    }
-}
-
 fn exit_status(exit_code: i32) -> ExitCode {
     if exit_code == 0 {
         ExitCode::SUCCESS
@@ -86,7 +76,7 @@ fn exit_status(exit_code: i32) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_status, handle_main_result, main_impl_with, maybe_exit, run_with};
+    use super::{exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_state::StateError;
 
     async fn ok_serve<T>(_config: T) -> Result<(), StateError> {
@@ -171,18 +161,6 @@ mod tests {
         .await;
 
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
-    }
-
-    #[test]
-    fn maybe_exit_calls_exit_for_non_zero_code() {
-        let captured = std::cell::Cell::new(None);
-        maybe_exit(2, |code| captured.set(Some(code)));
-        assert_eq!(captured.get(), Some(2));
-    }
-
-    #[test]
-    fn maybe_exit_ignores_zero_code() {
-        maybe_exit(0, std::mem::drop);
     }
 
     #[test]
