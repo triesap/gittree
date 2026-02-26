@@ -1391,6 +1391,35 @@ mod tests {
     }
 
     #[test]
+    fn run_hook_from_env_post_receive_accepts_updates() {
+        let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let updates_path = write_updates_file(&updates);
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let (sync_url, handle) = start_mock_http_server("200 OK", "application/json", "{}");
+        with_env_vars(
+            &[
+                (super::ENV_STATE_URL, Some("http://127.0.0.1:8082")),
+                (super::ENV_SYNC_URL, Some(sync_url.as_str())),
+                (
+                    super::ENV_HOOK_REPO_PATH,
+                    Some(repo_path.to_str().expect("repo path")),
+                ),
+                (
+                    super::ENV_HOOK_STDIN_FILE,
+                    Some(updates_path.to_str().expect("updates path")),
+                ),
+            ],
+            &mut || {
+                super::run_hook_from_env(HookMode::PostReceive).expect("run hook");
+            },
+        );
+        handle.join().expect("server join");
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
     fn run_hook_pre_receive_returns_parse_errors() {
         let updates_path = write_updates_file("invalid\n");
         let repo_path = std::path::Path::new("/tmp")
@@ -1474,6 +1503,32 @@ mod tests {
             .join("repo.git");
         let (sync_url, handle) =
             start_mock_http_server("500 Internal Server Error", "text/plain", "nope");
+        let config = super::HookConfig {
+            state_url: "http://127.0.0.1:8082".to_string(),
+            sync_url: Some(sync_url),
+            mode: HookMode::PostReceive,
+        };
+        with_env_vars(
+            &[(
+                super::ENV_HOOK_REPO_PATH,
+                Some(repo_path.to_str().expect("repo path")),
+            )],
+            &mut || {
+                super::run_hook(config.clone(), Some(&updates_path)).expect("run hook");
+            },
+        );
+        handle.join().expect("server join");
+        let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_post_receive_succeeds_when_notifier_accepts() {
+        let updates = format!("{} {} refs/heads/main\n", "0".repeat(40), "1".repeat(40));
+        let updates_path = write_updates_file(&updates);
+        let repo_path = std::path::Path::new("/tmp")
+            .join(SAMPLE_NPUB)
+            .join("repo.git");
+        let (sync_url, handle) = start_mock_http_server("200 OK", "application/json", "{}");
         let config = super::HookConfig {
             state_url: "http://127.0.0.1:8082".to_string(),
             sync_url: Some(sync_url),
