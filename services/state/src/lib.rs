@@ -11,7 +11,7 @@ use gittree_storage::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::future::{Future, IntoFuture};
+use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -201,6 +201,7 @@ impl<T> StateRepositoriesDyn for T where
 
 type DynStateRepositories = dyn StateRepositoriesDyn + Send + Sync;
 type StateServerFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
+type StateShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 pub fn build_repositories(config: &StateConfig) -> Result<StateRepositories, StateError> {
     let pool_options = config.storage.pool_options().map_err(StateError::Storage)?;
@@ -262,7 +263,19 @@ fn run_axum_server_boxed(
     listener: tokio::net::TcpListener,
     router: Router,
 ) -> StateServerFuture {
-    Box::pin(axum::serve(listener, router).into_future())
+    run_axum_server_with_shutdown(listener, router, Box::pin(pending()))
+}
+
+fn run_axum_server_with_shutdown(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: StateShutdownFuture,
+) -> StateServerFuture {
+    Box::pin(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await
+    })
 }
 
 fn build_router(state: StateAppState) -> Router {
@@ -2120,6 +2133,17 @@ mod tests {
             relay_urls: Vec::new(),
         };
         let result = super::serve_with(config, noop_init_observability, noop_server).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_axum_server_with_shutdown_returns_ok() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let router = Router::new().route("/health", axum::routing::get(super::health_handler));
+        let result =
+            super::run_axum_server_with_shutdown(listener, router, Box::pin(async {})).await;
         assert!(result.is_ok());
     }
 
