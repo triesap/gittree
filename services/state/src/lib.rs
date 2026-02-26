@@ -12,6 +12,7 @@ use gittree_storage::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -188,6 +189,18 @@ pub fn init_observability() -> Result<ObservabilityHandle, StateError> {
 }
 
 pub type StateRepositories = CachedRepositories<PostgresRepositories>;
+trait StateRepositoriesDyn:
+    AnnouncementRepository + RelayCompatibilityRepository + StateRepository
+{
+}
+
+impl<T> StateRepositoriesDyn for T where
+    T: AnnouncementRepository + RelayCompatibilityRepository + StateRepository
+{
+}
+
+type DynStateRepositories = dyn StateRepositoriesDyn + Send + Sync;
+type StateServerFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
 
 pub fn build_repositories(config: &StateConfig) -> Result<StateRepositories, StateError> {
     let pool_options = config.storage.pool_options().map_err(StateError::Storage)?;
@@ -200,12 +213,12 @@ pub fn build_repositories(config: &StateConfig) -> Result<StateRepositories, Sta
     Ok(CachedRepositories::new(repos))
 }
 
-struct StateAppState<R> {
-    repositories: Arc<R>,
+struct StateAppState {
+    repositories: Arc<DynStateRepositories>,
     cache: Arc<StateCache>,
 }
 
-impl<R> Clone for StateAppState<R> {
+impl Clone for StateAppState {
     fn clone(&self) -> Self {
         Self {
             repositories: Arc::clone(&self.repositories),
@@ -215,19 +228,19 @@ impl<R> Clone for StateAppState<R> {
 }
 
 pub async fn serve(config: StateConfig) -> Result<(), StateError> {
-    serve_with(config, init_observability, run_axum_server).await
+    serve_with(config, init_observability_unit, run_axum_server_boxed).await
 }
 
-async fn serve_with<InitFn, InitValue, ServerFn, ServerFut>(
+fn init_observability_unit() -> Result<(), StateError> {
+    let _ = init_observability()?;
+    Ok(())
+}
+
+async fn serve_with(
     config: StateConfig,
-    init_observability_fn: InitFn,
-    run_server: ServerFn,
-) -> Result<(), StateError>
-where
-    InitFn: FnOnce() -> Result<InitValue, StateError>,
-    ServerFn: FnOnce(tokio::net::TcpListener, Router) -> ServerFut,
-    ServerFut: Future<Output = Result<(), std::io::Error>>,
-{
+    init_observability_fn: fn() -> Result<(), StateError>,
+    run_server: fn(tokio::net::TcpListener, Router) -> StateServerFuture,
+) -> Result<(), StateError> {
     let _observability = init_observability_fn()?;
     let repositories = build_repositories(&config)?;
     let cache = Arc::new(StateCache::new(StateCacheConfig::default()));
@@ -245,22 +258,14 @@ where
     Ok(())
 }
 
-fn run_axum_server(
+fn run_axum_server_boxed(
     listener: tokio::net::TcpListener,
     router: Router,
-) -> impl Future<Output = Result<(), std::io::Error>> + Send + 'static {
-    axum::serve(listener, router).into_future()
+) -> StateServerFuture {
+    Box::pin(axum::serve(listener, router).into_future())
 }
 
-fn build_router<R>(state: StateAppState<R>) -> Router
-where
-    R: AnnouncementRepository
-        + RelayCompatibilityRepository
-        + StateRepository
-        + Send
-        + Sync
-        + 'static,
-{
+fn build_router(state: StateAppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/relay-compatibility", get(relay_compatibility_handler))
@@ -271,13 +276,10 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-async fn relay_compatibility_handler<R>(
-    State(state): State<StateAppState<R>>,
+async fn relay_compatibility_handler(
+    State(state): State<StateAppState>,
     Query(query): Query<RelayCompatQuery>,
-) -> Result<Json<RelayCompatibilityResponse>, StateHttpError>
-where
-    R: RelayCompatibilityRepository + Send + Sync,
-{
+) -> Result<Json<RelayCompatibilityResponse>, StateHttpError> {
     let response = relay_compatibility_cached(
         state.repositories.as_ref(),
         state.cache.as_ref(),
@@ -588,14 +590,11 @@ impl std::error::Error for StateServiceError {
     }
 }
 
-pub async fn latest_state<S>(
-    storage: &S,
+pub async fn latest_state(
+    storage: &dyn StateRepository,
     pubkey_hex: &str,
     identifier: &str,
-) -> Result<StateResponse, StateServiceError>
-where
-    S: StateRepository,
-{
+) -> Result<StateResponse, StateServiceError> {
     if identifier.trim().is_empty() {
         return Err(StateServiceError::InvalidInput {
             field: "identifier",
@@ -626,15 +625,12 @@ where
     })
 }
 
-pub async fn latest_state_cached<S>(
-    storage: &S,
+pub async fn latest_state_cached(
+    storage: &dyn StateRepository,
     cache: &StateCache,
     pubkey_hex: &str,
     identifier: &str,
-) -> Result<StateResponse, StateServiceError>
-where
-    S: StateRepository,
-{
+) -> Result<StateResponse, StateServiceError> {
     let key = StateCache::key(pubkey_hex, identifier);
     if let Some(value) = cache.get_state(&key) {
         return Ok(value);
@@ -644,14 +640,11 @@ where
     Ok(response)
 }
 
-pub async fn resolve_maintainers<S>(
-    storage: &S,
+pub async fn resolve_maintainers(
+    storage: &dyn AnnouncementRepository,
     pubkey_hex: &str,
     identifier: &str,
-) -> Result<MaintainersResponse, StateServiceError>
-where
-    S: AnnouncementRepository,
-{
+) -> Result<MaintainersResponse, StateServiceError> {
     if identifier.trim().is_empty() {
         return Err(StateServiceError::InvalidInput {
             field: "identifier",
@@ -696,15 +689,12 @@ where
     })
 }
 
-pub async fn resolve_maintainers_cached<S>(
-    storage: &S,
+pub async fn resolve_maintainers_cached(
+    storage: &dyn AnnouncementRepository,
     cache: &StateCache,
     pubkey_hex: &str,
     identifier: &str,
-) -> Result<MaintainersResponse, StateServiceError>
-where
-    S: AnnouncementRepository,
-{
+) -> Result<MaintainersResponse, StateServiceError> {
     let key = StateCache::key(pubkey_hex, identifier);
     if let Some(value) = cache.get_maintainers(&key) {
         return Ok(value);
@@ -714,13 +704,10 @@ where
     Ok(response)
 }
 
-pub async fn relay_compatibility<S>(
-    storage: &S,
+pub async fn relay_compatibility(
+    storage: &dyn RelayCompatibilityRepository,
     relay_url: &str,
-) -> Result<RelayCompatibilityResponse, StateServiceError>
-where
-    S: RelayCompatibilityRepository,
-{
+) -> Result<RelayCompatibilityResponse, StateServiceError> {
     if relay_url.trim().is_empty() {
         return Err(StateServiceError::InvalidInput {
             field: "relay_url",
@@ -750,14 +737,11 @@ where
     })
 }
 
-pub async fn relay_compatibility_cached<S>(
-    storage: &S,
+pub async fn relay_compatibility_cached(
+    storage: &dyn RelayCompatibilityRepository,
     cache: &StateCache,
     relay_url: &str,
-) -> Result<RelayCompatibilityResponse, StateServiceError>
-where
-    S: RelayCompatibilityRepository,
-{
+) -> Result<RelayCompatibilityResponse, StateServiceError> {
     let key = StateCache::relay_key(relay_url);
     if let Some(value) = cache.get_relay_compatibility(&key) {
         return Ok(value);
@@ -854,11 +838,31 @@ mod tests {
         RelayCompatibilityRecord::new(&report, 123, &metadata).expect("record")
     }
 
-    async fn noop_server(
+    fn noop_init_observability() -> Result<(), StateError> {
+        Ok(())
+    }
+
+    fn failing_init_observability() -> Result<(), StateError> {
+        Err(StateError::ObservabilityConfig(
+            gittree_observability::ObservabilityConfigError::InvalidEnv {
+                key: "GITTREE_LOG_JSON",
+                value: "bad".to_string(),
+            },
+        ))
+    }
+
+    fn noop_server(
         _listener: tokio::net::TcpListener,
         _router: Router,
-    ) -> Result<(), std::io::Error> {
-        Ok(())
+    ) -> super::StateServerFuture {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn failing_server(
+        _listener: tokio::net::TcpListener,
+        _router: Router,
+    ) -> super::StateServerFuture {
+        Box::pin(async { Err(std::io::Error::other("boom")) })
     }
 
     #[derive(Debug, Default)]
@@ -2052,18 +2056,7 @@ mod tests {
             },
             relay_urls: Vec::new(),
         };
-        let err = super::serve_with(
-            config,
-            || {
-                Err::<(), StateError>(StateError::ObservabilityConfig(
-                    gittree_observability::ObservabilityConfigError::InvalidEnv {
-                        key: "GITTREE_LOG_JSON",
-                        value: "bad".to_string(),
-                    },
-                ))
-            },
-            noop_server,
-        )
+        let err = super::serve_with(config, failing_init_observability, noop_server)
         .await
         .expect_err("observability error");
         assert!(err.to_string().contains("state observability config error"));
@@ -2084,7 +2077,7 @@ mod tests {
             },
             relay_urls: Vec::new(),
         };
-        let err = super::serve_with(config, || Ok(()), noop_server)
+        let err = super::serve_with(config, noop_init_observability, noop_server)
             .await
             .expect_err("repository build error");
         assert!(err.to_string().contains("state storage error"));
@@ -2105,11 +2098,7 @@ mod tests {
             },
             relay_urls: Vec::new(),
         };
-        let err = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Err(std::io::Error::other("boom")) },
-        )
+        let err = super::serve_with(config, noop_init_observability, failing_server)
         .await
         .expect_err("server error");
         assert_eq!(err.to_string(), "state serve error: boom");
@@ -2130,20 +2119,22 @@ mod tests {
             },
             relay_urls: Vec::new(),
         };
-        let result = super::serve_with(config, || Ok(()), noop_server).await;
+        let result = super::serve_with(config, noop_init_observability, noop_server).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn run_axum_server_can_start_and_be_aborted() {
+    async fn run_axum_server_boxed_can_start_and_be_aborted() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let router = Router::new().route("/health", axum::routing::get(super::health_handler));
-        let task = tokio::spawn(super::run_axum_server(listener, router));
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        task.abort();
-        let _ = task.await;
+        let result = tokio::time::timeout(
+            Duration::from_millis(5),
+            super::run_axum_server_boxed(listener, router),
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2174,6 +2165,16 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_STDOUT", "invalid-bool", &mut || {
             let err = init_observability().expect_err("invalid observability config");
+            assert!(err.to_string().contains("state observability config error"));
+        });
+    }
+
+    #[test]
+    fn init_observability_unit_maps_config_error() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("GITTREE_LOG_STDOUT", "invalid-bool", &mut || {
+            let err =
+                super::init_observability_unit().expect_err("invalid observability config");
             assert!(err.to_string().contains("state observability config error"));
         });
     }
