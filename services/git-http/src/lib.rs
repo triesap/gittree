@@ -307,7 +307,7 @@ fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
 ) -> ServeServerFuture {
-    Box::pin(async move { axum::serve(listener, router).into_future().await })
+    Box::pin(axum::serve(listener, router).into_future())
 }
 
 async fn serve_with<Obs, InitObs>(
@@ -1900,6 +1900,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_maintainers_skips_already_seen_pubkeys() {
+        let repositories = InMemoryRepositories::new();
+        let repo_npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let maintainer_pubkey = "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27";
+        let repo_path = Path::new("/").join(repo_npub).join("repo.git");
+        let parsed = gittree_core::parse_repo_path(&repo_path).expect("repo parse");
+
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec!["https://git.example/repo.git".to_string()],
+            web: Vec::new(),
+            relays: vec!["wss://relay.example".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: vec![parsed.pubkey.clone(), maintainer_pubkey.to_string()],
+        };
+        let announcement_record =
+            RepoAnnouncementRecord::new(&"ee".repeat(32), &parsed.pubkey, 1, &announcement)
+                .expect("announcement");
+        repositories
+            .insert_announcement(announcement_record)
+            .await
+            .expect("insert announcement");
+
+        let repo = super::normalize_repo_path(repo_npub, "repo.git").expect("normalized");
+        let maintainers = super::resolve_maintainers(&repositories, &repo)
+            .await
+            .expect("maintainers");
+
+        assert_eq!(
+            maintainers
+                .iter()
+                .filter(|pubkey| pubkey.as_str() == parsed.pubkey)
+                .count(),
+            1
+        );
+        assert!(maintainers.contains(&maintainer_pubkey.to_string()));
+    }
+
+    #[tokio::test]
     async fn resolve_maintainers_enqueues_unique_maintainers() {
         let repositories = InMemoryRepositories::new();
         let repo_npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
@@ -2372,6 +2415,36 @@ mod tests {
             .await
             .expect_err("upstream error");
         assert_eq!(err.into_response().status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn handle_git_route_maps_missing_mapping_error() {
+        let repositories = Arc::new(InMemoryRepositories::new());
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let state = GitHttpAppState {
+            auth: test_auth(),
+            repositories,
+            upstream: Arc::new(MockUpstreamClient::new(UpstreamResponse {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(b"upstream"),
+            })),
+            metrics: Arc::new(GitHttpMetrics::new()),
+            upstream_url: "https://git.example".to_string(),
+        };
+        let route = super::GitHttpRoute::UploadPack {
+            repo: super::normalize_repo_path(npub, "repo.git").expect("normalized"),
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/{npub}/repo.git/git-upload-pack"))
+            .body(Body::from(Bytes::from_static(b"pkt-line")))
+            .expect("request");
+
+        let err = super::handle_git_route(&state, &route, request)
+            .await
+            .expect_err("missing mapping");
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
