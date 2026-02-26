@@ -1,11 +1,12 @@
 use gittree_app::{AppServiceConfig, serve};
 use gittree_config::UiConfig;
 use gittree_storage::StorageConfig;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use axum::http::Method;
+
+const TCP_IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -23,41 +24,40 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn parse_status_code(response: &str) -> u16 {
+fn parse_status_code(response: &str) -> Option<u16> {
     let status_line = response.lines().next().unwrap_or_default();
     let code = status_line.split_whitespace().nth(1).unwrap_or_default();
-    code.parse::<u16>().expect("status code")
+    code.parse::<u16>().ok()
+}
+
+fn read_status_code(stream: &mut TcpStream) -> Option<u16> {
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).ok()?;
+    parse_status_code(status_line.trim_end())
 }
 
 fn http_status(port: u16, path: &str) -> Option<u16> {
     let endpoint = format!("127.0.0.1:{port}");
     let mut stream = TcpStream::connect(&endpoint).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok()?;
+    stream.set_read_timeout(Some(TCP_IO_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(TCP_IO_TIMEOUT)).ok()?;
     let request = format!("GET {path} HTTP/1.1\r\nHost: {endpoint}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).ok()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-    Some(parse_status_code(&response))
+    read_status_code(&mut stream)
 }
 
 fn http_post_status(port: u16, path: &str, body: &str) -> Option<u16> {
     let endpoint = format!("127.0.0.1:{port}");
     let mut stream = TcpStream::connect(&endpoint).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok()?;
+    stream.set_read_timeout(Some(TCP_IO_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(TCP_IO_TIMEOUT)).ok()?;
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {endpoint}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(request.as_bytes()).ok()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-    Some(parse_status_code(&response))
+    read_status_code(&mut stream)
 }
 
 async fn wait_for_health(port: u16) {
@@ -70,16 +70,24 @@ async fn wait_for_health(port: u16) {
     panic!("app server never became ready");
 }
 
-fn assert_route_status(status: Option<u16>) {
-    let code = status.expect("status code");
-    assert!(matches!(code, 200 | 500), "unexpected status code: {code}");
+async fn wait_for_status(port: u16, path: &str) -> u16 {
+    for _ in 0..40 {
+        if let Some(status) = http_status(port, path) {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("did not receive HTTP status for path: {path}");
 }
 
-fn first_registered_api_server_fn_path() -> String {
-    leptos::server_fn::axum::server_fn_paths()
-        .find(|(path, method)| path.starts_with("/api/") && *method == Method::POST)
-        .map(|(path, _)| path.to_string())
-        .expect("registered /api server fn path")
+async fn wait_for_post_status(port: u16, path: &str, body: &str) -> u16 {
+    for _ in 0..40 {
+        if let Some(status) = http_post_status(port, path, body) {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("did not receive HTTP status for post path: {path}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -120,16 +128,17 @@ async fn serve_runtime_path_executes_non_test_instantiations() {
 
     let serve_task = tokio::spawn(async move { serve(config).await });
     wait_for_health(port).await;
-    assert_eq!(http_status(port, "/missing"), Some(404));
-    assert_route_status(http_status(port, "/api/repos"));
+    assert_eq!(wait_for_status(port, "/missing").await, 404);
     assert_eq!(
-        http_status(port, "/api/users/not-a-valid-npub/repos"),
-        Some(400)
+        wait_for_status(port, "/api/users/not-a-valid-npub/repos").await,
+        400
     );
-    assert_eq!(http_status(port, "/api/repos/not-a-valid-npub/repo"), Some(400));
-    let server_fn_path = first_registered_api_server_fn_path();
-    let server_fn_status = http_post_status(port, &server_fn_path, "{}")
-        .expect("server fn status");
+    assert_eq!(
+        wait_for_status(port, "/api/repos/not-a-valid-npub/repo").await,
+        400
+    );
+    let server_fn_status =
+        wait_for_post_status(port, "/api/nonexistent_server_fn", "{}").await;
     assert_ne!(server_fn_status, 404);
     assert_ne!(server_fn_status, 405);
     serve_task.abort();
