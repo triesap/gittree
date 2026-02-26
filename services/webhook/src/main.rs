@@ -89,6 +89,41 @@ fn exit_status(exit_code: i32) -> ExitCode {
 mod tests {
     use super::{exit_if_needed, exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_webhook::WebhookError;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env_vars(entries: &[(&str, Option<&str>)], run: impl FnOnce()) {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous: Vec<(&str, Option<OsString>)> = entries
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+
+        for (key, value) in entries {
+            match value {
+                // SAFETY: tests serialize process env mutation behind a global lock.
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                // SAFETY: tests serialize process env mutation behind a global lock.
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+
+        run();
+
+        for (key, value) in previous {
+            match value {
+                // SAFETY: tests serialize process env mutation behind a global lock.
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                // SAFETY: tests serialize process env mutation behind a global lock.
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
 
     async fn serve_ok(_: ()) -> Result<(), WebhookError> {
         Ok(())
@@ -193,5 +228,44 @@ mod tests {
         assert_eq!(exit_status(1), std::process::ExitCode::from(1));
         assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
         assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
+    }
+
+    #[test]
+    fn main_entry_returns_failure_for_invalid_bind() {
+        with_env_vars(
+            &[
+                ("GITTREE_WEBHOOK_BIND", Some("not-a-socket")),
+                (
+                    "GITTREE_STORAGE_READ_URL",
+                    Some("postgres://gittree:gittree@127.0.0.1:5432/gittree"),
+                ),
+                ("GITTREE_SYNC_URL", Some("http://127.0.0.1:8087")),
+                ("GITTREE_FORGEJO_WEBHOOK_SECRET", Some("test-secret")),
+            ],
+            || {
+                let code = super::main();
+                assert_ne!(code, std::process::ExitCode::SUCCESS);
+            },
+        );
+    }
+
+    #[test]
+    fn with_env_vars_restores_previous_state() {
+        const EXISTING: &str = "GITTREE_TEST_WEBHOOK_MAIN_EXISTING";
+        const MISSING: &str = "GITTREE_TEST_WEBHOOK_MAIN_MISSING";
+        // SAFETY: test-only env mutation for unique keys.
+        unsafe { std::env::set_var(EXISTING, "before") };
+        // SAFETY: test-only env mutation for unique keys.
+        unsafe { std::env::remove_var(MISSING) };
+
+        with_env_vars(&[(EXISTING, None), (MISSING, Some("set"))], || {
+            assert!(std::env::var(EXISTING).is_err());
+            assert_eq!(std::env::var(MISSING).expect("set"), "set");
+        });
+
+        assert_eq!(std::env::var(EXISTING).expect("restored"), "before");
+        assert!(std::env::var(MISSING).is_err());
+        // SAFETY: test-only cleanup for unique keys.
+        unsafe { std::env::remove_var(EXISTING) };
     }
 }
