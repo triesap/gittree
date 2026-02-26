@@ -179,7 +179,7 @@ fn integration_http_paths_cover_post_receive_runtime_instantiations() {
         reference: "refs/heads/main".to_string(),
     }];
 
-    handle_post_receive(&notifier, repo_path(), &updates).expect("handle post receive");
+    handle_post_receive(&notifier, &repo_path(), &updates).expect("handle post receive");
     handle.join().expect("server join");
 }
 
@@ -191,7 +191,7 @@ fn integration_generic_paths_cover_evaluate_and_forgejo_push() {
         reference: format!("refs/nostr/{}", "b".repeat(64)),
     }];
     let fetcher = HttpStateFetcher::new("http://127.0.0.1:8082", Duration::from_secs(1));
-    let decision = evaluate_pre_receive(&fetcher, repo_path(), &updates).expect("decision");
+    let decision = evaluate_pre_receive(&fetcher, &repo_path(), &updates).expect("decision");
     assert!(matches!(decision, UpdateDecision::Accept));
 
     let payload = r#"

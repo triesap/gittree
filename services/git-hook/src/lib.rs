@@ -210,7 +210,7 @@ fn run_hook_with_terminal(
     match config.mode {
         HookMode::PreReceive => {
             let fetcher = HttpStateFetcher::new(config.state_url, Duration::from_secs(5));
-            let decision = evaluate_pre_receive(&fetcher, repo_path, &updates)?;
+            let decision = evaluate_pre_receive(&fetcher, &repo_path, &updates)?;
             if let UpdateDecision::Reject { reason } = decision {
                 return Err(HookServiceError::Reject(reason));
             }
@@ -224,7 +224,7 @@ fn run_hook_with_terminal(
                 )));
             };
             let notifier = HttpPostReceiveNotifier::new(sync_url, Duration::from_secs(5));
-            if handle_post_receive(&notifier, repo_path, &updates).is_err() {}
+            if handle_post_receive(&notifier, &repo_path, &updates).is_err() {}
         }
     }
     Ok(())
@@ -502,7 +502,7 @@ impl StateFetcher for HttpStateFetcher {
 
 pub fn evaluate_pre_receive(
     fetcher: &dyn StateFetcher,
-    repo_path: impl AsRef<Path>,
+    repo_path: &Path,
     updates: &[RefUpdate],
 ) -> Result<UpdateDecision, HookServiceError> {
     let repo = match gittree_core::parse_repo_path(repo_path) {
@@ -607,7 +607,7 @@ impl PostReceiveNotifier for HttpPostReceiveNotifier {
 
 pub fn handle_post_receive(
     notifier: &dyn PostReceiveNotifier,
-    repo_path: impl AsRef<Path>,
+    repo_path: &Path,
     updates: &[RefUpdate],
 ) -> Result<(), HookServiceError> {
     let repo = match gittree_core::parse_repo_path(repo_path) {
@@ -1324,7 +1324,7 @@ mod tests {
         let repo_path = std::path::Path::new("/tmp")
             .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
             .join("repo.git");
-        let decision = evaluate_pre_receive(&fetcher, repo_path, &updates).expect("decision");
+        let decision = evaluate_pre_receive(&fetcher, &repo_path, &updates).expect("decision");
         assert_eq!(update_decision_kind(&decision), "reject");
     }
 
@@ -1341,7 +1341,7 @@ mod tests {
             .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
             .join("repo.git");
         let decision =
-            evaluate_pre_receive(&FailingFetcher, repo_path, &updates).expect("decision");
+            evaluate_pre_receive(&FailingFetcher, &repo_path, &updates).expect("decision");
         assert_eq!(update_decision_kind(&decision), "accept");
     }
 
@@ -1355,7 +1355,7 @@ mod tests {
         let repo_path = std::path::Path::new("/tmp")
             .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
             .join("repo.git");
-        let err = evaluate_pre_receive(&FailingFetcher, repo_path, &updates).unwrap_err();
+        let err = evaluate_pre_receive(&FailingFetcher, &repo_path, &updates).unwrap_err();
         assert_eq!(hook_service_error_kind(&err), "state");
     }
 
@@ -1835,7 +1835,7 @@ mod tests {
         let repo_path = std::path::Path::new("/tmp")
             .join("npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq")
             .join("repo.git");
-        handle_post_receive(&notifier, repo_path, &updates).expect("post receive");
+        handle_post_receive(&notifier, &repo_path, &updates).expect("post receive");
         let payloads = notifier.payloads.lock().expect("payload lock");
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].updates[0].reference, "refs/heads/main");
@@ -1849,7 +1849,11 @@ mod tests {
             new: "1".repeat(40),
             reference: "refs/heads/main".to_string(),
         }];
-        let err = handle_post_receive(&notifier, "/tmp/not-an-npub/repo.git", &updates)
+        let err = handle_post_receive(
+            &notifier,
+            std::path::Path::new("/tmp/not-an-npub/repo.git"),
+            &updates,
+        )
             .expect_err("invalid path");
         assert_eq!(hook_service_error_kind(&err), "core");
     }
