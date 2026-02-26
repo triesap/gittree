@@ -303,10 +303,7 @@ type ServeServerFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>>
 type ServeServerFn = fn(tokio::net::TcpListener, Router) -> ServeServerFuture;
 type UpstreamBuilderFn = fn(Duration) -> Result<ReqwestUpstreamClient, GitHttpError>;
 
-fn run_axum_server(
-    listener: tokio::net::TcpListener,
-    router: Router,
-) -> ServeServerFuture {
+fn run_axum_server(listener: tokio::net::TcpListener, router: Router) -> ServeServerFuture {
     Box::pin(axum::serve(listener, router).into_future())
 }
 
@@ -373,15 +370,26 @@ fn build_repositories(config: &GitHttpConfig) -> Result<PostgresRepositories, Gi
     Ok(PostgresRepositories::new(pool))
 }
 
-struct GitHttpAppState<R, U> {
+#[async_trait]
+trait GitHttpRepositories: RepoMappingRepository + AnnouncementRepository + Send + Sync {}
+
+impl<T> GitHttpRepositories for T where
+    T: RepoMappingRepository + AnnouncementRepository + Send + Sync
+{
+}
+
+type DynRepositories = dyn GitHttpRepositories;
+type DynUpstreamClient = dyn UpstreamClient;
+
+struct GitHttpAppState {
     auth: AuthConfig,
-    repositories: Arc<R>,
-    upstream: Arc<U>,
+    repositories: Arc<DynRepositories>,
+    upstream: Arc<DynUpstreamClient>,
     metrics: Arc<GitHttpMetrics>,
     upstream_url: String,
 }
 
-impl<R, U> Clone for GitHttpAppState<R, U> {
+impl Clone for GitHttpAppState {
     fn clone(&self) -> Self {
         Self {
             auth: self.auth.clone(),
@@ -501,11 +509,7 @@ impl IntoResponse for GitHttpHttpError {
     }
 }
 
-fn build_router<R, U>(state: GitHttpAppState<R, U>) -> Router
-where
-    R: RepoMappingRepository + AnnouncementRepository + Send + Sync + 'static,
-    U: UpstreamClient + Send + Sync + 'static,
-{
+fn build_router(state: GitHttpAppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .fallback(git_handler)
@@ -516,14 +520,10 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-async fn git_handler<R, U>(
-    State(state): State<GitHttpAppState<R, U>>,
+async fn git_handler(
+    State(state): State<GitHttpAppState>,
     request: Request<Body>,
-) -> Result<Response, GitHttpHttpError>
-where
-    R: RepoMappingRepository + AnnouncementRepository + Send + Sync,
-    U: UpstreamClient + Send + Sync,
-{
+) -> Result<Response, GitHttpHttpError> {
     let method = request.method().clone();
     let uri = request.uri().clone();
     let route = route_request(&GitHttpRequest::new(
@@ -542,15 +542,11 @@ where
     Ok(response)
 }
 
-async fn handle_git_route<R, U>(
-    state: &GitHttpAppState<R, U>,
+async fn handle_git_route(
+    state: &GitHttpAppState,
     route: &GitHttpRoute,
     request: Request<Body>,
-) -> Result<Response, GitHttpHttpError>
-where
-    R: RepoMappingRepository + AnnouncementRepository + Send + Sync,
-    U: UpstreamClient + Send + Sync,
-{
+) -> Result<Response, GitHttpHttpError> {
     let (repo, suffix, query) = match route {
         GitHttpRoute::InfoRefs { repo, .. } => (repo, "/info/refs", request.uri().query()),
         GitHttpRoute::UploadPack { repo } => (repo, "/git-upload-pack", None),
@@ -602,13 +598,10 @@ where
     Ok(response)
 }
 
-async fn resolve_mapping<R>(
-    repositories: &R,
+async fn resolve_mapping(
+    repositories: &DynRepositories,
     repo: &NormalizedRepo,
-) -> Result<RepoMappingRecord, GitHttpHttpError>
-where
-    R: RepoMappingRepository + Send + Sync,
-{
+) -> Result<RepoMappingRecord, GitHttpHttpError> {
     let pubkey = match hex::decode(&repo.pubkey) {
         Ok(pubkey) => pubkey,
         Err(_) => {
@@ -632,18 +625,14 @@ where
     }
 }
 
-async fn authorize_receive_pack<R, U>(
-    state: &GitHttpAppState<R, U>,
+async fn authorize_receive_pack(
+    state: &GitHttpAppState,
     repo: &NormalizedRepo,
     headers: &HeaderMap,
     method: &Method,
     uri: &axum::http::Uri,
     body: &Bytes,
-) -> Result<(), GitHttpHttpError>
-where
-    R: RepoMappingRepository + AnnouncementRepository + Send + Sync,
-    U: UpstreamClient + Send + Sync,
-{
+) -> Result<(), GitHttpHttpError> {
     let event = parse_nostr_auth(headers)?;
     let request_url = build_request_url(headers, uri)?;
     let payload_hash = payload_hash(body);
@@ -670,13 +659,10 @@ where
     Ok(())
 }
 
-async fn resolve_maintainers<R>(
-    repositories: &R,
+async fn resolve_maintainers(
+    repositories: &DynRepositories,
     repo: &NormalizedRepo,
-) -> Result<Vec<String>, GitHttpHttpError>
-where
-    R: AnnouncementRepository + Send + Sync,
-{
+) -> Result<Vec<String>, GitHttpHttpError> {
     let mut pending = vec![repo.pubkey.to_lowercase()];
     let mut seen = HashSet::new();
 
@@ -1580,7 +1566,7 @@ mod tests {
         }
     }
 
-    fn postgres_state() -> GitHttpAppState<super::PostgresRepositories, ReqwestUpstreamClient> {
+    fn postgres_state() -> GitHttpAppState {
         let config = postgres_test_config();
         let repositories = Arc::new(super::build_repositories(&config).expect("repositories"));
         let upstream =
@@ -1761,8 +1747,8 @@ mod tests {
         }));
         let app = super::build_router(GitHttpAppState {
             auth: test_auth(),
-            repositories: Arc::clone(&repositories),
-            upstream: Arc::clone(&upstream),
+            repositories: repositories.clone(),
+            upstream: upstream.clone(),
             metrics: Arc::new(GitHttpMetrics::new()),
             upstream_url: "https://git.example".to_string(),
         });
@@ -1811,7 +1797,7 @@ mod tests {
         let app = super::build_router(GitHttpAppState {
             auth: test_auth(),
             repositories,
-            upstream: Arc::clone(&upstream),
+            upstream: upstream.clone(),
             metrics: Arc::new(GitHttpMetrics::new()),
             upstream_url: "https://git.example".to_string(),
         });
@@ -2143,8 +2129,8 @@ mod tests {
         }));
         let app = super::build_router(GitHttpAppState {
             auth: test_auth(),
-            repositories: Arc::clone(&repositories),
-            upstream: Arc::clone(&upstream),
+            repositories: repositories.clone(),
+            upstream: upstream.clone(),
             metrics: Arc::new(GitHttpMetrics::new()),
             upstream_url: "https://git.example".to_string(),
         });
@@ -2206,8 +2192,8 @@ mod tests {
         }));
         let app = super::build_router(GitHttpAppState {
             auth: test_auth(),
-            repositories: Arc::clone(&repositories),
-            upstream: Arc::clone(&upstream),
+            repositories: repositories.clone(),
+            upstream: upstream.clone(),
             metrics: Arc::new(GitHttpMetrics::new()),
             upstream_url: "https://git.example".to_string(),
         });
@@ -2271,8 +2257,8 @@ mod tests {
         }));
         let app = super::build_router(GitHttpAppState {
             auth: test_auth(),
-            repositories: Arc::clone(&repositories),
-            upstream: Arc::clone(&upstream),
+            repositories: repositories.clone(),
+            upstream: upstream.clone(),
             metrics: Arc::new(GitHttpMetrics::new()),
             upstream_url: "https://git.example".to_string(),
         });
