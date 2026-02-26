@@ -8,6 +8,11 @@ fn init_observability(service: &str) -> Result<gittree_observability::Observabil
     gittree_observability::init(&config).map_err(|err| err.to_string())
 }
 
+fn init_observability_unit(service: &str) -> Result<(), String> {
+    let _ = init_observability(service)?;
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr);
@@ -23,21 +28,18 @@ fn main_impl(stderr: &mut impl Write) -> i32 {
     let result = run_with(
         "gittree-post-receive",
         HookMode::PostReceive,
-        init_observability,
+        init_observability_unit,
         run_hook_from_env,
     );
     handle_main_result(result, stderr)
 }
 
-fn run_with<T, FInit, FHook>(
+fn run_with(
     service: &str,
     mode: HookMode,
-    init_observability_fn: FInit,
-    run_hook_fn: FHook,
+    init_observability_fn: fn(&str) -> Result<(), String>,
+    run_hook_fn: fn(HookMode) -> Result<(), gittree_git_hook::HookServiceError>,
 ) -> Result<(), String>
-where
-    FInit: FnOnce(&str) -> Result<T, String>,
-    FHook: FnOnce(HookMode) -> Result<(), gittree_git_hook::HookServiceError>,
 {
     let _observability = init_observability_fn(service)
         .map_err(|err| format!("git hook observability failed: {err}"))?;
