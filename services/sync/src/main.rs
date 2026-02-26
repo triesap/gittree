@@ -85,11 +85,11 @@ fn exit_status(exit_code: i32) -> ExitCode {
 mod tests {
     use super::{exit_status, handle_main_result, main_impl_with, maybe_exit, run_with};
     use gittree_sync::SyncError;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
     }
 
     fn with_env_var(key: &str, value: &str, run: impl FnOnce()) {
