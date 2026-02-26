@@ -2,14 +2,19 @@ use gittree_admission::{AdmissionConfig, AdmissionError, serve};
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
+use std::process::ExitCode;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), AdmissionError>>>>;
 
-fn main() {
+fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let exit_code = runtime.block_on(main_impl(&mut stderr));
-    exit_if_needed(exit_code, std::process::exit);
+    let mut status = ExitCode::SUCCESS;
+    exit_if_needed(exit_code, |code| {
+        status = exit_status(code);
+    });
+    status
 }
 
 async fn main_impl(stderr: &mut dyn Write) -> i32 {
@@ -69,9 +74,17 @@ where
     }
 }
 
+fn exit_status(exit_code: i32) -> ExitCode {
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(exit_code.clamp(1, u8::MAX as i32) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{exit_if_needed, handle_main_result, main_impl_with, run_with};
+    use super::{exit_if_needed, exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_admission::AdmissionError;
     use std::sync::{Mutex, OnceLock};
 
@@ -226,5 +239,13 @@ mod tests {
         let mut called_with = None;
         exit_if_needed(7, |code| called_with = Some(code));
         assert_eq!(called_with, Some(7));
+    }
+
+    #[test]
+    fn exit_status_maps_codes() {
+        assert_eq!(exit_status(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_status(1), std::process::ExitCode::from(1));
+        assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
+        assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
 }
