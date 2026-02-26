@@ -1044,6 +1044,7 @@ async fn decide_handler(
 #[cfg(test)]
 mod tests {
     use super::AdmissionCache;
+    use super::AdmissionCacheEntry;
     use super::AdmissionCacheConfig;
     use super::AdmissionConfig;
     use super::AdmissionConfigError;
@@ -1063,6 +1064,7 @@ mod tests {
     use super::evaluate_request_with_admin_keys;
     use super::evaluate_request_with_storage;
     use super::evaluate_request_with_storage_mode;
+    use super::warn_and_allow;
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -2782,6 +2784,19 @@ mod tests {
         assert!(payload.contains("\"decision\":\"requires_related_events\""));
     }
 
+    #[test]
+    fn warn_and_allow_returns_decision_when_warn_level_is_disabled() {
+        let decision = AdmissionDecision::Accept;
+        let subscriber = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let output = tracing::subscriber::with_default(subscriber, || {
+            warn_and_allow("wss://relay.example", "disabled warn path", &decision)
+        });
+        assert_eq!(output, decision);
+    }
+
     #[tokio::test]
     async fn storage_integration_allows_on_compatibility_error() {
         let storage = FailingStorage;
@@ -3136,6 +3151,25 @@ mod tests {
         let key = "stale".to_string();
         cache.insert(key.clone(), AdmissionDecision::Accept);
         assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn cache_get_removes_stale_entries_with_manual_timestamp() {
+        let cache = AdmissionCache::new(AdmissionCacheConfig::new(Some(Duration::from_secs(1)), 8));
+        let key = "stale-manual".to_string();
+        {
+            let mut entries = cache.entries.write().expect("write lock");
+            entries.insert(
+                key.clone(),
+                AdmissionCacheEntry {
+                    value: AdmissionDecision::Accept,
+                    stored_at: std::time::Instant::now() - Duration::from_secs(5),
+                },
+            );
+        }
+        assert!(cache.get(&key).is_none());
+        let entries = cache.entries.read().expect("read lock");
+        assert!(!entries.contains_key(&key));
     }
 
     #[test]

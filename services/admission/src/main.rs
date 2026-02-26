@@ -10,11 +10,7 @@ fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let exit_code = runtime.block_on(main_impl(&mut stderr));
-    let mut status = ExitCode::SUCCESS;
-    exit_if_needed(exit_code, |code| {
-        status = exit_status(code);
-    });
-    status
+    exit_status(exit_code)
 }
 
 async fn main_impl(stderr: &mut dyn Write) -> i32 {
@@ -65,15 +61,6 @@ fn handle_main_result(result: Result<(), AdmissionError>, stderr: &mut dyn Write
     }
 }
 
-fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
-where
-    F: FnOnce(i32) -> R,
-{
-    if exit_code != 0 {
-        exit_fn(exit_code);
-    }
-}
-
 fn exit_status(exit_code: i32) -> ExitCode {
     if exit_code == 0 {
         ExitCode::SUCCESS
@@ -84,13 +71,13 @@ fn exit_status(exit_code: i32) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_if_needed, exit_status, handle_main_result, main_impl_with, run_with};
+    use super::{exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_admission::AdmissionError;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
     }
 
     fn with_env_var(key: &str, value: &str, run: &mut dyn FnMut()) {
@@ -225,20 +212,6 @@ mod tests {
             let message = String::from_utf8(stderr).expect("utf8");
             assert!(message.contains("admission config error"));
         });
-    }
-
-    #[test]
-    fn exit_if_needed_skips_exit_for_zero_code() {
-        let mut called = false;
-        exit_if_needed(0, |_| called = true);
-        assert!(!called);
-    }
-
-    #[test]
-    fn exit_if_needed_calls_exit_for_non_zero_code() {
-        let mut called_with = None;
-        exit_if_needed(7, |code| called_with = Some(code));
-        assert_eq!(called_with, Some(7));
     }
 
     #[test]
