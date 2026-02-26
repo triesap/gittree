@@ -1,13 +1,18 @@
 use gittree_sync::{SyncConfig, SyncError, serve};
 use std::future::Future;
 use std::io::Write;
+use std::process::ExitCode;
 
 #[cfg(not(test))]
-fn main() {
+fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let exit_code = runtime.block_on(main_impl(&mut stderr));
-    maybe_exit(exit_code, |code| std::process::exit(code));
+    let mut status = ExitCode::SUCCESS;
+    maybe_exit(exit_code, |code| {
+        status = exit_status(code);
+    });
+    status
 }
 
 async fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -68,9 +73,17 @@ fn maybe_exit(exit_code: i32, exit_fn: impl FnOnce(i32)) {
     }
 }
 
+fn exit_status(exit_code: i32) -> ExitCode {
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(exit_code.clamp(1, u8::MAX as i32) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, main_impl_with, maybe_exit, run_with};
+    use super::{exit_status, handle_main_result, main_impl_with, maybe_exit, run_with};
     use gittree_sync::SyncError;
     use std::sync::{Mutex, OnceLock};
 
@@ -192,6 +205,14 @@ mod tests {
     #[test]
     fn maybe_exit_invokes_drop_for_non_zero_code() {
         maybe_exit(7, std::mem::drop);
+    }
+
+    #[test]
+    fn exit_status_maps_codes() {
+        assert_eq!(exit_status(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_status(1), std::process::ExitCode::from(1));
+        assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
+        assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
 
     #[tokio::test]
