@@ -2,15 +2,20 @@ use gittree_webhook::{WebhookConfig, WebhookError, serve};
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
+use std::process::ExitCode;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), WebhookError>>>>;
 
-fn main() {
+fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let exit_code = runtime.block_on(main_impl(&mut stderr));
-    let mut exit_fn = |code| std::process::exit(code);
-    exit_if_needed(exit_code, &mut exit_fn);
+    let mut status = ExitCode::SUCCESS;
+    let mut set_status = |code| {
+        status = exit_status(code);
+    };
+    exit_if_needed(exit_code, &mut set_status);
+    status
 }
 
 async fn main_impl(stderr: &mut dyn Write) -> i32 {
@@ -72,9 +77,17 @@ fn exit_if_needed(exit_code: i32, exit_fn: &mut dyn FnMut(i32)) {
     }
 }
 
+fn exit_status(exit_code: i32) -> ExitCode {
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(exit_code.clamp(1, u8::MAX as i32) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{exit_if_needed, handle_main_result, main_impl_with, run_with};
+    use super::{exit_if_needed, exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_webhook::WebhookError;
 
     async fn serve_ok(_: ()) -> Result<(), WebhookError> {
@@ -172,5 +185,13 @@ mod tests {
     fn exit_if_needed_skips_exit_for_zero_code() {
         let mut exit_fn = |_code| ();
         exit_if_needed(0, &mut exit_fn);
+    }
+
+    #[test]
+    fn exit_status_maps_codes() {
+        assert_eq!(exit_status(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_status(1), std::process::ExitCode::from(1));
+        assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
+        assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
 }
