@@ -1,13 +1,18 @@
 use gittree_git_http::{GitHttpConfig, GitHttpError, serve};
 use std::future::Future;
 use std::io::Write;
+use std::process::ExitCode;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
     let exit_code = handle_main_result(run().await, &mut std::io::stderr());
-    let mut exit_fn = |code| std::process::exit(code);
-    maybe_exit(exit_code, &mut exit_fn);
+    let mut status = ExitCode::SUCCESS;
+    let mut set_status = |code| {
+        status = exit_status(code);
+    };
+    maybe_exit(exit_code, &mut set_status);
+    status
 }
 
 async fn run() -> Result<(), GitHttpError> {
@@ -47,9 +52,17 @@ fn maybe_exit(exit_code: i32, exit_fn: &mut dyn FnMut(i32)) {
     }
 }
 
+fn exit_status(exit_code: i32) -> ExitCode {
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(exit_code.clamp(1, u8::MAX as i32) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_main_result, maybe_exit, run_with};
+    use super::{exit_status, handle_main_result, maybe_exit, run_with};
     use gittree_git_http::{GitHttpConfig, GitHttpError};
     use gittree_observability::{ObservabilityConfigError, ObservabilityError};
     use gittree_storage::StorageError;
@@ -186,5 +199,13 @@ mod tests {
     fn maybe_exit_ignores_zero_code() {
         let mut exit_fn = |_code| ();
         maybe_exit(0, &mut exit_fn);
+    }
+
+    #[test]
+    fn exit_status_maps_codes() {
+        assert_eq!(exit_status(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_status(1), std::process::ExitCode::from(1));
+        assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
+        assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
 }
