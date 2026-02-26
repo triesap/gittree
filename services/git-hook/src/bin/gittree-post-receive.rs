@@ -1,5 +1,6 @@
 use gittree_git_hook::{HookMode, run_hook_from_env};
 use std::io::Write;
+use std::process::ExitCode;
 
 fn init_observability(service: &str) -> Result<gittree_observability::ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env(service)
@@ -7,10 +8,14 @@ fn init_observability(service: &str) -> Result<gittree_observability::Observabil
     gittree_observability::init(&config).map_err(|err| err.to_string())
 }
 
-fn main() {
+fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr);
-    exit_if_needed(exit_code, std::process::exit);
+    let mut status = ExitCode::SUCCESS;
+    exit_if_needed(exit_code, |code| {
+        status = exit_status(code);
+    });
+    status
 }
 
 fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -58,9 +63,19 @@ where
     }
 }
 
+fn exit_status(exit_code: i32) -> ExitCode {
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(exit_code.clamp(1, u8::MAX as i32) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{HookMode, exit_if_needed, handle_main_result, init_observability, run_with};
+    use super::{
+        HookMode, exit_if_needed, exit_status, handle_main_result, init_observability, run_with,
+    };
     use std::sync::{Mutex, OnceLock};
 
     fn noop_hook(_mode: HookMode) -> Result<(), gittree_git_hook::HookServiceError> {
@@ -211,5 +226,13 @@ mod tests {
         let mut seen = None;
         exit_if_needed(17, |code| seen = Some(code));
         assert_eq!(seen, Some(17));
+    }
+
+    #[test]
+    fn exit_status_maps_codes() {
+        assert_eq!(exit_status(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_status(1), std::process::ExitCode::from(1));
+        assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
+        assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
 }

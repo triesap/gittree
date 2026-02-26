@@ -2,6 +2,7 @@ use clap::Parser;
 use gittree_git_hook::{run_hook, HookServiceError};
 use std::io::Write;
 use std::path::Path;
+use std::process::ExitCode;
 
 mod cli;
 
@@ -13,10 +14,14 @@ fn init_observability() -> Result<gittree_observability::ObservabilityHandle, St
     gittree_observability::init(&config).map_err(|err| err.to_string())
 }
 
-fn main() {
+fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr);
-    exit_if_needed(exit_code, std::process::exit);
+    let mut status = ExitCode::SUCCESS;
+    exit_if_needed(exit_code, |code| {
+        status = exit_status(code);
+    });
+    status
 }
 
 fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -65,11 +70,19 @@ where
     }
 }
 
+fn exit_status(exit_code: i32) -> ExitCode {
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(exit_code.clamp(1, u8::MAX as i32) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_if_needed, handle_main_result, init_observability, run_with_cli, try_main, HookCli,
-        HookServiceError,
+        exit_if_needed, exit_status, handle_main_result, init_observability, run_with_cli,
+        try_main, HookCli, HookServiceError,
     };
     use clap::Parser;
     use std::ffi::OsString;
@@ -338,5 +351,13 @@ mod tests {
         let mut seen = None;
         exit_if_needed(17, |code| seen = Some(code));
         assert_eq!(seen, Some(17));
+    }
+
+    #[test]
+    fn exit_status_maps_codes() {
+        assert_eq!(exit_status(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_status(1), std::process::ExitCode::from(1));
+        assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
+        assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
 }
