@@ -237,4 +237,13 @@ mod tests {
         assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
         assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
+
+    #[test]
+    fn main_paths_cover_stderr_instantiation() {
+        with_env_var("GITTREE_SYNC_URL", None, &mut || {
+            let mut stderr = std::io::stderr();
+            assert_eq!(super::main_impl(&mut stderr), 1);
+            assert_eq!(super::main(), std::process::ExitCode::from(1));
+        });
+    }
 }
