@@ -317,13 +317,18 @@ struct WebhookAppState {
 }
 
 pub async fn serve(config: WebhookConfig) -> Result<(), WebhookError> {
-    serve_with_init(config, init_observability).await
+    serve_with_init(config, init_observability_unit).await
 }
 
-async fn serve_with_init<I, O>(config: WebhookConfig, init: I) -> Result<(), WebhookError>
-where
-    I: FnOnce() -> Result<O, WebhookError>,
-{
+fn init_observability_unit() -> Result<(), WebhookError> {
+    let _ = init_observability()?;
+    Ok(())
+}
+
+async fn serve_with_init(
+    config: WebhookConfig,
+    init: fn() -> Result<(), WebhookError>,
+) -> Result<(), WebhookError> {
     let _observability = init()?;
     let repositories: Arc<DynRepoMappingRepository> = Arc::new(build_repositories(&config)?);
     let notifier = build_http_notifier(config.sync_url.clone())?;
@@ -454,7 +459,6 @@ fn extract_signature(headers: &HeaderMap) -> Result<&str, WebhookHttpError> {
 #[cfg(test)]
 mod tests {
     use super::HttpSyncNotifier;
-    use super::ObservabilityHandle;
     use super::StorageConfigError;
     use super::SyncNotifier;
     use super::WebhookAckPayload;
@@ -482,7 +486,7 @@ mod tests {
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    static OBSERVABILITY: OnceLock<ObservabilityHandle> = OnceLock::new();
+    static OBSERVABILITY: OnceLock<()> = OnceLock::new();
 
     #[derive(Clone, Default)]
     struct MockNotifier {
@@ -617,6 +621,10 @@ mod tests {
         }
     }
 
+    fn noop_init() -> Result<(), super::WebhookError> {
+        Ok(())
+    }
+
     fn with_env_var(key: &str, value: &str, f: &mut dyn FnMut()) {
         let previous = std::env::var_os(key);
         unsafe {
@@ -656,8 +664,8 @@ mod tests {
         if OBSERVABILITY.get().is_some() {
             return;
         }
-        let handle = super::init_observability().expect("observability should initialize once");
-        let _ = OBSERVABILITY.set(handle);
+        super::init_observability_unit().expect("observability should initialize once");
+        let _ = OBSERVABILITY.set(());
     }
 
     #[test]
@@ -1484,7 +1492,7 @@ mod tests {
             sync_url: "http://localhost:8084".to_string(),
             forgejo_secret: "secret".to_string(),
         };
-        let err = super::serve_with_init(config, || Ok(()))
+        let err = super::serve_with_init(config, noop_init)
             .await
             .expect_err("serve error");
         assert!(err.to_string().contains("webhook serve error"));
@@ -1506,7 +1514,7 @@ mod tests {
             sync_url: "http://localhost:8084".to_string(),
             forgejo_secret: "secret".to_string(),
         };
-        let err = super::serve_with_init(config, || Ok(()))
+        let err = super::serve_with_init(config, noop_init)
             .await
             .expect_err("storage error");
         assert!(err.to_string().contains("webhook storage error"));
@@ -1528,7 +1536,7 @@ mod tests {
             sync_url: "not-a-url".to_string(),
             forgejo_secret: "secret".to_string(),
         };
-        let err = super::serve_with_init(config, || Ok(()))
+        let err = super::serve_with_init(config, noop_init)
             .await
             .expect_err("notifier error");
         assert_eq!(err.to_string(), "webhook notify error: invalid sync url: not-a-url");
@@ -1550,7 +1558,7 @@ mod tests {
             sync_url: "http://localhost:8084".to_string(),
             forgejo_secret: "secret".to_string(),
         };
-        let task = tokio::spawn(super::serve_with_init(config, || Ok(())));
+        let task = tokio::spawn(super::serve_with_init(config, noop_init));
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         task.abort();
         let _ = task.await;
