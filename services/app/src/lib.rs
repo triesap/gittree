@@ -19,7 +19,7 @@ use gittree_storage::{
 use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
 use leptos_axum::{LeptosRoutes, handle_server_fns_with_context};
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -329,7 +329,7 @@ fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
 ) -> impl Future<Output = Result<(), std::io::Error>> {
-    async move { axum::serve(listener, router).await }
+    axum::serve(listener, router).into_future()
 }
 
 fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
