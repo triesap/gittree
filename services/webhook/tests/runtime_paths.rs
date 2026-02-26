@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use hmac::Mac;
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -79,6 +80,12 @@ fn stop_webhook_server(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn sign_payload(secret: &[u8], payload: &[u8]) -> String {
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret).expect("mac");
+    mac.update(payload);
+    hex::encode(mac.finalize().into_bytes())
+}
+
 #[tokio::test]
 async fn webhook_binary_runtime_routes_cover_non_test_monomorphizations() {
     let port = reserve_local_port();
@@ -106,6 +113,60 @@ async fn webhook_binary_runtime_routes_cover_non_test_monomorphizations() {
         .await
         .expect("webhook response");
     assert_eq!(no_sig.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let bad_sig = client
+        .post(format!("{base_url}/"))
+        .header("content-type", "application/json")
+        .header("x-gitea-signature", "sha256=not-hex")
+        .body("{}")
+        .send()
+        .await
+        .expect("bad signature response");
+    assert_eq!(bad_sig.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let invalid_utf8 = [0xff, 0xfe, 0xfd];
+    let invalid_utf8_signature = sign_payload(b"secret", &invalid_utf8);
+    let invalid_utf8_resp = client
+        .post(format!("{base_url}/"))
+        .header("x-gitea-signature", format!("sha256={invalid_utf8_signature}"))
+        .body(invalid_utf8.to_vec())
+        .send()
+        .await
+        .expect("invalid utf8 response");
+    assert_eq!(invalid_utf8_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let invalid_json = br#"{"ref":"refs/heads/main"}"#;
+    let invalid_json_signature = sign_payload(b"secret", invalid_json);
+    let invalid_json_resp = client
+        .post(format!("{base_url}/"))
+        .header("content-type", "application/json")
+        .header("x-gitea-signature", format!("sha256={invalid_json_signature}"))
+        .body(invalid_json.to_vec())
+        .send()
+        .await
+        .expect("invalid json response");
+    assert_eq!(invalid_json_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let valid_signature = sign_payload(b"secret", invalid_json);
+    let forgejo_header_only = client
+        .post(format!("{base_url}/"))
+        .header("content-type", "application/json")
+        .header("x-forgejo-signature", format!("sha256={valid_signature}"))
+        .body(invalid_json.to_vec())
+        .send()
+        .await
+        .expect("forgejo signature header response");
+    assert_eq!(forgejo_header_only.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let hub_header_only = client
+        .post(format!("{base_url}/"))
+        .header("content-type", "application/json")
+        .header("x-hub-signature-256", format!("sha256={valid_signature}"))
+        .body(invalid_json.to_vec())
+        .send()
+        .await
+        .expect("hub signature header response");
+    assert_eq!(hub_header_only.status(), reqwest::StatusCode::BAD_REQUEST);
 
     stop_webhook_server(&mut child);
     std::fs::remove_dir_all(temp_dir).ok();
