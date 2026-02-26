@@ -4,17 +4,20 @@ use gittree_app::{AppError, AppServiceConfig, serve};
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
+use std::process::ExitCode;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), AppError>>>>;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr).await;
-    let mut exit_process = |code| {
-        std::process::exit(code);
+    let mut status = ExitCode::SUCCESS;
+    let mut set_status = |code| {
+        status = exit_status(code);
     };
-    exit_if_needed(exit_code, &mut exit_process);
+    exit_if_needed(exit_code, &mut set_status);
+    status
 }
 
 async fn main_impl(stderr: &mut dyn Write) -> i32 {
@@ -76,9 +79,17 @@ fn exit_if_needed(exit_code: i32, exit: &mut dyn FnMut(i32)) {
     }
 }
 
+fn exit_status(exit_code: i32) -> ExitCode {
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(exit_code.clamp(1, u8::MAX as i32) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{exit_if_needed, handle_main_result, main_impl_with, run_with};
+    use super::{exit_if_needed, exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_app::AppError;
 
     async fn serve_should_not_run(_: ()) -> Result<(), AppError> {
@@ -162,6 +173,14 @@ mod tests {
         let mut exit = |code| observed = Some(code);
         exit_if_needed(7, &mut exit);
         assert_eq!(observed, Some(7));
+    }
+
+    #[test]
+    fn exit_status_maps_codes() {
+        assert_eq!(exit_status(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_status(1), std::process::ExitCode::from(1));
+        assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
+        assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
     }
 
     #[tokio::test]
