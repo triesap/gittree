@@ -297,3 +297,39 @@ fn integration_parse_forgejo_push_rejects_empty_owner_username() {
         other => panic!("unexpected error variant: {other:?}"),
     }
 }
+
+#[test]
+fn integration_error_traits_cover_additional_runtime_paths() {
+    let invalid_line = HookError::InvalidLine("broken".to_string());
+    assert_eq!(invalid_line.to_string(), "invalid ref line: broken");
+    let invalid_line_err: &dyn Error = &invalid_line;
+    assert!(invalid_line_err.source().is_none());
+
+    let invalid_mode = HookConfigError::InvalidMode("weird".to_string());
+    assert_eq!(invalid_mode.to_string(), "invalid hook mode: weird");
+    assert!(invalid_mode.source().is_none());
+}
+
+#[test]
+fn integration_run_hook_from_env_surfaces_parse_errors_in_pre_receive() {
+    let invalid_updates_path = write_updates_file("invalid-line\n");
+    let repo = repo_path();
+
+    let error = with_env_vars(
+        &[
+            ("GITTREE_HOOK_MODE", Some("pre-receive")),
+            ("GITTREE_STATE_URL", Some("http://127.0.0.1:8082")),
+            ("GITTREE_HOOK_REPO_PATH", repo.to_str()),
+            ("GITTREE_HOOK_STDIN_FILE", invalid_updates_path.to_str()),
+        ],
+        || run_hook_from_env(HookMode::PreReceive).expect_err("parse error"),
+    );
+
+    std::fs::remove_file(&invalid_updates_path).expect("remove invalid updates file");
+    match error {
+        HookServiceError::Parse(HookError::InvalidLine(line)) => {
+            assert_eq!(line, "invalid-line");
+        }
+        other => panic!("unexpected parse error variant: {other:?}"),
+    }
+}
