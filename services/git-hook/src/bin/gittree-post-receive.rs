@@ -66,16 +66,6 @@ fn handle_main_result(result: Result<(), String>, stderr: &mut impl Write) -> i3
     }
 }
 
-#[cfg(test)]
-fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
-where
-    F: FnOnce(i32) -> R,
-{
-    if exit_code != 0 {
-        let _ = exit_fn(exit_code);
-    }
-}
-
 fn exit_status(exit_code: i32) -> ExitCode {
     if exit_code == 0 {
         ExitCode::SUCCESS
@@ -87,7 +77,7 @@ fn exit_status(exit_code: i32) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        HookMode, exit_if_needed, exit_status, handle_main_result, init_observability, run_with,
+        HookMode, exit_status, handle_main_result, init_observability, run_with,
     };
     use std::sync::{Mutex, OnceLock};
 
@@ -222,23 +212,6 @@ mod tests {
             assert!(std::env::var(KEY).is_err());
         });
         assert!(std::env::var(KEY).is_err());
-    }
-
-    #[test]
-    fn exit_if_needed_skips_exit_when_code_is_zero() {
-        exit_if_needed(0, noop_exit);
-    }
-
-    #[test]
-    fn exit_if_needed_allows_noop_exit_when_code_is_non_zero() {
-        exit_if_needed(17, noop_exit);
-    }
-
-    #[test]
-    fn exit_if_needed_calls_exit_when_code_is_non_zero() {
-        let mut seen = None;
-        exit_if_needed(17, |code| seen = Some(code));
-        assert_eq!(seen, Some(17));
     }
 
     #[test]
