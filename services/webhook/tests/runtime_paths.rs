@@ -1,7 +1,55 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::error::Error;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hmac::Mac;
+use gittree_webhook::{StorageConfigError, WebhookConfig, WebhookConfigError, WebhookError};
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_env_vars(vars: &[(&str, Option<&str>)], run: impl FnOnce()) {
+    let _guard = env_lock().lock().expect("lock env");
+    let previous: Vec<(&str, Option<std::ffi::OsString>)> = vars
+        .iter()
+        .map(|(key, _)| (*key, std::env::var_os(key)))
+        .collect();
+
+    for (key, value) in vars {
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::set_var(key, value) };
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+
+    for (key, value) in previous {
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::set_var(key, value) };
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation with a process-wide mutex.
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+    }
+
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -174,6 +222,7 @@ async fn webhook_binary_runtime_routes_cover_non_test_monomorphizations() {
 
 #[test]
 fn webhook_binary_missing_secret_exits_with_config_error() {
+    let _guard = env_lock().lock().expect("lock env");
     let temp_dir = std::env::temp_dir().join(format!(
         "gittree-webhook-missing-secret-{}",
         SystemTime::now()
@@ -197,4 +246,50 @@ fn webhook_binary_missing_secret_exits_with_config_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("webhook service failed:"));
     assert!(stderr.contains("missing env GITTREE_FORGEJO_WEBHOOK_SECRET"));
+}
+
+#[test]
+fn webhook_runtime_error_traits_cover_additional_paths() {
+    let storage_missing = StorageConfigError::MissingEnv("GITTREE_STORAGE_READ_URL");
+    assert_eq!(
+        storage_missing.to_string(),
+        "missing env GITTREE_STORAGE_READ_URL"
+    );
+    let storage_missing_error: &dyn std::error::Error = &storage_missing;
+    assert!(storage_missing_error.source().is_none());
+
+    let config_storage = WebhookConfigError::Storage(StorageConfigError::InvalidConfig(
+        "invalid pool".to_string(),
+    ));
+    assert!(config_storage.source().is_some());
+
+    let webhook_notify = WebhookError::Notify("sync failed".to_string());
+    assert_eq!(webhook_notify.to_string(), "webhook notify error: sync failed");
+    assert!(webhook_notify.source().is_none());
+}
+
+#[test]
+fn webhook_runtime_config_rejects_invalid_storage_numeric_env() {
+    with_env_vars(
+        &[
+            ("GITTREE_WEBHOOK_BIND", Some("127.0.0.1:9099")),
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://user:pass@localhost:5432/gittree"),
+            ),
+            ("GITTREE_STORAGE_MAX_CONNECTIONS", Some("not-a-number")),
+            ("GITTREE_SYNC_URL", Some("http://localhost:8084")),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", Some("secret")),
+        ],
+        || {
+            let err = WebhookConfig::from_env().expect_err("invalid storage env");
+            match err {
+                WebhookConfigError::Storage(StorageConfigError::InvalidEnv { key, value }) => {
+                    assert_eq!(key, "GITTREE_STORAGE_MAX_CONNECTIONS");
+                    assert_eq!(value, "not-a-number");
+                }
+                other => panic!("unexpected config error: {other:?}"),
+            }
+        },
+    );
 }
