@@ -3,9 +3,14 @@ use std::io::Write;
 use std::process::ExitCode;
 
 fn init_observability(service: &str) -> Result<gittree_observability::ObservabilityHandle, String> {
-    let config = gittree_observability::ObservabilityConfig::from_env(service)
-        .map_err(|err| err.to_string())?;
-    gittree_observability::init(&config).map_err(|err| err.to_string())
+    let config = match gittree_observability::ObservabilityConfig::from_env(service) {
+        Ok(config) => config,
+        Err(err) => return Err(err.to_string()),
+    };
+    match gittree_observability::init(&config) {
+        Ok(handle) => Ok(handle),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 fn init_observability_unit(service: &str) -> Result<(), String> {
@@ -16,11 +21,11 @@ fn init_observability_unit(service: &str) -> Result<(), String> {
 fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr);
-    let mut status = ExitCode::SUCCESS;
-    exit_if_needed(exit_code, |code| {
-        status = exit_status(code);
-    });
-    status
+    if exit_code == 0 {
+        ExitCode::SUCCESS
+    } else {
+        exit_status(exit_code)
+    }
 }
 
 fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -41,9 +46,14 @@ fn run_with(
     run_hook_fn: fn(HookMode) -> Result<(), gittree_git_hook::HookServiceError>,
 ) -> Result<(), String>
 {
-    let _observability = init_observability_fn(service)
-        .map_err(|err| format!("git hook observability failed: {err}"))?;
-    run_hook_fn(mode).map_err(|err| format!("git hook failed: {err}"))
+    let _observability = match init_observability_fn(service) {
+        Ok(observability) => observability,
+        Err(err) => return Err(format!("git hook observability failed: {err}")),
+    };
+    match run_hook_fn(mode) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(format!("git hook failed: {err}")),
+    }
 }
 
 fn handle_main_result(result: Result<(), String>, stderr: &mut impl Write) -> i32 {
@@ -56,6 +66,7 @@ fn handle_main_result(result: Result<(), String>, stderr: &mut impl Write) -> i3
     }
 }
 
+#[cfg(test)]
 fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
 where
     F: FnOnce(i32) -> R,
