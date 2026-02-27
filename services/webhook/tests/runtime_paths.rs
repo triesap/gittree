@@ -5,6 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hmac::Mac;
 use gittree_webhook::{StorageConfigError, WebhookConfig, WebhookConfigError, WebhookError};
+use gittree_storage::StorageConfig;
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -292,4 +293,127 @@ fn webhook_runtime_config_rejects_invalid_storage_numeric_env() {
             }
         },
     );
+}
+
+#[test]
+fn webhook_runtime_config_rejects_invalid_bind() {
+    with_env_vars(
+        &[
+            ("GITTREE_WEBHOOK_BIND", Some("not-a-socket")),
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://user:pass@localhost:5432/gittree"),
+            ),
+            ("GITTREE_SYNC_URL", Some("http://localhost:8084")),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", Some("secret")),
+        ],
+        || {
+            let err = WebhookConfig::from_env().expect_err("invalid bind");
+            match err {
+                WebhookConfigError::Config(_) => {}
+                other => panic!("unexpected config error: {other:?}"),
+            }
+        },
+    );
+}
+
+#[test]
+fn webhook_runtime_config_loads_valid_storage_values() {
+    with_env_vars(
+        &[
+            ("GITTREE_WEBHOOK_BIND", Some("127.0.0.1:9099")),
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://user:pass@localhost:5432/gittree"),
+            ),
+            ("GITTREE_STORAGE_WRITE_URL", Some("postgres://user:pass@localhost:5432/gittree")),
+            ("GITTREE_STORAGE_MAX_CONNECTIONS", Some("16")),
+            ("GITTREE_STORAGE_MIN_CONNECTIONS", Some("4")),
+            ("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", Some("30")),
+            ("GITTREE_STORAGE_MAX_LIFETIME_SECS", Some("120")),
+            ("GITTREE_STORAGE_APP_NAME", Some("gittree-webhook-tests")),
+            ("GITTREE_SYNC_URL", Some("http://localhost:8084")),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", Some("secret")),
+        ],
+        || {
+            let config = WebhookConfig::from_env().expect("valid webhook config");
+            assert_eq!(config.storage.max_connections, 16);
+            assert_eq!(config.storage.min_connections, 4);
+            assert_eq!(config.storage.idle_timeout_secs, Some(30));
+            assert_eq!(config.storage.max_lifetime_secs, Some(120));
+            assert_eq!(
+                config.storage.application_name.as_deref(),
+                Some("gittree-webhook-tests")
+            );
+        },
+    );
+}
+
+#[test]
+fn webhook_runtime_config_rejects_missing_sync_after_storage_parse() {
+    with_env_vars(
+        &[
+            ("GITTREE_WEBHOOK_BIND", Some("127.0.0.1:9099")),
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://user:pass@localhost:5432/gittree"),
+            ),
+            ("GITTREE_SYNC_URL", None),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", Some("secret")),
+        ],
+        || {
+            let err = WebhookConfig::from_env().expect_err("missing sync url");
+            match err {
+                WebhookConfigError::MissingEnv(key) => assert_eq!(key, "GITTREE_SYNC_URL"),
+                other => panic!("unexpected config error: {other:?}"),
+            }
+        },
+    );
+}
+
+#[test]
+fn webhook_runtime_config_rejects_missing_secret_after_sync_parse() {
+    with_env_vars(
+        &[
+            ("GITTREE_WEBHOOK_BIND", Some("127.0.0.1:9099")),
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://user:pass@localhost:5432/gittree"),
+            ),
+            ("GITTREE_SYNC_URL", Some("http://localhost:8084")),
+            ("GITTREE_FORGEJO_WEBHOOK_SECRET", None),
+        ],
+        || {
+            let err = WebhookConfig::from_env().expect_err("missing webhook secret");
+            match err {
+                WebhookConfigError::MissingEnv(key) => {
+                    assert_eq!(key, "GITTREE_FORGEJO_WEBHOOK_SECRET")
+                }
+                other => panic!("unexpected config error: {other:?}"),
+            }
+        },
+    );
+}
+
+#[tokio::test]
+async fn webhook_runtime_serve_covers_notifier_builder_success_path() {
+    let config = WebhookConfig {
+        bind: "not-a-socket".to_string(),
+        storage: StorageConfig {
+            read_connection: runtime_storage_url(),
+            write_connection: None,
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: Some("gittree-webhook-runtime".to_string()),
+        },
+        sync_url: "http://127.0.0.1:1".to_string(),
+        forgejo_secret: "secret".to_string(),
+    };
+
+    let error = gittree_webhook::serve(config)
+        .await
+        .expect_err("invalid bind should fail serve");
+    assert!(error.to_string().contains("webhook serve error"));
 }
