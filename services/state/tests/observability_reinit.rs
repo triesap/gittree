@@ -1,4 +1,10 @@
-use gittree_state::init_observability;
+use gittree_state::{StateError, init_observability};
+use std::sync::{Mutex, OnceLock};
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn with_env(key: &str, value: Option<&str>, run: &mut dyn FnMut()) {
     let previous = std::env::var_os(key);
@@ -29,6 +35,7 @@ fn with_env(key: &str, value: Option<&str>, run: &mut dyn FnMut()) {
 
 #[test]
 fn init_observability_reports_reinit_error() {
+    let _guard = env_lock().lock().expect("env lock");
     with_env("GITTREE_LOG_DIR", None, &mut || {
         with_env("GITTREE_LOG_JSON", Some("false"), &mut || {
             with_env("GITTREE_LOG_STDOUT", Some("true"), &mut || {
@@ -36,6 +43,20 @@ fn init_observability_reports_reinit_error() {
                 let err = init_observability().expect_err("second init should fail");
                 assert!(err.to_string().contains("state observability error"));
             });
+        });
+    });
+}
+
+#[test]
+fn init_observability_reports_config_error() {
+    let _guard = env_lock().lock().expect("env lock");
+    with_env("GITTREE_LOG_DIR", None, &mut || {
+        with_env("GITTREE_LOG_STDOUT", Some("not-a-bool"), &mut || {
+            let err = init_observability().expect_err("invalid observability env");
+            match err {
+                StateError::ObservabilityConfig(_) => {}
+                other => panic!("unexpected error variant: {other:?}"),
+            }
         });
     });
 }

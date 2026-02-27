@@ -91,3 +91,58 @@ fn state_runtime_config_rejects_invalid_storage_numeric_env() {
         },
     );
 }
+
+#[test]
+fn state_runtime_config_rejects_missing_storage_after_services_parse() {
+    with_env_vars(
+        &[
+            ("GITTREE_STATE_BIND", Some("127.0.0.1:9098")),
+            ("GITTREE_RELAY_URLS", Some("wss://relay.example")),
+            ("GITTREE_STORAGE_READ_URL", None),
+        ],
+        || {
+            let err = StateConfig::from_env().expect_err("missing storage env");
+            match err {
+                StateConfigError::Storage(StorageConfigError::MissingEnv(key)) => {
+                    assert_eq!(key, "GITTREE_STORAGE_READ_URL");
+                }
+                other => panic!("unexpected state config error: {other:?}"),
+            }
+        },
+    );
+}
+
+#[test]
+fn state_runtime_config_loads_valid_storage_values() {
+    with_env_vars(
+        &[
+            ("GITTREE_STATE_BIND", Some("127.0.0.1:9098")),
+            ("GITTREE_RELAY_URLS", Some("wss://relay.example,wss://relay2.example")),
+            (
+                "GITTREE_STORAGE_READ_URL",
+                Some("postgres://user:pass@localhost:5432/gittree"),
+            ),
+            ("GITTREE_STORAGE_WRITE_URL", Some("postgres://user:pass@localhost:5432/gittree")),
+            ("GITTREE_STORAGE_MAX_CONNECTIONS", Some("16")),
+            ("GITTREE_STORAGE_MIN_CONNECTIONS", Some("4")),
+            ("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", Some("30")),
+            ("GITTREE_STORAGE_MAX_LIFETIME_SECS", Some("120")),
+            ("GITTREE_STORAGE_APP_NAME", Some("gittree-state-tests")),
+        ],
+        || {
+            let config = StateConfig::from_env().expect("valid state config");
+            assert_eq!(config.storage.max_connections, 16);
+            assert_eq!(config.storage.min_connections, 4);
+            assert_eq!(config.storage.idle_timeout_secs, Some(30));
+            assert_eq!(config.storage.max_lifetime_secs, Some(120));
+            assert_eq!(config.storage.application_name.as_deref(), Some("gittree-state-tests"));
+            assert_eq!(
+                config.relay_urls,
+                vec![
+                    "wss://relay.example".to_string(),
+                    "wss://relay2.example".to_string()
+                ]
+            );
+        },
+    );
+}
