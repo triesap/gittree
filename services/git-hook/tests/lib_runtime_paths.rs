@@ -190,7 +190,8 @@ fn integration_generic_paths_cover_evaluate_and_forgejo_push() {
         new: "1".repeat(40),
         reference: format!("refs/nostr/{}", "b".repeat(64)),
     }];
-    let fetcher = HttpStateFetcher::new("http://127.0.0.1:8082", Duration::from_secs(1));
+    let fetcher =
+        HttpStateFetcher::new("http://127.0.0.1:8082".to_string(), Duration::from_secs(1));
     let decision = evaluate_pre_receive(&fetcher, &repo_path(), &updates).expect("decision");
     assert!(matches!(decision, UpdateDecision::Accept));
 

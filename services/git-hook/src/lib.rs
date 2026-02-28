@@ -442,9 +442,9 @@ pub struct HttpStateFetcher {
 }
 
 impl HttpStateFetcher {
-    pub fn new(base_url: impl Into<String>, timeout: Duration) -> Self {
+    pub fn new(base_url: String, timeout: Duration) -> Self {
         Self {
-            base_url: base_url.into(),
+            base_url,
             client: reqwest::blocking::Client::new(),
             timeout,
         }
@@ -571,9 +571,9 @@ pub struct HttpPostReceiveNotifier {
 }
 
 impl HttpPostReceiveNotifier {
-    pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Self {
+    pub fn new(endpoint: String, timeout: Duration) -> Self {
         Self {
-            endpoint: endpoint.into(),
+            endpoint,
             client: reqwest::blocking::Client::new(),
             timeout,
         }
@@ -1768,7 +1768,7 @@ mod tests {
     #[test]
     fn http_state_fetcher_reports_send_errors() {
         let fetcher = super::HttpStateFetcher::new(
-            "http://127.0.0.1:1",
+            "http://127.0.0.1:1".to_string(),
             std::time::Duration::from_millis(100),
         );
         let err = fetcher
@@ -1829,7 +1829,7 @@ mod tests {
     #[test]
     fn http_post_receive_notifier_reports_send_errors() {
         let notifier = super::HttpPostReceiveNotifier::new(
-            "http://127.0.0.1:1",
+            "http://127.0.0.1:1".to_string(),
             std::time::Duration::from_millis(100),
         );
         let payload = PostReceivePayload {
