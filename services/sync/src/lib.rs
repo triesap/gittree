@@ -14,6 +14,7 @@ use gittree_storage::{RelayCompatibilityRecord, StorageConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -215,17 +216,16 @@ struct SyncAppState {
     repo_root: PathBuf,
 }
 
-async fn serve_with<InitFn, InitOut, ServeFn, ServeFut>(
+type ServeFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
+type InitFn = fn() -> Result<(), SyncError>;
+type ServeFn = fn(tokio::net::TcpListener, Router) -> ServeFuture;
+
+async fn serve_with(
     config: SyncConfig,
     init_fn: InitFn,
     serve_fn: ServeFn,
-) -> Result<(), SyncError>
-where
-    InitFn: FnOnce() -> Result<InitOut, SyncError>,
-    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
-    ServeFut: Future<Output = Result<(), std::io::Error>>,
-{
-    let _observability = init_fn()?;
+) -> Result<(), SyncError> {
+    init_fn()?;
     let state = SyncAppState {
         repo_root: config.repo_root,
     };
@@ -239,15 +239,19 @@ where
     Ok(())
 }
 
+fn init_observability_unit() -> Result<(), SyncError> {
+    init_observability().map(|_| ())
+}
+
 pub async fn serve(config: SyncConfig) -> Result<(), SyncError> {
-    serve_with(config, init_observability, run_axum_server).await
+    serve_with(config, init_observability_unit, run_axum_server).await
 }
 
 fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
-) -> impl Future<Output = Result<(), std::io::Error>> {
-    axum::serve(listener, router).into_future()
+) -> ServeFuture {
+    Box::pin(axum::serve(listener, router).into_future())
 }
 
 fn build_router(state: SyncAppState) -> Router {
@@ -1289,6 +1293,30 @@ mod tests {
         assert_eq!(delete_err.to_string(), "repo path is not utf-8");
     }
 
+    fn init_ok() -> Result<(), SyncError> {
+        Ok(())
+    }
+
+    fn init_err() -> Result<(), SyncError> {
+        Err(SyncError::Observability(ObservabilityError::TraceInit(
+            "init failed".to_string(),
+        )))
+    }
+
+    fn serve_ok(
+        _listener: tokio::net::TcpListener,
+        _router: axum::Router,
+    ) -> super::ServeFuture {
+        Box::pin(async { Ok::<(), std::io::Error>(()) })
+    }
+
+    fn serve_err(
+        _listener: tokio::net::TcpListener,
+        _router: axum::Router,
+    ) -> super::ServeFuture {
+        Box::pin(async { Err(std::io::Error::other("boom")) })
+    }
+
     #[tokio::test]
     async fn serve_maps_bind_error_after_observability_init() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1309,7 +1337,7 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = super::serve_with(config, || Ok(()), super::run_axum_server)
+        let err = super::serve_with(config, init_ok, super::run_axum_server)
             .await
             .expect_err("bind error");
         assert!(err.to_string().starts_with("sync serve error:"));
@@ -1331,11 +1359,7 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Err(std::io::Error::other("boom")) },
-        )
+        let err = super::serve_with(config, init_ok, serve_err)
         .await
         .expect_err("serve error");
         assert_eq!(err.to_string(), "sync serve error: boom");
@@ -1357,12 +1381,7 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let result = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
-        )
-        .await;
+        let result = super::serve_with(config, init_ok, serve_ok).await;
         assert!(result.is_ok());
     }
 
@@ -1382,15 +1401,7 @@ mod tests {
             relay_urls: vec!["wss://relay.example".to_string()],
             repo_root: PathBuf::from("/tmp/gittree-sync"),
         };
-        let err = super::serve_with(
-            config,
-            || {
-                Err::<(), SyncError>(SyncError::Observability(
-                    ObservabilityError::TraceInit("init failed".to_string()),
-                ))
-            },
-            super::run_axum_server,
-        )
+        let err = super::serve_with(config, init_err, super::run_axum_server)
         .await
         .expect_err("init error");
         assert!(err.to_string().contains("sync observability error:"));
