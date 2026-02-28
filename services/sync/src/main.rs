@@ -8,11 +8,7 @@ fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let exit_code = runtime.block_on(main_impl(&mut stderr));
-    let mut status = ExitCode::SUCCESS;
-    maybe_exit(exit_code, |code| {
-        status = exit_status(code);
-    });
-    status
+    exit_status(exit_code)
 }
 
 async fn main_impl(stderr: &mut impl Write) -> i32 {
@@ -67,12 +63,6 @@ fn handle_main_result(result: Result<(), SyncError>, stderr: &mut impl Write) ->
     }
 }
 
-fn maybe_exit(exit_code: i32, exit_fn: impl FnOnce(i32)) {
-    if exit_code != 0 {
-        exit_fn(exit_code);
-    }
-}
-
 fn exit_status(exit_code: i32) -> ExitCode {
     if exit_code == 0 {
         ExitCode::SUCCESS
@@ -83,7 +73,7 @@ fn exit_status(exit_code: i32) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_status, handle_main_result, main_impl_with, maybe_exit, run_with};
+    use super::{exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_storage::StorageConfig;
     use gittree_sync::{SyncConfig, SyncError};
     use std::sync::Mutex;
@@ -142,6 +132,12 @@ mod tests {
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
         let result = run_with(|| Ok::<_, SyncError>("config"), serve_ok).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_succeeds_for_unit_config() {
+        let result = run_with(|| Ok::<_, SyncError>(()), serve_ok).await;
         assert!(result.is_ok());
     }
 
@@ -211,26 +207,6 @@ mod tests {
             String::from_utf8(stderr).expect("utf8"),
             "sync service failed: sync serve error: boom\n"
         );
-    }
-
-    #[test]
-    fn maybe_exit_skips_exit_for_zero_code() {
-        maybe_exit(0, std::mem::drop);
-    }
-
-    #[test]
-    fn maybe_exit_invokes_exit_for_non_zero_code() {
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let seen_code = seen.clone();
-        maybe_exit(7, move |code| {
-            *seen_code.lock().expect("seen code") = Some(code);
-        });
-        assert_eq!(*seen.lock().expect("seen code"), Some(7));
-    }
-
-    #[test]
-    fn maybe_exit_invokes_drop_for_non_zero_code() {
-        maybe_exit(7, std::mem::drop);
     }
 
     #[test]
