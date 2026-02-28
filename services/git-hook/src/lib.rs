@@ -1095,6 +1095,67 @@ mod tests {
     }
 
     #[test]
+    fn hook_config_reports_services_config_errors() {
+        with_env_vars(
+            &[
+                ("GITTREE_AUTH_BIND", Some("not-a-socket")),
+                (super::ENV_STATE_URL, Some("http://127.0.0.1:8082")),
+            ],
+            &mut || {
+                let err = super::HookConfig::from_env_with_overrides(
+                    Some(HookMode::PreReceive),
+                    None,
+                    None,
+                )
+                .expect_err("invalid services config");
+                assert_eq!(hook_config_error_kind(&err).0, "config");
+            },
+        );
+    }
+
+    #[test]
+    fn hook_config_requires_state_url_when_missing() {
+        with_env_vars(
+            &[
+                (super::ENV_STATE_URL, None),
+                (super::ENV_SYNC_URL, None),
+                ("GITTREE_AUTH_BIND", Some("127.0.0.1:8089")),
+            ],
+            &mut || {
+                let err = super::HookConfig::from_env_with_overrides(
+                    Some(HookMode::PreReceive),
+                    None,
+                    None,
+                )
+                .expect_err("missing state url");
+                assert_eq!(
+                    hook_config_error_kind(&err),
+                    ("missing_env", Some(super::ENV_STATE_URL))
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn hook_config_override_sync_url_is_preserved() {
+        with_env_vars(
+            &[
+                ("GITTREE_AUTH_BIND", Some("127.0.0.1:8089")),
+                (super::ENV_SYNC_URL, None),
+            ],
+            &mut || {
+                let config = super::HookConfig::from_env_with_overrides(
+                    Some(HookMode::PostReceive),
+                    Some("http://127.0.0.1:8082".to_string()),
+                    Some("http://127.0.0.1:8084".to_string()),
+                )
+                .expect("config");
+                assert_eq!(config.sync_url.as_deref(), Some("http://127.0.0.1:8084"));
+            },
+        );
+    }
+
+    #[test]
     fn parse_updates_accepts_lines() {
         let input = "old new refs/heads/main\nold2 new2 refs/tags/v1";
         let updates = parse_updates(input).expect("updates");
@@ -1221,6 +1282,21 @@ mod tests {
         payload["repository"]["name"] = serde_json::Value::String(String::new());
         let name_err = parse_forgejo_push(&payload.to_string()).expect_err("empty repo name");
         assert_eq!(hook_error_kind(&name_err), "invalid_payload");
+    }
+
+    #[test]
+    fn parse_forgejo_push_rejects_empty_owner_username() {
+        let payload = serde_json::json!({
+            "ref": "refs/heads/main",
+            "before": "0".repeat(40),
+            "after": "1".repeat(40),
+            "repository": {
+                "name": "repo",
+                "owner": { "username": "" }
+            }
+        });
+        let err = parse_forgejo_push(&payload.to_string()).expect_err("empty owner username");
+        assert_eq!(hook_error_kind(&err), "invalid_payload");
     }
 
     #[test]
@@ -1417,6 +1493,22 @@ mod tests {
         );
         handle.join().expect("server join");
         let _ = std::fs::remove_file(updates_path);
+    }
+
+    #[test]
+    fn run_hook_from_env_returns_config_errors() {
+        with_env_vars(
+            &[
+                ("GITTREE_AUTH_BIND", Some("not-a-socket")),
+                (super::ENV_STATE_URL, Some("http://127.0.0.1:8082")),
+                (super::ENV_SYNC_URL, Some("http://127.0.0.1:8084")),
+            ],
+            &mut || {
+                let err = super::run_hook_from_env(HookMode::PreReceive)
+                    .expect_err("config error expected");
+                assert_eq!(hook_service_error_kind(&err), "config");
+            },
+        );
     }
 
     #[test]
