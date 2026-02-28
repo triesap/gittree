@@ -370,7 +370,8 @@ fn publish_to_relay_boxed(relay_url: String, event: SignedNostrEvent) -> Publish
 }
 
 fn log_outbox_error(err: &impl std::fmt::Display, context: &'static str) {
-    tracing::error!(error = %err, context, "outbox error");
+    let log_message = format!("{context}: {err}");
+    eprintln!("{log_message}");
 }
 
 async fn publish_outbox_loop_with_delay_and_publish<R, T>(

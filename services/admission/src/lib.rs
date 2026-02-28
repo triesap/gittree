@@ -22,7 +22,6 @@ use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tracing::warn;
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -273,9 +272,7 @@ impl AdmissionCache {
         match cached {
             Some(entry) if self.is_fresh(&entry) => Some(entry.value),
             Some(_) => {
-                if let Ok(mut entries) = self.entries.write() {
-                    entries.remove(key);
-                }
+                let _ = self.entries.write().map(|mut entries| entries.remove(key));
                 None
             }
             None => None,
@@ -707,7 +704,8 @@ fn warn_and_allow(
     message: &'static str,
     decision: &AdmissionDecision,
 ) -> AdmissionDecision {
-    warn!(relay_url = %relay_url, "{message}");
+    let log_message = format!("{message}: {relay_url}");
+    eprintln!("{log_message}");
     decision.clone()
 }
 
