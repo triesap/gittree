@@ -110,6 +110,47 @@ fn relay_probe_binary_active_mode_uses_secret_key_path() {
 }
 
 #[test]
+fn relay_probe_binary_invalid_nip11_payload_exits_with_parse_error() {
+    let run_dir = unique_run_dir("invalid-nip11");
+    std::fs::create_dir_all(&run_dir).expect("create temp run dir");
+    let (relay_url, handle) = spawn_nip11_server(r#"{"name":"relay""#);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gittree-relay-probe"))
+        .current_dir(&run_dir)
+        .arg("--relay")
+        .arg(&relay_url)
+        .output()
+        .expect("run relay probe binary");
+
+    handle.join().expect("server join");
+    std::fs::remove_dir_all(&run_dir).ok();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("relay probe parse error"));
+}
+
+#[test]
+fn relay_probe_binary_unreachable_relay_exits_with_http_error() {
+    let run_dir = unique_run_dir("http-error");
+    std::fs::create_dir_all(&run_dir).expect("create temp run dir");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind temp listener");
+    let relay_url = format!("ws://{}", listener.local_addr().expect("listener addr"));
+    drop(listener);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gittree-relay-probe"))
+        .current_dir(&run_dir)
+        .arg("--relay")
+        .arg(&relay_url)
+        .output()
+        .expect("run relay probe binary");
+
+    std::fs::remove_dir_all(&run_dir).ok();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("relay probe http error"));
+}
+
+#[test]
 fn relay_probe_binary_store_mode_hits_storage_path_when_db_is_reachable() {
     if TcpStream::connect("127.0.0.1:5432").is_err() {
         return;

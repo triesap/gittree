@@ -435,6 +435,19 @@ mod tests {
         assert_http_error(err);
     }
 
+    #[test]
+    fn http_relay_probe_client_fetch_nip11_maps_send_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        drop(listener);
+
+        let client = HttpRelayProbeClient::new().expect("client");
+        let err = client
+            .fetch_nip11(&url)
+            .expect_err("closed listener should return send error");
+        assert_http_error(err);
+    }
+
     struct OkAdapter;
 
     #[async_trait]

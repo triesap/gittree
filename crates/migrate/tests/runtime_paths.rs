@@ -1,4 +1,4 @@
-use gittree_migrate::{MigrationConfig, MigrationError};
+use gittree_migrate::{MigrationConfig, MigrationConfigError, MigrationError, run};
 use gittree_storage::StorageError;
 use std::error::Error;
 use std::ffi::OsString;
@@ -83,6 +83,49 @@ fn runtime_config_reads_optional_storage_envs() {
 }
 
 #[test]
+fn runtime_config_requires_storage_read_url() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let previous = capture_env(&ENV_KEYS);
+    for key in ENV_KEYS {
+        // SAFETY: tests are serialized by ENV_LOCK; env mutation is restored at the end of the test.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+    let err = MigrationConfig::from_env().expect_err("missing read url should error");
+    restore_env(previous);
+
+    assert!(matches!(
+        err,
+        MigrationConfigError::MissingEnv("GITTREE_STORAGE_READ_URL")
+    ));
+}
+
+#[test]
+fn runtime_config_rejects_invalid_numeric_storage_env() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let previous = capture_env(&ENV_KEYS);
+    // SAFETY: tests are serialized by ENV_LOCK; env mutation is restored at the end of the test.
+    unsafe {
+        std::env::set_var(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+        );
+        std::env::set_var("GITTREE_STORAGE_MAX_CONNECTIONS", "not-a-number");
+    }
+    let err = MigrationConfig::from_env().expect_err("invalid max connections should error");
+    restore_env(previous);
+
+    assert!(matches!(
+        err,
+        MigrationConfigError::InvalidEnv {
+            key: "GITTREE_STORAGE_MAX_CONNECTIONS",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn runtime_migration_error_source_paths_are_stable() {
     let config = MigrationError::Config(gittree_migrate::MigrationConfigError::MissingEnv(
         "GITTREE_STORAGE_READ_URL",
@@ -93,4 +136,44 @@ fn runtime_migration_error_source_paths_are_stable() {
         message: "database error".to_string(),
     });
     assert!(Error::source(&storage).is_some());
+}
+
+#[tokio::test]
+async fn runtime_run_maps_config_error_when_storage_url_missing() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let previous = capture_env(&ENV_KEYS);
+    for key in ENV_KEYS {
+        // SAFETY: tests are serialized by ENV_LOCK; env mutation is restored at the end of the test.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+    let err = run().await.expect_err("missing read url should error");
+    restore_env(previous);
+
+    assert!(
+        matches!(err, MigrationError::Config(_) | MigrationError::Storage(_)),
+        "unexpected error variant: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn runtime_run_maps_config_error_when_write_url_is_invalid() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let previous = capture_env(&ENV_KEYS);
+    // SAFETY: tests are serialized by ENV_LOCK; env mutation is restored at the end of the test.
+    unsafe {
+        std::env::set_var(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+        );
+        std::env::set_var("GITTREE_STORAGE_WRITE_URL", "://invalid");
+    }
+    let err = run().await.expect_err("invalid write url should error");
+    restore_env(previous);
+
+    assert!(
+        matches!(err, MigrationError::Config(_) | MigrationError::Storage(_)),
+        "unexpected error variant: {err:?}"
+    );
 }
