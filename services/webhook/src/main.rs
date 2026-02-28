@@ -184,6 +184,21 @@ mod tests {
     }
 
     #[test]
+    fn run_reports_config_error_for_invalid_storage_env() {
+        with_env_vars(
+            &[
+                ("GITTREE_WEBHOOK_BIND", Some("not-a-socket")),
+                ("GITTREE_STORAGE_READ_URL", Some("not-a-postgres-url")),
+            ],
+            || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let err = runtime.block_on(super::run()).expect_err("config error");
+            assert!(err.to_string().contains("webhook config error:"));
+            },
+        );
+    }
+
+    #[test]
     fn handle_main_result_returns_zero_on_success() {
         let mut stderr = Vec::new();
         let exit_code = handle_main_result(Ok(()), &mut stderr);
