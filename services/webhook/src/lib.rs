@@ -1413,7 +1413,7 @@ mod tests {
     fn http_sync_notifier_new_maps_builder_errors() {
         let result = HttpSyncNotifier::new_with_result(
             "http://localhost:8084",
-            Err::<reqwest::Client, _>("builder failed"),
+            Err::<reqwest::Client, _>("builder failed".to_string()),
         );
         let message = result.err().expect("builder error");
         assert!(message.contains("builder failed"));
@@ -1423,7 +1423,7 @@ mod tests {
     fn build_http_notifier_with_result_maps_builder_errors() {
         let result = super::build_http_notifier_with_result(
             "http://localhost:8084".to_string(),
-            Err::<reqwest::Client, _>("builder failed"),
+            Err::<reqwest::Client, _>("builder failed".to_string()),
         );
         assert!(result.is_err());
         let err = result.err().expect("builder error");
