@@ -90,7 +90,23 @@ fn exit_status(exit_code: i32) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{exit_if_needed, exit_status, handle_main_result, main_impl_with, run_with};
-    use gittree_app::AppError;
+    use gittree_app::{AppError, AppServiceConfig};
+    use gittree_config::UiConfig;
+    use gittree_storage::StorageConfig;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::path::PathBuf;
+
+    fn invalid_storage_config() -> StorageConfig {
+        StorageConfig {
+            read_connection: "not-a-postgres-url".to_string(),
+            write_connection: None,
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: None,
+        }
+    }
 
     async fn serve_should_not_run(_: ()) -> Result<(), AppError> {
         panic!("serve should not run when config loading fails");
@@ -124,6 +140,27 @@ mod tests {
     async fn run_with_succeeds_when_serve_succeeds() {
         let result = run_with(|| Ok::<_, AppError>(()), |_| async { Ok::<(), AppError>(()) }).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_covers_production_serve_monomorphization() {
+        let config = AppServiceConfig {
+            bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18090)),
+            base_path: "/ui".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: invalid_storage_config(),
+            ui: UiConfig {
+                repo_root: PathBuf::from("."),
+                public_git_url: "https://gittr.ee".to_string(),
+                auth_url: "https://auth.gittr.ee".to_string(),
+                app_url: "https://app.gittr.ee".to_string(),
+                control_url: "https://api.gittr.ee".to_string(),
+            },
+        };
+        let _err = run_with(|| Ok::<_, AppError>(config), super::serve)
+            .await
+            .expect_err("storage error");
     }
 
     #[test]

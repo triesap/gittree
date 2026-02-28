@@ -84,7 +84,8 @@ fn exit_status(exit_code: i32) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{exit_status, handle_main_result, main_impl_with, maybe_exit, run_with};
-    use gittree_sync::SyncError;
+    use gittree_storage::StorageConfig;
+    use gittree_sync::{SyncConfig, SyncError};
     use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -142,6 +143,31 @@ mod tests {
     async fn run_with_succeeds_when_serve_succeeds() {
         let result = run_with(|| Ok::<_, SyncError>("config"), serve_ok).await;
         assert!(result.is_ok());
+    }
+
+    fn invalid_storage_config() -> StorageConfig {
+        StorageConfig {
+            read_connection: "not-a-postgres-url".to_string(),
+            write_connection: None,
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_covers_production_serve_monomorphization() {
+        let config = SyncConfig {
+            bind: "127.0.0.1:1".to_string(),
+            storage: invalid_storage_config(),
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: std::env::temp_dir().join("gittree-sync-main-runtime"),
+        };
+        let _err = run_with(|| Ok::<_, SyncError>(config), super::serve)
+            .await
+            .expect_err("serve error");
     }
 
     #[test]

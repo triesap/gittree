@@ -77,7 +77,8 @@ fn exit_status(exit_code: i32) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{exit_status, handle_main_result, main_impl_with, run_with};
-    use gittree_state::StateError;
+    use gittree_state::{StateConfig, StateError};
+    use gittree_storage::StorageConfig;
 
     async fn ok_serve<T>(_config: T) -> Result<(), StateError> {
         Ok(())
@@ -109,6 +110,30 @@ mod tests {
     async fn run_with_succeeds_when_serve_succeeds() {
         let result = run_with(|| Ok::<_, StateError>("config"), ok_serve).await;
         assert!(result.is_ok());
+    }
+
+    fn invalid_storage_config() -> StorageConfig {
+        StorageConfig {
+            read_connection: "not-a-postgres-url".to_string(),
+            write_connection: None,
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_covers_production_serve_monomorphization() {
+        let config = StateConfig {
+            bind: "127.0.0.1:18092".to_string(),
+            storage: invalid_storage_config(),
+            relay_urls: vec!["wss://relay.example".to_string()],
+        };
+        let _err = run_with(|| Ok::<_, StateError>(config), super::serve)
+            .await
+            .expect_err("storage error");
     }
 
     #[test]
