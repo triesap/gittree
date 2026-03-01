@@ -3,7 +3,10 @@ use gittree_coordinator::{CoordinatorConfig, HookInstallConfig, serve};
 use gittree_storage::StorageConfig;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::task::JoinHandle;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+const TEST_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -104,28 +107,55 @@ async fn http_post_status(base_url: &str, path: &str, body: &str) -> Option<u16>
     parse_status_code(status_line.trim_end())
 }
 
-#[tokio::test]
-async fn coordinator_serve_rejects_invalid_kind_with_postgres_runtime_state() {
+async fn start_runtime_server() -> (JoinHandle<Result<(), gittree_coordinator::CoordinatorError>>, String, PathBuf) {
     let port = reserve_local_port();
     let temp_dir = unique_temp_dir("gittree-coordinator-postgres-runtime");
     std::fs::create_dir_all(&temp_dir).expect("temp dir");
     let config = runtime_config(port, &temp_dir);
     let base_url = format!("http://127.0.0.1:{port}");
-
     let handle = tokio::spawn(async move { serve(config).await });
     wait_for_health(&base_url).await;
+    (handle, base_url, temp_dir)
+}
 
-    let payload = r#"{
+async fn stop_runtime_server(
+    handle: JoinHandle<Result<(), gittree_coordinator::CoordinatorError>>,
+    temp_dir: PathBuf,
+) {
+    handle.abort();
+    let _ = handle.await;
+    let _ = std::fs::remove_dir_all(temp_dir);
+}
+
+#[tokio::test]
+async fn coordinator_serve_handles_postgres_announcement_runtime_paths() {
+    let (handle, base_url, temp_dir) = start_runtime_server().await;
+
+    let invalid_payload = r#"{
       "kind":18446744073709551615,
       "event_id":"4444444444444444444444444444444444444444444444444444444444444444",
       "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
       "created_at":10,
       "tags":[]
     }"#;
-    let response = http_post_status(&base_url, "/announcement", payload).await;
-    assert_eq!(response, Some(400));
+    let invalid_response = http_post_status(&base_url, "/announcement", invalid_payload).await;
+    assert_eq!(invalid_response, Some(400));
 
-    handle.abort();
-    let _ = handle.await;
-    let _ = std::fs::remove_dir_all(temp_dir);
+    let payload = format!(
+        r#"{{
+          "kind":30617,
+          "event_id":"5555555555555555555555555555555555555555555555555555555555555555",
+          "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
+          "created_at":10,
+          "tags":[
+            ["d","repo"],
+            ["clone","https://gittr.ee/{TEST_NPUB}/repo.git"],
+            ["relays","wss://relay.example"]
+          ]
+        }}"#
+    );
+    let response = http_post_status(&base_url, "/announcement", &payload).await;
+    assert_eq!(response, Some(500));
+
+    stop_runtime_server(handle, temp_dir).await;
 }
