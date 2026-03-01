@@ -219,6 +219,9 @@ struct SyncAppState {
 type ServeFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
 type InitFn = fn() -> Result<(), SyncError>;
 type ServeFn = fn(tokio::net::TcpListener, Router) -> ServeFuture;
+type EncodeNpubFn = fn(Hrp, &[u8]) -> Result<String, ()>;
+type TryWaitFn =
+    fn(&mut std::process::Child) -> Result<Option<std::process::ExitStatus>, std::io::Error>;
 
 async fn serve_with(
     config: SyncConfig,
@@ -330,15 +333,14 @@ fn npub_from_hex(pubkey: &str) -> Result<String, SyncHttpError> {
 }
 
 fn encode_npub_bytes(bytes: &[u8]) -> Result<String, SyncHttpError> {
-    encode_npub_bytes_with(bytes, |hrp, payload| {
-        bech32::encode::<Bech32>(hrp, payload).map_err(|_| ())
-    })
+    encode_npub_bytes_with(bytes, encode_npub_bech32)
 }
 
-fn encode_npub_bytes_with<F>(bytes: &[u8], encode: F) -> Result<String, SyncHttpError>
-where
-    F: FnOnce(Hrp, &[u8]) -> Result<String, ()>,
-{
+fn encode_npub_bech32(hrp: Hrp, payload: &[u8]) -> Result<String, ()> {
+    bech32::encode::<Bech32>(hrp, payload).map_err(|_| ())
+}
+
+fn encode_npub_bytes_with(bytes: &[u8], encode: EncodeNpubFn) -> Result<String, SyncHttpError> {
     let hrp = Hrp::parse("npub").expect("static npub hrp");
     encode(hrp, bytes).map_err(|_| SyncHttpError::Internal("npub encode failed".to_string()))
 }
@@ -611,15 +613,19 @@ fn run_with_timeout(
     command: std::process::Command,
     timeout: Duration,
 ) -> Result<(), GitExecError> {
-    run_with_timeout_with(command, timeout, |child| child.try_wait())
+    run_with_timeout_with(command, timeout, try_wait_child)
+}
+
+fn try_wait_child(
+    child: &mut std::process::Child,
+) -> Result<Option<std::process::ExitStatus>, std::io::Error> {
+    child.try_wait()
 }
 
 fn run_with_timeout_with(
     mut command: std::process::Command,
     timeout: Duration,
-    mut try_wait: impl FnMut(
-        &mut std::process::Child,
-    ) -> Result<Option<std::process::ExitStatus>, std::io::Error>,
+    try_wait: TryWaitFn,
 ) -> Result<(), GitExecError> {
     let mut child = command.spawn().map_err(GitExecError::Io)?;
     let start = Instant::now();
