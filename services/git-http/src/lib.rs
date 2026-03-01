@@ -439,22 +439,20 @@ pub struct ReqwestUpstreamClient {
 
 impl ReqwestUpstreamClient {
     pub fn new(timeout: Duration) -> Result<Self, GitHttpError> {
-        let result = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|err| err.to_string());
-        Self::from_builder_result(result)
+        Self::from_builder_result(reqwest::Client::builder().timeout(timeout).build())
     }
 
-    fn from_builder_result(result: Result<reqwest::Client, String>) -> Result<Self, GitHttpError> {
-        let client = result.map_err(GitHttpError::Upstream)?;
+    fn from_builder_result<E: ToString>(
+        result: Result<reqwest::Client, E>,
+    ) -> Result<Self, GitHttpError> {
+        let client = result.map_err(|err| GitHttpError::Upstream(err.to_string()))?;
         Ok(Self { client })
     }
 
     #[cfg(test)]
     fn new_with(
         timeout: Duration,
-        build_client: fn(Duration) -> Result<reqwest::Client, String>,
+        build_client: impl FnOnce(Duration) -> Result<reqwest::Client, String>,
     ) -> Result<Self, GitHttpError> {
         Self::from_builder_result(build_client(timeout))
     }
