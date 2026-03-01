@@ -133,9 +133,8 @@ impl std::fmt::Display for StorageConfigError {
 impl std::error::Error for StorageConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, CoordinatorConfigError> {
-    let read_connection = std::env::var(ENV_STORAGE_READ_URL).map_err(|_| {
-        CoordinatorConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
-    })?;
+    let read_connection =
+        std::env::var(ENV_STORAGE_READ_URL).map_err(map_storage_read_url_missing)?;
     let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
     let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
     let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
@@ -153,11 +152,17 @@ fn storage_from_env() -> Result<StorageConfig, CoordinatorConfigError> {
         application_name,
     };
 
-    config.validate().map_err(|err| {
-        CoordinatorConfigError::Storage(StorageConfigError::InvalidConfig(err.to_string()))
-    })?;
+    config.validate().map_err(map_storage_validate_error)?;
 
     Ok(config)
+}
+
+fn map_storage_read_url_missing(_: std::env::VarError) -> CoordinatorConfigError {
+    CoordinatorConfigError::Storage(StorageConfigError::MissingEnv(ENV_STORAGE_READ_URL))
+}
+
+fn map_storage_validate_error(err: StorageError) -> CoordinatorConfigError {
+    CoordinatorConfigError::Storage(StorageConfigError::InvalidConfig(err.to_string()))
 }
 
 fn env_u32(key: &'static str) -> Result<Option<u32>, CoordinatorConfigError> {

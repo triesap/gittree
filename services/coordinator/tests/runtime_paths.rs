@@ -187,11 +187,16 @@ async fn coordinator_binary_runtime_routes_cover_non_test_monomorphizations() {
     let (mut child, base_url, runtime_dir) = start_coordinator_server(port);
     wait_for_health(&base_url, &mut child).await;
 
+    let invalid_kind_payload = r#"{
+      "kind":18446744073709551615,
+      "event_id":"4444444444444444444444444444444444444444444444444444444444444444",
+      "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at":10,
+      "tags":[]
+    }"#;
     assert_eq!(http_status(&base_url, "/health"), Some(200));
-    assert!(matches!(
-        http_post_status(&base_url, "/announcement", "{}"),
-        Some(400 | 422)
-    ));
+    let announcement_status = http_post_status(&base_url, "/announcement", invalid_kind_payload);
+    assert_eq!(announcement_status, Some(400));
 
     stop_server(&mut child);
     let _ = std::fs::remove_dir_all(runtime_dir);
