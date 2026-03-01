@@ -1050,6 +1050,25 @@ mod tests {
     }
 
     #[test]
+    fn config_maps_services_config_errors() {
+        let _guard = env_guard();
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var("GITTREE_RELAY_URLS", "wss://relay.example", &mut || {
+                    with_env_var(super::ENV_SYNC_REPO_ROOT, "/tmp/gittree-sync", &mut || {
+                        with_env_var("GITTREE_SYNC_BIND", "invalid-bind", &mut || {
+                            let err = SyncConfig::from_env().expect_err("services config error");
+                            assert!(err.to_string().contains("sync config error"));
+                        });
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn with_env_var_restores_previous_value() {
         let _guard = env_guard();
         const KEY: &str = "GITTREE_SYNC_TEST_ENV_RESTORE";
