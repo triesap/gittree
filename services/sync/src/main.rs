@@ -1,7 +1,12 @@
 use gittree_sync::{SyncConfig, SyncError, serve};
 use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 use std::process::ExitCode;
+
+type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), SyncError>>>>;
+type LoadConfigFn = fn() -> Result<SyncConfig, SyncError>;
+type ServeFn = fn(SyncConfig) -> MainRunFuture;
 
 #[cfg(not(test))]
 fn main() -> ExitCode {
@@ -11,49 +16,41 @@ fn main() -> ExitCode {
     exit_status(exit_code)
 }
 
-async fn main_impl(stderr: &mut impl Write) -> i32 {
-    main_impl_with(
-        || {
-            dotenvy::dotenv().ok();
-        },
-        run,
-        stderr,
-    )
-    .await
+async fn main_impl(stderr: &mut dyn Write) -> i32 {
+    let mut load_dotenv = || {
+        dotenvy::dotenv().ok();
+    };
+    let mut run_fn = || -> MainRunFuture { Box::pin(run()) };
+    main_impl_with(&mut load_dotenv, &mut run_fn, stderr).await
 }
 
-async fn main_impl_with<DotenvFn, RunFn, RunFut>(
-    load_dotenv: DotenvFn,
-    run_fn: RunFn,
-    stderr: &mut impl Write,
-) -> i32
-where
-    DotenvFn: FnOnce(),
-    RunFn: FnOnce() -> RunFut,
-    RunFut: Future<Output = Result<(), SyncError>>,
-{
+async fn main_impl_with(
+    load_dotenv: &mut dyn FnMut(),
+    run_fn: &mut dyn FnMut() -> MainRunFuture,
+    stderr: &mut dyn Write,
+) -> i32 {
     load_dotenv();
     handle_main_result(run_fn().await, stderr)
 }
 
 async fn run() -> Result<(), SyncError> {
-    run_with(|| SyncConfig::from_env().map_err(SyncError::Config), serve).await
+    run_with(load_sync_config, serve_boxed).await
 }
 
-async fn run_with<Config, LoadFn, ServeFn, ServeFut>(
-    load_config: LoadFn,
-    serve_fn: ServeFn,
-) -> Result<(), SyncError>
-where
-    LoadFn: FnOnce() -> Result<Config, SyncError>,
-    ServeFn: FnOnce(Config) -> ServeFut,
-    ServeFut: Future<Output = Result<(), SyncError>>,
-{
+fn load_sync_config() -> Result<SyncConfig, SyncError> {
+    SyncConfig::from_env().map_err(SyncError::Config)
+}
+
+fn serve_boxed(config: SyncConfig) -> MainRunFuture {
+    Box::pin(serve(config))
+}
+
+async fn run_with(load_config: LoadConfigFn, serve_fn: ServeFn) -> Result<(), SyncError> {
     let config = load_config()?;
     serve_fn(config).await
 }
 
-fn handle_main_result(result: Result<(), SyncError>, stderr: &mut impl Write) -> i32 {
+fn handle_main_result(result: Result<(), SyncError>, stderr: &mut dyn Write) -> i32 {
     match result {
         Ok(()) => 0,
         Err(err) => {
@@ -73,4 +70,3 @@ fn exit_status(exit_code: i32) -> ExitCode {
 
 #[cfg(test)]
 mod main_tests;
-
