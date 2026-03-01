@@ -1275,6 +1275,23 @@ mod tests {
     }
 
     #[test]
+    fn config_maps_services_config_errors() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var(ENV_UPSTREAM_URL, "https://git.example", &mut || {
+                    with_env_var("GITTREE_GIT_HTTP_BIND", "invalid-bind", &mut || {
+                        let err = GitHttpConfig::from_env().expect_err("services config error");
+                        assert_eq!(config_error_label(&err), "config");
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
     fn config_rejects_invalid_storage_numeric_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
