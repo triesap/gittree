@@ -292,7 +292,7 @@ async fn coordinator_binary_runtime_valid_announcement_exercises_postgres_and_ou
     let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
     let port = reserve_local_port();
     let (mut child, base_url, runtime_dir) =
-        start_coordinator_server_with(port, &forgejo_base_url, "wss://relay.example");
+        start_coordinator_server_with(port, &forgejo_base_url, "ws://127.0.0.1:1");
     wait_for_health(&base_url, &mut child).await;
 
     let unique = SystemTime::now()
@@ -309,7 +309,7 @@ async fn coordinator_binary_runtime_valid_announcement_exercises_postgres_and_ou
         "tags": [
             ["d", identifier.as_str()],
             ["clone", format!("https://gittr.ee/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/{identifier}.git")],
-            ["relays", "wss://relay.example"]
+            ["relays", "ws://127.0.0.1:1"]
         ]
     });
 
@@ -326,6 +326,9 @@ async fn coordinator_binary_runtime_valid_announcement_exercises_postgres_and_ou
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     assert_eq!(status, reqwest::StatusCode::OK, "announcement body: {body}");
+
+    // Let the outbox worker run at least one poll cycle to execute runtime publish paths.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     stop_server(&mut child);
     let _ = std::fs::remove_dir_all(runtime_dir);
