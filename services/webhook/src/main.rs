@@ -5,6 +5,8 @@ use std::pin::Pin;
 use std::process::ExitCode;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), WebhookError>>>>;
+type LoadConfigFn = fn() -> Result<WebhookConfig, WebhookError>;
+type ServeFn = fn(WebhookConfig) -> MainRunFuture;
 
 fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
@@ -41,22 +43,18 @@ async fn main_impl_with(
 }
 
 async fn run() -> Result<(), WebhookError> {
-    run_with(
-        || WebhookConfig::from_env().map_err(WebhookError::Config),
-        serve,
-    )
-    .await
+    run_with(load_config, serve_boxed).await
 }
 
-async fn run_with<Config, LoadFn, ServeFn, ServeFut>(
-    load_config: LoadFn,
-    serve_fn: ServeFn,
-) -> Result<(), WebhookError>
-where
-    LoadFn: FnOnce() -> Result<Config, WebhookError>,
-    ServeFn: FnOnce(Config) -> ServeFut,
-    ServeFut: Future<Output = Result<(), WebhookError>>,
-{
+fn load_config() -> Result<WebhookConfig, WebhookError> {
+    WebhookConfig::from_env().map_err(WebhookError::Config)
+}
+
+fn serve_boxed(config: WebhookConfig) -> MainRunFuture {
+    Box::pin(serve(config))
+}
+
+async fn run_with(load_config: LoadConfigFn, serve_fn: ServeFn) -> Result<(), WebhookError> {
     let config = load_config()?;
     serve_fn(config).await
 }
@@ -126,16 +124,36 @@ mod tests {
         }
     }
 
-    async fn serve_ok(_: ()) -> Result<(), WebhookError> {
-        Ok(())
+    fn runtime_config() -> WebhookConfig {
+        WebhookConfig {
+            bind: "127.0.0.1:18093".to_string(),
+            storage: invalid_storage_config(),
+            sync_url: "http://127.0.0.1:8087".to_string(),
+            forgejo_secret: "test-secret".to_string(),
+        }
+    }
+
+    fn load_runtime_config() -> Result<WebhookConfig, WebhookError> {
+        Ok(runtime_config())
+    }
+
+    fn load_config_error() -> Result<WebhookConfig, WebhookError> {
+        Err(WebhookError::Serve("config failed".to_string()))
+    }
+
+    fn serve_ok(_: WebhookConfig) -> super::MainRunFuture {
+        Box::pin(async { Ok::<(), WebhookError>(()) })
+    }
+
+    fn serve_err(_: WebhookConfig) -> super::MainRunFuture {
+        Box::pin(async {
+            Err::<(), WebhookError>(WebhookError::Serve("serve failed".to_string()))
+        })
     }
 
     #[tokio::test]
     async fn run_with_returns_config_errors() {
-        let err = run_with(
-            || Err::<(), WebhookError>(WebhookError::Serve("config failed".to_string())),
-            serve_ok,
-        )
+        let err = run_with(load_config_error, serve_ok)
         .await
         .expect_err("config error");
         assert_eq!(err.to_string(), "webhook serve error: config failed");
@@ -143,10 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_returns_serve_errors() {
-        let err = run_with(
-            || Ok::<_, WebhookError>("config"),
-            |_| async { Err::<(), WebhookError>(WebhookError::Serve("serve failed".to_string())) },
-        )
+        let err = run_with(load_runtime_config, serve_err)
         .await
         .expect_err("serve error");
         assert_eq!(err.to_string(), "webhook serve error: serve failed");
@@ -154,7 +169,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(|| Ok::<_, WebhookError>(()), serve_ok).await;
+        let result = run_with(load_runtime_config, serve_ok).await;
         assert!(result.is_ok());
     }
 
@@ -172,13 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_covers_production_serve_monomorphization() {
-        let config = WebhookConfig {
-            bind: "127.0.0.1:18093".to_string(),
-            storage: invalid_storage_config(),
-            sync_url: "http://127.0.0.1:8087".to_string(),
-            forgejo_secret: "test-secret".to_string(),
-        };
-        let _err = run_with(|| Ok::<_, WebhookError>(config), super::serve)
+        let _err = run_with(load_runtime_config, super::serve_boxed)
             .await
             .expect_err("storage error");
     }
