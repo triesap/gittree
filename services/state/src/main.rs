@@ -1,7 +1,12 @@
 use gittree_state::{StateConfig, StateError, serve};
 use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 use std::process::ExitCode;
+
+type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), StateError>>>>;
+type LoadConfigFn = fn() -> Result<StateConfig, StateError>;
+type ServeFn = fn(StateConfig) -> MainRunFuture;
 
 fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
@@ -10,53 +15,41 @@ fn main() -> ExitCode {
     exit_status(exit_code)
 }
 
-async fn main_impl(stderr: &mut impl Write) -> i32 {
-    main_impl_with(
-        || {
-            dotenvy::dotenv().ok();
-        },
-        run,
-        stderr,
-    )
-    .await
+async fn main_impl(stderr: &mut dyn Write) -> i32 {
+    let mut load_dotenv = || {
+        dotenvy::dotenv().ok();
+    };
+    let mut run_fn = || -> MainRunFuture { Box::pin(run()) };
+    main_impl_with(&mut load_dotenv, &mut run_fn, stderr).await
 }
 
-async fn main_impl_with<DotenvFn, RunFn, RunFut>(
-    load_dotenv: DotenvFn,
-    run_fn: RunFn,
-    stderr: &mut impl Write,
-) -> i32
-where
-    DotenvFn: FnOnce(),
-    RunFn: FnOnce() -> RunFut,
-    RunFut: Future<Output = Result<(), StateError>>,
-{
+async fn main_impl_with(
+    load_dotenv: &mut dyn FnMut(),
+    run_fn: &mut dyn FnMut() -> MainRunFuture,
+    stderr: &mut dyn Write,
+) -> i32 {
     load_dotenv();
     handle_main_result(run_fn().await, stderr)
 }
 
 async fn run() -> Result<(), StateError> {
-    run_with(
-        || StateConfig::from_env().map_err(StateError::Config),
-        serve,
-    )
-    .await
+    run_with(load_config, serve_boxed).await
 }
 
-async fn run_with<Config, LoadFn, ServeFn, ServeFut>(
-    load_config: LoadFn,
-    serve_fn: ServeFn,
-) -> Result<(), StateError>
-where
-    LoadFn: FnOnce() -> Result<Config, StateError>,
-    ServeFn: FnOnce(Config) -> ServeFut,
-    ServeFut: Future<Output = Result<(), StateError>>,
-{
+fn load_config() -> Result<StateConfig, StateError> {
+    StateConfig::from_env().map_err(StateError::Config)
+}
+
+fn serve_boxed(config: StateConfig) -> MainRunFuture {
+    Box::pin(serve(config))
+}
+
+async fn run_with(load_config: LoadConfigFn, serve_fn: ServeFn) -> Result<(), StateError> {
     let config = load_config()?;
     serve_fn(config).await
 }
 
-fn handle_main_result(result: Result<(), StateError>, stderr: &mut impl Write) -> i32 {
+fn handle_main_result(result: Result<(), StateError>, stderr: &mut dyn Write) -> i32 {
     match result {
         Ok(()) => 0,
         Err(err) => {
@@ -80,38 +73,6 @@ mod tests {
     use gittree_state::{StateConfig, StateError};
     use gittree_storage::StorageConfig;
 
-    async fn ok_serve<T>(_config: T) -> Result<(), StateError> {
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn run_with_returns_config_errors() {
-        let err = run_with(
-            || Err::<(), StateError>(StateError::Serve("config failed".to_string())),
-            ok_serve,
-        )
-        .await
-        .expect_err("config error");
-        assert!(matches!(err, StateError::Serve(message) if message == "config failed"));
-    }
-
-    #[tokio::test]
-    async fn run_with_returns_serve_errors() {
-        let err = run_with(
-            || Ok::<_, StateError>("config"),
-            |_| async { Err::<(), StateError>(StateError::Serve("serve failed".to_string())) },
-        )
-        .await
-        .expect_err("serve error");
-        assert!(matches!(err, StateError::Serve(message) if message == "serve failed"));
-    }
-
-    #[tokio::test]
-    async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(|| Ok::<_, StateError>("config"), ok_serve).await;
-        assert!(result.is_ok());
-    }
-
     fn invalid_storage_config() -> StorageConfig {
         StorageConfig {
             read_connection: "not-a-postgres-url".to_string(),
@@ -124,14 +85,55 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn run_with_covers_production_serve_monomorphization() {
-        let config = StateConfig {
+    fn runtime_config() -> StateConfig {
+        StateConfig {
             bind: "127.0.0.1:18092".to_string(),
             storage: invalid_storage_config(),
             relay_urls: vec!["wss://relay.example".to_string()],
-        };
-        let _err = run_with(|| Ok::<_, StateError>(config), super::serve)
+        }
+    }
+
+    fn load_runtime_config() -> Result<StateConfig, StateError> {
+        Ok(runtime_config())
+    }
+
+    fn load_config_error() -> Result<StateConfig, StateError> {
+        Err(StateError::Serve("config failed".to_string()))
+    }
+
+    fn serve_ok(_: StateConfig) -> super::MainRunFuture {
+        Box::pin(async { Ok::<(), StateError>(()) })
+    }
+
+    fn serve_err(_: StateConfig) -> super::MainRunFuture {
+        Box::pin(async { Err::<(), StateError>(StateError::Serve("serve failed".to_string())) })
+    }
+
+    #[tokio::test]
+    async fn run_with_returns_config_errors() {
+        let err = run_with(load_config_error, serve_ok)
+            .await
+            .expect_err("config error");
+        assert!(matches!(err, StateError::Serve(message) if message == "config failed"));
+    }
+
+    #[tokio::test]
+    async fn run_with_returns_serve_errors() {
+        let err = run_with(load_runtime_config, serve_err)
+            .await
+            .expect_err("serve error");
+        assert!(matches!(err, StateError::Serve(message) if message == "serve failed"));
+    }
+
+    #[tokio::test]
+    async fn run_with_succeeds_when_serve_succeeds() {
+        let result = run_with(load_runtime_config, serve_ok).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_covers_production_serve_monomorphization() {
+        let _err = run_with(load_runtime_config, super::serve_boxed)
             .await
             .expect_err("storage error");
     }
@@ -158,12 +160,11 @@ mod tests {
     #[tokio::test]
     async fn main_impl_with_reports_errors() {
         let mut stderr = Vec::new();
-        let exit_code = main_impl_with(
-            || {},
-            || async { Err::<(), StateError>(StateError::Serve("boom".to_string())) },
-            &mut stderr,
-        )
-        .await;
+        let mut load_dotenv = || {};
+        let mut run_fn = || -> super::MainRunFuture {
+            Box::pin(async { Err::<(), StateError>(StateError::Serve("boom".to_string())) })
+        };
+        let exit_code = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
 
         assert_eq!(exit_code, 1);
         let message = String::from_utf8(stderr).expect("utf8");
@@ -175,15 +176,12 @@ mod tests {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let loader_called = called.clone();
         let mut stderr = Vec::new();
+        let mut load_dotenv = move || {
+            loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+        let mut run_fn = || -> super::MainRunFuture { Box::pin(async { Ok::<(), StateError>(()) }) };
 
-        let _ = main_impl_with(
-            move || {
-                loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
-            },
-            || async { Ok::<(), StateError>(()) },
-            &mut stderr,
-        )
-        .await;
+        let _ = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
 
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
     }
