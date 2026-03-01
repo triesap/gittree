@@ -8,6 +8,8 @@ fn base_command() -> Command {
         "GITTREE_STORAGE_READ_URL",
         "GITTREE_GIT_HTTP_UPSTREAM_URL",
         "GITTREE_GIT_HTTP_BIND",
+        "GITTREE_AUTH_EMAIL_DOMAIN",
+        "GITTREE_AUTH_MAX_SKEW_SECONDS",
         "GITTREE_LOG_JSON",
         "GITTREE_LOG_STDOUT",
         "GITTREE_LOG_DIR",
@@ -55,4 +57,23 @@ fn git_http_binary_occupied_bind_exits_with_serve_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("git-http service failed"));
     assert!(stderr.contains("git-http serve error"));
+}
+
+#[test]
+fn git_http_binary_invalid_auth_skew_exits_with_config_error() {
+    let output = base_command()
+        .env(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+        )
+        .env("GITTREE_GIT_HTTP_UPSTREAM_URL", "https://git.example")
+        .env("GITTREE_GIT_HTTP_BIND", "127.0.0.1:0")
+        .env("GITTREE_AUTH_MAX_SKEW_SECONDS", "not-a-number")
+        .output()
+        .expect("run git-http binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("git-http service failed"));
+    assert!(stderr.contains("git-http config error"));
 }
