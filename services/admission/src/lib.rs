@@ -1204,6 +1204,20 @@ mod tests {
     }
 
     #[test]
+    fn config_maps_services_config_errors() {
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://localhost/test",
+            &mut || {
+                with_env_var("GITTREE_ADMISSION_BIND", "invalid-bind", &mut || {
+                    let err = AdmissionConfig::from_env().expect_err("services config error");
+                    assert!(err.to_string().contains("admission config error"));
+                });
+            },
+        );
+    }
+
+    #[test]
     fn config_ignores_empty_numeric_values_and_missing_admin_keys() {
         with_env_var(
             super::ENV_STORAGE_READ_URL,
