@@ -1,4 +1,9 @@
+use axum::extract::Path;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use gittree_coordinator::{CoordinatorConfig, CoordinatorConfigError, StorageConfigError};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -62,7 +67,7 @@ fn runtime_storage_url() -> String {
     std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "postgres://user:pass@127.0.0.1:1/gittree".to_string())
+        .unwrap_or_else(|| "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string())
 }
 
 fn new_runtime_dir() -> PathBuf {
@@ -82,6 +87,18 @@ fn write_hook_source(path: &PathBuf, name: &str) -> PathBuf {
 }
 
 fn start_coordinator_server(port: u16) -> (Child, String, PathBuf) {
+    start_coordinator_server_with(
+        port,
+        "http://127.0.0.1:1",
+        "wss://relay.example",
+    )
+}
+
+fn start_coordinator_server_with(
+    port: u16,
+    forgejo_base_url: &str,
+    relay_urls: &str,
+) -> (Child, String, PathBuf) {
     let runtime_dir = new_runtime_dir();
     let repo_root = runtime_dir.join("repos");
     std::fs::create_dir_all(&repo_root).expect("create repo root");
@@ -102,12 +119,12 @@ fn start_coordinator_server(port: u16) -> (Child, String, PathBuf) {
         .env("GITTREE_COORDINATOR_REPO_ROOT", &repo_root)
         .env("GITTREE_COORDINATOR_PRE_RECEIVE_HOOK", &pre_hook)
         .env("GITTREE_COORDINATOR_POST_RECEIVE_HOOK", &post_hook)
-        .env("GITTREE_FORGEJO_BASE_URL", "http://127.0.0.1:1")
+        .env("GITTREE_FORGEJO_BASE_URL", forgejo_base_url)
         .env("GITTREE_FORGEJO_API_TOKEN", "token")
         .env("GITTREE_FORGEJO_OWNER", "owner")
         .env("GITTREE_FORGEJO_WEBHOOK_URL", "http://127.0.0.1:1/webhook")
         .env("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret")
-        .env("GITTREE_RELAY_URLS", "wss://relay.example")
+        .env("GITTREE_RELAY_URLS", relay_urls)
         .env("GITTREE_LOG_STDOUT", "false")
         .env("GITTREE_METRICS_ENABLED", "false")
         .env("GITTREE_LOG_DIR", runtime_dir.join("logs"))
@@ -117,6 +134,74 @@ fn start_coordinator_server(port: u16) -> (Child, String, PathBuf) {
 
     let child = command.spawn().expect("spawn coordinator");
     (child, base_url, runtime_dir)
+}
+
+async fn get_repo_not_found(Path((_owner, _repo)): Path<(String, String)>) -> StatusCode {
+    StatusCode::NOT_FOUND
+}
+
+async fn create_repo_for_org(
+    Path(owner): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    let Some(name) = payload.get("name").and_then(Value::as_str) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "full_name": format!("{owner}/{name}"),
+            "name": name,
+            "owner": {"username": owner},
+            "html_url": Value::Null
+        })),
+    ))
+}
+
+async fn create_repo_for_user(
+    Json(payload): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    let Some(name) = payload.get("name").and_then(Value::as_str) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let owner = "owner";
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "full_name": format!("{owner}/{name}"),
+            "name": name,
+            "owner": {"username": owner},
+            "html_url": Value::Null
+        })),
+    ))
+}
+
+async fn list_hooks_for_repo(Path((_owner, _repo)): Path<(String, String)>) -> Json<Value> {
+    Json(json!([]))
+}
+
+async fn create_hook_for_repo(Path((_owner, _repo)): Path<(String, String)>) -> StatusCode {
+    StatusCode::CREATED
+}
+
+async fn start_mock_forgejo_server() -> (tokio::task::JoinHandle<()>, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("forgejo bind");
+    let addr = listener.local_addr().expect("forgejo addr");
+    let app = Router::new()
+        .route("/api/v1/repos/:owner/:repo", get(get_repo_not_found))
+        .route("/api/v1/orgs/:owner/repos", post(create_repo_for_org))
+        .route("/api/v1/user/repos", post(create_repo_for_user))
+        .route("/api/v1/admin/users/:owner/repos", post(create_repo_for_org))
+        .route(
+            "/api/v1/repos/:owner/:repo/hooks",
+            get(list_hooks_for_repo).post(create_hook_for_repo),
+        );
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (handle, format!("http://{addr}"))
 }
 
 fn parse_status_code(response: &str) -> Option<u16> {
@@ -200,6 +285,52 @@ async fn coordinator_binary_runtime_routes_cover_non_test_monomorphizations() {
 
     stop_server(&mut child);
     let _ = std::fs::remove_dir_all(runtime_dir);
+}
+
+#[tokio::test]
+async fn coordinator_binary_runtime_valid_announcement_exercises_postgres_and_outbox_paths() {
+    let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
+    let port = reserve_local_port();
+    let (mut child, base_url, runtime_dir) =
+        start_coordinator_server_with(port, &forgejo_base_url, "wss://relay.example");
+    wait_for_health(&base_url, &mut child).await;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let event_id = format!("{unique:064x}");
+    let identifier = format!("repo-{unique}");
+    let payload = json!({
+        "kind": 30617_u32,
+        "event_id": event_id,
+        "pubkey": "1111111111111111111111111111111111111111111111111111111111111111",
+        "created_at": 10_u64,
+        "tags": [
+            ["d", identifier.as_str()],
+            ["clone", format!("https://gittr.ee/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/{identifier}.git")],
+            ["relays", "wss://relay.example"]
+        ]
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("client");
+    let response = client
+        .post(format!("{base_url}/announcement"))
+        .json(&payload)
+        .send()
+        .await
+        .expect("announcement request");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(status, reqwest::StatusCode::OK, "announcement body: {body}");
+
+    stop_server(&mut child);
+    let _ = std::fs::remove_dir_all(runtime_dir);
+    forgejo_handle.abort();
+    let _ = forgejo_handle.await;
 }
 
 #[test]

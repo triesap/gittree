@@ -1754,6 +1754,22 @@ mod tests {
     }
 
     #[test]
+    fn env_u64_invalid_value_maps_storage_invalid_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        const KEY: &str = "GITTREE_COORDINATOR_TEST_INVALID_U64";
+        with_env_var(KEY, "not-a-u64", &mut || {
+            let err = super::env_u64(KEY).expect_err("invalid u64 should fail");
+            assert!(matches!(
+                err,
+                super::CoordinatorConfigError::Storage(super::StorageConfigError::InvalidEnv {
+                    key: KEY,
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
     fn config_rejects_missing_read_url_and_invalid_pool_ranges() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_required_coordinator_envs(&mut || {

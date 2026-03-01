@@ -2082,6 +2082,7 @@ dependencies = [
  "gittree-relay-adapter",
  "gittree-storage",
  "hex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "time",
