@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -71,12 +72,16 @@ fn runtime_storage_url() -> String {
 }
 
 fn new_runtime_dir() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "gittree-coordinator-runtime-{}",
+        "gittree-coordinator-runtime-{}-{}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
-            .as_nanos()
+            .as_nanos(),
+        std::process::id(),
+        counter
     ))
 }
 
@@ -329,6 +334,30 @@ async fn coordinator_binary_runtime_valid_announcement_exercises_postgres_and_ou
 
     // Let the outbox worker run at least one poll cycle to execute runtime publish paths.
     tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    stop_server(&mut child);
+    let _ = std::fs::remove_dir_all(runtime_dir);
+    forgejo_handle.abort();
+    let _ = forgejo_handle.await;
+}
+
+#[tokio::test]
+async fn coordinator_binary_runtime_announcement_parse_error_returns_bad_request() {
+    let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
+    let port = reserve_local_port();
+    let (mut child, base_url, runtime_dir) =
+        start_coordinator_server_with(port, &forgejo_base_url, "wss://relay.example");
+    wait_for_health(&base_url, &mut child).await;
+
+    let payload = r#"{
+      "kind":30617,
+      "event_id":"9999999999999999999999999999999999999999999999999999999999999999",
+      "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at":10,
+      "tags":[]
+    }"#;
+    let status = http_post_status(&base_url, "/announcement", payload);
+    assert_eq!(status, Some(400));
 
     stop_server(&mut child);
     let _ = std::fs::remove_dir_all(runtime_dir);
