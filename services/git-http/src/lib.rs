@@ -449,13 +449,6 @@ impl ReqwestUpstreamClient {
         Ok(Self { client })
     }
 
-    #[cfg(test)]
-    fn new_with(
-        timeout: Duration,
-        build_client: impl FnOnce(Duration) -> Result<reqwest::Client, String>,
-    ) -> Result<Self, GitHttpError> {
-        Self::from_builder_result(build_client(timeout))
-    }
 }
 
 #[async_trait]
@@ -3016,9 +3009,9 @@ mod tests {
 
     #[test]
     fn reqwest_upstream_client_new_maps_builder_errors() {
-        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| {
-            Err("builder failed".to_string())
-        });
+        let result = super::ReqwestUpstreamClient::from_builder_result::<String>(Err(
+            "builder failed".to_string(),
+        ));
         assert!(result.is_err());
         let err = result.err().expect("builder error expected");
         assert_eq!(git_http_error_label(&err), "upstream");
@@ -3027,13 +3020,27 @@ mod tests {
 
     #[test]
     fn reqwest_upstream_client_new_with_supports_success_path() {
-        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |timeout| {
-            reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .map_err(|err| err.to_string())
-        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("reqwest client");
+        let result = super::ReqwestUpstreamClient::from_builder_result::<reqwest::Error>(Ok(client));
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reqwest_upstream_client_from_builder_result_covers_reqwest_error_type() {
+        let reqwest_err = reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("expected reqwest transport error");
+
+        let result =
+            super::ReqwestUpstreamClient::from_builder_result::<reqwest::Error>(Err(reqwest_err));
+        assert!(result.is_err());
+        let err = result.err().expect("builder error expected");
+        assert_eq!(git_http_error_label(&err), "upstream");
     }
 
     #[tokio::test]
