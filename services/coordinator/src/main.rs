@@ -4,6 +4,8 @@ use std::io::Write;
 use std::pin::Pin;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), CoordinatorError>>>>;
+type LoadConfigFn = fn() -> Result<CoordinatorConfig, CoordinatorError>;
+type ServeFn = fn(CoordinatorConfig) -> MainRunFuture;
 
 fn main() {
     let mut stderr = std::io::stderr();
@@ -31,22 +33,18 @@ async fn main_impl_with(
 }
 
 async fn run() -> Result<(), CoordinatorError> {
-    run_with(
-        || CoordinatorConfig::from_env().map_err(CoordinatorError::Config),
-        serve,
-    )
-    .await
+    run_with(load_config, serve_boxed).await
 }
 
-async fn run_with<Config, LoadFn, ServeFn, ServeFut>(
-    load_config: LoadFn,
-    serve_fn: ServeFn,
-) -> Result<(), CoordinatorError>
-where
-    LoadFn: FnOnce() -> Result<Config, CoordinatorError>,
-    ServeFn: FnOnce(Config) -> ServeFut,
-    ServeFut: Future<Output = Result<(), CoordinatorError>>,
-{
+fn load_config() -> Result<CoordinatorConfig, CoordinatorError> {
+    CoordinatorConfig::from_env().map_err(CoordinatorError::Config)
+}
+
+fn serve_boxed(config: CoordinatorConfig) -> MainRunFuture {
+    Box::pin(serve(config))
+}
+
+async fn run_with(load_config: LoadConfigFn, serve_fn: ServeFn) -> Result<(), CoordinatorError> {
     let config = load_config()?;
     serve_fn(config).await
 }
@@ -70,18 +68,64 @@ fn exit_if_needed(exit_code: i32, exit_fn: &mut dyn FnMut(i32)) {
 #[cfg(test)]
 mod tests {
     use super::{exit_if_needed, handle_main_result, main_impl_with, run_with};
-    use gittree_coordinator::CoordinatorError;
+    use gittree_config::ForgejoConfig;
+    use gittree_coordinator::{CoordinatorConfig, CoordinatorError, HookInstallConfig};
+    use gittree_storage::StorageConfig;
 
-    async fn serve_ok(_: ()) -> Result<(), CoordinatorError> {
-        Ok(())
+    fn invalid_storage_config() -> StorageConfig {
+        StorageConfig {
+            read_connection: "not-a-postgres-url".to_string(),
+            write_connection: None,
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: None,
+        }
+    }
+
+    fn runtime_config() -> CoordinatorConfig {
+        CoordinatorConfig {
+            bind: "127.0.0.1:1".to_string(),
+            storage: invalid_storage_config(),
+            relay_urls: vec!["wss://relay.example".to_string()],
+            repo_root: std::env::temp_dir().join("gittree-coordinator-main-runtime"),
+            hooks: HookInstallConfig {
+                pre_receive_source: std::env::temp_dir().join("pre-receive"),
+                post_receive_source: std::env::temp_dir().join("post-receive"),
+            },
+            forgejo: ForgejoConfig {
+                base_url: "https://gittr.ee".to_string(),
+                api_token: "token".to_string(),
+                owner: "owner".to_string(),
+                webhook_url: "https://gittr.ee/hook".to_string(),
+                webhook_secret: "secret".to_string(),
+                repo_private: true,
+            },
+        }
+    }
+
+    fn load_runtime_config() -> Result<CoordinatorConfig, CoordinatorError> {
+        Ok(runtime_config())
+    }
+
+    fn load_config_error() -> Result<CoordinatorConfig, CoordinatorError> {
+        Err(CoordinatorError::Serve("config failed".to_string()))
+    }
+
+    fn serve_ok(_: CoordinatorConfig) -> super::MainRunFuture {
+        Box::pin(async { Ok::<(), CoordinatorError>(()) })
+    }
+
+    fn serve_err(_: CoordinatorConfig) -> super::MainRunFuture {
+        Box::pin(
+            async { Err::<(), CoordinatorError>(CoordinatorError::Serve("serve failed".to_string())) },
+        )
     }
 
     #[tokio::test]
     async fn run_with_returns_config_errors() {
-        let err = run_with(
-            || Err::<(), CoordinatorError>(CoordinatorError::Serve("config failed".to_string())),
-            serve_ok,
-        )
+        let err = run_with(load_config_error, serve_ok)
         .await
         .expect_err("config error");
         assert!(matches!(err, CoordinatorError::Serve(message) if message == "config failed"));
@@ -89,12 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_returns_serve_errors() {
-        let err = run_with(
-            || Ok::<_, CoordinatorError>("config"),
-            |_| async {
-                Err::<(), CoordinatorError>(CoordinatorError::Serve("serve failed".to_string()))
-            },
-        )
+        let err = run_with(load_runtime_config, serve_err)
         .await
         .expect_err("serve error");
         assert!(matches!(err, CoordinatorError::Serve(message) if message == "serve failed"));
@@ -102,8 +141,15 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(|| Ok::<_, CoordinatorError>(()), serve_ok).await;
+        let result = run_with(load_runtime_config, serve_ok).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_covers_production_serve_monomorphization() {
+        let _err = run_with(load_runtime_config, super::serve_boxed)
+            .await
+            .expect_err("serve error");
     }
 
     #[test]
