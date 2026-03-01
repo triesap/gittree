@@ -7,6 +7,8 @@ use std::pin::Pin;
 use std::process::ExitCode;
 
 type MainRunFuture = Pin<Box<dyn Future<Output = Result<(), AppError>>>>;
+type LoadConfigFn = fn() -> Result<AppServiceConfig, AppError>;
+type ServeFn = fn(AppServiceConfig) -> MainRunFuture;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -43,22 +45,18 @@ async fn main_impl_with(
 }
 
 async fn run() -> Result<(), AppError> {
-    run_with(
-        || AppServiceConfig::from_env().map_err(AppError::Config),
-        serve,
-    )
-    .await
+    run_with(load_config, serve_boxed).await
 }
 
-async fn run_with<Config, LoadFn, ServeFn, ServeFut>(
-    load_config: LoadFn,
-    serve_fn: ServeFn,
-) -> Result<(), AppError>
-where
-    LoadFn: FnOnce() -> Result<Config, AppError>,
-    ServeFn: FnOnce(Config) -> ServeFut,
-    ServeFut: Future<Output = Result<(), AppError>>,
-{
+fn load_config() -> Result<AppServiceConfig, AppError> {
+    AppServiceConfig::from_env().map_err(AppError::Config)
+}
+
+fn serve_boxed(config: AppServiceConfig) -> MainRunFuture {
+    Box::pin(serve(config))
+}
+
+async fn run_with(load_config: LoadConfigFn, serve_fn: ServeFn) -> Result<(), AppError> {
     let config = load_config()?;
     serve_fn(config).await
 }
@@ -108,43 +106,10 @@ mod tests {
         }
     }
 
-    async fn serve_should_not_run(_: ()) -> Result<(), AppError> {
-        panic!("serve should not run when config loading fails");
-    }
-
     fn noop_exit(_: i32) {}
 
-    #[tokio::test]
-    async fn run_with_returns_config_errors() {
-        let err = run_with(
-            || Err::<(), AppError>(AppError::Serve("config failed".to_string())),
-            serve_should_not_run,
-        )
-        .await
-        .expect_err("config error");
-        assert_eq!(err.to_string(), "app serve error: config failed");
-    }
-
-    #[tokio::test]
-    async fn run_with_returns_serve_errors() {
-        let err = run_with(
-            || Ok::<_, AppError>(()),
-            |_| async { Err::<(), AppError>(AppError::Serve("serve failed".to_string())) },
-        )
-        .await
-        .expect_err("serve error");
-        assert_eq!(err.to_string(), "app serve error: serve failed");
-    }
-
-    #[tokio::test]
-    async fn run_with_succeeds_when_serve_succeeds() {
-        let result = run_with(|| Ok::<_, AppError>(()), |_| async { Ok::<(), AppError>(()) }).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn run_with_covers_production_serve_monomorphization() {
-        let config = AppServiceConfig {
+    fn runtime_config() -> AppServiceConfig {
+        AppServiceConfig {
             bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18090)),
             base_path: "/ui".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
@@ -157,8 +122,50 @@ mod tests {
                 app_url: "https://app.gittr.ee".to_string(),
                 control_url: "https://api.gittr.ee".to_string(),
             },
-        };
-        let _err = run_with(|| Ok::<_, AppError>(config), super::serve)
+        }
+    }
+
+    fn load_runtime_config() -> Result<AppServiceConfig, AppError> {
+        Ok(runtime_config())
+    }
+
+    fn load_config_error() -> Result<AppServiceConfig, AppError> {
+        Err(AppError::Serve("config failed".to_string()))
+    }
+
+    fn serve_ok(_: AppServiceConfig) -> super::MainRunFuture {
+        Box::pin(async { Ok::<(), AppError>(()) })
+    }
+
+    fn serve_err(_: AppServiceConfig) -> super::MainRunFuture {
+        Box::pin(async { Err::<(), AppError>(AppError::Serve("serve failed".to_string())) })
+    }
+
+    #[tokio::test]
+    async fn run_with_returns_config_errors() {
+        let err = run_with(load_config_error, serve_ok)
+        .await
+        .expect_err("config error");
+        assert_eq!(err.to_string(), "app serve error: config failed");
+    }
+
+    #[tokio::test]
+    async fn run_with_returns_serve_errors() {
+        let err = run_with(load_runtime_config, serve_err)
+        .await
+        .expect_err("serve error");
+        assert_eq!(err.to_string(), "app serve error: serve failed");
+    }
+
+    #[tokio::test]
+    async fn run_with_succeeds_when_serve_succeeds() {
+        let result = run_with(load_runtime_config, serve_ok).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_with_covers_production_serve_monomorphization() {
+        let _err = run_with(load_runtime_config, super::serve_boxed)
             .await
             .expect_err("storage error");
     }
@@ -218,12 +225,6 @@ mod tests {
         assert_eq!(exit_status(1), std::process::ExitCode::from(1));
         assert_eq!(exit_status(999), std::process::ExitCode::from(u8::MAX));
         assert_eq!(exit_status(-1), std::process::ExitCode::from(1));
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "serve should not run when config loading fails")]
-    async fn serve_should_not_run_panics_when_called() {
-        let _ = serve_should_not_run(()).await;
     }
 
     #[tokio::test]
