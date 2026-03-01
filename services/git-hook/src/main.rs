@@ -8,25 +8,33 @@ mod cli;
 
 use cli::{HookCli, HookRunConfig};
 
+type InitObservabilityFn = fn() -> Result<(), String>;
+type RunFn = fn() -> Result<(), HookServiceError>;
+
 fn init_observability() -> Result<gittree_observability::ObservabilityHandle, String> {
     let config = gittree_observability::ObservabilityConfig::from_env("gittree-git-hook")
         .map_err(|err| err.to_string())?;
     gittree_observability::init(&config).map_err(|err| err.to_string())
 }
 
+fn init_observability_unit() -> Result<(), String> {
+    init_observability().map(|_| ())
+}
+
 fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let exit_code = main_impl(&mut stderr);
     let mut status = ExitCode::SUCCESS;
-    exit_if_needed(exit_code, |code| {
+    let mut set_status = |code| {
         status = exit_status(code);
-    });
+    };
+    exit_if_needed(exit_code, &mut set_status);
     status
 }
 
 fn main_impl(stderr: &mut impl Write) -> i32 {
     dotenvy::dotenv().ok();
-    handle_main_result(try_main(init_observability, run), stderr)
+    handle_main_result(try_main(init_observability_unit, run), stderr)
 }
 
 fn run() -> Result<(), HookServiceError> {
@@ -41,11 +49,7 @@ where
     run_hook_fn(config.hook, config.stdin_file.as_deref())
 }
 
-fn try_main<FInit, FRun, T>(init_observability_fn: FInit, run_fn: FRun) -> Result<(), String>
-where
-    FInit: FnOnce() -> Result<T, String>,
-    FRun: FnOnce() -> Result<(), HookServiceError>,
-{
+fn try_main(init_observability_fn: InitObservabilityFn, run_fn: RunFn) -> Result<(), String> {
     let _observability =
         init_observability_fn().map_err(|err| format!("git hook observability failed: {err}"))?;
     run_fn().map_err(|err| format!("git hook failed: {err}"))
@@ -61,12 +65,9 @@ fn handle_main_result(result: Result<(), String>, stderr: &mut impl Write) -> i3
     }
 }
 
-fn exit_if_needed<F, R>(exit_code: i32, exit_fn: F)
-where
-    F: FnOnce(i32) -> R,
-{
+fn exit_if_needed(exit_code: i32, exit_fn: &mut dyn FnMut(i32)) {
     if exit_code != 0 {
-        let _ = exit_fn(exit_code);
+        exit_fn(exit_code);
     }
 }
 
@@ -91,6 +92,18 @@ mod tests {
 
     fn noop_run() -> Result<(), HookServiceError> {
         Ok(())
+    }
+
+    fn observability_ok() -> Result<(), String> {
+        Ok(())
+    }
+
+    fn observability_err() -> Result<(), String> {
+        Err("obs boom".to_string())
+    }
+
+    fn run_err() -> Result<(), HookServiceError> {
+        Err(HookServiceError::Core("hook boom".to_string()))
     }
 
     fn noop_exit(_code: i32) {}
@@ -173,24 +186,19 @@ mod tests {
 
     #[test]
     fn try_main_reports_observability_error() {
-        let err = try_main(|| Err::<(), _>("obs boom".to_string()), noop_run)
-            .expect_err("expected error");
+        let err = try_main(observability_err, noop_run).expect_err("expected error");
         assert!(err.contains("git hook observability failed"));
     }
 
     #[test]
     fn try_main_reports_hook_error() {
-        let err = try_main(
-            || Ok::<(), String>(()),
-            || Err(HookServiceError::Core("hook boom".to_string())),
-        )
-        .expect_err("expected error");
+        let err = try_main(observability_ok, run_err).expect_err("expected error");
         assert!(err.contains("git hook failed"));
     }
 
     #[test]
     fn try_main_returns_ok_on_success() {
-        let result = try_main(|| Ok::<(), String>(()), noop_run);
+        let result = try_main(observability_ok, noop_run);
         assert!(result.is_ok());
     }
 
@@ -338,18 +346,21 @@ mod tests {
 
     #[test]
     fn exit_if_needed_skips_exit_when_code_is_zero() {
-        exit_if_needed(0, noop_exit);
+        let mut exit_fn = noop_exit;
+        exit_if_needed(0, &mut exit_fn);
     }
 
     #[test]
     fn exit_if_needed_allows_noop_exit_when_code_is_non_zero() {
-        exit_if_needed(17, noop_exit);
+        let mut exit_fn = noop_exit;
+        exit_if_needed(17, &mut exit_fn);
     }
 
     #[test]
     fn exit_if_needed_calls_exit_when_code_is_non_zero() {
         let mut seen = None;
-        exit_if_needed(17, |code| seen = Some(code));
+        let mut exit_fn = |code| seen = Some(code);
+        exit_if_needed(17, &mut exit_fn);
         assert_eq!(seen, Some(17));
     }
 
