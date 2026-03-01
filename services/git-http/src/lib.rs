@@ -296,25 +296,27 @@ impl GitHttpMetrics {
 }
 
 pub async fn serve(config: GitHttpConfig) -> Result<(), GitHttpError> {
-    serve_with(config, init_observability, run_axum_server).await
+    serve_with(config, init_observability_unit, run_axum_server).await
 }
 
 type ServeServerFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send + 'static>>;
 type ServeServerFn = fn(tokio::net::TcpListener, Router) -> ServeServerFuture;
 type UpstreamBuilderFn = fn(Duration) -> Result<ReqwestUpstreamClient, GitHttpError>;
+type InitObservabilityFn = fn() -> Result<(), GitHttpError>;
+
+fn init_observability_unit() -> Result<(), GitHttpError> {
+    init_observability().map(|_| ())
+}
 
 fn run_axum_server(listener: tokio::net::TcpListener, router: Router) -> ServeServerFuture {
     Box::pin(axum::serve(listener, router).into_future())
 }
 
-async fn serve_with<Obs, InitObs>(
+async fn serve_with(
     config: GitHttpConfig,
-    init_observability_fn: InitObs,
+    init_observability_fn: InitObservabilityFn,
     serve_fn: ServeServerFn,
-) -> Result<(), GitHttpError>
-where
-    InitObs: FnOnce() -> Result<Obs, GitHttpError>,
-{
+) -> Result<(), GitHttpError> {
     serve_with_upstream_builder(
         config,
         init_observability_fn,
@@ -324,15 +326,12 @@ where
     .await
 }
 
-async fn serve_with_upstream_builder<Obs, InitObs>(
+async fn serve_with_upstream_builder(
     config: GitHttpConfig,
-    init_observability_fn: InitObs,
+    init_observability_fn: InitObservabilityFn,
     serve_fn: ServeServerFn,
     build_upstream_fn: UpstreamBuilderFn,
-) -> Result<(), GitHttpError>
-where
-    InitObs: FnOnce() -> Result<Obs, GitHttpError>,
-{
+) -> Result<(), GitHttpError> {
     let _observability = init_observability_fn()?;
     let metrics = Arc::new(GitHttpMetrics::new());
     let repositories = build_repositories(&config)?;
