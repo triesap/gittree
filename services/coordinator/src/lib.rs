@@ -133,13 +133,27 @@ impl std::fmt::Display for StorageConfigError {
 impl std::error::Error for StorageConfigError {}
 
 fn storage_from_env() -> Result<StorageConfig, CoordinatorConfigError> {
-    let read_connection =
-        std::env::var(ENV_STORAGE_READ_URL).map_err(map_storage_read_url_missing)?;
+    let read_connection = match std::env::var(ENV_STORAGE_READ_URL) {
+        Ok(value) => value,
+        Err(err) => return Err(map_storage_read_url_missing(err)),
+    };
     let write_connection = std::env::var(ENV_STORAGE_WRITE_URL).ok();
-    let max_connections = env_u32(ENV_STORAGE_MAX_CONNECTIONS)?.unwrap_or(10);
-    let min_connections = env_u32(ENV_STORAGE_MIN_CONNECTIONS)?.unwrap_or(2);
-    let idle_timeout_secs = env_u64(ENV_STORAGE_IDLE_TIMEOUT_SECS)?;
-    let max_lifetime_secs = env_u64(ENV_STORAGE_MAX_LIFETIME_SECS)?;
+    let max_connections = match env_u32(ENV_STORAGE_MAX_CONNECTIONS) {
+        Ok(value) => value.unwrap_or(10),
+        Err(err) => return Err(err),
+    };
+    let min_connections = match env_u32(ENV_STORAGE_MIN_CONNECTIONS) {
+        Ok(value) => value.unwrap_or(2),
+        Err(err) => return Err(err),
+    };
+    let idle_timeout_secs = match env_u64(ENV_STORAGE_IDLE_TIMEOUT_SECS) {
+        Ok(value) => value,
+        Err(err) => return Err(err),
+    };
+    let max_lifetime_secs = match env_u64(ENV_STORAGE_MAX_LIFETIME_SECS) {
+        Ok(value) => value,
+        Err(err) => return Err(err),
+    };
     let application_name = std::env::var(ENV_STORAGE_APP_NAME).ok();
 
     let config = StorageConfig {
@@ -152,7 +166,9 @@ fn storage_from_env() -> Result<StorageConfig, CoordinatorConfigError> {
         application_name,
     };
 
-    config.validate().map_err(map_storage_validate_error)?;
+    if let Err(err) = config.validate() {
+        return Err(map_storage_validate_error(err));
+    }
 
     Ok(config)
 }
@@ -242,23 +258,28 @@ impl std::error::Error for CoordinatorError {
 }
 
 pub fn init_observability() -> Result<ObservabilityHandle, CoordinatorError> {
-    let config = gittree_observability::ObservabilityConfig::from_env("gittree-coordinator")
-        .map_err(CoordinatorError::ObservabilityConfig)?;
-    let handle = gittree_observability::init(&config).map_err(CoordinatorError::Observability)?;
+    let config = match gittree_observability::ObservabilityConfig::from_env("gittree-coordinator") {
+        Ok(value) => value,
+        Err(err) => return Err(CoordinatorError::ObservabilityConfig(err)),
+    };
+    let handle = match gittree_observability::init(&config) {
+        Ok(value) => value,
+        Err(err) => return Err(CoordinatorError::Observability(err)),
+    };
     Ok(handle)
 }
 
 pub fn build_repositories(
     config: &CoordinatorConfig,
 ) -> Result<PostgresRepositories, CoordinatorError> {
-    let pool_options = config
-        .storage
-        .pool_options()
-        .map_err(CoordinatorError::Storage)?;
-    let connect_options = config
-        .storage
-        .read_connect_options()
-        .map_err(CoordinatorError::Storage)?;
+    let pool_options = match config.storage.pool_options() {
+        Ok(value) => value,
+        Err(err) => return Err(CoordinatorError::Storage(err)),
+    };
+    let connect_options = match config.storage.read_connect_options() {
+        Ok(value) => value,
+        Err(err) => return Err(CoordinatorError::Storage(err)),
+    };
     let pool = pool_options.connect_lazy_with(connect_options);
     Ok(PostgresRepositories::new(pool))
 }
@@ -1141,7 +1162,10 @@ mod tests {
             }
         }
 
-        fn with_storage_failures(fail_insert_announcement: bool, fail_upsert_mapping: bool) -> Self {
+        fn with_storage_failures(
+            fail_insert_announcement: bool,
+            fail_upsert_mapping: bool,
+        ) -> Self {
             Self {
                 inner: Arc::new(InMemoryRepositories::new()),
                 fail_claim: false,
@@ -1551,19 +1575,23 @@ mod tests {
     }
 
     fn with_forgejo_envs(f: &mut dyn FnMut()) {
-        with_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000", &mut || {
-            with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", &mut || {
-                with_env_var("GITTREE_FORGEJO_OWNER", "gittree", &mut || {
-                    with_env_var(
-                        "GITTREE_FORGEJO_WEBHOOK_URL",
-                        "http://localhost:8090/",
-                        &mut || {
-                            with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", f);
-                        },
-                    );
+        with_env_var(
+            "GITTREE_FORGEJO_BASE_URL",
+            "http://localhost:3000",
+            &mut || {
+                with_env_var("GITTREE_FORGEJO_API_TOKEN", "token", &mut || {
+                    with_env_var("GITTREE_FORGEJO_OWNER", "gittree", &mut || {
+                        with_env_var(
+                            "GITTREE_FORGEJO_WEBHOOK_URL",
+                            "http://localhost:8090/",
+                            &mut || {
+                                with_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret", f);
+                            },
+                        );
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     fn with_required_coordinator_envs(f: &mut dyn FnMut()) {
@@ -1672,34 +1700,43 @@ mod tests {
                     super::ENV_COORDINATOR_REPO_ROOT,
                     "/tmp/gittree-repos",
                     &mut || {
-                        with_env_var(super::ENV_COORDINATOR_PRE_RECEIVE_HOOK, "/tmp/pre", &mut || {
-                            with_env_var(
-                                super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
-                                "/tmp/post",
-                                &mut || {
-                                    with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "", &mut || {
+                        with_env_var(
+                            super::ENV_COORDINATOR_PRE_RECEIVE_HOOK,
+                            "/tmp/pre",
+                            &mut || {
+                                with_env_var(
+                                    super::ENV_COORDINATOR_POST_RECEIVE_HOOK,
+                                    "/tmp/post",
+                                    &mut || {
                                         with_env_var(
-                                            super::ENV_STORAGE_MAX_LIFETIME_SECS,
+                                            super::ENV_STORAGE_IDLE_TIMEOUT_SECS,
                                             "",
                                             &mut || {
-                                                with_forgejo_envs(&mut || {
-                                                    let config = CoordinatorConfig::from_env()
-                                                        .expect("config");
-                                                    assert_eq!(
-                                                        config.storage.idle_timeout_secs,
-                                                        None
-                                                    );
-                                                    assert_eq!(
-                                                        config.storage.max_lifetime_secs,
-                                                        None
-                                                    );
-                                                });
+                                                with_env_var(
+                                                    super::ENV_STORAGE_MAX_LIFETIME_SECS,
+                                                    "",
+                                                    &mut || {
+                                                        with_forgejo_envs(&mut || {
+                                                            let config =
+                                                                CoordinatorConfig::from_env()
+                                                                    .expect("config");
+                                                            assert_eq!(
+                                                                config.storage.idle_timeout_secs,
+                                                                None
+                                                            );
+                                                            assert_eq!(
+                                                                config.storage.max_lifetime_secs,
+                                                                None
+                                                            );
+                                                        });
+                                                    },
+                                                );
                                             },
                                         );
-                                    });
-                                },
-                            );
-                        });
+                                    },
+                                );
+                            },
+                        );
                     },
                 );
             },
@@ -1962,9 +1999,11 @@ mod tests {
         let invalid_read = sample_coordinator_config(sample_storage_config("not-a-connection"));
         let invalid_read_err =
             super::build_repositories(&invalid_read).expect_err("invalid read connection");
-        assert!(invalid_read_err
-            .to_string()
-            .contains("coordinator storage error"));
+        assert!(
+            invalid_read_err
+                .to_string()
+                .contains("coordinator storage error")
+        );
 
         let valid_config = sample_coordinator_config(sample_storage_config(
             "postgres://user:pass@localhost:5432/gittree",
@@ -2086,8 +2125,9 @@ mod tests {
             .expect_err("missing git binary should fail");
         assert!(init_err.to_string().contains("repo init io error"));
 
-        let config_err = super::apply_git_config_with_git(&repo_path, &entry, "gittree-missing-git")
-            .expect_err("missing git binary should fail");
+        let config_err =
+            super::apply_git_config_with_git(&repo_path, &entry, "gittree-missing-git")
+                .expect_err("missing git binary should fail");
         assert!(config_err.to_string().contains("repo init io error"));
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -2180,8 +2220,8 @@ mod tests {
             .expect_err("copy should fail");
         assert!(copy_err.to_string().contains("hook install io error"));
 
-        let metadata_err =
-            super::ensure_executable(Path::new("/path/that/does/not/exist")).expect_err("missing path");
+        let metadata_err = super::ensure_executable(Path::new("/path/that/does/not/exist"))
+            .expect_err("missing path");
         assert!(metadata_err.to_string().contains("hook install io error"));
 
         #[cfg(unix)]
@@ -2279,14 +2319,22 @@ mod tests {
         assert_eq!(
             CoordinatorActionPayload::from(action),
             CoordinatorActionPayload::Provisioned {
-                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+                repo_path: repo_root
+                    .join(npub)
+                    .join("repo.git")
+                    .to_string_lossy()
+                    .to_string(),
             }
         );
         let again = handle_announcement_event(&repo_root, &hooks, &event).expect("handle");
         assert_eq!(
             CoordinatorActionPayload::from(again),
             CoordinatorActionPayload::SkippedExisting {
-                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+                repo_path: repo_root
+                    .join(npub)
+                    .join("repo.git")
+                    .to_string_lossy()
+                    .to_string(),
             }
         );
         let _ = fs::remove_dir_all(temp_dir);
@@ -2479,7 +2527,10 @@ mod tests {
             post_receive_source: temp_dir.join("post-receive"),
         };
         let action = handle_announcement_event(&temp_dir, &hooks, &event).expect("ignored");
-        assert_eq!(CoordinatorActionPayload::from(action), CoordinatorActionPayload::Ignored);
+        assert_eq!(
+            CoordinatorActionPayload::from(action),
+            CoordinatorActionPayload::Ignored
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -2506,7 +2557,10 @@ mod tests {
             handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
                 .await
                 .expect("ignored");
-        assert_eq!(CoordinatorActionPayload::from(action), CoordinatorActionPayload::Ignored);
+        assert_eq!(
+            CoordinatorActionPayload::from(action),
+            CoordinatorActionPayload::Ignored
+        );
         assert!(transport.requests().is_empty());
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -2620,9 +2674,10 @@ mod tests {
             status: 500,
             body: "boom".to_string(),
         }]);
-        let repo_err = handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
-            .await
-            .expect_err("forgejo repo error expected");
+        let repo_err =
+            handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
+                .await
+                .expect_err("forgejo repo error expected");
         assert!(repo_err.to_string().contains("forgejo"));
         assert_eq!(transport.requests().len(), 1);
 
@@ -2636,9 +2691,10 @@ mod tests {
                 body: "boom".to_string(),
             },
         ]);
-        let hook_err = handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
-            .await
-            .expect_err("forgejo webhook error expected");
+        let hook_err =
+            handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
+                .await
+                .expect_err("forgejo webhook error expected");
         assert!(hook_err.to_string().contains("forgejo"));
         assert_eq!(transport.requests().len(), 2);
 
@@ -2751,8 +2807,8 @@ mod tests {
             pre_receive_source: hook_temp_dir.join("missing-pre"),
             post_receive_source: hook_temp_dir.join("missing-post"),
         };
-        let hook_err =
-            handle_announcement_event(&hook_repo_root, &hook_hooks, &hook_event).expect_err("hook err");
+        let hook_err = handle_announcement_event(&hook_repo_root, &hook_hooks, &hook_event)
+            .expect_err("hook err");
         assert_eq!(
             std::mem::discriminant(&hook_err),
             std::mem::discriminant(&super::CoordinatorEventError::Hooks(
@@ -3024,7 +3080,8 @@ mod tests {
         };
         let tags = sample_repo_announcement("repo").to_tags();
 
-        let mut invalid_record_job = sample_publish_job(KIND_GIT_REPO_ANNOUNCEMENT.0, tags.clone(), "repo");
+        let mut invalid_record_job =
+            sample_publish_job(KIND_GIT_REPO_ANNOUNCEMENT.0, tags.clone(), "repo");
         invalid_record_job.pubkey = vec![0x22; 31];
         let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
         let record_state = super::CoordinatorAppState {
@@ -3041,7 +3098,9 @@ mod tests {
 
         let valid_job = sample_publish_job(KIND_GIT_REPO_ANNOUNCEMENT.0, tags.clone(), "repo");
         let insert_state = super::CoordinatorAppState {
-            repositories: Arc::new(ScriptedOutboxRepositories::with_storage_failures(true, false)),
+            repositories: Arc::new(ScriptedOutboxRepositories::with_storage_failures(
+                true, false,
+            )),
             repo_root: repo_root.clone(),
             hooks: hooks.clone(),
             forgejo: forgejo_client_with_responses(Vec::new()).0,
@@ -3130,7 +3189,9 @@ mod tests {
             },
         ]);
         let upsert_state = super::CoordinatorAppState {
-            repositories: Arc::new(ScriptedOutboxRepositories::with_storage_failures(false, true)),
+            repositories: Arc::new(ScriptedOutboxRepositories::with_storage_failures(
+                false, true,
+            )),
             repo_root: repo_root.clone(),
             hooks: hooks.clone(),
             forgejo,
@@ -3206,7 +3267,10 @@ mod tests {
             let err = runtime
                 .block_on(super::serve(config))
                 .expect_err("observability config");
-            assert!(err.to_string().contains("coordinator observability config error"));
+            assert!(
+                err.to_string()
+                    .contains("coordinator observability config error")
+            );
         });
     }
 
@@ -3711,7 +3775,11 @@ mod tests {
         assert_eq!(
             CoordinatorActionPayload::from(action),
             CoordinatorActionPayload::Provisioned {
-                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+                repo_path: repo_root
+                    .join(npub)
+                    .join("repo.git")
+                    .to_string_lossy()
+                    .to_string(),
             }
         );
         assert_eq!(transport.requests().len(), 4);
@@ -3883,7 +3951,11 @@ mod tests {
         assert_eq!(
             action,
             CoordinatorActionPayload::Provisioned {
-                repo_path: repo_root.join(npub).join("repo.git").to_string_lossy().to_string(),
+                repo_path: repo_root
+                    .join(npub)
+                    .join("repo.git")
+                    .to_string_lossy()
+                    .to_string(),
             }
         );
         assert!(repo_root.join(npub).join("repo.git").exists());
@@ -3910,7 +3982,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_JSON", "invalid-bool", &mut || {
             let err = init_observability().expect_err("invalid observability config");
-            assert!(err.to_string().contains("coordinator observability config error"));
+            assert!(
+                err.to_string()
+                    .contains("coordinator observability config error")
+            );
         });
 
         let _ = LazyLock::force(&OBSERVABILITY);
