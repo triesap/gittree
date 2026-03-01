@@ -439,14 +439,16 @@ pub struct ReqwestUpstreamClient {
 
 impl ReqwestUpstreamClient {
     pub fn new(timeout: Duration) -> Result<Self, GitHttpError> {
-        Self::from_builder_result(reqwest::Client::builder().timeout(timeout).build())
+        Self::try_from_client_result(reqwest::Client::builder().timeout(timeout).build())
     }
 
-    fn from_builder_result<E: ToString>(
-        result: Result<reqwest::Client, E>,
+    pub fn try_from_client_result(
+        result: Result<reqwest::Client, reqwest::Error>,
     ) -> Result<Self, GitHttpError> {
-        let client = result.map_err(|err| GitHttpError::Upstream(err.to_string()))?;
-        Ok(Self { client })
+        match result {
+            Ok(client) => Ok(Self { client }),
+            Err(err) => Err(GitHttpError::Upstream(err.to_string())),
+        }
     }
 
 }
@@ -3008,36 +3010,24 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_upstream_client_new_maps_builder_errors() {
-        let result = super::ReqwestUpstreamClient::from_builder_result::<String>(Err(
-            "builder failed".to_string(),
-        ));
-        assert!(result.is_err());
-        let err = result.err().expect("builder error expected");
-        assert_eq!(git_http_error_label(&err), "upstream");
-        assert!(err.to_string().contains("builder failed"));
-    }
-
-    #[test]
-    fn reqwest_upstream_client_new_with_supports_success_path() {
+    fn reqwest_upstream_client_try_from_client_result_supports_success_path() {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(1))
             .build()
             .expect("reqwest client");
-        let result = super::ReqwestUpstreamClient::from_builder_result::<reqwest::Error>(Ok(client));
+        let result = super::ReqwestUpstreamClient::try_from_client_result(Ok(client));
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn reqwest_upstream_client_from_builder_result_covers_reqwest_error_type() {
+    async fn reqwest_upstream_client_try_from_client_result_maps_reqwest_error() {
         let reqwest_err = reqwest::Client::new()
             .get("http://127.0.0.1:1")
             .send()
             .await
             .expect_err("expected reqwest transport error");
 
-        let result =
-            super::ReqwestUpstreamClient::from_builder_result::<reqwest::Error>(Err(reqwest_err));
+        let result = super::ReqwestUpstreamClient::try_from_client_result(Err(reqwest_err));
         assert!(result.is_err());
         let err = result.err().expect("builder error expected");
         assert_eq!(git_http_error_label(&err), "upstream");

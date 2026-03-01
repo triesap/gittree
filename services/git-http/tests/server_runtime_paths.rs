@@ -152,6 +152,8 @@ async fn git_http_binary_runtime_routes_cover_non_test_monomorphizations() {
 
 #[test]
 fn git_http_public_surface_covers_non_test_runtime_instantiations() {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+
     let config_missing = GitHttpConfigError::MissingEnv("MISSING");
     assert!(std::error::Error::source(&config_missing).is_none());
     let config_storage = GitHttpConfigError::Storage(StorageConfigError::MissingEnv("READ_URL"));
@@ -178,7 +180,25 @@ fn git_http_public_surface_covers_non_test_runtime_instantiations() {
         }
     ));
 
-    let _client = ReqwestUpstreamClient::new(Duration::from_millis(10)).expect("client");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(10))
+        .build()
+        .expect("reqwest client");
+    let _upstream =
+        ReqwestUpstreamClient::try_from_client_result(Ok(client)).expect("upstream client");
+
+    let reqwest_err = runtime.block_on(async {
+        reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("expected reqwest transport error")
+    });
+    let err = match ReqwestUpstreamClient::try_from_client_result(Err(reqwest_err)) {
+        Ok(_) => panic!("expected builder error"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, GitHttpError::Upstream(_)));
 }
 
 #[tokio::test]
