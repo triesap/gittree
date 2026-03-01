@@ -1,7 +1,9 @@
+use gittree_coordinator::{CoordinatorConfig, CoordinatorConfigError, StorageConfigError};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn reserve_local_port() -> u16 {
@@ -9,6 +11,51 @@ fn reserve_local_port() -> u16 {
     let port = listener.local_addr().expect("listener addr").port();
     drop(listener);
     port
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct EnvRestore {
+    vars: Vec<(String, Option<String>)>,
+}
+
+impl EnvRestore {
+    fn capture(keys: &[&str]) -> Self {
+        let vars = keys
+            .iter()
+            .map(|key| ((*key).to_string(), std::env::var(key).ok()))
+            .collect();
+        Self { vars }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (key, value) in &self.vars {
+            if let Some(value) = value {
+                set_env_var(key, value);
+            } else {
+                remove_env_var(key);
+            }
+        }
+    }
+}
+
+fn set_env_var(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+    // SAFETY: tests hold a process-local env mutex and restore values on drop.
+    unsafe {
+        std::env::set_var(key, value);
+    }
+}
+
+fn remove_env_var(key: &str) {
+    // SAFETY: tests hold a process-local env mutex and restore values on drop.
+    unsafe {
+        std::env::remove_var(key);
+    }
 }
 
 fn runtime_storage_url() -> String {
@@ -142,5 +189,99 @@ async fn coordinator_binary_runtime_routes_cover_non_test_monomorphizations() {
     ));
 
     stop_server(&mut child);
+    let _ = std::fs::remove_dir_all(runtime_dir);
+}
+
+#[test]
+fn coordinator_config_from_env_covers_runtime_error_paths() {
+    let _lock = env_lock().lock().expect("env lock");
+
+    let keys = [
+        "GITTREE_COORDINATOR_BIND",
+        "GITTREE_STORAGE_READ_URL",
+        "GITTREE_STORAGE_MAX_CONNECTIONS",
+        "GITTREE_RELAY_URLS",
+        "GITTREE_COORDINATOR_REPO_ROOT",
+        "GITTREE_COORDINATOR_PRE_RECEIVE_HOOK",
+        "GITTREE_COORDINATOR_POST_RECEIVE_HOOK",
+        "GITTREE_FORGEJO_BASE_URL",
+        "GITTREE_FORGEJO_API_TOKEN",
+        "GITTREE_FORGEJO_OWNER",
+        "GITTREE_FORGEJO_WEBHOOK_URL",
+        "GITTREE_FORGEJO_WEBHOOK_SECRET",
+    ];
+    let _restore = EnvRestore::capture(&keys);
+
+    let runtime_dir = new_runtime_dir();
+    let _ = std::fs::create_dir_all(&runtime_dir);
+    let repo_root = runtime_dir.join("repos");
+    let _ = std::fs::create_dir_all(&repo_root);
+    let pre_hook = write_hook_source(&runtime_dir, "pre-env-hook");
+    let post_hook = write_hook_source(&runtime_dir, "post-env-hook");
+
+    set_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091");
+    set_env_var(
+        "GITTREE_STORAGE_READ_URL",
+        "postgres://user:pass@localhost:5432/gittree",
+    );
+    set_env_var("GITTREE_RELAY_URLS", "wss://relay.example");
+    set_env_var("GITTREE_COORDINATOR_REPO_ROOT", &repo_root);
+    set_env_var("GITTREE_COORDINATOR_PRE_RECEIVE_HOOK", &pre_hook);
+    set_env_var("GITTREE_COORDINATOR_POST_RECEIVE_HOOK", &post_hook);
+    set_env_var("GITTREE_FORGEJO_BASE_URL", "http://localhost:3000");
+    set_env_var("GITTREE_FORGEJO_API_TOKEN", "token");
+    set_env_var("GITTREE_FORGEJO_OWNER", "gittree");
+    set_env_var("GITTREE_FORGEJO_WEBHOOK_URL", "http://localhost:3000/webhook");
+    set_env_var("GITTREE_FORGEJO_WEBHOOK_SECRET", "secret");
+
+    let config = CoordinatorConfig::from_env().expect("valid coordinator env");
+    assert_eq!(config.bind, "127.0.0.1:9091");
+
+    set_env_var("GITTREE_COORDINATOR_BIND", "not-an-addr");
+    let err = CoordinatorConfig::from_env().expect_err("invalid bind should fail");
+    assert!(matches!(err, CoordinatorConfigError::Config(_)));
+    set_env_var("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091");
+
+    set_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "not-a-number");
+    let err = CoordinatorConfig::from_env().expect_err("invalid storage env should fail");
+    assert!(matches!(
+        err,
+        CoordinatorConfigError::Storage(StorageConfigError::InvalidEnv { .. })
+    ));
+    remove_env_var("GITTREE_STORAGE_MAX_CONNECTIONS");
+
+    set_env_var("GITTREE_RELAY_URLS", "not-a-url");
+    let err = CoordinatorConfig::from_env().expect_err("invalid relay target should fail");
+    assert!(matches!(err, CoordinatorConfigError::Config(_)));
+    set_env_var("GITTREE_RELAY_URLS", "wss://relay.example");
+
+    remove_env_var("GITTREE_COORDINATOR_REPO_ROOT");
+    let err = CoordinatorConfig::from_env().expect_err("missing repo root should fail");
+    assert!(matches!(
+        err,
+        CoordinatorConfigError::MissingEnv("GITTREE_COORDINATOR_REPO_ROOT")
+    ));
+    set_env_var("GITTREE_COORDINATOR_REPO_ROOT", &repo_root);
+
+    remove_env_var("GITTREE_COORDINATOR_PRE_RECEIVE_HOOK");
+    let err = CoordinatorConfig::from_env().expect_err("missing pre-receive hook should fail");
+    assert!(matches!(
+        err,
+        CoordinatorConfigError::MissingEnv("GITTREE_COORDINATOR_PRE_RECEIVE_HOOK")
+    ));
+    set_env_var("GITTREE_COORDINATOR_PRE_RECEIVE_HOOK", &pre_hook);
+
+    remove_env_var("GITTREE_COORDINATOR_POST_RECEIVE_HOOK");
+    let err = CoordinatorConfig::from_env().expect_err("missing post-receive hook should fail");
+    assert!(matches!(
+        err,
+        CoordinatorConfigError::MissingEnv("GITTREE_COORDINATOR_POST_RECEIVE_HOOK")
+    ));
+    set_env_var("GITTREE_COORDINATOR_POST_RECEIVE_HOOK", &post_hook);
+
+    remove_env_var("GITTREE_FORGEJO_OWNER");
+    let err = CoordinatorConfig::from_env().expect_err("missing forgejo owner should fail");
+    assert!(matches!(err, CoordinatorConfigError::Config(_)));
+
     let _ = std::fs::remove_dir_all(runtime_dir);
 }
