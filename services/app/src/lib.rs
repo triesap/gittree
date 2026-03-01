@@ -21,6 +21,7 @@ use leptos::prelude::provide_context;
 use leptos_axum::{LeptosRoutes, handle_server_fns_with_context};
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -283,17 +284,12 @@ pub fn build_repositories(config: &AppServiceConfig) -> Result<PostgresRepositor
     Ok(PostgresRepositories::new(pool))
 }
 
-async fn serve_with<InitFn, InitOut, ServeFn, ServeFut>(
-    config: AppServiceConfig,
-    init_fn: InitFn,
-    serve_fn: ServeFn,
-) -> Result<(), AppError>
-where
-    InitFn: FnOnce() -> Result<InitOut, AppError>,
-    ServeFn: FnOnce(tokio::net::TcpListener, Router) -> ServeFut,
-    ServeFut: Future<Output = Result<(), std::io::Error>>,
-{
-    let _observability = init_fn()?;
+type ServeFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
+type InitFn = fn() -> Result<(), AppError>;
+type ServeFn = fn(tokio::net::TcpListener, Router) -> ServeFuture;
+
+async fn serve_with(config: AppServiceConfig, init_fn: InitFn, serve_fn: ServeFn) -> Result<(), AppError> {
+    init_fn()?;
     let repositories = build_repositories(&config)?;
     let leptos_options = build_leptos_options(&config);
     let repositories = Arc::new(repositories);
@@ -321,15 +317,19 @@ where
     Ok(())
 }
 
+fn init_observability_unit() -> Result<(), AppError> {
+    init_observability().map(|_| ())
+}
+
 pub async fn serve(config: AppServiceConfig) -> Result<(), AppError> {
-    serve_with(config, init_observability, run_axum_server).await
+    serve_with(config, init_observability_unit, run_axum_server).await
 }
 
 fn run_axum_server(
     listener: tokio::net::TcpListener,
     router: Router,
-) -> impl Future<Output = Result<(), std::io::Error>> {
-    axum::serve(listener, router).into_future()
+) -> ServeFuture {
+    Box::pin(axum::serve(listener, router).into_future())
 }
 
 fn build_leptos_options(config: &AppServiceConfig) -> LeptosOptions {
@@ -721,6 +721,24 @@ mod tests {
         assert!(err.to_string().contains("app storage error"));
     }
 
+    fn init_ok() -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn serve_ok(
+        _listener: tokio::net::TcpListener,
+        _router: axum::Router,
+    ) -> super::ServeFuture {
+        Box::pin(async { Ok::<(), std::io::Error>(()) })
+    }
+
+    fn serve_err(
+        _listener: tokio::net::TcpListener,
+        _router: axum::Router,
+    ) -> super::ServeFuture {
+        Box::pin(async { Err(std::io::Error::other("boom")) })
+    }
+
     #[tokio::test]
     async fn serve_maps_bind_errors_after_setup() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -736,7 +754,7 @@ mod tests {
             ui: test_ui_config(),
         };
 
-        let err = super::serve_with(config, || Ok(()), run_axum_server)
+        let err = super::serve_with(config, init_ok, run_axum_server)
             .await
             .expect_err("bind error");
         assert!(err.to_string().contains("app serve error"));
@@ -779,13 +797,7 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let err = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Err(std::io::Error::other("boom")) },
-        )
-        .await
-        .expect_err("serve error");
+        let err = super::serve_with(config, init_ok, serve_err).await.expect_err("serve error");
         assert!(err.to_string().contains("boom"));
     }
 
@@ -803,7 +815,7 @@ mod tests {
             },
             ui: test_ui_config(),
         };
-        let err = super::serve_with(config, || Ok(()), run_axum_server)
+        let err = super::serve_with(config, init_ok, run_axum_server)
             .await
             .expect_err("storage error");
         assert!(err.to_string().contains("app storage error"));
@@ -819,12 +831,7 @@ mod tests {
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
-        let result = super::serve_with(
-            config,
-            || Ok(()),
-            |_listener, _router| async { Ok::<(), std::io::Error>(()) },
-        )
-        .await;
+        let result = super::serve_with(config, init_ok, serve_ok).await;
         assert!(result.is_ok());
     }
 
