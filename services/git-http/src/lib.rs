@@ -439,22 +439,23 @@ pub struct ReqwestUpstreamClient {
 
 impl ReqwestUpstreamClient {
     pub fn new(timeout: Duration) -> Result<Self, GitHttpError> {
-        Self::from_builder_result(reqwest::Client::builder().timeout(timeout).build())
+        let result = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|err| err.to_string());
+        Self::from_builder_result(result)
     }
 
-    fn from_builder_result<E: ToString>(
-        result: Result<reqwest::Client, E>,
-    ) -> Result<Self, GitHttpError> {
-        let client = result.map_err(|err| GitHttpError::Upstream(err.to_string()))?;
+    fn from_builder_result(result: Result<reqwest::Client, String>) -> Result<Self, GitHttpError> {
+        let client = result.map_err(GitHttpError::Upstream)?;
         Ok(Self { client })
     }
 
     #[cfg(test)]
-    fn new_with<F, E>(timeout: Duration, build_client: F) -> Result<Self, GitHttpError>
-    where
-        F: FnOnce(Duration) -> Result<reqwest::Client, E>,
-        E: ToString,
-    {
+    fn new_with(
+        timeout: Duration,
+        build_client: fn(Duration) -> Result<reqwest::Client, String>,
+    ) -> Result<Self, GitHttpError> {
         Self::from_builder_result(build_client(timeout))
     }
 }
@@ -3028,12 +3029,11 @@ mod tests {
 
     #[test]
     fn reqwest_upstream_client_new_with_supports_success_path() {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(1))
-            .build()
-            .expect("client");
-        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |_| {
-            Ok::<reqwest::Client, String>(client)
+        let result = super::ReqwestUpstreamClient::new_with(Duration::from_secs(1), |timeout| {
+            reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(|err| err.to_string())
         });
         assert!(result.is_ok());
     }
