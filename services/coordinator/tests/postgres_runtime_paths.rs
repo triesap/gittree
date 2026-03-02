@@ -285,5 +285,22 @@ async fn coordinator_serve_handles_postgres_announcement_runtime_paths() {
     let (response, body) = http_post_response(&base_url, "/announcement", &payload).await;
     assert_eq!(response, Some(200), "{body}");
 
+    let malformed_pubkey_payload = format!(
+        r#"{{
+          "kind":30617,
+          "event_id":"{valid_event_id}",
+          "pubkey":"zz",
+          "created_at":10,
+          "tags":[
+            ["d","repo-malformed-pubkey"],
+            ["clone","https://gittr.ee/{TEST_NPUB}/repo-malformed-pubkey.git"],
+            ["relays","wss://relay.example"]
+          ]
+        }}"#
+    );
+    let (malformed_response, malformed_body) =
+        http_post_response(&base_url, "/announcement", &malformed_pubkey_payload).await;
+    assert_eq!(malformed_response, Some(500), "{malformed_body}");
+
     stop_runtime_server(handle, temp_dir).await;
 }

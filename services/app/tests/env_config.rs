@@ -390,6 +390,8 @@ fn init_observability_succeeds_with_valid_env_for_integration_instantiation() {
         ],
         || {
             let _handle = gittree_app::init_observability().expect("valid observability init");
+            let second = gittree_app::init_observability().expect_err("reinit should fail");
+            assert!(matches!(second, AppError::Observability(_)));
         },
     );
 }

@@ -1832,6 +1832,12 @@ mod tests {
                     CoordinatorConfig::from_env().expect("empty max connections uses default");
                 assert_eq!(config.storage.max_connections, 10);
             });
+
+            with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "", &mut || {
+                let config =
+                    CoordinatorConfig::from_env().expect("empty min connections uses default");
+                assert_eq!(config.storage.min_connections, 2);
+            });
         });
     }
 
