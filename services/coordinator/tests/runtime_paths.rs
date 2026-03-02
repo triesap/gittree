@@ -418,6 +418,57 @@ async fn coordinator_binary_runtime_announcement_parse_error_returns_bad_request
 }
 
 #[tokio::test]
+async fn coordinator_binary_runtime_announcement_missing_npub_returns_bad_request() {
+    let _guard = async_test_lock().lock().await;
+    let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
+    let port = reserve_local_port();
+    let (mut child, base_url, runtime_dir) =
+        start_coordinator_server_with(port, &forgejo_base_url, "wss://relay.example");
+    wait_for_health(&base_url, &mut child).await;
+
+    let payload = r#"{
+      "kind":30617,
+      "event_id":"8888888888888888888888888888888888888888888888888888888888888888",
+      "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at":10,
+      "tags":[["d","repo"]]
+    }"#;
+    let status = http_post_status(&base_url, "/announcement", payload);
+    assert_eq!(status, Some(400));
+
+    stop_server(&mut child);
+    let _ = std::fs::remove_dir_all(runtime_dir);
+    forgejo_handle.abort();
+    let _ = forgejo_handle.await;
+}
+
+#[tokio::test]
+async fn coordinator_binary_runtime_announcement_forgejo_error_returns_internal_error() {
+    let _guard = async_test_lock().lock().await;
+    let port = reserve_local_port();
+    let (mut child, base_url, runtime_dir) =
+        start_coordinator_server_with(port, "http://127.0.0.1:1", "wss://relay.example");
+    wait_for_health(&base_url, &mut child).await;
+
+    let payload = r#"{
+      "kind":30617,
+      "event_id":"7777777777777777777777777777777777777777777777777777777777777777",
+      "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at":10,
+      "tags":[
+        ["d","repo"],
+        ["clone","https://gittr.ee/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git"],
+        ["relays","wss://relay.example"]
+      ]
+    }"#;
+    let status = http_post_status(&base_url, "/announcement", payload);
+    assert_eq!(status, Some(500));
+
+    stop_server(&mut child);
+    let _ = std::fs::remove_dir_all(runtime_dir);
+}
+
+#[tokio::test]
 async fn coordinator_serve_maps_invalid_forgejo_for_runtime_instantiation() {
     let _guard = async_test_lock().lock().await;
     let runtime_dir = new_runtime_dir();
