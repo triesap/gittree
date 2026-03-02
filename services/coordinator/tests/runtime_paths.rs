@@ -443,6 +443,35 @@ async fn coordinator_binary_runtime_announcement_missing_npub_returns_bad_reques
 }
 
 #[tokio::test]
+async fn coordinator_binary_runtime_announcement_invalid_pubkey_returns_internal_error() {
+    let _guard = async_test_lock().lock().await;
+    let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
+    let port = reserve_local_port();
+    let (mut child, base_url, runtime_dir) =
+        start_coordinator_server_with(port, &forgejo_base_url, "wss://relay.example");
+    wait_for_health(&base_url, &mut child).await;
+
+    let payload = r#"{
+      "kind":30617,
+      "event_id":"9999999999999999999999999999999999999999999999999999999999999999",
+      "pubkey":"zz",
+      "created_at":10,
+      "tags":[
+        ["d","repo"],
+        ["clone","https://gittr.ee/npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq/repo.git"],
+        ["relays","wss://relay.example"]
+      ]
+    }"#;
+    let status = http_post_status(&base_url, "/announcement", payload);
+    assert_eq!(status, Some(500));
+
+    stop_server(&mut child);
+    let _ = std::fs::remove_dir_all(runtime_dir);
+    forgejo_handle.abort();
+    let _ = forgejo_handle.await;
+}
+
+#[tokio::test]
 async fn coordinator_binary_runtime_announcement_forgejo_error_returns_internal_error() {
     let _guard = async_test_lock().lock().await;
     let port = reserve_local_port();
@@ -486,18 +515,15 @@ async fn coordinator_serve_maps_invalid_forgejo_for_runtime_instantiation() {
     let _ = std::fs::remove_dir_all(runtime_dir);
 }
 
-#[tokio::test]
-async fn coordinator_serve_maps_invalid_storage_for_runtime_instantiation() {
-    let _guard = async_test_lock().lock().await;
+#[test]
+fn coordinator_build_repositories_maps_invalid_storage_for_runtime_instantiation() {
     let runtime_dir = new_runtime_dir();
     let _ = std::fs::create_dir_all(&runtime_dir);
     let mut config = direct_serve_config("127.0.0.1:0", &runtime_dir, "http://localhost:3000");
     config.storage.max_connections = 0;
     config.storage.min_connections = 0;
-    let err = tokio::time::timeout(Duration::from_secs(3), serve(config))
-        .await
-        .expect("serve should return quickly")
-        .expect_err("invalid storage config");
+    let err = gittree_coordinator::build_repositories(&config)
+        .expect_err("invalid storage config must fail");
     assert!(matches!(err, CoordinatorError::Storage(_)));
     let _ = std::fs::remove_dir_all(runtime_dir);
 }

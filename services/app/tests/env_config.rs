@@ -379,3 +379,17 @@ fn init_observability_reports_invalid_env() {
         assert!(matches!(err, AppError::ObservabilityConfig(_)));
     });
 }
+
+#[test]
+fn init_observability_succeeds_with_valid_env_for_integration_instantiation() {
+    with_env_overrides(
+        &[
+            ("GITTREE_LOG_JSON", Some("false")),
+            ("GITTREE_LOG_STDOUT", Some("false")),
+            ("GITTREE_METRICS_ENABLED", Some("false")),
+        ],
+        || {
+            let _handle = gittree_app::init_observability().expect("valid observability init");
+        },
+    );
+}
