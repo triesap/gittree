@@ -73,8 +73,8 @@ fn runtime_config(
         storage: StorageConfig {
             read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
             write_connection: None,
-            max_connections: 16,
-            min_connections: 1,
+            max_connections: 64,
+            min_connections: 2,
             idle_timeout_secs: Some(30),
             max_lifetime_secs: Some(300),
             application_name: Some("gittree-coordinator-runtime-test".to_string()),
