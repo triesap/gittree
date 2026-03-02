@@ -1,4 +1,4 @@
-use gittree_app::{AppServiceConfig, serve};
+use gittree_app::{AppServiceConfig, build_repositories, serve};
 use gittree_app_core::npub_from_bytes;
 use gittree_config::UiConfig;
 use gittree_storage::{
@@ -8,9 +8,16 @@ use gittree_storage::{
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex as AsyncMutex;
 
 const TCP_IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn async_test_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -144,6 +151,7 @@ async fn seed_public_repo(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_runtime_path_executes_non_test_instantiations() {
+    let _guard = async_test_lock().lock().await;
     let port = reserve_local_port();
     let storage_url = runtime_storage_url();
     let temp_dir = std::env::temp_dir().join(format!(
@@ -215,4 +223,44 @@ async fn serve_runtime_path_executes_non_test_instantiations() {
     serve_task.abort();
     let join_err = serve_task.await.expect_err("serve task should abort");
     assert!(join_err.is_cancelled());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_runtime_path_maps_storage_config_errors_for_production_instantiation() {
+    let _guard = async_test_lock().lock().await;
+    let port = reserve_local_port();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "gittree-app-serve-runtime-invalid-storage-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(temp_dir.join("repos")).expect("create repos dir");
+
+    let config = AppServiceConfig {
+        bind: format!("127.0.0.1:{port}").parse().expect("bind"),
+        base_path: "/".to_string(),
+        site_root: repo_root().join("crates/app-ui/dist"),
+        site_pkg_dir: "pkg".to_string(),
+        storage: StorageConfig {
+            read_connection: runtime_storage_url(),
+            write_connection: None,
+            max_connections: 0,
+            min_connections: 0,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: Some("gittree-app-serve-runtime-tests-invalid-storage".to_string()),
+        },
+        ui: UiConfig {
+            repo_root: temp_dir.join("repos"),
+            public_git_url: "https://gittr.ee".to_string(),
+            auth_url: "http://localhost:8089".to_string(),
+            app_url: format!("http://127.0.0.1:{port}"),
+            control_url: "http://localhost:8088".to_string(),
+        },
+    };
+
+    let err = build_repositories(&config).expect_err("invalid storage must fail");
+    assert!(err.to_string().contains("app storage error"));
 }

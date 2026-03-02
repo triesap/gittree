@@ -487,6 +487,22 @@ async fn coordinator_serve_maps_invalid_forgejo_for_runtime_instantiation() {
 }
 
 #[tokio::test]
+async fn coordinator_serve_maps_invalid_storage_for_runtime_instantiation() {
+    let _guard = async_test_lock().lock().await;
+    let runtime_dir = new_runtime_dir();
+    let _ = std::fs::create_dir_all(&runtime_dir);
+    let mut config = direct_serve_config("127.0.0.1:0", &runtime_dir, "http://localhost:3000");
+    config.storage.max_connections = 0;
+    config.storage.min_connections = 0;
+    let err = tokio::time::timeout(Duration::from_secs(3), serve(config))
+        .await
+        .expect("serve should return quickly")
+        .expect_err("invalid storage config");
+    assert!(matches!(err, CoordinatorError::Storage(_)));
+    let _ = std::fs::remove_dir_all(runtime_dir);
+}
+
+#[tokio::test]
 async fn coordinator_serve_maps_observability_reinit_for_runtime_instantiation() {
     let _guard = async_test_lock().lock().await;
     let runtime_dir = new_runtime_dir();
