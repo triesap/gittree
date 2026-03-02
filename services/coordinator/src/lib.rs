@@ -2509,6 +2509,62 @@ mod tests {
         let _ = fs::remove_dir_all(temp_dir);
     }
 
+    #[tokio::test]
+    async fn announcement_endpoint_maps_storage_errors() {
+        let repositories = Arc::new(ScriptedOutboxRepositories::with_storage_failures(true, false));
+        let temp_dir = temp_dir("gittree-coordinator-http-storage-error");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let (forgejo, _transport) = forgejo_client_with_responses(Vec::new());
+        let app = super::build_router(super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        });
+
+        let npub = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+        let announcement = RepoAnnouncement {
+            identifier: "repo".to_string(),
+            name: None,
+            description: None,
+            root_commit: None,
+            clone: vec![format!("https://gittr.ee/{npub}/repo.git")],
+            web: Vec::new(),
+            relays: vec!["wss://gittr.ee".to_string()],
+            blossoms: Vec::new(),
+            hashtags: Vec::new(),
+            maintainers: Vec::new(),
+        };
+        let payload = CoordinatorEventPayload {
+            kind: u64::from(KIND_GIT_REPO_ANNOUNCEMENT.0),
+            event_id: "44".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: announcement.to_tags(),
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/announcement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).expect("body")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(text.contains("insert failure"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     #[test]
     fn handle_event_ignores_non_repo_nip34_events() {
         let list = UserGraspList {
@@ -3242,6 +3298,21 @@ mod tests {
 
     fn init_ok() -> Result<(), super::CoordinatorError> {
         Ok(())
+    }
+
+    fn init_err() -> Result<(), super::CoordinatorError> {
+        Err(super::CoordinatorError::Serve("init failed".to_string()))
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_maps_init_errors() {
+        let config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        let err = super::serve_with_init(config, init_err)
+            .await
+            .expect_err("init error");
+        assert!(err.to_string().contains("init failed"));
     }
 
     #[tokio::test]

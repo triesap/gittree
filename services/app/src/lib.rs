@@ -544,6 +544,38 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct FailingRepoLookupMappings;
+
+    #[async_trait]
+    impl RepoMappingRepository for FailingRepoLookupMappings {
+        async fn upsert_mapping(&self, _record: RepoMappingRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn mapping_by_forgejo(
+            &self,
+            _owner: &str,
+            _repo: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn mapping_by_repo(
+            &self,
+            _pubkey: &[u8],
+            _identifier: &str,
+        ) -> Result<Option<RepoMappingRecord>, StorageError> {
+            Err(StorageError::Internal {
+                message: "mapping by repo failed".to_string(),
+            })
+        }
+
+        async fn list_mappings(&self) -> Result<Vec<RepoMappingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+    }
+
     fn pubkey_hex(byte: u8) -> String {
         format!("{:02x}", byte).repeat(32)
     }
@@ -739,6 +771,10 @@ mod tests {
         Box::pin(async { Err(std::io::Error::other("boom")) })
     }
 
+    fn init_err() -> Result<(), AppError> {
+        Err(AppError::Serve("init failed".to_string()))
+    }
+
     #[tokio::test]
     async fn serve_maps_bind_errors_after_setup() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -799,6 +835,20 @@ mod tests {
         };
         let err = super::serve_with(config, init_ok, serve_err).await.expect_err("serve error");
         assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn serve_with_maps_init_errors() {
+        let config = AppServiceConfig {
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            base_path: "/".to_string(),
+            site_root: PathBuf::from("crates/app-ui/dist"),
+            site_pkg_dir: "pkg".to_string(),
+            storage: test_storage_config(),
+            ui: test_ui_config(),
+        };
+        let err = super::serve_with(config, init_err, serve_ok).await.expect_err("init error");
+        assert!(err.to_string().contains("init failed"));
     }
 
     #[tokio::test]
@@ -1475,6 +1525,96 @@ mod tests {
         let state = test_state(mappings, profiles);
 
         let err = super::api_list_repos_handler(State(state))
+            .await
+            .expect_err("storage error");
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn api_list_repos_by_owner_handler_maps_internal_errors() {
+        let profile_repo = Arc::new(InMemoryRepositories::new());
+        let profile = ProfileRecord::new(
+            &pubkey_hex(0x77),
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        profile_repo
+            .upsert_profile(profile)
+            .await
+            .expect("insert profile");
+        let profiles: Arc<dyn ProfileRepository> = profile_repo;
+        let mappings: Arc<dyn RepoMappingRepository> = Arc::new(FailingListMappings::default());
+        let state = test_state(mappings, profiles);
+        let npub = gittree_app_core::npub_from_bytes(&[0x77; 32]).expect("npub");
+
+        let err = super::api_list_repos_by_owner_handler(State(state), Path(npub))
+            .await
+            .expect_err("storage error");
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn api_repo_detail_handler_maps_internal_errors() {
+        let profile_repo = Arc::new(InMemoryRepositories::new());
+        let profile = ProfileRecord::new(
+            &pubkey_hex(0x55),
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProfileVisibility::Public,
+            10,
+            10,
+        )
+        .expect("profile");
+        profile_repo
+            .upsert_profile(profile)
+            .await
+            .expect("insert profile");
+        let profiles: Arc<dyn ProfileRepository> = profile_repo;
+        let mappings_impl = Arc::new(FailingRepoLookupMappings::default());
+        mappings_impl
+            .upsert_mapping(RepoMappingRecord {
+                forgejo_owner: "owner".to_string(),
+                forgejo_repo: "repo".to_string(),
+                pubkey: vec![0x55; 32],
+                identifier: "repo".to_string(),
+            })
+            .await
+            .expect("noop upsert");
+        assert!(
+            mappings_impl
+                .mapping_by_forgejo("owner", "repo")
+                .await
+                .expect("mapping by forgejo")
+                .is_none()
+        );
+        assert!(
+            mappings_impl
+                .list_mappings()
+                .await
+                .expect("list mappings")
+                .is_empty()
+        );
+        let mappings: Arc<dyn RepoMappingRepository> = mappings_impl;
+        let state = test_state(mappings, profiles);
+        let npub = gittree_app_core::npub_from_bytes(&[0x55; 32]).expect("npub");
+
+        let err = super::api_repo_detail_handler(State(state), Path((npub, "repo".to_string())))
             .await
             .expect_err("storage error");
         assert_eq!(
