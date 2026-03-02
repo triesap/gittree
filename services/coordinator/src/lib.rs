@@ -1807,6 +1807,16 @@ mod tests {
     }
 
     #[test]
+    fn env_u32_empty_value_returns_none() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        const KEY: &str = "GITTREE_COORDINATOR_TEST_EMPTY_U32";
+        with_env_var(KEY, "", &mut || {
+            let value = super::env_u32(KEY).expect("empty u32 should be accepted");
+            assert_eq!(value, None);
+        });
+    }
+
+    #[test]
     fn config_rejects_missing_read_url_and_invalid_pool_ranges() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_required_coordinator_envs(&mut || {
@@ -2203,6 +2213,14 @@ mod tests {
         let err = super::install_hooks(&plan, &config).expect_err("missing post source");
         assert!(err.to_string().contains("missing hook source"));
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn ensure_source_exists_reports_missing_path() {
+        let temp_dir = temp_dir("gittree-hook-source-exists-check");
+        let missing = temp_dir.join("missing-source");
+        let err = super::ensure_source_exists(&missing).expect_err("missing source");
+        assert!(err.to_string().contains("missing hook source"));
     }
 
     #[test]
@@ -2614,7 +2632,7 @@ mod tests {
             post_receive_source: temp_dir.join("post-receive"),
         };
         let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
-        let storage = InMemoryRepositories::new();
+        let storage = ScriptedOutboxRepositories::default();
         let action =
             handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
                 .await
@@ -2642,7 +2660,7 @@ mod tests {
             post_receive_source: temp_dir.join("post-receive"),
         };
         let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
-        let storage = InMemoryRepositories::new();
+        let storage = ScriptedOutboxRepositories::default();
         let err =
             handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &invalid)
                 .await
@@ -2664,7 +2682,7 @@ mod tests {
             ..sample_repo_event("repo")
         };
         let (forgejo, transport) = forgejo_client_with_responses(Vec::new());
-        let in_memory = InMemoryRepositories::new();
+        let in_memory = ScriptedOutboxRepositories::default();
         let record_err = handle_announcement_event_with_storage(
             &temp_dir,
             &hooks,
@@ -2730,7 +2748,7 @@ mod tests {
             post_receive_source: temp_dir.join("post-receive"),
         };
         let event = sample_repo_event("repo");
-        let storage = InMemoryRepositories::new();
+        let storage = ScriptedOutboxRepositories::default();
 
         let (forgejo, transport) = forgejo_client_with_responses(vec![ForgejoResponse {
             status: 500,
@@ -3832,7 +3850,7 @@ mod tests {
             },
         ];
         let (forgejo, transport) = forgejo_client_with_responses(forgejo_responses);
-        let storage = InMemoryRepositories::new();
+        let storage = ScriptedOutboxRepositories::default();
         let temp_dir = temp_dir("gittree-event-storage");
         let bin_dir = temp_dir.join("bin");
         fs::create_dir_all(&bin_dir).expect("bin dir");
