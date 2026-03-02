@@ -901,20 +901,18 @@ mod tests {
         };
         let err = super::serve(config).await.expect_err("wrapper error");
         drop(occupied);
-        assert!(
-            err.to_string().contains("app serve error")
-                || err.to_string().contains("app observability")
-        );
+        let message = err.to_string();
+        let contains_serve_error = message.contains("app serve error");
+        let contains_observability_error = message.contains("app observability");
+        assert!(contains_serve_error || contains_observability_error);
     }
 
     #[test]
     fn init_observability_returns_registry() {
         let first = super::init_observability();
-        let first_registry_valid = first
-            .as_ref()
-            .map(|handle| handle.prometheus_registry().is_some())
-            .unwrap_or(true);
-        assert!(first_registry_valid);
+        if let Ok(handle) = first.as_ref() {
+            assert!(handle.prometheus_registry().is_some());
+        }
         let second = super::init_observability();
         let second_error = second.err().map(|err| err.to_string()).unwrap_or_default();
         assert!(second_error.is_empty() || second_error.contains("app observability error"));
