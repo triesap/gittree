@@ -21,5 +21,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 async-trait = "0.1"
+futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = "0.23"
 tower = "0.4"

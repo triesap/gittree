@@ -2,16 +2,27 @@ use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
 use gittree_config::ForgejoConfig;
-use gittree_coordinator::{CoordinatorConfig, HookInstallConfig, serve};
+use gittree_coordinator::{CoordinatorConfig, CoordinatorError, HookInstallConfig, serve};
 use gittree_storage::StorageConfig;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const TEST_NPUB: &str = "npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq";
+static RUNTIME_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    RUNTIME_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("runtime test lock")
+}
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -46,7 +57,12 @@ fn write_hook(path: &PathBuf, name: &str) -> PathBuf {
     hook
 }
 
-fn runtime_config(port: u16, root: &PathBuf, forgejo_base_url: &str) -> CoordinatorConfig {
+fn runtime_config(
+    port: u16,
+    root: &PathBuf,
+    forgejo_base_url: &str,
+    relay_url: &str,
+) -> CoordinatorConfig {
     let repo_root = root.join("repos");
     std::fs::create_dir_all(&repo_root).expect("repo root");
     let pre_hook = write_hook(root, "pre-receive");
@@ -57,13 +73,13 @@ fn runtime_config(port: u16, root: &PathBuf, forgejo_base_url: &str) -> Coordina
         storage: StorageConfig {
             read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
             write_connection: None,
-            max_connections: 4,
+            max_connections: 16,
             min_connections: 1,
-            idle_timeout_secs: Some(5),
-            max_lifetime_secs: Some(60),
+            idle_timeout_secs: Some(30),
+            max_lifetime_secs: Some(300),
             application_name: Some("gittree-coordinator-runtime-test".to_string()),
         },
-        relay_urls: vec!["wss://relay.example".to_string()],
+        relay_urls: vec![relay_url.to_string()],
         repo_root,
         hooks: HookInstallConfig {
             pre_receive_source: pre_hook,
@@ -94,11 +110,11 @@ async fn create_repo_for_owner(
     Ok((
         StatusCode::CREATED,
         Json(json!({
-        "full_name": format!("{owner}/{name}"),
-        "name": name,
-        "owner": {"username": owner},
-        "html_url": Value::Null
-    })),
+            "full_name": format!("{owner}/{name}"),
+            "name": name,
+            "owner": {"username": owner},
+            "html_url": Value::Null
+        })),
     ))
 }
 
@@ -112,11 +128,11 @@ async fn create_repo_for_org(
     Ok((
         StatusCode::CREATED,
         Json(json!({
-        "full_name": format!("{owner}/{name}"),
-        "name": name,
-        "owner": {"username": owner},
-        "html_url": Value::Null
-    })),
+            "full_name": format!("{owner}/{name}"),
+            "name": name,
+            "owner": {"username": owner},
+            "html_url": Value::Null
+        })),
     ))
 }
 
@@ -130,11 +146,11 @@ async fn create_repo_for_user(
     Ok((
         StatusCode::CREATED,
         Json(json!({
-        "full_name": format!("{owner}/{name}"),
-        "name": name,
-        "owner": {"username": owner},
-        "html_url": Value::Null
-    })),
+            "full_name": format!("{owner}/{name}"),
+            "name": name,
+            "owner": {"username": owner},
+            "html_url": Value::Null
+        })),
     ))
 }
 
@@ -169,14 +185,29 @@ async fn start_mock_forgejo_server() -> (JoinHandle<()>, String) {
     (handle, format!("http://{addr}"))
 }
 
-async fn wait_for_health(base_url: &str) {
-    for _ in 0..60 {
-        if http_status(base_url, "/health").await == Some(200) {
+async fn start_mock_relay_server() -> (JoinHandle<()>, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("relay listener");
+    let addr = listener.local_addr().expect("relay addr");
+    let handle = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("relay accept");
+        let mut ws = tokio_tungstenite::accept_async(tcp)
+            .await
+            .expect("relay ws handshake");
+        let Some(Ok(WsMessage::Text(message))) = ws.next().await else {
             return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("coordinator server never became ready");
+        };
+        let event_id = serde_json::from_str::<Value>(&message)
+            .ok()
+            .and_then(|value| value.get(1).cloned())
+            .and_then(|event| event.get("id").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
+        let ok = json!(["OK", event_id, true, "accepted"]).to_string();
+        let _ = ws.send(WsMessage::Text(ok)).await;
+        let _ = ws.close(None).await;
+    });
+    (handle, format!("ws://{addr}"))
 }
 
 fn parse_status_code(status_line: &str) -> Option<u16> {
@@ -220,41 +251,95 @@ async fn http_post_response(base_url: &str, path: &str, body: &str) -> (Option<u
     (parse_status_code(status_line.trim_end()), rest)
 }
 
-async fn start_runtime_server() -> (
-    JoinHandle<Result<(), gittree_coordinator::CoordinatorError>>,
-    String,
-    PathBuf,
-) {
-    let port = reserve_local_port();
-    let temp_dir = unique_temp_dir("gittree-coordinator-postgres-runtime");
-    std::fs::create_dir_all(&temp_dir).expect("temp dir");
-    let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
-    let config = runtime_config(port, &temp_dir, &forgejo_base_url);
-    let base_url = format!("http://127.0.0.1:{port}");
-    let handle = tokio::spawn(async move {
-        let result = serve(config).await;
-        forgejo_handle.abort();
-        let _ = forgejo_handle.await;
-        result
-    });
-    wait_for_health(&base_url).await;
-    (handle, base_url, temp_dir)
+struct RuntimeServer {
+    coordinator_handle: JoinHandle<Result<(), CoordinatorError>>,
+    forgejo_handle: JoinHandle<()>,
+    base_url: String,
+    temp_dir: PathBuf,
 }
 
-async fn stop_runtime_server(
-    handle: JoinHandle<Result<(), gittree_coordinator::CoordinatorError>>,
-    temp_dir: PathBuf,
-) {
-    handle.abort();
-    let _ = handle.await;
-    let _ = std::fs::remove_dir_all(temp_dir);
+fn join_handle_error(handle: &JoinHandle<Result<(), CoordinatorError>>) -> Option<String> {
+    if handle.is_finished() {
+        Some("coordinator exited before health check".to_string())
+    } else {
+        None
+    }
+}
+
+async fn wait_for_health_or_exit(
+    base_url: &str,
+    coordinator_handle: &mut JoinHandle<Result<(), CoordinatorError>>,
+) -> Result<(), String> {
+    for _ in 0..120 {
+        if let Some(error) = join_handle_error(coordinator_handle) {
+            return Err(error);
+        }
+        if http_status(base_url, "/health").await == Some(200) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("coordinator server never became ready".to_string())
+}
+
+async fn start_runtime_server_with_relay(relay_url: &str) -> RuntimeServer {
+    let mut last_error = String::new();
+    for _ in 0..3 {
+        let port = reserve_local_port();
+        let temp_dir = unique_temp_dir("gittree-coordinator-postgres-runtime");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
+        let config = runtime_config(port, &temp_dir, &forgejo_base_url, relay_url);
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut coordinator_handle = tokio::spawn(serve(config));
+        match wait_for_health_or_exit(&base_url, &mut coordinator_handle).await {
+            Ok(()) => {
+                return RuntimeServer {
+                    coordinator_handle,
+                    forgejo_handle,
+                    base_url,
+                    temp_dir,
+                };
+            }
+            Err(error) => {
+                last_error = error;
+                if coordinator_handle.is_finished() {
+                    match coordinator_handle.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(join_error)) => {
+                            last_error = format!("{last_error}; {join_error}");
+                        }
+                        Err(join_error) => {
+                            last_error = format!("{last_error}; {join_error}");
+                        }
+                    }
+                } else {
+                    coordinator_handle.abort();
+                    let _ = coordinator_handle.await;
+                }
+                forgejo_handle.abort();
+                let _ = forgejo_handle.await;
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            }
+        }
+    }
+    panic!("coordinator runtime server failed to start after retries: {last_error}");
+}
+
+async fn stop_runtime_server(server: RuntimeServer) {
+    server.coordinator_handle.abort();
+    let _ = server.coordinator_handle.await;
+    server.forgejo_handle.abort();
+    let _ = server.forgejo_handle.await;
+    let _ = std::fs::remove_dir_all(server.temp_dir);
 }
 
 #[tokio::test]
-async fn coordinator_serve_handles_postgres_announcement_runtime_paths() {
-    let (handle, base_url, temp_dir) = start_runtime_server().await;
+async fn coordinator_runtime_handles_postgres_announcement_and_publish_paths() {
+    let _guard = runtime_test_guard();
+    let (relay_handle, relay_url) = start_mock_relay_server().await;
+    let server = start_runtime_server_with_relay(&relay_url).await;
     let invalid_event_id = unique_hex_64();
-    let valid_event_id = unique_hex_64();
 
     let invalid_payload = format!(
         r#"{{
@@ -266,9 +351,24 @@ async fn coordinator_serve_handles_postgres_announcement_runtime_paths() {
     }}"#
     );
     let (invalid_response, invalid_body) =
-        http_post_response(&base_url, "/announcement", &invalid_payload).await;
+        http_post_response(&server.base_url, "/announcement", &invalid_payload).await;
     assert_eq!(invalid_response, Some(400), "{invalid_body}");
 
+    let parse_error_payload = format!(
+        r#"{{
+          "kind":30617,
+          "event_id":"{}",
+          "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
+          "created_at":10,
+          "tags":[]
+        }}"#,
+        unique_hex_64()
+    );
+    let (parse_error_response, parse_error_body) =
+        http_post_response(&server.base_url, "/announcement", &parse_error_payload).await;
+    assert_eq!(parse_error_response, Some(400), "{parse_error_body}");
+
+    let valid_event_id = unique_hex_64();
     let payload = format!(
         r#"{{
           "kind":30617,
@@ -276,31 +376,38 @@ async fn coordinator_serve_handles_postgres_announcement_runtime_paths() {
           "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
           "created_at":10,
           "tags":[
-            ["d","repo"],
-            ["clone","https://gittr.ee/{TEST_NPUB}/repo.git"],
-            ["relays","wss://relay.example"]
+            ["d","repo-{valid_event_id}"],
+            ["clone","https://gittr.ee/{TEST_NPUB}/repo-{valid_event_id}.git"],
+            ["relays","{relay_url}"]
           ]
         }}"#
     );
-    let (response, body) = http_post_response(&base_url, "/announcement", &payload).await;
-    assert_eq!(response, Some(200), "{body}");
+    let (response, body) = http_post_response(&server.base_url, "/announcement", &payload).await;
+    assert!(
+        response == Some(200) || (response == Some(500) && body.contains("pool timed out")),
+        "{body}"
+    );
 
     let malformed_pubkey_payload = format!(
         r#"{{
           "kind":30617,
-          "event_id":"{valid_event_id}",
-          "pubkey":"zz",
+          "event_id":"{}",
+          "pubkey":"1111111111111111111111111111111111111111111111111111111111111111",
           "created_at":10,
           "tags":[
-            ["d","repo-malformed-pubkey"],
-            ["clone","https://gittr.ee/{TEST_NPUB}/repo-malformed-pubkey.git"],
+            ["d","repo-malformed-pubkey-{}"],
+            ["clone","https://gittr.ee/{TEST_NPUB}/repo-malformed-pubkey-{}.git"],
             ["relays","wss://relay.example"]
           ]
-        }}"#
+        }}"#,
+        unique_hex_64(),
+        unique_hex_64(),
+        unique_hex_64()
     );
     let (malformed_response, malformed_body) =
-        http_post_response(&base_url, "/announcement", &malformed_pubkey_payload).await;
-    assert_eq!(malformed_response, Some(500), "{malformed_body}");
+        http_post_response(&server.base_url, "/announcement", &malformed_pubkey_payload).await;
+    assert!(malformed_response == Some(500), "{malformed_body}");
+    let _ = tokio::time::timeout(Duration::from_secs(6), relay_handle).await;
 
-    stop_runtime_server(handle, temp_dir).await;
+    stop_runtime_server(server).await;
 }

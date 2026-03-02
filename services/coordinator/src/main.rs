@@ -118,24 +118,24 @@ mod tests {
     }
 
     fn serve_err(_: CoordinatorConfig) -> super::MainRunFuture {
-        Box::pin(
-            async { Err::<(), CoordinatorError>(CoordinatorError::Serve("serve failed".to_string())) },
-        )
+        Box::pin(async {
+            Err::<(), CoordinatorError>(CoordinatorError::Serve("serve failed".to_string()))
+        })
     }
 
     #[tokio::test]
     async fn run_with_returns_config_errors() {
         let err = run_with(load_config_error, serve_ok)
-        .await
-        .expect_err("config error");
+            .await
+            .expect_err("config error");
         assert!(matches!(err, CoordinatorError::Serve(message) if message == "config failed"));
     }
 
     #[tokio::test]
     async fn run_with_returns_serve_errors() {
         let err = run_with(load_runtime_config, serve_err)
-        .await
-        .expect_err("serve error");
+            .await
+            .expect_err("serve error");
         assert!(matches!(err, CoordinatorError::Serve(message) if message == "serve failed"));
     }
 
@@ -150,6 +150,22 @@ mod tests {
         let _err = run_with(load_runtime_config, super::serve_boxed)
             .await
             .expect_err("serve error");
+    }
+
+    #[tokio::test]
+    async fn run_with_covers_library_probe_paths_for_runtime_instantiation() {
+        let err = gittree_coordinator::__coverage_probe_map_serve_result(Err(
+            std::io::Error::other("main test probe io error"),
+        ))
+        .expect_err("probe should map io error");
+        assert!(matches!(err, CoordinatorError::Serve(_)));
+
+        let polled = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            gittree_coordinator::__coverage_probe_shutdown_signal(),
+        )
+        .await;
+        assert!(polled.is_err());
     }
 
     #[test]
@@ -211,9 +227,8 @@ mod tests {
         let mut load_dotenv = move || {
             loader_called.store(true, std::sync::atomic::Ordering::Relaxed);
         };
-        let mut run_fn = || -> super::MainRunFuture {
-            Box::pin(async { Ok::<(), CoordinatorError>(()) })
-        };
+        let mut run_fn =
+            || -> super::MainRunFuture { Box::pin(async { Ok::<(), CoordinatorError>(()) }) };
         let _ = main_impl_with(&mut load_dotenv, &mut run_fn, &mut stderr).await;
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
     }

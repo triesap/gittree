@@ -18,15 +18,16 @@ fn write_hook_source(path: &std::path::Path, name: &str) -> std::path::PathBuf {
     hook_path
 }
 
-fn command_output_with_timeout(
-    mut command: Command,
-    timeout: Duration,
-) -> std::process::Output {
+fn command_output_with_timeout(mut command: Command, timeout: Duration) -> std::process::Output {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().expect("spawn coordinator binary");
     let deadline = Instant::now() + timeout;
     loop {
-        if child.try_wait().expect("check coordinator status").is_some() {
+        if child
+            .try_wait()
+            .expect("check coordinator status")
+            .is_some()
+        {
             return child.wait_with_output().expect("read coordinator output");
         }
         if Instant::now() >= deadline {
@@ -113,6 +114,10 @@ fn coordinator_binary_config_errors_cover_from_env_paths() {
 
     let scenarios: &[(&[(&str, Option<&str>)], &str)] = &[
         (
+            &[("GITTREE_STORAGE_READ_URL", None)],
+            "coordinator storage config error",
+        ),
+        (
             &[("GITTREE_STORAGE_MAX_CONNECTIONS", Some("not-a-number"))],
             "coordinator storage config error",
         ),
@@ -135,7 +140,10 @@ fn coordinator_binary_config_errors_cover_from_env_paths() {
             ],
             "coordinator storage config error",
         ),
-        (&[("GITTREE_RELAY_URLS", Some("not-a-url"))], "coordinator config error"),
+        (
+            &[("GITTREE_RELAY_URLS", Some("not-a-url"))],
+            "coordinator config error",
+        ),
         (
             &[("GITTREE_COORDINATOR_REPO_ROOT", Some("   "))],
             "invalid env GITTREE_COORDINATOR_REPO_ROOT",
@@ -157,6 +165,7 @@ fn coordinator_binary_config_errors_cover_from_env_paths() {
     for (override_envs, expected_stderr) in scenarios {
         let mut command = Command::new(env!("CARGO_BIN_EXE_gittree-coordinator"));
         command
+            .current_dir(&runtime_dir)
             .env("GITTREE_COORDINATOR_BIND", "127.0.0.1:9091")
             .env(
                 "GITTREE_STORAGE_READ_URL",

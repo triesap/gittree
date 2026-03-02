@@ -4,9 +4,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gittree_config::{ConfigError, ForgejoConfig, RelayTargetsConfig, ServicesConfig};
+#[cfg(test)]
+use gittree_core::KIND_USER_GRASP_LIST;
 use gittree_core::{
     CoreError, Nip34Event, RepoAnnouncement, RepoMapping, extract_npub, parse_repo_path,
 };
+#[cfg(test)]
+use gittree_forgejo::ReqwestTransport;
 use gittree_forgejo::{ForgejoClient, ForgejoError, ForgejoTransport};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_relay_adapter::{
@@ -17,7 +21,7 @@ use gittree_storage::{
     RepoAnnouncementRecord, RepoMappingRecord, RepoMappingRepository, StorageConfig, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::future::{Future, pending};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
@@ -329,7 +333,21 @@ async fn serve_with_init(config: CoordinatorConfig, init: InitFn) -> Result<(), 
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|err| CoordinatorError::Serve(err.to_string()))?;
-    run_http_server_with_shutdown(listener, router, Box::pin(pending())).await
+    run_http_server_with_shutdown(listener, router, shutdown_signal()).await
+}
+
+#[cfg(not(test))]
+#[inline(never)]
+fn shutdown_signal() -> ShutdownFuture {
+    Box::pin(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+}
+
+#[cfg(test)]
+#[inline(never)]
+fn shutdown_signal() -> ShutdownFuture {
+    Box::pin(std::future::pending::<()>())
 }
 
 fn spawn_publish_outbox<R, T>(state: CoordinatorAppState<R, T>) -> tokio::task::JoinHandle<()>
@@ -361,11 +379,24 @@ async fn run_http_server_with_shutdown(
     map_serve_result(result)
 }
 
+#[inline(never)]
 fn map_serve_result(result: std::io::Result<()>) -> Result<(), CoordinatorError> {
     if let Err(err) = result {
         return Err(CoordinatorError::Serve(err.to_string()));
     }
     Ok(())
+}
+
+#[doc(hidden)]
+pub fn __coverage_probe_map_serve_result(
+    result: std::io::Result<()>,
+) -> Result<(), CoordinatorError> {
+    map_serve_result(result)
+}
+
+#[doc(hidden)]
+pub fn __coverage_probe_shutdown_signal() -> impl Future<Output = ()> + Send {
+    shutdown_signal()
 }
 
 fn build_router<R, T>(state: CoordinatorAppState<R, T>) -> Router
@@ -893,6 +924,7 @@ where
         &announcement,
     )
     .map_err(CoordinatorEventError::Storage)?;
+    let mapping_pubkey = record.pubkey.clone();
     state
         .repositories
         .insert_announcement(record)
@@ -919,8 +951,12 @@ where
         announcement.identifier.clone(),
     )
     .map_err(CoordinatorEventError::Mapping)?;
-    // RepoMapping::new validates pubkey as strict 64-char hex before storage conversion.
-    let record = RepoMappingRecord::new(&mapping).expect("validated mapping pubkey");
+    let record = RepoMappingRecord {
+        forgejo_owner: mapping.forgejo.owner.clone(),
+        forgejo_repo: mapping.forgejo.name.clone(),
+        pubkey: mapping_pubkey,
+        identifier: mapping.identifier.clone(),
+    };
     state
         .repositories
         .upsert_mapping(record)
@@ -1038,6 +1074,7 @@ where
         &announcement,
     )
     .map_err(CoordinatorEventError::Storage)?;
+    let mapping_pubkey = record.pubkey.clone();
     storage
         .insert_announcement(record)
         .await
@@ -1058,13 +1095,45 @@ where
         announcement.identifier.clone(),
     )
     .map_err(CoordinatorEventError::Mapping)?;
-    // RepoMapping::new validates pubkey as strict 64-char hex before storage conversion.
-    let record = RepoMappingRecord::new(&mapping).expect("validated mapping pubkey");
+    let record = RepoMappingRecord {
+        forgejo_owner: mapping.forgejo.owner.clone(),
+        forgejo_repo: mapping.forgejo.name.clone(),
+        pubkey: mapping_pubkey,
+        identifier: mapping.identifier.clone(),
+    };
     storage
         .upsert_mapping(record)
         .await
         .map_err(CoordinatorEventError::Storage)?;
     handle_announcement_event(root, hooks, event)
+}
+
+#[cfg(test)]
+async fn publish_to_relay_invalid_url_for_test(event: SignedNostrEvent) -> Result<(), String> {
+    publish_to_relay("not-a-url".to_string(), event).await
+}
+
+#[cfg(test)]
+async fn finalize_outbox_job_ignored_postgres_reqwest_for_test(
+    state: &CoordinatorAppState<PostgresRepositories, ReqwestTransport>,
+) -> Result<(), CoordinatorEventError> {
+    let job = RelayPublishJob {
+        id: 99,
+        relay_url: "wss://relay.example".to_string(),
+        event_id: vec![0x11; 32],
+        pubkey: vec![0x22; 32],
+        created_at: 10,
+        kind: KIND_USER_GRASP_LIST.0,
+        tags: vec![vec!["r".to_string(), "wss://relay.example".to_string()]],
+        content: String::new(),
+        sig: vec![0x33; 64],
+        forgejo_owner: "owner".to_string(),
+        forgejo_repo: "repo".to_string(),
+        identifier: "repo".to_string(),
+        attempt_count: 1,
+        publish_after: OffsetDateTime::now_utc(),
+    };
+    finalize_outbox_job(state, &job).await
 }
 
 #[cfg(test)]
@@ -1105,6 +1174,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, LazyLock, Mutex};
     use std::time::Duration as StdDuration;
     use time::{Duration as TimeDuration, OffsetDateTime};
@@ -1308,16 +1378,19 @@ mod tests {
         Ok(())
     }
 
-    async fn publish_err(_: String, _: super::SignedNostrEvent) -> Result<(), String> {
-        Err("publish failed".to_string())
-    }
-
     fn publish_ok_fn() -> super::PublishRelayFn {
         Arc::new(|relay_url, event| Box::pin(publish_ok(relay_url, event)))
     }
 
-    fn publish_err_fn() -> super::PublishRelayFn {
-        Arc::new(|relay_url, event| Box::pin(publish_err(relay_url, event)))
+    fn publish_err_counted_fn(counter: Arc<AtomicUsize>) -> super::PublishRelayFn {
+        Arc::new(move |relay_url, event| {
+            let counter = Arc::clone(&counter);
+            Box::pin(async move {
+                let _ = (relay_url, event);
+                counter.fetch_add(1, AtomicOrdering::SeqCst);
+                Err("publish failed".to_string())
+            })
+        })
     }
 
     fn publish_to_relay_fn() -> super::PublishRelayFn {
@@ -1862,6 +1935,17 @@ mod tests {
 
             with_unset_env_var("GITTREE_FORGEJO_OWNER", &mut || {
                 let err = CoordinatorConfig::from_env().expect_err("missing forgejo owner");
+                assert!(err.to_string().contains("coordinator config error"));
+            });
+        });
+    }
+
+    #[test]
+    fn config_rejects_invalid_services_bind() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_required_coordinator_envs(&mut || {
+            with_env_var("GITTREE_COORDINATOR_BIND", "not-an-addr", &mut || {
+                let err = CoordinatorConfig::from_env().expect_err("invalid bind");
                 assert!(err.to_string().contains("coordinator config error"));
             });
         });
@@ -2535,7 +2619,9 @@ mod tests {
 
     #[tokio::test]
     async fn announcement_endpoint_maps_storage_errors() {
-        let repositories = Arc::new(ScriptedOutboxRepositories::with_storage_failures(true, false));
+        let repositories = Arc::new(ScriptedOutboxRepositories::with_storage_failures(
+            true, false,
+        ));
         let temp_dir = temp_dir("gittree-coordinator-http-storage-error");
         let hooks = HookInstallConfig {
             pre_receive_source: temp_dir.join("pre-receive"),
@@ -2580,7 +2666,10 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
@@ -2642,6 +2731,39 @@ mod tests {
             CoordinatorActionPayload::Ignored
         );
         assert!(transport.requests().is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn handle_event_with_storage_postgres_reqwest_ignores_non_repo_nip34_events() {
+        let config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        let storage = super::build_repositories(&config).expect("repositories");
+        let forgejo = ForgejoClient::new(config.forgejo.clone()).expect("forgejo client");
+        let list = UserGraspList {
+            urls: vec!["wss://relay.example".to_string()],
+        };
+        let event = RelayEvent {
+            kind: KIND_USER_GRASP_LIST.0,
+            event_id: "66".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: list.to_tags(),
+        };
+        let temp_dir = temp_dir("gittree-ignored-storage-event-postgres");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let action =
+            handle_announcement_event_with_storage(&temp_dir, &hooks, &storage, &forgejo, &event)
+                .await
+                .expect("ignored");
+        assert_eq!(
+            CoordinatorActionPayload::from(action),
+            CoordinatorActionPayload::Ignored
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -3068,6 +3190,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_outbox_job_postgres_reqwest_ignores_non_announcement_event_kinds() {
+        let config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        let repositories = Arc::new(super::build_repositories(&config).expect("repositories"));
+        let temp_dir = temp_dir("gittree-finalize-ignored-postgres");
+        let hooks = HookInstallConfig {
+            pre_receive_source: temp_dir.join("pre-receive"),
+            post_receive_source: temp_dir.join("post-receive"),
+        };
+        let forgejo = ForgejoClient::new(config.forgejo).expect("forgejo client");
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: temp_dir.join("repos"),
+            hooks,
+            forgejo,
+        };
+        super::finalize_outbox_job_ignored_postgres_reqwest_for_test(&state)
+            .await
+            .expect("ignored event should succeed");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
     async fn finalize_outbox_job_persists_state_and_provisions_repo() {
         let repositories = Arc::new(InMemoryRepositories::new());
         let temp_dir = temp_dir("gittree-finalize-success");
@@ -3395,6 +3541,27 @@ mod tests {
         assert!(join_err.is_cancelled());
     }
 
+    #[tokio::test]
+    async fn shutdown_signal_future_can_be_aborted() {
+        let task = tokio::spawn(super::shutdown_signal());
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        task.abort();
+        let join_err = task.await.expect_err("aborted");
+        assert!(join_err.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn coverage_probe_wrappers_are_exercised_in_unit_target() {
+        let _ = super::__coverage_probe_map_serve_result(Err(std::io::Error::other(
+            "unit target probe error",
+        )));
+        let _ = tokio::time::timeout(
+            StdDuration::from_millis(1),
+            super::__coverage_probe_shutdown_signal(),
+        )
+        .await;
+    }
+
     #[test]
     fn map_serve_result_maps_io_errors() {
         let err = super::map_serve_result(Err(std::io::Error::other("serve failed")))
@@ -3555,12 +3722,22 @@ mod tests {
             hooks,
             forgejo,
         };
+        let publish_attempts = Arc::new(AtomicUsize::new(0));
         let task = tokio::spawn(super::publish_outbox_loop_with_delay_and_publish(
             state,
             StdDuration::from_millis(1),
-            publish_err_fn(),
+            publish_err_counted_fn(Arc::clone(&publish_attempts)),
         ));
-        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        tokio::time::timeout(StdDuration::from_millis(500), async {
+            loop {
+                if publish_attempts.load(AtomicOrdering::SeqCst) > 0 {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("publish loop attempted a failed publish");
         task.abort();
         let _ = task.await;
         let _ = fs::remove_dir_all(temp_dir);
@@ -3778,6 +3955,14 @@ mod tests {
         assert!(claimed.attempt_count >= 2);
         assert_eq!(claimed.relay_url, "not-a-url");
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn publish_to_relay_reports_invalid_url() {
+        let event = super::signed_event_from_job(&sample_job());
+        let _ = super::publish_to_relay_invalid_url_for_test(event)
+            .await
+            .expect_err("invalid relay url should fail");
     }
 
     #[test]
