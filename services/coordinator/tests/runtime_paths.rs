@@ -2,7 +2,12 @@ use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use gittree_coordinator::{CoordinatorConfig, CoordinatorConfigError, StorageConfigError};
+use gittree_config::ForgejoConfig;
+use gittree_coordinator::{
+    CoordinatorConfig, CoordinatorConfigError, CoordinatorError, HookInstallConfig,
+    StorageConfigError, serve,
+};
+use gittree_storage::StorageConfig;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -11,6 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex as AsyncMutex;
 
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
@@ -22,6 +28,11 @@ fn reserve_local_port() -> u16 {
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn async_test_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 struct EnvRestore {
@@ -83,6 +94,44 @@ fn new_runtime_dir() -> PathBuf {
         std::process::id(),
         counter
     ))
+}
+
+fn direct_serve_config(
+    bind: &str,
+    runtime_dir: &PathBuf,
+    forgejo_base_url: &str,
+) -> CoordinatorConfig {
+    let repo_root = runtime_dir.join("repos");
+    std::fs::create_dir_all(&repo_root).expect("create repo root");
+    let pre_hook = write_hook_source(runtime_dir, "pre-direct-hook");
+    let post_hook = write_hook_source(runtime_dir, "post-direct-hook");
+
+    CoordinatorConfig {
+        bind: bind.to_string(),
+        storage: StorageConfig {
+            read_connection: runtime_storage_url(),
+            write_connection: None,
+            max_connections: 5,
+            min_connections: 1,
+            idle_timeout_secs: Some(30),
+            max_lifetime_secs: Some(300),
+            application_name: Some("gittree-coordinator-runtime-direct".to_string()),
+        },
+        relay_urls: vec!["wss://relay.example".to_string()],
+        repo_root,
+        hooks: HookInstallConfig {
+            pre_receive_source: pre_hook,
+            post_receive_source: post_hook,
+        },
+        forgejo: ForgejoConfig {
+            base_url: forgejo_base_url.to_string(),
+            api_token: "token".to_string(),
+            owner: "owner".to_string(),
+            webhook_url: "http://localhost:8080/webhook".to_string(),
+            webhook_secret: "secret".to_string(),
+            repo_private: true,
+        },
+    }
 }
 
 fn write_hook_source(path: &PathBuf, name: &str) -> PathBuf {
@@ -273,6 +322,7 @@ fn stop_server(child: &mut Child) {
 
 #[tokio::test]
 async fn coordinator_binary_runtime_routes_cover_non_test_monomorphizations() {
+    let _guard = async_test_lock().lock().await;
     let port = reserve_local_port();
     let (mut child, base_url, runtime_dir) = start_coordinator_server(port);
     wait_for_health(&base_url, &mut child).await;
@@ -294,6 +344,7 @@ async fn coordinator_binary_runtime_routes_cover_non_test_monomorphizations() {
 
 #[tokio::test]
 async fn coordinator_binary_runtime_valid_announcement_exercises_postgres_and_outbox_paths() {
+    let _guard = async_test_lock().lock().await;
     let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
     let port = reserve_local_port();
     let (mut child, base_url, runtime_dir) =
@@ -343,6 +394,7 @@ async fn coordinator_binary_runtime_valid_announcement_exercises_postgres_and_ou
 
 #[tokio::test]
 async fn coordinator_binary_runtime_announcement_parse_error_returns_bad_request() {
+    let _guard = async_test_lock().lock().await;
     let (forgejo_handle, forgejo_base_url) = start_mock_forgejo_server().await;
     let port = reserve_local_port();
     let (mut child, base_url, runtime_dir) =
@@ -363,6 +415,47 @@ async fn coordinator_binary_runtime_announcement_parse_error_returns_bad_request
     let _ = std::fs::remove_dir_all(runtime_dir);
     forgejo_handle.abort();
     let _ = forgejo_handle.await;
+}
+
+#[tokio::test]
+async fn coordinator_serve_maps_invalid_forgejo_for_runtime_instantiation() {
+    let _guard = async_test_lock().lock().await;
+    let runtime_dir = new_runtime_dir();
+    let _ = std::fs::create_dir_all(&runtime_dir);
+    let mut config = direct_serve_config("127.0.0.1:0", &runtime_dir, "http://localhost:3000");
+    config.forgejo.api_token = " ".to_string();
+    let err = tokio::time::timeout(Duration::from_secs(3), serve(config))
+        .await
+        .expect("serve should return quickly")
+        .expect_err("invalid forgejo config");
+    assert!(matches!(
+        err,
+        CoordinatorError::Forgejo(_) | CoordinatorError::Observability(_)
+    ));
+    let _ = std::fs::remove_dir_all(runtime_dir);
+}
+
+#[tokio::test]
+async fn coordinator_serve_maps_observability_reinit_for_runtime_instantiation() {
+    let _guard = async_test_lock().lock().await;
+    let runtime_dir = new_runtime_dir();
+    let _ = std::fs::create_dir_all(&runtime_dir);
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind occupied listener");
+    let bind = occupied.local_addr().expect("occupied addr").to_string();
+
+    let first = direct_serve_config(&bind, &runtime_dir, "http://localhost:3000");
+    let _first_err = tokio::time::timeout(Duration::from_secs(3), serve(first))
+        .await
+        .expect("first serve should return quickly")
+        .expect_err("occupied bind should fail");
+
+    let second = direct_serve_config("127.0.0.1:0", &runtime_dir, "http://localhost:3000");
+    let err = tokio::time::timeout(Duration::from_secs(3), serve(second))
+        .await
+        .expect("serve should return quickly")
+        .expect_err("observability reinit error");
+    assert!(matches!(err, CoordinatorError::Observability(_)));
+    let _ = std::fs::remove_dir_all(runtime_dir);
 }
 
 #[test]

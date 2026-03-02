@@ -1,6 +1,10 @@
 use gittree_app::{AppServiceConfig, serve};
+use gittree_app_core::npub_from_bytes;
 use gittree_config::UiConfig;
-use gittree_storage::StorageConfig;
+use gittree_storage::{
+    PostgresRepositories, ProfileRecord, ProfileRepository, ProfileVisibility, RepoMappingRecord,
+    RepoMappingRepository, StorageConfig,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -22,6 +26,17 @@ fn repo_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("workspace root")
         .to_path_buf()
+}
+
+fn runtime_storage_url() -> String {
+    std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string())
+}
+
+fn pubkey_hex(pubkey: [u8; 32]) -> String {
+    pubkey.iter().map(|value| format!("{value:02x}")).collect()
 }
 
 fn parse_status_code(response: &str) -> Option<u16> {
@@ -90,9 +105,47 @@ async fn wait_for_post_status(port: u16, path: &str, body: &str) -> u16 {
     panic!("did not receive HTTP status for post path: {path}");
 }
 
+async fn seed_public_repo(
+    storage: &StorageConfig,
+    pubkey: [u8; 32],
+    identifier: &str,
+) {
+    let pool_options = storage.pool_options().expect("pool options");
+    let connect_options = storage
+        .read_connect_options()
+        .expect("storage connect options");
+    let repositories = PostgresRepositories::new(pool_options.connect_lazy_with(connect_options));
+    let profile = ProfileRecord::new(
+        &pubkey_hex(pubkey),
+        None,
+        None,
+        None,
+        None,
+        None,
+        ProfileVisibility::Public,
+        10,
+        10,
+    )
+    .expect("profile record");
+    repositories
+        .upsert_profile(profile)
+        .await
+        .expect("upsert profile");
+    repositories
+        .upsert_mapping(RepoMappingRecord {
+            forgejo_owner: "owner".to_string(),
+            forgejo_repo: identifier.to_string(),
+            pubkey: pubkey.to_vec(),
+            identifier: identifier.to_string(),
+        })
+        .await
+        .expect("upsert mapping");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_runtime_path_executes_non_test_instantiations() {
     let port = reserve_local_port();
+    let storage_url = runtime_storage_url();
     let temp_dir = std::env::temp_dir().join(format!(
         "gittree-app-serve-runtime-{}",
         SystemTime::now()
@@ -109,7 +162,7 @@ async fn serve_runtime_path_executes_non_test_instantiations() {
         site_root: repo_root().join("crates/app-ui/dist"),
         site_pkg_dir: "pkg".to_string(),
         storage: StorageConfig {
-            read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+            read_connection: storage_url,
             write_connection: None,
             max_connections: 10,
             min_connections: 2,
@@ -125,6 +178,16 @@ async fn serve_runtime_path_executes_non_test_instantiations() {
             control_url: "http://localhost:8088".to_string(),
         },
     };
+    let pubkey = [0x66; 32];
+    let npub = npub_from_bytes(&pubkey).expect("npub");
+    let identifier = format!(
+        "repo-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    seed_public_repo(&config.storage, pubkey, &identifier).await;
 
     let serve_task = tokio::spawn(async move { serve(config).await });
     wait_for_health(port).await;
@@ -136,6 +199,14 @@ async fn serve_runtime_path_executes_non_test_instantiations() {
     assert_eq!(
         wait_for_status(port, "/api/repos/not-a-valid-npub/repo").await,
         400
+    );
+    assert_eq!(
+        wait_for_status(port, &format!("/api/users/{npub}/repos")).await,
+        200
+    );
+    assert_eq!(
+        wait_for_status(port, &format!("/api/repos/{npub}/{identifier}")).await,
+        200
     );
     let server_fn_status =
         wait_for_post_status(port, "/api/nonexistent_server_fn", "{}").await;
