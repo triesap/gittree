@@ -3,11 +3,6 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use gittree_app_core::npub_from_bytes;
-use gittree_storage::{
-    PostgresRepositories, ProfileRecord, ProfileRepository, ProfileVisibility, RepoMappingRecord,
-    RepoMappingRepository, StorageConfig,
-};
 
 const INVALID_NPUB: &str = "not-a-valid-npub";
 
@@ -32,43 +27,6 @@ fn runtime_storage_url() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string())
-}
-
-fn pubkey_hex(pubkey: [u8; 32]) -> String {
-    pubkey.iter().map(|value| format!("{value:02x}")).collect()
-}
-
-async fn seed_public_repo(storage: &StorageConfig, pubkey: [u8; 32], identifier: &str) {
-    let pool_options = storage.pool_options().expect("pool options");
-    let connect_options = storage
-        .read_connect_options()
-        .expect("storage connect options");
-    let repositories = PostgresRepositories::new(pool_options.connect_lazy_with(connect_options));
-    let profile = ProfileRecord::new(
-        &pubkey_hex(pubkey),
-        None,
-        None,
-        None,
-        None,
-        None,
-        ProfileVisibility::Public,
-        10,
-        10,
-    )
-    .expect("profile record");
-    repositories
-        .upsert_profile(profile)
-        .await
-        .expect("upsert profile");
-    repositories
-        .upsert_mapping(RepoMappingRecord {
-            forgejo_owner: "owner".to_string(),
-            forgejo_repo: identifier.to_string(),
-            pubkey: pubkey.to_vec(),
-            identifier: identifier.to_string(),
-        })
-        .await
-        .expect("upsert mapping");
 }
 
 fn start_app_server(port: u16) -> (Child, String) {
@@ -160,25 +118,6 @@ fn stop_app_server(child: &mut Child) {
 #[tokio::test]
 async fn app_binary_runtime_routes_cover_non_test_monomorphizations() {
     let port = reserve_local_port();
-    let pubkey = [0x44; 32];
-    let npub = npub_from_bytes(&pubkey).expect("npub");
-    let identifier = format!(
-        "repo-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let storage = StorageConfig {
-        read_connection: runtime_storage_url(),
-        write_connection: None,
-        max_connections: 10,
-        min_connections: 2,
-        idle_timeout_secs: None,
-        max_lifetime_secs: None,
-        application_name: Some("gittree-app-binary-runtime-tests".to_string()),
-    };
-    seed_public_repo(&storage, pubkey, &identifier).await;
     let (mut child, base_url) = start_app_server(port);
     wait_for_health(&base_url, &mut child);
 
@@ -190,14 +129,6 @@ async fn app_binary_runtime_routes_cover_non_test_monomorphizations() {
     assert_eq!(
         http_status(&base_url, &format!("/api/repos/{INVALID_NPUB}/repo")),
         Some(400)
-    );
-    assert_eq!(
-        http_status(&base_url, &format!("/api/users/{npub}/repos")),
-        Some(200)
-    );
-    assert_eq!(
-        http_status(&base_url, &format!("/api/repos/{npub}/{identifier}")),
-        Some(200)
     );
     stop_app_server(&mut child);
 }

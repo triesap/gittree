@@ -910,12 +910,18 @@ mod tests {
     #[test]
     fn init_observability_returns_registry() {
         let first = super::init_observability();
-        if let Ok(handle) = first.as_ref() {
-            assert!(handle.prometheus_registry().is_some());
-        }
+        let first_registry_present = first
+            .as_ref()
+            .ok()
+            .and_then(|handle| handle.prometheus_registry())
+            .is_some();
+        let first_is_err = first.is_err();
+        assert!(first_registry_present | first_is_err);
         let second = super::init_observability();
         let second_error = second.err().map(|err| err.to_string()).unwrap_or_default();
-        assert!(second_error.is_empty() || second_error.contains("app observability error"));
+        let second_is_empty = second_error.is_empty();
+        let second_has_expected = second_error.contains("app observability error");
+        assert!(second_is_empty | second_has_expected);
     }
 
     #[tokio::test]
