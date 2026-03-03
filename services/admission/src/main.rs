@@ -100,6 +100,26 @@ mod tests {
         }
     }
 
+    fn with_env_removed(key: &str, run: &mut dyn FnMut()) {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = std::env::var_os(key);
+        // SAFETY: test-only env mutation guarded by a process-wide lock.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        run();
+        match previous {
+            Some(previous) => {
+                // SAFETY: restore previous value under the same lock.
+                unsafe { std::env::set_var(key, previous) };
+            }
+            None => {
+                // SAFETY: restore missing state under the same lock.
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+    }
+
     async fn serve_ok<T>(_config: T) -> Result<(), AdmissionError> {
         Ok(())
     }
@@ -211,6 +231,41 @@ mod tests {
             assert_eq!(exit_code, 1);
             let message = String::from_utf8(stderr).expect("utf8");
             assert!(message.contains("admission config error"));
+        });
+    }
+
+    #[test]
+    fn run_reports_config_error_for_invalid_relay_compat_mode() {
+        with_env_var(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                let previous_mode = std::env::var_os("GITTREE_RELAY_COMPAT_MODE");
+                // SAFETY: test-only env mutation guarded by with_env_var lock.
+                unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", "invalid") };
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                let err = runtime.block_on(super::run()).expect_err("config error");
+                assert!(err.to_string().contains("admission config error"));
+                match previous_mode {
+                    Some(previous_mode) => {
+                        // SAFETY: restore previous value under the same lock.
+                        unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", previous_mode) };
+                    }
+                    None => {
+                        // SAFETY: restore missing state under the same lock.
+                        unsafe { std::env::remove_var("GITTREE_RELAY_COMPAT_MODE") };
+                    }
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn run_reports_storage_config_error_when_read_url_is_missing() {
+        with_env_removed("GITTREE_STORAGE_READ_URL", &mut || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let err = runtime.block_on(super::run()).expect_err("storage config error");
+            assert!(err.to_string().contains("admission storage config error"));
         });
     }
 
