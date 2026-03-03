@@ -1154,8 +1154,9 @@ mod tests {
     use super::init_repo;
     use super::install_hooks;
     use async_trait::async_trait;
-    use axum::Router;
+    use axum::{Json, Router};
     use axum::body::{Body, to_bytes};
+    use axum::extract::State;
     use axum::http::Request;
     use axum::response::IntoResponse;
     use gittree_config::ConfigError;
@@ -4146,6 +4147,35 @@ mod tests {
             .await
             .expect("body");
         assert!(String::from_utf8_lossy(&body).contains("invalid kind"));
+    }
+
+    #[tokio::test]
+    async fn announcement_handler_postgres_reqwest_maps_parse_error_for_valid_kind() {
+        let config = sample_coordinator_config(sample_storage_config(
+            "postgres://user:pass@localhost:5432/gittree",
+        ));
+        let repositories = Arc::new(super::build_repositories(&config).expect("repositories"));
+        let forgejo = ForgejoClient::new(config.forgejo.clone()).expect("forgejo client");
+        let state = super::CoordinatorAppState {
+            repositories,
+            repo_root: config.repo_root,
+            hooks: config.hooks,
+            forgejo,
+        };
+
+        let payload = CoordinatorEventPayload {
+            kind: KIND_GIT_REPO_ANNOUNCEMENT.0 as u64,
+            event_id: "44".repeat(32),
+            pubkey: "11".repeat(32),
+            created_at: 10,
+            tags: Vec::new(),
+        };
+
+        let err = super::announcement_handler(State(state), Json(payload))
+            .await
+            .expect_err("parse error");
+        let response = err.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
