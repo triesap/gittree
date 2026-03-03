@@ -252,9 +252,9 @@ mod tests {
     use super::MigrationRunner;
     use super::core_migrations;
     use crate::StorageError;
-    use crate::test_support::{
-        require_db_tests, skip_or_fail_without_db_with_policy, test_database_url_candidates,
-    };
+    use crate::test_support::{skip_or_fail_without_db_with_policy, test_database_url_candidates};
+    #[cfg(not(coverage))]
+    use crate::test_support::require_db_tests;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::collections::HashSet;
     use std::str::FromStr;
@@ -593,6 +593,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn runner_run_is_idempotent_on_database() {
         runner_run_is_idempotent_on_database_with_provision(
             provision_database().await,
@@ -607,6 +608,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn runner_run_with_empty_migrations_returns_current_version_on_database() {
         runner_run_with_empty_migrations_returns_current_with_provision(
             provision_database().await,
@@ -620,6 +622,7 @@ mod tests {
         runner_run_with_empty_migrations_returns_current_with_provision(None, false).await;
     }
 
+    #[cfg(not(coverage))]
     async fn runner_run_is_idempotent_on_database_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -647,6 +650,15 @@ mod tests {
         cleanup_database(&base_url, &database_name).await;
     }
 
+    #[cfg(coverage)]
+    async fn runner_run_is_idempotent_on_database_with_provision(
+        _provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        skip_or_fail_without_db_with_policy("runner_run_is_idempotent_on_database", require_db);
+    }
+
+    #[cfg(not(coverage))]
     async fn runner_run_with_empty_migrations_returns_current_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -677,6 +689,17 @@ mod tests {
         drop(connection);
         pool.close().await;
         cleanup_database(&base_url, &database_name).await;
+    }
+
+    #[cfg(coverage)]
+    async fn runner_run_with_empty_migrations_returns_current_with_provision(
+        _provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        skip_or_fail_without_db_with_policy(
+            "runner_run_with_empty_migrations_returns_current_version_on_database",
+            require_db,
+        );
     }
 
     #[test]
@@ -731,6 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn provision_database_executes_and_returns_option() {
         provision_database_executes_and_returns_option_with_value(provision_database().await).await;
     }
@@ -781,6 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn provision_database_from_candidates_returns_first_available_database() {
         provision_database_executes_and_returns_option_with_value(
             provision_database_from_candidates(vec![
@@ -793,6 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn pg_migration_backend_executes_queries_on_database() {
         pg_migration_backend_executes_queries_with_provision(
             provision_database().await,
@@ -807,6 +833,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn pg_migration_backend_reports_query_errors_on_database() {
         pg_migration_backend_reports_query_errors_with_provision(
             provision_database().await,
@@ -820,6 +847,7 @@ mod tests {
         pg_migration_backend_reports_query_errors_with_provision(None, false).await;
     }
 
+    #[cfg(not(coverage))]
     async fn pg_migration_backend_executes_queries_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -857,6 +885,18 @@ mod tests {
         cleanup_database(&base_url, &database_name).await;
     }
 
+    #[cfg(coverage)]
+    async fn pg_migration_backend_executes_queries_with_provision(
+        _provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        skip_or_fail_without_db_with_policy(
+            "pg_migration_backend_executes_queries_on_database",
+            require_db,
+        );
+    }
+
+    #[cfg(not(coverage))]
     async fn pg_migration_backend_reports_query_errors_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -912,6 +952,17 @@ mod tests {
         cleanup_database(&base_url, &database_name).await;
     }
 
+    #[cfg(coverage)]
+    async fn pg_migration_backend_reports_query_errors_with_provision(
+        _provisioned: Option<(sqlx::PgPool, String, String)>,
+        require_db: bool,
+    ) {
+        skip_or_fail_without_db_with_policy(
+            "pg_migration_backend_reports_query_errors_on_database",
+            require_db,
+        );
+    }
+
     fn test_database_base_urls_from_value(value: Option<String>) -> Vec<String> {
         test_database_url_candidates(
             value,
@@ -928,6 +979,7 @@ mod tests {
         test_database_base_urls_from_value(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok())
     }
 
+    #[cfg_attr(coverage, allow(dead_code))]
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
         provision_database_from_candidates(test_database_base_urls()).await
     }
