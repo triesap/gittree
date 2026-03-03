@@ -288,14 +288,24 @@ pub fn build_repositories(
     Ok(PostgresRepositories::new(pool))
 }
 
-struct CoordinatorAppState<R, T> {
-    repositories: Arc<R>,
+trait CoordinatorRepositories:
+    RelayPublishRepository + AnnouncementRepository + RepoMappingRepository + Send + Sync
+{
+}
+
+impl<T> CoordinatorRepositories for T where
+    T: RelayPublishRepository + AnnouncementRepository + RepoMappingRepository + Send + Sync
+{
+}
+
+struct CoordinatorAppState<T> {
+    repositories: Arc<dyn CoordinatorRepositories>,
     repo_root: PathBuf,
     hooks: HookInstallConfig,
     forgejo: ForgejoClient<T>,
 }
 
-impl<R, T> Clone for CoordinatorAppState<R, T>
+impl<T> Clone for CoordinatorAppState<T>
 where
     T: Clone,
 {
@@ -319,10 +329,10 @@ fn init_observability_unit() -> Result<(), CoordinatorError> {
 
 async fn serve_with_init(config: CoordinatorConfig, init: InitFn) -> Result<(), CoordinatorError> {
     let _observability = init()?;
-    let repositories = build_repositories(&config)?;
+    let repositories: Arc<dyn CoordinatorRepositories> = Arc::new(build_repositories(&config)?);
     let forgejo = ForgejoClient::new(config.forgejo).map_err(CoordinatorError::Forgejo)?;
     let state = CoordinatorAppState {
-        repositories: Arc::new(repositories),
+        repositories,
         repo_root: config.repo_root,
         hooks: config.hooks,
         forgejo,
@@ -350,14 +360,8 @@ fn shutdown_signal() -> ShutdownFuture {
     Box::pin(std::future::pending::<()>())
 }
 
-fn spawn_publish_outbox<R, T>(state: CoordinatorAppState<R, T>) -> tokio::task::JoinHandle<()>
+fn spawn_publish_outbox<T>(state: CoordinatorAppState<T>) -> tokio::task::JoinHandle<()>
 where
-    R: RelayPublishRepository
-        + AnnouncementRepository
-        + RepoMappingRepository
-        + Send
-        + Sync
-        + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
     let publish: PublishRelayFn = Arc::new(publish_to_relay_boxed);
@@ -399,9 +403,8 @@ pub fn __coverage_probe_shutdown_signal() -> impl Future<Output = ()> + Send {
     shutdown_signal()
 }
 
-fn build_router<R, T>(state: CoordinatorAppState<R, T>) -> Router
+fn build_router<T>(state: CoordinatorAppState<T>) -> Router
 where
-    R: AnnouncementRepository + RepoMappingRepository + Send + Sync + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
     Router::new()
@@ -431,17 +434,11 @@ fn log_outbox_error(err: &impl std::fmt::Display, context: &'static str) {
     eprintln!("{log_message}");
 }
 
-async fn publish_outbox_loop_with_delay_and_publish<R, T>(
-    state: CoordinatorAppState<R, T>,
+async fn publish_outbox_loop_with_delay_and_publish<T>(
+    state: CoordinatorAppState<T>,
     poll_delay: StdDuration,
     publish: PublishRelayFn,
 ) where
-    R: RelayPublishRepository
-        + AnnouncementRepository
-        + RepoMappingRepository
-        + Send
-        + Sync
-        + 'static,
     T: ForgejoTransport + Clone + Send + Sync + 'static,
 {
     loop {
@@ -567,12 +564,11 @@ impl IntoResponse for CoordinatorHttpError {
     }
 }
 
-async fn announcement_handler<R, T>(
-    State(state): State<CoordinatorAppState<R, T>>,
+async fn announcement_handler<T>(
+    State(state): State<CoordinatorAppState<T>>,
     Json(payload): Json<CoordinatorEventPayload>,
 ) -> Result<Json<CoordinatorActionPayload>, CoordinatorHttpError>
 where
-    R: AnnouncementRepository + RepoMappingRepository + Send + Sync,
     T: ForgejoTransport + Clone + Send + Sync,
 {
     let kind = u32::try_from(payload.kind)
@@ -903,12 +899,11 @@ fn retry_after(now: OffsetDateTime, attempt_count: i32) -> OffsetDateTime {
     now + TimeDuration::seconds(delay)
 }
 
-async fn finalize_outbox_job<R, T>(
-    state: &CoordinatorAppState<R, T>,
+async fn finalize_outbox_job<T>(
+    state: &CoordinatorAppState<T>,
     job: &RelayPublishJob,
 ) -> Result<(), CoordinatorEventError>
 where
-    R: AnnouncementRepository + RepoMappingRepository,
     T: ForgejoTransport,
 {
     let event = relay_event_from_job(job);
@@ -1059,7 +1054,7 @@ pub async fn handle_announcement_event_with_storage<S, T>(
     event: &RelayEvent,
 ) -> Result<CoordinatorAction, CoordinatorEventError>
 where
-    S: AnnouncementRepository + RepoMappingRepository,
+    S: AnnouncementRepository + RepoMappingRepository + ?Sized,
     T: ForgejoTransport,
 {
     let parsed = Nip34Event::parse_validated(event.kind, &event.tags)
@@ -1115,7 +1110,7 @@ async fn publish_to_relay_invalid_url_for_test(event: SignedNostrEvent) -> Resul
 
 #[cfg(test)]
 async fn finalize_outbox_job_ignored_postgres_reqwest_for_test(
-    state: &CoordinatorAppState<PostgresRepositories, ReqwestTransport>,
+    state: &CoordinatorAppState<ReqwestTransport>,
 ) -> Result<(), CoordinatorEventError> {
     let job = RelayPublishJob {
         id: 99,
