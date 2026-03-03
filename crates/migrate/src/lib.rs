@@ -558,9 +558,11 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_config_applies_core_migrations_when_database_is_reachable() {
-        let database_url = first_reachable_migration_database_url()
-            .await
-            .expect("postgres must be reachable for db-backed migrate tests");
+        let Some(database_url) =
+            database_url_or_skip_message(first_reachable_migration_database_url().await)
+        else {
+            return;
+        };
         let config = MigrationConfig {
             storage: StorageConfig {
                 read_connection: database_url.clone(),
