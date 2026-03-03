@@ -821,11 +821,18 @@ impl std::error::Error for AdmissionError {
     }
 }
 
-pub fn init_observability() -> Result<ObservabilityHandle, AdmissionError> {
+fn init_observability_with<T>(
+    init_fn: impl FnOnce(
+        &gittree_observability::ObservabilityConfig,
+    ) -> Result<T, ObservabilityError>,
+) -> Result<T, AdmissionError> {
     let config = gittree_observability::ObservabilityConfig::from_env("gittree-admission")
         .map_err(AdmissionError::ObservabilityConfig)?;
-    let handle = gittree_observability::init(&config).map_err(AdmissionError::Observability)?;
-    Ok(handle)
+    init_fn(&config).map_err(AdmissionError::Observability)
+}
+
+pub fn init_observability() -> Result<ObservabilityHandle, AdmissionError> {
+    init_observability_with(gittree_observability::init)
 }
 
 pub type AdmissionRepositories = CachedRepositories<PostgresRepositories>;
@@ -1755,6 +1762,27 @@ mod tests {
                 err.to_string()
                     .contains("admission observability config error")
             );
+        });
+    }
+
+    #[test]
+    fn init_observability_with_maps_init_error() {
+        with_env_removed("GITTREE_LOG_JSON", &mut || {
+            let err = super::init_observability_with::<()>(|_| {
+                Err(gittree_observability::ObservabilityError::SubscriberInit(
+                    "already initialized".to_string(),
+                ))
+            })
+            .expect_err("mapped init error");
+            assert!(err.to_string().contains("admission observability error"));
+        });
+    }
+
+    #[test]
+    fn init_observability_with_returns_ok_for_injected_initializer() {
+        with_env_removed("GITTREE_LOG_JSON", &mut || {
+            let result = super::init_observability_with::<usize>(|_| Ok(42));
+            assert_eq!(result.expect("injected init result"), 42);
         });
     }
 
