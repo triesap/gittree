@@ -223,12 +223,7 @@ async fn run() -> Result<(), AdminError> {
             let options = map_storage(storage.write_connect_options())?;
             // storage_from_env validates pool bounds before returning StorageConfig.
             let pool_options = storage.pool_options().expect("validated storage pool options");
-            let pool = map_storage(
-                pool_options
-                    .connect_with(options)
-                    .await
-                    .map_err(StorageError::from),
-            )?;
+            let pool = pool_options.connect_lazy_with(options);
             let repo = PostgresRepositories::new(pool);
             return map_storage(repo.upsert_mapping(record).await);
         }

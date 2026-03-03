@@ -158,7 +158,10 @@ mod tests {
             std::io::Error::other("main test probe io error"),
         ))
         .expect_err("probe should map io error");
-        assert!(matches!(err, CoordinatorError::Serve(_)));
+        assert_eq!(
+            err.to_string(),
+            "coordinator serve error: main test probe io error"
+        );
 
         let polled = tokio::time::timeout(
             std::time::Duration::from_millis(1),
