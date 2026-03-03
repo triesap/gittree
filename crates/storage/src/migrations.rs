@@ -766,9 +766,13 @@ mod tests {
     #[tokio::test]
     async fn provision_database_for_base_url_returns_none_when_create_database_statement_is_invalid()
      {
+        let base_url = test_database_base_urls()
+            .into_iter()
+            .next()
+            .expect("test database url candidate");
         assert!(
             provision_database_for_base_url_with_name(
-                DEFAULT_TEST_DATABASE_URL,
+                &base_url,
                 "bad\"database".to_string(),
             )
             .await
