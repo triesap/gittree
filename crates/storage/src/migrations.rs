@@ -1,4 +1,5 @@
 use crate::StorageError;
+#[cfg(not(coverage))]
 use sqlx::postgres::PgConnection;
 use std::collections::HashSet;
 
@@ -109,11 +110,6 @@ impl MigrationRunner {
     pub async fn run(&self, connection: &mut PgConnection) -> Result<i64, StorageError> {
         let mut backend = PgMigrationBackend { connection };
         self.run_with_backend(&mut backend).await
-    }
-
-    #[cfg(coverage)]
-    pub async fn run(&self, _connection: &mut PgConnection) -> Result<i64, StorageError> {
-        Ok(self.latest_version())
     }
 
     async fn run_with_backend<B: MigrationBackend>(
@@ -604,6 +600,13 @@ mod tests {
         });
     }
 
+    #[test]
+    fn assert_database_error_accepts_database_errors() {
+        assert_database_error(StorageError::Database {
+            source: sqlx::Error::PoolTimedOut,
+        });
+    }
+
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn runner_run_is_idempotent_on_database() {
@@ -995,12 +998,6 @@ mod tests {
     #[cfg(not(coverage))]
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
         provision_database_from_candidates(test_database_base_urls()).await
-    }
-
-    #[cfg(coverage)]
-    #[allow(dead_code)]
-    async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
-        None
     }
 
     #[cfg(not(coverage))]
