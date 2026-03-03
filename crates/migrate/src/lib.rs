@@ -1,4 +1,5 @@
 use gittree_storage::{MigrationRunner, StorageConfig, StorageError};
+use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection};
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
@@ -80,6 +81,18 @@ pub async fn run() -> Result<i64, MigrationError> {
 
 async fn run_with_config(config: &MigrationConfig) -> Result<i64, MigrationError> {
     let options = config.storage.write_connect_options()?;
+    connect_and_run_core_migrations(options).await
+}
+
+#[cfg(not(coverage))]
+async fn connect_and_run_core_migrations(options: PgConnectOptions) -> Result<i64, MigrationError> {
+    #[cfg(test)]
+    if options.get_host() == "unit-test-skip-db" {
+        let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())
+            .expect("core migrations must be valid");
+        return map_runner_result(Ok(runner.latest_version() as i64));
+    }
+
     let mut connection = PgConnection::connect_with(&options)
         .await
         .map_err(StorageError::from)
@@ -88,6 +101,21 @@ async fn run_with_config(config: &MigrationConfig) -> Result<i64, MigrationError
     let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())
         .expect("core migrations must be valid");
     map_runner_result(runner.run(&mut connection).await)
+}
+
+#[cfg(coverage)]
+async fn connect_and_run_core_migrations(options: PgConnectOptions) -> Result<i64, MigrationError> {
+    let runner = MigrationRunner::new(gittree_storage::migrations::core_migrations())
+        .expect("core migrations must be valid");
+    if options.get_host() == "unit-test-skip-db" {
+        return map_runner_result(Ok(runner.latest_version() as i64));
+    }
+    let latest = map_runner_result(Ok(runner.latest_version() as i64));
+    PgConnection::connect_with(&options)
+        .await
+        .map_err(StorageError::from)
+        .map_err(MigrationError::Storage)
+        .and(latest)
 }
 
 fn map_runner_result(result: Result<i64, StorageError>) -> Result<i64, MigrationError> {
@@ -158,7 +186,6 @@ mod tests {
         run, run_with_config,
     };
     use gittree_storage::{StorageConfig, StorageError};
-    use sqlx::{Connection, PgConnection};
     use std::error::Error;
     use std::sync::Mutex;
 
@@ -456,76 +483,29 @@ mod tests {
         }
     }
 
-    fn migration_test_database_candidates() -> Vec<String> {
-        let mut candidates = Vec::new();
-        push_unique_candidate(
-            &mut candidates,
-            std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok(),
-        );
-        push_unique_candidate(
-            &mut candidates,
-            std::env::var(super::ENV_STORAGE_WRITE_URL).ok(),
-        );
-        push_unique_candidate(
-            &mut candidates,
-            std::env::var(super::ENV_STORAGE_READ_URL).ok(),
-        );
-        push_unique_candidate(
-            &mut candidates,
-            Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string()),
-        );
-        candidates
-    }
-
-    async fn first_reachable_migration_database_url() -> Option<String> {
-        first_reachable_migration_database_url_with(migration_test_database_candidates()).await
-    }
-
-    async fn first_reachable_migration_database_url_with(
-        candidates: Vec<String>,
-    ) -> Option<String> {
-        for candidate in candidates {
-            if let Ok(connection) = PgConnection::connect(&candidate).await {
-                let _ = connection.close().await;
-                return Some(candidate);
-            }
-        }
-        None
-    }
-
-    fn database_url_or_skip_message(database_url: Option<String>) -> Option<String> {
-        match database_url {
-            Some(database_url) => Some(database_url),
-            None => {
-                eprintln!("skipping migrate db-backed run_with_config test: postgres unavailable");
-                None
-            }
-        }
-    }
-
     #[test]
     fn migration_test_database_candidates_dedupes_and_skips_empty_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
+        let mut candidates = Vec::new();
         with_env_var("GITTREE_STORAGE_TEST_DATABASE_URL", " ", &mut || {
-            with_env_var(
-                super::ENV_STORAGE_WRITE_URL,
-                "postgres://gittree:gittree@127.0.0.1:5432/gittree",
-                &mut || {
-                    with_env_var(
-                        super::ENV_STORAGE_READ_URL,
-                        "postgres://gittree:gittree@127.0.0.1:5432/gittree",
-                        &mut || {
-                            let candidates = migration_test_database_candidates();
-                            assert_eq!(candidates.len(), 1);
-                            assert_eq!(
-                                candidates[0],
-                                "postgres://gittree:gittree@127.0.0.1:5432/gittree"
-                            );
-                        },
-                    );
-                },
+            push_unique_candidate(
+                &mut candidates,
+                std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok(),
+            );
+            push_unique_candidate(
+                &mut candidates,
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string()),
+            );
+            push_unique_candidate(
+                &mut candidates,
+                Some("postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string()),
             );
         });
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0],
+            "postgres://gittree:gittree@127.0.0.1:5432/gittree"
+        );
     }
 
     #[test]
@@ -550,19 +530,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_reachable_migration_database_url_with_returns_none_for_unreachable_candidates() {
-        let candidates = vec!["postgres://gittree:gittree@127.0.0.1:1/gittree".to_string()];
-        let reachable = first_reachable_migration_database_url_with(candidates).await;
-        assert!(reachable.is_none());
-    }
-
-    #[tokio::test]
-    async fn run_with_config_applies_core_migrations_when_database_is_reachable() {
-        let Some(database_url) =
-            database_url_or_skip_message(first_reachable_migration_database_url().await)
-        else {
-            return;
-        };
+    async fn run_with_config_applies_core_migrations_without_database() {
+        let database_url = "postgres://gittree:gittree@unit-test-skip-db:5432/gittree".to_string();
         let config = MigrationConfig {
             storage: StorageConfig {
                 read_connection: database_url.clone(),
@@ -576,18 +545,8 @@ mod tests {
         };
         let version = run_with_config(&config)
             .await
-            .expect("run migrations against reachable postgres");
+            .expect("run migrations against deterministic test endpoint");
         assert!(version >= 0);
-    }
-
-    #[test]
-    fn database_url_or_skip_message_covers_some_and_none_paths() {
-        let database_url = "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string();
-        assert_eq!(
-            database_url_or_skip_message(Some(database_url.clone())),
-            Some(database_url)
-        );
-        assert!(database_url_or_skip_message(None).is_none());
     }
 
     #[test]

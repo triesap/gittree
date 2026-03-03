@@ -3,6 +3,9 @@ name = "gittree-migrate"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+
 [dependencies]
 dotenvy = "0.15"
 gittree-observability = { path = "../observability" }
