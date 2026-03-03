@@ -120,6 +120,19 @@ mod tests {
         }
     }
 
+    fn restore_relay_compat_mode(previous_mode: Option<std::ffi::OsString>) {
+        match previous_mode {
+            Some(previous_mode) => {
+                // SAFETY: restore previous value under the same lock.
+                unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", previous_mode) };
+            }
+            None => {
+                // SAFETY: restore missing state under the same lock.
+                unsafe { std::env::remove_var("GITTREE_RELAY_COMPAT_MODE") };
+            }
+        }
+    }
+
     async fn serve_ok<T>(_config: T) -> Result<(), AdmissionError> {
         Ok(())
     }
@@ -259,16 +272,7 @@ mod tests {
                 let runtime = tokio::runtime::Runtime::new().expect("runtime");
                 let err = runtime.block_on(super::run()).expect_err("config error");
                 assert!(err.to_string().contains("admission config error"));
-                match previous_mode {
-                    Some(previous_mode) => {
-                        // SAFETY: restore previous value under the same lock.
-                        unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", previous_mode) };
-                    }
-                    None => {
-                        // SAFETY: restore missing state under the same lock.
-                        unsafe { std::env::remove_var("GITTREE_RELAY_COMPAT_MODE") };
-                    }
-                }
+                restore_relay_compat_mode(previous_mode);
                 assert!(std::env::var("GITTREE_RELAY_COMPAT_MODE").is_err());
             },
         );
@@ -288,16 +292,7 @@ mod tests {
                 let runtime = tokio::runtime::Runtime::new().expect("runtime");
                 let err = runtime.block_on(super::run()).expect_err("config error");
                 assert!(err.to_string().contains("admission config error"));
-                match previous_mode {
-                    Some(previous_mode) => {
-                        // SAFETY: restore previous value under the same lock.
-                        unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", previous_mode) };
-                    }
-                    None => {
-                        // SAFETY: restore missing state under the same lock.
-                        unsafe { std::env::remove_var("GITTREE_RELAY_COMPAT_MODE") };
-                    }
-                }
+                restore_relay_compat_mode(previous_mode);
                 assert_eq!(
                     std::env::var("GITTREE_RELAY_COMPAT_MODE").expect("mode restored"),
                     "allow"
