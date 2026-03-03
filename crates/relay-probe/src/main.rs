@@ -258,15 +258,11 @@ fn render_probe_output(cli: &ProbeCli, results: &[RelayProbeResult]) -> String {
 async fn store_probe_result(result: &RelayProbeResult) -> Result<(), ProbeCommandError> {
     let storage = storage_from_env()?;
     let options = storage.write_connect_options()?;
-    let pool = storage
-        .pool_options_validated()
-        .connect_with(options)
-        .await
-        .map_err(StorageError::from)
-        .map_err(ProbeCommandError::Storage)?;
+    let pool = storage.pool_options_validated().connect_lazy_with(options);
     let repo = PostgresRepositories::new(pool);
-    store_probe_result_with_repo(&repo, result, now_unix_timestamp()).await?;
-    Ok(())
+    store_probe_result_with_repo(&repo, result, now_unix_timestamp())
+        .await
+        .map_err(ProbeCommandError::Storage)
 }
 
 async fn store_probe_result_with_repo(
@@ -1532,6 +1528,17 @@ mod tests {
         result.expect("store");
     }
 
+    fn assert_invalid_record_result_or_skip_database_error(result: Result<(), ProbeCommandError>) {
+        if matches!(
+            result,
+            Err(ProbeCommandError::Storage(StorageError::Database { .. }))
+        ) {
+            return;
+        }
+        let err = result.expect_err("invalid relay url should fail");
+        assert!(err.to_string().contains("relay_url"));
+    }
+
     #[test]
     fn assert_store_result_or_skip_database_error_covers_all_paths() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -1576,19 +1583,33 @@ mod tests {
                             invalid.report.relay_url = " ".to_string();
                             let runtime = tokio::runtime::Runtime::new().expect("runtime");
                             let result = runtime.block_on(store_probe_result(&invalid));
-                            if matches!(
-                                result,
-                                Err(ProbeCommandError::Storage(StorageError::Database { .. }))
-                            ) {
-                                return;
-                            }
-                            let err = result.expect_err("invalid relay url should fail");
-                            assert!(err.to_string().contains("relay_url"));
+                            assert_invalid_record_result_or_skip_database_error(result);
                         });
                     });
                 },
             );
         }
+        assert_invalid_record_result_or_skip_database_error(Err(ProbeCommandError::Storage(
+            StorageError::InvalidField {
+                field: "relay_url",
+                value: " ".to_string(),
+            },
+        )));
+        with_env_var(
+            super::ENV_STORAGE_READ_URL,
+            "postgres://gittree:gittree@127.0.0.1:1/gittree",
+            &mut || {
+                with_env_var(
+                    super::ENV_STORAGE_WRITE_URL,
+                    "postgres://gittree:gittree@127.0.0.1:1/gittree",
+                    &mut || {
+                        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                        let result = runtime.block_on(store_probe_result(&sample_probe_result()));
+                        assert_invalid_record_result_or_skip_database_error(result);
+                    },
+                );
+            },
+        );
     }
 
     #[test]
