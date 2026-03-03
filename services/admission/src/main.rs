@@ -168,6 +168,17 @@ mod tests {
     }
 
     #[test]
+    fn with_env_removed_restores_missing_value() {
+        const KEY: &str = "GITTREE_TEST_ADMISSION_MAIN_ENV_MISSING";
+        // SAFETY: test-only env cleanup for a unique key.
+        unsafe { std::env::remove_var(KEY) };
+        with_env_removed(KEY, &mut || {
+            assert!(std::env::var(KEY).is_err());
+        });
+        assert!(std::env::var(KEY).is_err());
+    }
+
+    #[test]
     fn handle_main_result_returns_zero_on_success() {
         let mut stderr = Vec::new();
         let exit_code = handle_main_result(Ok(()), &mut stderr);
@@ -240,6 +251,8 @@ mod tests {
             "GITTREE_STORAGE_READ_URL",
             "postgres://user:pass@localhost:5432/gittree",
             &mut || {
+                // SAFETY: test-only env mutation guarded by with_env_var lock.
+                unsafe { std::env::remove_var("GITTREE_RELAY_COMPAT_MODE") };
                 let previous_mode = std::env::var_os("GITTREE_RELAY_COMPAT_MODE");
                 // SAFETY: test-only env mutation guarded by with_env_var lock.
                 unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", "invalid") };
@@ -256,6 +269,39 @@ mod tests {
                         unsafe { std::env::remove_var("GITTREE_RELAY_COMPAT_MODE") };
                     }
                 }
+                assert!(std::env::var("GITTREE_RELAY_COMPAT_MODE").is_err());
+            },
+        );
+    }
+
+    #[test]
+    fn run_reports_config_error_for_invalid_relay_compat_mode_restores_existing_mode() {
+        with_env_var(
+            "GITTREE_STORAGE_READ_URL",
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                // SAFETY: test-only env mutation guarded by with_env_var lock.
+                unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", "allow") };
+                let previous_mode = std::env::var_os("GITTREE_RELAY_COMPAT_MODE");
+                // SAFETY: test-only env mutation guarded by with_env_var lock.
+                unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", "invalid") };
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                let err = runtime.block_on(super::run()).expect_err("config error");
+                assert!(err.to_string().contains("admission config error"));
+                match previous_mode {
+                    Some(previous_mode) => {
+                        // SAFETY: restore previous value under the same lock.
+                        unsafe { std::env::set_var("GITTREE_RELAY_COMPAT_MODE", previous_mode) };
+                    }
+                    None => {
+                        // SAFETY: restore missing state under the same lock.
+                        unsafe { std::env::remove_var("GITTREE_RELAY_COMPAT_MODE") };
+                    }
+                }
+                assert_eq!(
+                    std::env::var("GITTREE_RELAY_COMPAT_MODE").expect("mode restored"),
+                    "allow"
+                );
             },
         );
     }
