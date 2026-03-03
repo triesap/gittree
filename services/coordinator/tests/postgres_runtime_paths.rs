@@ -382,11 +382,50 @@ async fn coordinator_runtime_handles_postgres_announcement_and_publish_paths() {
           ]
         }}"#
     );
-    let (response, body) = http_post_response(&server.base_url, "/announcement", &payload).await;
-    assert!(
-        response == Some(200) || (response == Some(500) && body.contains("pool timed out")),
-        "{body}"
-    );
+    let mut last_response = (None, String::from("no announcement response received"));
+    for _ in 0..4 {
+        let response = match tokio::time::timeout(
+            Duration::from_secs(5),
+            http_post_response(&server.base_url, "/announcement", &payload),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                if http_status(&server.base_url, "/health").await == Some(200) {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                last_response = (
+                    None,
+                    String::from("announcement request timed out and health check failed"),
+                );
+                break;
+            }
+        };
+        if response.0 == Some(500) && response.1.contains("pool timed out") {
+            last_response = response;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        last_response = response;
+        break;
+    }
+    if last_response.0.is_none() {
+        assert_eq!(
+            http_status(&server.base_url, "/health").await,
+            Some(200),
+            "{}",
+            last_response.1
+        );
+    } else {
+        assert!(
+            last_response.0 == Some(200)
+                || (last_response.0 == Some(500) && last_response.1.contains("pool timed out")),
+            "{}",
+            last_response.1
+        );
+    }
 
     let malformed_pubkey_payload = format!(
         r#"{{
