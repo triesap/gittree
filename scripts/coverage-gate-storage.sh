@@ -18,9 +18,9 @@ cleanup() {
 trap cleanup EXIT
 
 max_uncovered_lines="${COV_STORAGE_MAX_UNCOVERED_LINES:-0}"
-min_line_pct="${COV_STORAGE_MIN_LINE_PCT:-99}"
-min_function_pct="${COV_STORAGE_MIN_FUNCTION_PCT:-99}"
-min_region_pct="${COV_STORAGE_MIN_REGION_PCT:-99}"
+min_line_pct="${COV_STORAGE_MIN_LINE_PCT:-100}"
+min_function_pct="${COV_STORAGE_MIN_FUNCTION_PCT:-100}"
+min_region_pct="${COV_STORAGE_MIN_REGION_PCT:-100}"
 
 if ! command -v docker >/dev/null 2>&1 && [[ -z "${GITTREE_STORAGE_TEST_DATABASE_URL:-}" ]]; then
   export GITTREE_STORAGE_TEST_DATABASE_URL="${COV_STORAGE_DATABASE_URL:-postgres://gittree:gittree@127.0.0.1:5432/gittree}"

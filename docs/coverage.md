@@ -51,9 +51,9 @@ security-critical packages.
 ```
 
 Defaults:
-- line coverage: `90`
-- function coverage: `85`
-- region coverage: `85`
+- line coverage: `100`
+- function coverage: `100`
+- region coverage: `100`
 - binary `main.rs` files are excluded from gate calculations by default
   (`.*/src/main\\.rs$`)
 
@@ -86,6 +86,7 @@ COV_PACKAGES="gittree-storage" COV_STRICT_STORAGE=1 ./scripts/coverage-gate.sh
 This path delegates to `scripts/coverage-gate-storage.sh`, which enforces:
 - storage function coverage: `100%`
 - storage line coverage: `100%`
+- storage region coverage: `100%`
 - storage uncovered lines: `0`
 
 If Docker is unavailable and `GITTREE_STORAGE_TEST_DATABASE_URL` is unset, coverage
@@ -117,12 +118,6 @@ Current stage contract for this repo requires:
   - `gittree-auth`
 
 This matches the default set used by `./scripts/coverage-gate.sh`.
-
-Note:
-- Enforcement for these 100% thresholds is staged. Today, only storage is
-  fully enforceable through `COV_STRICT_STORAGE` in the repository scripts.
-  Other packages will be moved to 100% enforcement in the next step while keeping
-  the same package set.
 
 ### Stage-0 frontend exception
 

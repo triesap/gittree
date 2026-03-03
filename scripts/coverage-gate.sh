@@ -34,7 +34,7 @@ for pkg in "${packages[@]}"; do
   fi
 done
 
-if [[ "${COV_STRICT_STORAGE:-0}" == "1" && "${needs_storage_db}" == "1" ]]; then
+if [[ "${COV_STRICT_STORAGE:-1}" == "1" && "${needs_storage_db}" == "1" ]]; then
   ./scripts/coverage-gate-storage.sh
   original_packages=("${packages[@]}")
   packages=()
@@ -66,9 +66,9 @@ if [[ "${COV_NOCAPTURE:-0}" == "1" ]]; then
   test_args+=("--" "--nocapture")
 fi
 
-lines="${COV_FAIL_UNDER_LINES:-90}"
-functions="${COV_FAIL_UNDER_FUNCTIONS:-85}"
-regions="${COV_FAIL_UNDER_REGIONS:-85}"
+lines="${COV_FAIL_UNDER_LINES:-100}"
+functions="${COV_FAIL_UNDER_FUNCTIONS:-100}"
+regions="${COV_FAIL_UNDER_REGIONS:-100}"
 include_bin_mains="${COV_INCLUDE_BIN_MAINS:-0}"
 
 cov_args=(
