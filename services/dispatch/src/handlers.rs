@@ -463,7 +463,7 @@ mod tests {
     use gittree_storage::{
         AccountLifecycle, AccountStateRecord, CommandLogRecord, CommandStatus,
         ProfileStateRecord, ProfileVisibilityV1, RepoMaintainerV1Record, RepoStateV1Record,
-        RepoVisibilityV1,
+        RepoVisibilityV1, StorageError,
     };
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
@@ -475,6 +475,89 @@ mod tests {
         profiles: Mutex<HashMap<Vec<u8>, ProfileStateRecord>>,
         repos: Mutex<HashMap<(Vec<u8>, String), RepoStateV1Record>>,
         maintainers: Mutex<HashMap<(Vec<u8>, String), HashSet<Vec<u8>>>>,
+    }
+
+    #[derive(Default)]
+    struct ApplyFailStore;
+
+    #[async_trait]
+    impl CommandStore for ApplyFailStore {
+        async fn insert_command_log(
+            &self,
+            _record: &CommandLogRecord,
+        ) -> Result<bool, DispatchError> {
+            Ok(true)
+        }
+
+        async fn update_command_log_outcome(
+            &self,
+            _event_id: &[u8],
+            _status: CommandStatus,
+            _code: &str,
+            _message: &str,
+        ) -> Result<(), DispatchError> {
+            Ok(())
+        }
+
+        async fn account_state(
+            &self,
+            _pubkey: &[u8],
+        ) -> Result<Option<AccountStateRecord>, DispatchError> {
+            Err(DispatchError::Storage(StorageError::Internal {
+                message: "store boom".to_string(),
+            }))
+        }
+
+        async fn upsert_account_state(
+            &self,
+            _record: &AccountStateRecord,
+        ) -> Result<(), DispatchError> {
+            Ok(())
+        }
+
+        async fn profile_state(
+            &self,
+            _pubkey: &[u8],
+        ) -> Result<Option<ProfileStateRecord>, DispatchError> {
+            Ok(None)
+        }
+
+        async fn upsert_profile_state(
+            &self,
+            _record: &ProfileStateRecord,
+        ) -> Result<(), DispatchError> {
+            Ok(())
+        }
+
+        async fn repo_state(
+            &self,
+            _owner_pubkey: &[u8],
+            _repo_name: &str,
+        ) -> Result<Option<RepoStateV1Record>, DispatchError> {
+            Ok(None)
+        }
+
+        async fn upsert_repo_state(
+            &self,
+            _record: &RepoStateV1Record,
+        ) -> Result<(), DispatchError> {
+            Ok(())
+        }
+
+        async fn set_repo_maintainer(
+            &self,
+            _record: &RepoMaintainerV1Record,
+        ) -> Result<(), DispatchError> {
+            Ok(())
+        }
+
+        async fn list_active_repo_maintainers(
+            &self,
+            _owner_pubkey: &[u8],
+            _repo_name: &str,
+        ) -> Result<HashSet<Vec<u8>>, DispatchError> {
+            Ok(HashSet::new())
+        }
     }
 
     #[async_trait]
@@ -802,5 +885,349 @@ mod tests {
         let second = execute_command(&store, input).await.expect("second");
         assert_eq!(first.code, "account_status");
         assert_eq!(second.code, "duplicate");
+    }
+
+    #[tokio::test]
+    async fn execute_account_delete_and_invalid_action_paths() {
+        let store = MemoryStore::default();
+        let actor = vec![15u8; 32];
+
+        let missing_status = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![40u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree account status"),
+                created_at: 100,
+            },
+        )
+        .await
+        .expect("status");
+        assert_eq!(missing_status.code, "account_status");
+        assert_eq!(missing_status.message, "account missing");
+
+        let deleted = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![41u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree account delete"),
+                created_at: 101,
+            },
+        )
+        .await
+        .expect("delete");
+        assert_eq!(deleted.code, "account_deleted");
+
+        let state = store
+            .account_state(&actor)
+            .await
+            .expect("lookup")
+            .expect("state");
+        assert_eq!(state.status, AccountLifecycle::Deleted);
+
+        let invalid = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![42u8; 32],
+                actor_pubkey: actor,
+                parsed: command(CommandNamespace::Account, "unknown"),
+                created_at: 102,
+            },
+        )
+        .await
+        .expect("invalid");
+        assert_eq!(invalid.status, CommandStatus::Error);
+        assert_eq!(invalid.code, "invalid_command");
+    }
+
+    #[tokio::test]
+    async fn execute_profile_invalid_and_full_set_paths() {
+        let store = MemoryStore::default();
+        let actor = vec![16u8; 32];
+
+        let invalid_visibility = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![50u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: ParsedCommand {
+                    namespace: CommandNamespace::Profile,
+                    action: "visibility".to_string(),
+                    target: None,
+                    args: Vec::new(),
+                },
+                created_at: 200,
+            },
+        )
+        .await
+        .expect("invalid visibility");
+        assert_eq!(invalid_visibility.status, CommandStatus::Error);
+        assert_eq!(invalid_visibility.code, "invalid_args");
+
+        let set = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![51u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse(
+                    "gittree profile set name=alice bio=hi avatar=https://a website=https://w location=earth",
+                ),
+                created_at: 201,
+            },
+        )
+        .await
+        .expect("set");
+        assert_eq!(set.code, "profile_updated");
+
+        let private_visibility = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![52u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree profile visibility private"),
+                created_at: 202,
+            },
+        )
+        .await
+        .expect("visibility");
+        assert_eq!(private_visibility.code, "profile_visibility_updated");
+
+        let profile = store
+            .profile_state(&actor)
+            .await
+            .expect("lookup")
+            .expect("profile");
+        assert_eq!(profile.bio.as_deref(), Some("hi"));
+        assert_eq!(profile.avatar_url.as_deref(), Some("https://a"));
+        assert_eq!(profile.website_url.as_deref(), Some("https://w"));
+        assert_eq!(profile.location.as_deref(), Some("earth"));
+        assert_eq!(profile.visibility, ProfileVisibilityV1::Private);
+
+        let invalid = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![53u8; 32],
+                actor_pubkey: actor,
+                parsed: command(CommandNamespace::Profile, "unknown"),
+                created_at: 203,
+            },
+        )
+        .await
+        .expect("invalid");
+        assert_eq!(invalid.status, CommandStatus::Error);
+        assert_eq!(invalid.code, "invalid_command");
+    }
+
+    #[tokio::test]
+    async fn execute_repo_branch_paths_cover_invalid_and_misc_actions() {
+        let store = MemoryStore::default();
+        let actor = vec![17u8; 32];
+        let actor_npub = npub_from_bytes(&actor).expect("npub");
+
+        let missing_target = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![60u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: ParsedCommand {
+                    namespace: CommandNamespace::Repo,
+                    action: "create".to_string(),
+                    target: None,
+                    args: Vec::new(),
+                },
+                created_at: 300,
+            },
+        )
+        .await
+        .expect("missing target");
+        assert_eq!(missing_target.status, CommandStatus::Error);
+        assert_eq!(missing_target.code, "invalid_args");
+
+        let created = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![61u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo create demo"),
+                created_at: 301,
+            },
+        )
+        .await
+        .expect("create");
+        assert_eq!(created.code, "repo_created");
+
+        let duplicate = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![62u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo create demo"),
+                created_at: 302,
+            },
+        )
+        .await
+        .expect("duplicate");
+        assert_eq!(duplicate.code, "repo_exists");
+
+        let not_found = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![63u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo update missing description=hello"),
+                created_at: 303,
+            },
+        )
+        .await
+        .expect("missing");
+        assert_eq!(not_found.status, CommandStatus::Error);
+        assert_eq!(not_found.code, "not_found");
+
+        let invalid_maintainer = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![64u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: ParsedCommand {
+                    namespace: CommandNamespace::Repo,
+                    action: "maintainers".to_string(),
+                    target: Some("demo".to_string()),
+                    args: vec![
+                        CommandArg::Positional("add".to_string()),
+                        CommandArg::Positional("not-an-npub".to_string()),
+                    ],
+                },
+                created_at: 304,
+            },
+        )
+        .await
+        .expect("invalid maintainer");
+        assert_eq!(invalid_maintainer.status, CommandStatus::Error);
+        assert_eq!(invalid_maintainer.code, "invalid_args");
+
+        let malformed_maintainer = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![65u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: ParsedCommand {
+                    namespace: CommandNamespace::Repo,
+                    action: "maintainers".to_string(),
+                    target: Some("demo".to_string()),
+                    args: vec![CommandArg::Positional("add".to_string())],
+                },
+                created_at: 305,
+            },
+        )
+        .await
+        .expect("malformed maintainer");
+        assert_eq!(malformed_maintainer.status, CommandStatus::Error);
+        assert_eq!(malformed_maintainer.code, "invalid_args");
+
+        let announce = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![66u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo announce demo"),
+                created_at: 306,
+            },
+        )
+        .await
+        .expect("announce");
+        assert_eq!(announce.code, "repo_announce_accepted");
+
+        let sync = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![67u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo sync demo"),
+                created_at: 307,
+            },
+        )
+        .await
+        .expect("sync");
+        assert_eq!(sync.code, "repo_sync_accepted");
+
+        let unarchive = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![68u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo unarchive demo"),
+                created_at: 308,
+            },
+        )
+        .await
+        .expect("unarchive");
+        assert_eq!(unarchive.code, "repo_state_updated");
+
+        let remove_actor = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![69u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse(&format!("gittree repo maintainers demo remove {actor_npub}")),
+                created_at: 309,
+            },
+        )
+        .await
+        .expect("remove actor");
+        assert_eq!(remove_actor.code, "repo_maintainer_updated");
+
+        let unauthorized_update = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![70u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo update demo description=world"),
+                created_at: 310,
+            },
+        )
+        .await
+        .expect("unauthorized");
+        assert_eq!(unauthorized_update.status, CommandStatus::Error);
+        assert_eq!(unauthorized_update.code, "unauthorized");
+
+        let invalid = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![72u8; 32],
+                actor_pubkey: actor,
+                parsed: ParsedCommand {
+                    namespace: CommandNamespace::Repo,
+                    action: "unknown".to_string(),
+                    target: Some("demo".to_string()),
+                    args: Vec::new(),
+                },
+                created_at: 311,
+            },
+        )
+        .await
+        .expect("invalid");
+        assert_eq!(invalid.status, CommandStatus::Error);
+        assert_eq!(invalid.code, "invalid_command");
+    }
+
+    #[tokio::test]
+    async fn execute_command_maps_apply_errors_to_internal_outcome() {
+        let store = ApplyFailStore;
+        let actor = vec![18u8; 32];
+        let output = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![80u8; 32],
+                actor_pubkey: actor,
+                parsed: parse("gittree account status"),
+                created_at: 400,
+            },
+        )
+        .await
+        .expect("output");
+        assert_eq!(output.status, CommandStatus::Error);
+        assert_eq!(output.code, "internal");
+        assert!(output.message.contains("dispatch storage error"));
     }
 }
