@@ -458,6 +458,7 @@ mod tests {
     use super::{CommandExecutionInput, CommandStore, execute_command};
     use crate::DispatchError;
     use async_trait::async_trait;
+    use gittree_app_core::npub_from_bytes;
     use gittree_core::{CommandArg, CommandNamespace, ParsedCommand};
     use gittree_storage::{
         AccountLifecycle, AccountStateRecord, CommandLogRecord, CommandStatus,
@@ -570,6 +571,10 @@ mod tests {
             target: None,
             args: Vec::new(),
         }
+    }
+
+    fn parse(input: &str) -> ParsedCommand {
+        gittree_core::parse_cli_command(input).expect("parse")
     }
 
     #[tokio::test]
@@ -705,6 +710,81 @@ mod tests {
             .expect("state");
         assert_eq!(state.visibility, RepoVisibilityV1::Private);
         assert!(state.archived);
+    }
+
+    #[tokio::test]
+    async fn execute_parsed_command_sequence_updates_projection_records() {
+        let store = MemoryStore::default();
+        let actor = vec![10u8; 32];
+        let maintainer = vec![12u8; 32];
+        let maintainer_npub = npub_from_bytes(&maintainer).expect("npub");
+
+        let inputs = vec![
+            ("gittree account create".to_string(), vec![10u8; 32], 100),
+            (
+                "gittree profile set name=alice website=https://gittr.ee".to_string(),
+                vec![11u8; 32],
+                101,
+            ),
+            (
+                "gittree profile visibility public".to_string(),
+                vec![12u8; 32],
+                102,
+            ),
+            ("gittree repo create demo".to_string(), vec![13u8; 32], 103),
+            (
+                format!("gittree repo maintainers demo add {maintainer_npub}"),
+                vec![14u8; 32],
+                104,
+            ),
+        ];
+
+        for (content, event_id, created_at) in inputs {
+            let output = execute_command(
+                &store,
+                CommandExecutionInput {
+                    event_id,
+                    actor_pubkey: actor.clone(),
+                    parsed: parse(&content),
+                    created_at,
+                },
+            )
+            .await
+            .expect("execute");
+            assert_eq!(output.status, CommandStatus::Ok);
+        }
+
+        let account = store
+            .account_state(&actor)
+            .await
+            .expect("account lookup")
+            .expect("account");
+        assert_eq!(account.status, AccountLifecycle::Active);
+
+        let profile = store
+            .profile_state(&actor)
+            .await
+            .expect("profile lookup")
+            .expect("profile");
+        assert_eq!(profile.display_name.as_deref(), Some("alice"));
+        assert_eq!(profile.website_url.as_deref(), Some("https://gittr.ee"));
+        assert_eq!(profile.visibility, ProfileVisibilityV1::Public);
+
+        let repo = store
+            .repo_state(&actor, "demo")
+            .await
+            .expect("repo lookup")
+            .expect("repo");
+        assert_eq!(repo.repo_name, "demo");
+        assert_eq!(repo.visibility, RepoVisibilityV1::Private);
+        assert!(!repo.archived);
+
+        let maintainers = store
+            .list_active_repo_maintainers(&actor, "demo")
+            .await
+            .expect("maintainers");
+        assert!(maintainers.contains(&actor));
+        assert!(maintainers.contains(&maintainer));
     }
 
     #[tokio::test]
