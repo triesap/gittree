@@ -7,11 +7,12 @@ use gittree_app_core::{npub_from_bytes, pubkey_bytes_from_npub};
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
-    AnnouncementRepository, CachedRepositories, PostgresRepositories, RelayCompatibilityRepository,
-    RepoFilter, StateRepository, StorageConfig, StorageError,
+    AccountStateRecord, AnnouncementRepository, CachedRepositories, PostgresRepositories,
+    ProfileStateRecord, RelayCompatibilityRepository, RepoFilter, RepoStateV1Record,
+    StateRepository, StorageConfig, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -201,6 +202,65 @@ impl<T> StateRepositoriesDyn for T where
 }
 
 type DynStateRepositories = dyn StateRepositoriesDyn + Send + Sync;
+type ProjectionAccountFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<AccountStateRecord>, StorageError>> + Send + 'a>>;
+type ProjectionProfileFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ProfileStateRecord>, StorageError>> + Send + 'a>>;
+type ProjectionRepoFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<RepoStateV1Record>, StorageError>> + Send + 'a>>;
+type ProjectionMaintainersFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<HashSet<Vec<u8>>, StorageError>> + Send + 'a>>;
+
+trait ProjectionRepositoriesDyn {
+    fn v1_account_state<'a>(&'a self, pubkey: &'a [u8]) -> ProjectionAccountFuture<'a>;
+    fn v1_profile_state<'a>(&'a self, pubkey: &'a [u8]) -> ProjectionProfileFuture<'a>;
+    fn v1_repo_state<'a>(
+        &'a self,
+        owner_pubkey: &'a [u8],
+        repo_name: &'a str,
+    ) -> ProjectionRepoFuture<'a>;
+    fn v1_list_active_repo_maintainers<'a>(
+        &'a self,
+        owner_pubkey: &'a [u8],
+        repo_name: &'a str,
+    ) -> ProjectionMaintainersFuture<'a>;
+}
+
+impl ProjectionRepositoriesDyn for PostgresRepositories {
+    fn v1_account_state<'a>(&'a self, pubkey: &'a [u8]) -> ProjectionAccountFuture<'a> {
+        Box::pin(PostgresRepositories::v1_account_state(self, pubkey))
+    }
+
+    fn v1_profile_state<'a>(&'a self, pubkey: &'a [u8]) -> ProjectionProfileFuture<'a> {
+        Box::pin(PostgresRepositories::v1_profile_state(self, pubkey))
+    }
+
+    fn v1_repo_state<'a>(
+        &'a self,
+        owner_pubkey: &'a [u8],
+        repo_name: &'a str,
+    ) -> ProjectionRepoFuture<'a> {
+        Box::pin(PostgresRepositories::v1_repo_state(
+            self,
+            owner_pubkey,
+            repo_name,
+        ))
+    }
+
+    fn v1_list_active_repo_maintainers<'a>(
+        &'a self,
+        owner_pubkey: &'a [u8],
+        repo_name: &'a str,
+    ) -> ProjectionMaintainersFuture<'a> {
+        Box::pin(PostgresRepositories::v1_list_active_repo_maintainers(
+            self,
+            owner_pubkey,
+            repo_name,
+        ))
+    }
+}
+
+type DynProjectionRepositories = dyn ProjectionRepositoriesDyn + Send + Sync;
 type StateServerFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
 type StateShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -215,7 +275,9 @@ pub fn build_repositories(config: &StateConfig) -> Result<StateRepositories, Sta
     Ok(CachedRepositories::new(repos))
 }
 
-pub fn build_projection_repositories(config: &StateConfig) -> Result<PostgresRepositories, StateError> {
+pub fn build_projection_repositories(
+    config: &StateConfig,
+) -> Result<PostgresRepositories, StateError> {
     let pool_options = config.storage.pool_options().map_err(StateError::Storage)?;
     let connect_options = config
         .storage
@@ -227,7 +289,7 @@ pub fn build_projection_repositories(config: &StateConfig) -> Result<PostgresRep
 
 struct StateAppState {
     repositories: Arc<DynStateRepositories>,
-    projection_repositories: Arc<PostgresRepositories>,
+    projection_repositories: Arc<DynProjectionRepositories>,
     cache: Arc<StateCache>,
 }
 
@@ -274,10 +336,7 @@ async fn serve_with(
     Ok(())
 }
 
-fn run_axum_server_boxed(
-    listener: tokio::net::TcpListener,
-    router: Router,
-) -> StateServerFuture {
+fn run_axum_server_boxed(listener: tokio::net::TcpListener, router: Router) -> StateServerFuture {
     run_axum_server_with_shutdown(listener, router, Box::pin(pending()))
 }
 
@@ -304,7 +363,10 @@ fn build_router(state: StateAppState) -> Router {
             "/v1/repos/:owner/:repo/maintainers",
             get(repo_maintainers_view_handler),
         )
-        .route("/v1/repos/:owner/:repo/activity", get(repo_activity_view_handler))
+        .route(
+            "/v1/repos/:owner/:repo/activity",
+            get(repo_activity_view_handler),
+        )
         .with_state(state)
 }
 
@@ -975,13 +1037,15 @@ mod tests {
     use gittree_core::RepoAnnouncement;
     use gittree_core::RepoState;
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
+    use gittree_storage::AccountLifecycle;
     use gittree_storage::AnnouncementRepository;
     use gittree_storage::InMemoryRepositories;
-    use gittree_storage::PostgresRepositories;
+    use gittree_storage::ProfileVisibilityV1;
     use gittree_storage::RelayCompatibilityRecord;
     use gittree_storage::RelayCompatibilityRepository;
     use gittree_storage::RelayProbeMetadata;
     use gittree_storage::RepoAnnouncementRecord;
+    use gittree_storage::RepoVisibilityV1;
     use gittree_storage::StateRepository;
     use gittree_storage::StorageConfig;
     use std::collections::HashMap;
@@ -1039,7 +1103,7 @@ mod tests {
         RelayCompatibilityRecord::new(&report, 123, &metadata).expect("record")
     }
 
-    fn projection_repo_for_tests() -> std::sync::Arc<PostgresRepositories> {
+    fn projection_repo_for_tests() -> std::sync::Arc<super::DynProjectionRepositories> {
         let config = StateConfig {
             bind: "127.0.0.1:18082".to_string(),
             storage: StorageConfig {
@@ -1056,6 +1120,84 @@ mod tests {
         std::sync::Arc::new(
             super::build_projection_repositories(&config).expect("projection repositories"),
         )
+    }
+
+    #[derive(Default)]
+    struct FakeProjectionRepositories {
+        account: Option<gittree_storage::AccountStateRecord>,
+        account_error: Option<String>,
+        profile: Option<gittree_storage::ProfileStateRecord>,
+        profile_error: Option<String>,
+        repo: Option<gittree_storage::RepoStateV1Record>,
+        repo_error: Option<String>,
+        maintainers: std::collections::HashSet<Vec<u8>>,
+        maintainers_error: Option<String>,
+    }
+
+    impl super::ProjectionRepositoriesDyn for FakeProjectionRepositories {
+        fn v1_account_state<'a>(&'a self, _pubkey: &'a [u8]) -> super::ProjectionAccountFuture<'a> {
+            Box::pin(async move {
+                if let Some(message) = &self.account_error {
+                    return Err(gittree_storage::StorageError::Internal {
+                        message: message.clone(),
+                    });
+                }
+                Ok(self.account.clone())
+            })
+        }
+
+        fn v1_profile_state<'a>(&'a self, _pubkey: &'a [u8]) -> super::ProjectionProfileFuture<'a> {
+            Box::pin(async move {
+                if let Some(message) = &self.profile_error {
+                    return Err(gittree_storage::StorageError::Internal {
+                        message: message.clone(),
+                    });
+                }
+                Ok(self.profile.clone())
+            })
+        }
+
+        fn v1_repo_state<'a>(
+            &'a self,
+            _owner_pubkey: &'a [u8],
+            _repo_name: &'a str,
+        ) -> super::ProjectionRepoFuture<'a> {
+            Box::pin(async move {
+                if let Some(message) = &self.repo_error {
+                    return Err(gittree_storage::StorageError::Internal {
+                        message: message.clone(),
+                    });
+                }
+                Ok(self.repo.clone())
+            })
+        }
+
+        fn v1_list_active_repo_maintainers<'a>(
+            &'a self,
+            _owner_pubkey: &'a [u8],
+            _repo_name: &'a str,
+        ) -> super::ProjectionMaintainersFuture<'a> {
+            Box::pin(async move {
+                if let Some(message) = &self.maintainers_error {
+                    return Err(gittree_storage::StorageError::Internal {
+                        message: message.clone(),
+                    });
+                }
+                Ok(self.maintainers.clone())
+            })
+        }
+    }
+
+    fn app_with_projection(
+        projection_repositories: std::sync::Arc<super::DynProjectionRepositories>,
+    ) -> Router {
+        let repositories = std::sync::Arc::new(InMemoryRepositories::new());
+        let cache = std::sync::Arc::new(StateCache::new(StateCacheConfig::default()));
+        super::build_router(super::StateAppState {
+            repositories,
+            projection_repositories,
+            cache,
+        })
     }
 
     fn noop_init_observability() -> Result<(), StateError> {
@@ -1284,7 +1426,10 @@ mod tests {
                     });
                     with_env_var(super::ENV_STORAGE_IDLE_TIMEOUT_SECS, "nope", &mut || {
                         let err = StateConfig::from_env().expect_err("invalid idle timeout");
-                        assert!(err.to_string().contains(super::ENV_STORAGE_IDLE_TIMEOUT_SECS));
+                        assert!(
+                            err.to_string()
+                                .contains(super::ENV_STORAGE_IDLE_TIMEOUT_SECS)
+                        );
                     });
                     with_env_var(super::ENV_STORAGE_MIN_CONNECTIONS, "bad", &mut || {
                         let err = StateConfig::from_env().expect_err("invalid min connections");
@@ -1292,7 +1437,10 @@ mod tests {
                     });
                     with_env_var(super::ENV_STORAGE_MAX_LIFETIME_SECS, "bad", &mut || {
                         let err = StateConfig::from_env().expect_err("invalid max lifetime");
-                        assert!(err.to_string().contains(super::ENV_STORAGE_MAX_LIFETIME_SECS));
+                        assert!(
+                            err.to_string()
+                                .contains(super::ENV_STORAGE_MAX_LIFETIME_SECS)
+                        );
                     });
                 });
             },
@@ -2155,6 +2303,317 @@ mod tests {
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn v1_account_endpoint_covers_success_not_found_bad_request_and_storage() {
+        let pubkey = vec![0x11; 32];
+        let npub = gittree_app_core::npub_from_bytes(&pubkey).expect("npub");
+        let account = gittree_storage::AccountStateRecord {
+            pubkey: pubkey.clone(),
+            status: AccountLifecycle::Active,
+            created_at: 10,
+            updated_at: 20,
+            deleted_at: None,
+        };
+
+        let app = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            account: Some(account),
+            ..Default::default()
+        }));
+        let success = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/accounts/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(success.status(), StatusCode::OK);
+        let body = to_bytes(success.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["npub"], npub);
+        assert_eq!(json["status"], "active");
+        assert_eq!(json["created_at"], 10);
+        assert_eq!(json["updated_at"], 20);
+
+        let missing =
+            app_with_projection(std::sync::Arc::new(FakeProjectionRepositories::default()))
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/accounts/{npub}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let bad_request =
+            app_with_projection(std::sync::Arc::new(FakeProjectionRepositories::default()))
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/accounts/not-an-npub")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+        assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+
+        let storage_error = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            account_error: Some("account failure".to_string()),
+            ..Default::default()
+        }))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/accounts/{npub}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+        assert_eq!(storage_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn v1_profile_endpoint_covers_public_private_not_found_and_storage() {
+        let pubkey = vec![0x22; 32];
+        let npub = gittree_app_core::npub_from_bytes(&pubkey).expect("npub");
+        let profile = gittree_storage::ProfileStateRecord {
+            pubkey: pubkey.clone(),
+            display_name: Some("alice".to_string()),
+            bio: Some("builder".to_string()),
+            avatar_url: None,
+            website_url: None,
+            location: Some("earth".to_string()),
+            visibility: ProfileVisibilityV1::Public,
+            updated_at: 30,
+        };
+
+        let app = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            profile: Some(profile),
+            ..Default::default()
+        }));
+        let success = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/profiles/{npub}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(success.status(), StatusCode::OK);
+
+        let private = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            profile: Some(gittree_storage::ProfileStateRecord {
+                pubkey,
+                display_name: None,
+                bio: None,
+                avatar_url: None,
+                website_url: None,
+                location: None,
+                visibility: ProfileVisibilityV1::Private,
+                updated_at: 40,
+            }),
+            ..Default::default()
+        }))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/profiles/{npub}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+        assert_eq!(private.status(), StatusCode::NOT_FOUND);
+
+        let missing =
+            app_with_projection(std::sync::Arc::new(FakeProjectionRepositories::default()))
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/profiles/{npub}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let storage_error = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            profile_error: Some("profile failure".to_string()),
+            ..Default::default()
+        }))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/profiles/{npub}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+        assert_eq!(storage_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn v1_repo_endpoint_covers_success_not_found_bad_request_and_storage() {
+        let owner_pubkey = vec![0x33; 32];
+        let owner = gittree_app_core::npub_from_bytes(&owner_pubkey).expect("npub");
+        let app = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            repo: Some(gittree_storage::RepoStateV1Record {
+                owner_pubkey: owner_pubkey.clone(),
+                repo_name: "demo".to_string(),
+                description: Some("demo repo".to_string()),
+                website_url: None,
+                visibility: RepoVisibilityV1::Public,
+                default_branch: "main".to_string(),
+                archived: false,
+                updated_at: 50,
+            }),
+            ..Default::default()
+        }));
+
+        let success = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/repos/{owner}/demo"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(success.status(), StatusCode::OK);
+
+        let missing =
+            app_with_projection(std::sync::Arc::new(FakeProjectionRepositories::default()))
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/repos/{owner}/demo"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let bad_request =
+            app_with_projection(std::sync::Arc::new(FakeProjectionRepositories::default()))
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/repos/not-an-npub/demo")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+        assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+
+        let storage_error = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            repo_error: Some("repo failure".to_string()),
+            ..Default::default()
+        }))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/repos/{owner}/demo"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+        assert_eq!(storage_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn v1_repo_maintainers_endpoint_covers_sorting_and_storage() {
+        let owner_pubkey = vec![0x44; 32];
+        let owner = gittree_app_core::npub_from_bytes(&owner_pubkey).expect("npub");
+        let maintainer_a = vec![0x21; 32];
+        let maintainer_b = vec![0x20; 32];
+        let maintainer_short = vec![0x01, 0x02];
+        let npub_a = gittree_app_core::npub_from_bytes(&maintainer_a).expect("npub");
+        let npub_b = gittree_app_core::npub_from_bytes(&maintainer_b).expect("npub");
+        let npub_short = gittree_app_core::npub_from_bytes(&maintainer_short).expect("npub");
+        let app = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            maintainers: std::collections::HashSet::from([
+                maintainer_a,
+                maintainer_short,
+                maintainer_b,
+            ]),
+            ..Default::default()
+        }));
+
+        let success = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/repos/{owner}/demo/maintainers"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(success.status(), StatusCode::OK);
+        let body = to_bytes(success.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let mut expected = vec![npub_a, npub_b, npub_short];
+        expected.sort();
+        assert_eq!(json["maintainers"], serde_json::json!(expected));
+
+        let bad_request =
+            app_with_projection(std::sync::Arc::new(FakeProjectionRepositories::default()))
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/repos/not-an-npub/demo/maintainers")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+        assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+
+        let storage_error = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories {
+            maintainers_error: Some("maintainer failure".to_string()),
+            ..Default::default()
+        }))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/repos/{owner}/demo/maintainers"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+        assert_eq!(storage_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn v1_repo_activity_endpoint_returns_empty_activity() {
+        let owner = gittree_app_core::npub_from_bytes(&[0x55; 32]).expect("npub");
+        let app = app_with_projection(std::sync::Arc::new(FakeProjectionRepositories::default()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/repos/{owner}/demo/activity"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["activity"], serde_json::json!([]));
+    }
+
     #[test]
     fn state_http_error_maps_service_errors() {
         let bad = super::StateHttpError::from(StateServiceError::InvalidInput {
@@ -2280,8 +2739,8 @@ mod tests {
             relay_urls: Vec::new(),
         };
         let err = super::serve_with(config, failing_init_observability, noop_server)
-        .await
-        .expect_err("observability error");
+            .await
+            .expect_err("observability error");
         assert!(err.to_string().contains("state observability config error"));
     }
 
@@ -2322,8 +2781,8 @@ mod tests {
             relay_urls: Vec::new(),
         };
         let err = super::serve_with(config, noop_init_observability, failing_server)
-        .await
-        .expect_err("server error");
+            .await
+            .expect_err("server error");
         assert_eq!(err.to_string(), "state serve error: boom");
     }
 
@@ -2407,10 +2866,8 @@ mod tests {
     fn init_observability_unit_maps_config_error() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var("GITTREE_LOG_STDOUT", "invalid-bool", &mut || {
-            let err =
-                super::init_observability_unit().expect_err("invalid observability config");
+            let err = super::init_observability_unit().expect_err("invalid observability config");
             assert!(err.to_string().contains("state observability config error"));
         });
     }
-
 }
