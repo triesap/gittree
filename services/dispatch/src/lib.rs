@@ -634,6 +634,41 @@ mod tests {
         assert_eq!(config.relay_urls, vec!["wss://gittr.ee".to_string()]);
     }
 
+    #[test]
+    fn from_env_rejects_invalid_storage_numeric_values() {
+        let mut env = base_env();
+        env.push(("GITTREE_STORAGE_MAX_CONNECTIONS", "abc"));
+        let err = from_pairs(&env).expect_err("invalid max");
+        assert!(matches!(
+            err,
+            DispatchError::Config(message)
+            if message.contains("GITTREE_STORAGE_MAX_CONNECTIONS")
+        ));
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_storage_pool_bounds() {
+        let mut env = base_env();
+        env.push(("GITTREE_STORAGE_MAX_CONNECTIONS", "1"));
+        env.push(("GITTREE_STORAGE_MIN_CONNECTIONS", "2"));
+        let err = from_pairs(&env).expect_err("invalid bounds");
+        assert!(matches!(
+            err,
+            DispatchError::Config(message)
+            if message.contains("max_connections") || message.contains("min_connections")
+        ));
+    }
+
+    #[test]
+    fn from_env_treats_blank_optional_storage_values_as_defaults() {
+        let mut env = base_env();
+        env.push(("GITTREE_STORAGE_MAX_CONNECTIONS", "   "));
+        env.push(("GITTREE_STORAGE_MIN_CONNECTIONS", ""));
+        let config = from_pairs(&env).expect("config");
+        assert_eq!(config.storage.max_connections, 10);
+        assert_eq!(config.storage.min_connections, 2);
+    }
+
     #[tokio::test]
     async fn process_event_ignores_non_dispatch_messages() {
         let store = EventStore::default();
@@ -718,6 +753,39 @@ mod tests {
         assert_eq!(envelope.relay_url, "wss://gittr.ee");
     }
 
+    #[test]
+    fn parse_relay_event_message_rejects_invalid_payload_shapes() {
+        let invalid_kind = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": "1",
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&invalid_kind, "wss://gittr.ee").is_none());
+
+        let invalid_tags = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [1, 2, 3]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&invalid_tags, "wss://gittr.ee").is_none());
+    }
+
     #[tokio::test]
     async fn process_event_message_ignores_non_event_payloads() {
         let store = EventStore::default();
@@ -726,5 +794,96 @@ mod tests {
             .await
             .expect("result");
         assert!(outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn process_event_message_returns_rejected_for_invalid_command() {
+        let store = EventStore::default();
+        let message = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account nope",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        let outcome = process_event_message(&store, &filter(), "wss://gittr.ee", &message)
+            .await
+            .expect("result");
+        assert!(matches!(
+            outcome,
+            Some(DispatchEventOutcome::Rejected(message))
+            if message.contains("invalid command")
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_event_message_applies_valid_event() {
+        let store = EventStore::default();
+        let message = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        let outcome = process_event_message(&store, &filter(), "wss://gittr.ee", &message)
+            .await
+            .expect("result");
+        assert!(matches!(
+            outcome,
+            Some(DispatchEventOutcome::Applied(output))
+            if output.code == "account_created"
+        ));
+    }
+
+    #[test]
+    fn dispatch_error_display_and_source_cover_variants() {
+        let config = DispatchError::Config("bad config".to_string());
+        assert_eq!(config.to_string(), "dispatch config error: bad config");
+        assert!(std::error::Error::source(&config).is_none());
+
+        let storage = DispatchError::Storage(gittree_storage::StorageError::Internal {
+            message: "boom".to_string(),
+        });
+        assert_eq!(
+            storage.to_string(),
+            "dispatch storage error: internal error: boom"
+        );
+        assert!(std::error::Error::source(&storage).is_some());
+
+        let observability_config = DispatchError::ObservabilityConfig(
+            gittree_observability::ObservabilityConfigError::InvalidEnv {
+                key: "GITTREE_LOG_JSON",
+                value: "nope".to_string(),
+            },
+        );
+        assert!(
+            observability_config
+                .to_string()
+                .contains("dispatch observability config error:")
+        );
+        assert!(std::error::Error::source(&observability_config).is_some());
+
+        let observability = DispatchError::Observability(
+            gittree_observability::ObservabilityError::LogInit("cannot open".to_string()),
+        );
+        assert!(
+            observability
+                .to_string()
+                .contains("dispatch observability error:")
+        );
+        assert!(std::error::Error::source(&observability).is_some());
     }
 }
