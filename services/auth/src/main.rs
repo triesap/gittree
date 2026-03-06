@@ -96,6 +96,7 @@ mod tests {
                 max_lifetime_secs: Some(300),
                 application_name: Some("gittree-auth-test".to_string()),
             },
+            command_only: false,
         }
     }
 

@@ -39,6 +39,7 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const ENV_AUTH_COMMAND_ONLY: &str = "GITTREE_AUTH_COMMAND_ONLY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthServiceConfig {
@@ -46,6 +47,7 @@ pub struct AuthServiceConfig {
     pub auth: AuthSettings,
     pub forgejo: ForgejoConfig,
     pub storage: StorageConfig,
+    pub command_only: bool,
 }
 
 impl AuthServiceConfig {
@@ -62,12 +64,21 @@ impl AuthServiceConfig {
         let auth = AuthSettings::from_env_with(get_var).map_err(AuthConfigError::Config)?;
         let forgejo = ForgejoConfig::from_env_with(get_var).map_err(AuthConfigError::Config)?;
         let storage = storage_from_env_with(get_var)?;
+        let command_only = parse_bool_flag(get_var(ENV_AUTH_COMMAND_ONLY));
         Ok(Self {
             bind: services.auth.bind,
             auth,
             forgejo,
             storage,
+            command_only,
         })
+    }
+}
+
+fn parse_bool_flag(value: Option<String>) -> bool {
+    match value {
+        Some(value) => matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"),
+        None => false,
     }
 }
 
@@ -332,8 +343,18 @@ async fn serve_without_observability_with(
     let bind = config.bind;
     let auth = config.auth;
     let forgejo_config = config.forgejo;
+    let command_only = config.command_only;
     let transport = build_reqwest_transport(&forgejo_config.api_token)?;
-    serve_with_components(&bind, auth, forgejo_config, transport, accounts, profiles).await
+    serve_with_components(
+        &bind,
+        auth,
+        forgejo_config,
+        command_only,
+        transport,
+        accounts,
+        profiles,
+    )
+    .await
 }
 
 fn build_reqwest_transport(api_token: &str) -> Result<Arc<dyn ForgejoTransport>, AuthError> {
@@ -345,6 +366,7 @@ async fn serve_with_components(
     bind: &str,
     auth: AuthSettings,
     forgejo_config: ForgejoConfig,
+    command_only: bool,
     transport: Arc<dyn ForgejoTransport>,
     accounts: Arc<dyn AccountRepository>,
     profiles: Arc<dyn ProfileRepository>,
@@ -356,21 +378,37 @@ async fn serve_with_components(
         accounts,
         profiles,
     };
-    let router = build_router(state);
+    let router = if command_only {
+        build_router_with_mode(state, true)
+    } else {
+        build_router(state)
+    };
     serve_inner(bind, router).await
 }
 
 fn build_router(state: AuthAppState) -> Router {
+    build_router_with_mode(state, false)
+}
+
+fn build_router_with_mode(state: AuthAppState, command_only: bool) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
         .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT]);
-    Router::new()
-        .route("/health", get(health_handler))
-        .route("/v1/signup", post(signup_handler))
+    let router = Router::new().route("/health", get(health_handler));
+    let router = if command_only {
+        router.route("/v1/signup", post(command_only_signup_handler))
+    } else {
+        router.route("/v1/signup", post(signup_handler))
+    };
+    router
         .route(
             "/v1/profile",
-            get(profile_get_handler).patch(profile_patch_handler),
+            if command_only {
+                get(profile_get_handler).patch(command_only_profile_patch_handler)
+            } else {
+                get(profile_get_handler).patch(profile_patch_handler)
+            },
         )
         .route("/v1/profile/:npub", get(profile_public_handler))
         .layer(cors)
@@ -502,6 +540,14 @@ async fn signup_handler(
     }))
 }
 
+async fn command_only_signup_handler(
+    State(_state): State<AuthAppState>,
+) -> Result<Json<SignupResponse>, AuthHttpError> {
+    Err(AuthHttpError::BadRequest(
+        "signup disabled; use gittree kind-1 command flow".to_string(),
+    ))
+}
+
 async fn profile_get_handler(
     State(state): State<AuthAppState>,
     headers: HeaderMap,
@@ -541,6 +587,14 @@ async fn profile_get_handler(
         &account.forgejo_username,
         profile,
     )))
+}
+
+async fn command_only_profile_patch_handler(
+    State(_state): State<AuthAppState>,
+) -> Result<Json<Profile>, AuthHttpError> {
+    Err(AuthHttpError::BadRequest(
+        "profile write disabled; use gittree kind-1 command flow".to_string(),
+    ))
 }
 
 async fn profile_patch_handler(
@@ -1640,6 +1694,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let repos = build_repositories(&config).expect("repositories");
         let _ = repos;
@@ -1663,6 +1718,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let err = build_repositories(&config).expect_err("invalid pool bounds should fail");
         assert!(err.to_string().contains("auth storage error"));
@@ -1686,6 +1742,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let err = build_repositories(&config).expect_err("invalid write url should fail");
         assert!(err.to_string().contains("auth storage error"));
@@ -1748,6 +1805,7 @@ mod tests {
             "127.0.0.1:0",
             auth,
             test_config(),
+            false,
             transport_dyn,
             accounts,
             profiles,
@@ -1774,6 +1832,7 @@ mod tests {
             "not-a-socket",
             auth,
             test_config(),
+            false,
             transport_dyn,
             accounts,
             profiles,
@@ -1801,6 +1860,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let build_repositories_fn: Box<
             dyn FnOnce(
@@ -1844,6 +1904,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let err = super::serve_without_observability(config)
             .await
@@ -1902,6 +1963,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let err = super::serve_with_init(
             config,
@@ -1935,6 +1997,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let err = super::serve_with_init(config, Box::new(|| Ok(())))
             .await
@@ -1963,6 +2026,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
         let err = super::serve_without_observability(config)
             .await
@@ -1988,6 +2052,7 @@ mod tests {
                 max_lifetime_secs: None,
                 application_name: None,
             },
+            command_only: false,
         };
 
         let runtime = tokio::runtime::Builder::new_current_thread()
