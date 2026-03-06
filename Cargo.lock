@@ -2109,6 +2109,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dotenvy",
+ "futures-util",
  "gittree-app-core",
  "gittree-core",
  "gittree-observability",
@@ -2117,6 +2118,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tracing",
 ]
 

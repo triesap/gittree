@@ -1,6 +1,11 @@
+use futures_util::{SinkExt, StreamExt};
 pub use gittree_core::{CommandParseError, ParsedCommand, parse_cli_command};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{PostgresRepositories, StorageConfig, StorageError};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 pub mod handlers;
 pub mod ingest;
 use handlers::{CommandExecutionInput, CommandExecutionOutput, CommandStore, execute_command};
@@ -18,6 +23,8 @@ const ENV_STORAGE_MIN_CONNECTIONS: &str = "GITTREE_STORAGE_MIN_CONNECTIONS";
 const ENV_STORAGE_IDLE_TIMEOUT_SECS: &str = "GITTREE_STORAGE_IDLE_TIMEOUT_SECS";
 const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
+const DISPATCH_SUB_ID: &str = "gittree-dispatch";
+const RELAY_RETRY_DELAY_SECS: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchConfig {
@@ -165,14 +172,33 @@ pub fn init_observability() -> Result<ObservabilityHandle, DispatchError> {
 
 pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
     let _guard = init_observability()?;
-    let repositories = build_repositories(&config)?;
+    let repositories = Arc::new(build_repositories(&config)?);
+    let filter = dispatch_filter_config(&config);
     tracing::info!(
         bind = %config.bind,
         relay_count = config.relay_urls.len(),
         storage = %config.storage.read_connection,
-        "dispatch service scaffold initialized"
+        "dispatch relay subscriber initialized"
     );
-    let _ = repositories;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for relay_url in &config.relay_urls {
+        let store = Arc::clone(&repositories);
+        let filter = filter.clone();
+        let relay_url = relay_url.clone();
+        tasks.spawn(async move {
+            run_relay_subscription(store, filter, relay_url).await;
+        });
+    }
+
+    if let Err(err) = tokio::signal::ctrl_c().await {
+        return Err(DispatchError::Config(format!(
+            "dispatch shutdown signal failed: {err}"
+        )));
+    }
+
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -252,11 +278,137 @@ fn decode_fixed_hex(value: &str, field: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+fn build_relay_req_message(admin_pubkey: &str) -> String {
+    serde_json::json!(["REQ", DISPATCH_SUB_ID, {"kinds":[1], "#p":[admin_pubkey]}]).to_string()
+}
+
+fn parse_relay_event_message(message: &str, relay_url: &str) -> Option<RelayEventEnvelope> {
+    let value = serde_json::from_str::<serde_json::Value>(message).ok()?;
+    let parts = value.as_array()?;
+    if parts.len() < 3 || parts.first()?.as_str()? != "EVENT" {
+        return None;
+    }
+
+    let event = parts.get(2)?.as_object()?;
+    let id = event.get("id")?.as_str()?.to_string();
+    let pubkey = event.get("pubkey")?.as_str()?.to_string();
+    let kind = event.get("kind")?.as_u64()? as u32;
+    let created_at = event.get("created_at")?.as_i64()?;
+    let content = event.get("content")?.as_str()?.to_string();
+    let tags = parse_event_tags(event.get("tags")?)?;
+
+    Some(RelayEventEnvelope {
+        id,
+        pubkey,
+        kind,
+        created_at,
+        content,
+        tags,
+        relay_url: relay_url.to_string(),
+    })
+}
+
+fn parse_event_tags(value: &serde_json::Value) -> Option<Vec<Vec<String>>> {
+    let rows = value.as_array()?;
+    let mut tags = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row = row.as_array()?;
+        let mut columns = Vec::with_capacity(row.len());
+        for col in row {
+            columns.push(col.as_str()?.to_string());
+        }
+        tags.push(columns);
+    }
+    Some(tags)
+}
+
+async fn process_event_message<S: CommandStore>(
+    store: &S,
+    filter: &DispatchFilterConfig,
+    relay_url: &str,
+    message: &str,
+) -> Result<Option<DispatchEventOutcome>, DispatchError> {
+    let Some(envelope) = parse_relay_event_message(message, relay_url) else {
+        return Ok(None);
+    };
+    let outcome = process_event_envelope(store, filter, envelope).await?;
+    Ok(Some(outcome))
+}
+
+async fn run_relay_subscription<S: CommandStore + Send + Sync + 'static>(
+    store: Arc<S>,
+    filter: DispatchFilterConfig,
+    relay_url: String,
+) {
+    loop {
+        match connect_async(relay_url.as_str()).await {
+            Ok((stream, _response)) => {
+                tracing::info!(relay = %relay_url, "dispatch relay connected");
+                let (mut writer, mut reader) = stream.split();
+                let req = build_relay_req_message(&filter.admin_pubkey);
+                if writer.send(Message::Text(req)).await.is_err() {
+                    tracing::warn!(relay = %relay_url, "dispatch failed to send relay req");
+                    tokio::time::sleep(Duration::from_secs(RELAY_RETRY_DELAY_SECS)).await;
+                    continue;
+                }
+
+                while let Some(next) = reader.next().await {
+                    match next {
+                        Ok(Message::Text(text)) => {
+                            match process_event_message(store.as_ref(), &filter, &relay_url, &text)
+                                .await
+                            {
+                                Ok(Some(DispatchEventOutcome::Applied(output))) => {
+                                    tracing::info!(
+                                        relay = %relay_url,
+                                        code = %output.code,
+                                        "dispatch applied command event"
+                                    );
+                                }
+                                Ok(Some(DispatchEventOutcome::Ignored(reason))) => {
+                                    tracing::debug!(relay = %relay_url, ?reason, "dispatch ignored relay event");
+                                }
+                                Ok(Some(DispatchEventOutcome::Rejected(message))) => {
+                                    tracing::warn!(
+                                        relay = %relay_url,
+                                        %message,
+                                        "dispatch rejected relay event"
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    tracing::error!(relay = %relay_url, error = %err, "dispatch event processing failed");
+                                }
+                            }
+                        }
+                        Ok(Message::Ping(payload)) => {
+                            if writer.send(Message::Pong(payload)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Message::Close(_)) => break,
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::warn!(relay = %relay_url, error = %err, "dispatch relay read failed");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(relay = %relay_url, error = %err, "dispatch relay connect failed");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(RELAY_RETRY_DELAY_SECS)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DispatchConfig, DispatchError, DispatchEventOutcome, DispatchFilterConfig,
-        RelayEventEnvelope, dispatch_filter_config, parse_csv, process_event_envelope,
+        RelayEventEnvelope, build_relay_req_message, dispatch_filter_config, parse_csv,
+        parse_relay_event_message, process_event_envelope, process_event_message,
     };
     use crate::handlers::CommandStore;
     use async_trait::async_trait;
@@ -532,5 +684,47 @@ mod tests {
             .await
             .expect("account lookup");
         assert!(account.is_some());
+    }
+
+    #[test]
+    fn build_relay_req_message_uses_nostr_req_shape() {
+        let encoded = build_relay_req_message("npub1admin");
+        let parsed = serde_json::from_str::<serde_json::Value>(&encoded).expect("json");
+        let parts = parsed.as_array().expect("array");
+        assert_eq!(parts[0], "REQ");
+        assert_eq!(parts[1], "gittree-dispatch");
+        assert_eq!(parts[2]["kinds"][0], 1);
+        assert_eq!(parts[2]["#p"][0], "npub1admin");
+    }
+
+    #[test]
+    fn parse_relay_event_message_extracts_envelope() {
+        let message = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        let envelope = parse_relay_event_message(&message, "wss://gittr.ee").expect("envelope");
+        assert_eq!(envelope.kind, 1);
+        assert_eq!(envelope.created_at, 321);
+        assert_eq!(envelope.relay_url, "wss://gittr.ee");
+    }
+
+    #[tokio::test]
+    async fn process_event_message_ignores_non_event_payloads() {
+        let store = EventStore::default();
+        let message = serde_json::json!(["NOTICE", "ok"]).to_string();
+        let outcome = process_event_message(&store, &filter(), "wss://gittr.ee", &message)
+            .await
+            .expect("result");
+        assert!(outcome.is_none());
     }
 }
