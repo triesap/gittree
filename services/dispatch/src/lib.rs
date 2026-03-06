@@ -1,5 +1,9 @@
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 pub use gittree_core::{CommandParseError, ParsedCommand, parse_cli_command};
+pub mod ingest;
+pub use ingest::{
+    DispatchFilterConfig, IngestRejectReason, RelayEventEnvelope, is_dispatch_command_event,
+};
 
 const ENV_BIND: &str = "GITTREE_DISPATCH_BIND";
 const ENV_ADMIN_PUBKEY: &str = "GITTREE_DISPATCH_ADMIN_PUBKEY";
@@ -97,9 +101,16 @@ pub fn parse_command_content(content: &str) -> Result<ParsedCommand, CommandPars
     parse_cli_command(content)
 }
 
+pub fn dispatch_filter_config(config: &DispatchConfig) -> DispatchFilterConfig {
+    DispatchFilterConfig {
+        admin_pubkey: config.admin_pubkey.clone(),
+        relay_allowlist: config.relay_urls.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DispatchConfig, DispatchError, parse_csv};
+    use super::{DispatchConfig, DispatchError, dispatch_filter_config, parse_csv};
     use std::collections::HashMap;
 
     fn from_pairs(values: &[(&'static str, &'static str)]) -> Result<DispatchConfig, DispatchError> {
@@ -118,6 +129,21 @@ mod tests {
     fn parse_command_content_delegates_to_core_parser() {
         let command = super::parse_command_content("gittree account create").expect("command");
         assert_eq!(command.action, "create");
+    }
+
+    #[test]
+    fn dispatch_filter_config_uses_dispatch_settings() {
+        let config = from_pairs(&[
+            ("GITTREE_DISPATCH_ADMIN_PUBKEY", "npub1admin"),
+            ("GITTREE_DISPATCH_RELAY_URLS", "wss://gittr.ee,wss://relay.example"),
+        ])
+        .expect("config");
+        let filter = dispatch_filter_config(&config);
+        assert_eq!(filter.admin_pubkey, "npub1admin");
+        assert_eq!(
+            filter.relay_allowlist,
+            vec!["wss://gittr.ee".to_string(), "wss://relay.example".to_string()]
+        );
     }
 
     #[test]
