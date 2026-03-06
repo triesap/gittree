@@ -406,4 +406,56 @@ mod tests {
             parse_cli_command("gittree profile visibility hidden").expect_err("visibility required");
         assert!(matches!(err, CommandParseError::InvalidArgs(message) if message.contains("public|private")));
     }
+
+    #[test]
+    fn rejects_invalid_actions_per_namespace() {
+        let account = parse_cli_command("gittree account unknown").expect_err("account action");
+        assert!(matches!(
+            account,
+            CommandParseError::InvalidCommand(action)
+            if action == "unknown"
+        ));
+
+        let profile = parse_cli_command("gittree profile unknown").expect_err("profile action");
+        assert!(matches!(
+            profile,
+            CommandParseError::InvalidCommand(action)
+            if action == "unknown"
+        ));
+
+        let repo_missing_target =
+            parse_cli_command("gittree repo update description=hello").expect_err("repo update");
+        assert!(matches!(
+            repo_missing_target,
+            CommandParseError::InvalidArgs(message)
+            if message.contains("repo update requires target and key=value args")
+        ));
+
+        let repo_maintainers_missing_target =
+            parse_cli_command("gittree repo maintainers").expect_err("repo maintainers target");
+        assert!(matches!(
+            repo_maintainers_missing_target,
+            CommandParseError::InvalidArgs(message)
+            if message.contains("repo maintainers requires target")
+        ));
+
+        let repo_unknown = parse_cli_command("gittree repo unknown demo").expect_err("repo action");
+        assert!(matches!(
+            repo_unknown,
+            CommandParseError::InvalidCommand(action)
+            if action == "unknown"
+        ));
+    }
+
+    #[test]
+    fn parses_escaped_characters_in_tokens() {
+        let cmd = parsed("gittree profile set bio=hello\\ world");
+        assert_eq!(
+            cmd.args,
+            vec![CommandArg::KeyValue {
+                key: "bio".to_string(),
+                value: "hello world".to_string(),
+            }]
+        );
+    }
 }
