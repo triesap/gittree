@@ -1,8 +1,9 @@
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use gittree_app_core::{npub_from_bytes, pubkey_bytes_from_npub};
 use gittree_config::{ConfigError, RelayTargetsConfig, ServicesConfig};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{
@@ -214,8 +215,19 @@ pub fn build_repositories(config: &StateConfig) -> Result<StateRepositories, Sta
     Ok(CachedRepositories::new(repos))
 }
 
+pub fn build_projection_repositories(config: &StateConfig) -> Result<PostgresRepositories, StateError> {
+    let pool_options = config.storage.pool_options().map_err(StateError::Storage)?;
+    let connect_options = config
+        .storage
+        .read_connect_options()
+        .map_err(StateError::Storage)?;
+    let pool = pool_options.connect_lazy_with(connect_options);
+    Ok(PostgresRepositories::new(pool))
+}
+
 struct StateAppState {
     repositories: Arc<DynStateRepositories>,
+    projection_repositories: Arc<PostgresRepositories>,
     cache: Arc<StateCache>,
 }
 
@@ -223,6 +235,7 @@ impl Clone for StateAppState {
     fn clone(&self) -> Self {
         Self {
             repositories: Arc::clone(&self.repositories),
+            projection_repositories: Arc::clone(&self.projection_repositories),
             cache: Arc::clone(&self.cache),
         }
     }
@@ -244,9 +257,11 @@ async fn serve_with(
 ) -> Result<(), StateError> {
     let _observability = init_observability_fn()?;
     let repositories = build_repositories(&config)?;
+    let projection_repositories = build_projection_repositories(&config)?;
     let cache = Arc::new(StateCache::new(StateCacheConfig::default()));
     let state = StateAppState {
         repositories: Arc::new(repositories),
+        projection_repositories: Arc::new(projection_repositories),
         cache,
     };
     let router = build_router(state);
@@ -282,6 +297,14 @@ fn build_router(state: StateAppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/relay-compatibility", get(relay_compatibility_handler))
+        .route("/v1/accounts/:npub", get(account_view_handler))
+        .route("/v1/profiles/:npub", get(profile_view_handler))
+        .route("/v1/repos/:owner/:repo", get(repo_view_handler))
+        .route(
+            "/v1/repos/:owner/:repo/maintainers",
+            get(repo_maintainers_view_handler),
+        )
+        .route("/v1/repos/:owner/:repo/activity", get(repo_activity_view_handler))
         .with_state(state)
 }
 
@@ -300,6 +323,170 @@ async fn relay_compatibility_handler(
     )
     .await?;
     Ok(Json(response))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AccountViewResponse {
+    npub: String,
+    status: String,
+    created_at: i64,
+    updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ProfileViewResponse {
+    npub: String,
+    display_name: Option<String>,
+    bio: Option<String>,
+    avatar_url: Option<String>,
+    website_url: Option<String>,
+    location: Option<String>,
+    visibility: String,
+    updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RepoViewResponse {
+    owner: String,
+    repo: String,
+    description: Option<String>,
+    website_url: Option<String>,
+    visibility: String,
+    default_branch: String,
+    archived: bool,
+    updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RepoMaintainersResponse {
+    owner: String,
+    repo: String,
+    maintainers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RepoActivityResponse {
+    owner: String,
+    repo: String,
+    activity: Vec<String>,
+}
+
+async fn account_view_handler(
+    State(state): State<StateAppState>,
+    Path(npub): Path<String>,
+) -> Result<Json<AccountViewResponse>, StateHttpError> {
+    let pubkey = parse_npub_param(&npub)?;
+    let Some(record) = state
+        .projection_repositories
+        .v1_account_state(&pubkey)
+        .await
+        .map_err(|err| StateHttpError::Storage(err.to_string()))?
+    else {
+        return Err(StateHttpError::NotFound("account".to_string()));
+    };
+
+    Ok(Json(AccountViewResponse {
+        npub,
+        status: record.status.as_str().to_string(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        deleted_at: record.deleted_at,
+    }))
+}
+
+async fn profile_view_handler(
+    State(state): State<StateAppState>,
+    Path(npub): Path<String>,
+) -> Result<Json<ProfileViewResponse>, StateHttpError> {
+    let pubkey = parse_npub_param(&npub)?;
+    let Some(record) = state
+        .projection_repositories
+        .v1_profile_state(&pubkey)
+        .await
+        .map_err(|err| StateHttpError::Storage(err.to_string()))?
+    else {
+        return Err(StateHttpError::NotFound("profile".to_string()));
+    };
+    if record.visibility.as_str() == "private" {
+        return Err(StateHttpError::NotFound("profile".to_string()));
+    }
+
+    Ok(Json(ProfileViewResponse {
+        npub,
+        display_name: record.display_name,
+        bio: record.bio,
+        avatar_url: record.avatar_url,
+        website_url: record.website_url,
+        location: record.location,
+        visibility: record.visibility.as_str().to_string(),
+        updated_at: record.updated_at,
+    }))
+}
+
+async fn repo_view_handler(
+    State(state): State<StateAppState>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<RepoViewResponse>, StateHttpError> {
+    let owner_pubkey = parse_npub_param(&owner)?;
+    let Some(record) = state
+        .projection_repositories
+        .v1_repo_state(&owner_pubkey, &repo)
+        .await
+        .map_err(|err| StateHttpError::Storage(err.to_string()))?
+    else {
+        return Err(StateHttpError::NotFound("repo".to_string()));
+    };
+
+    Ok(Json(RepoViewResponse {
+        owner,
+        repo: record.repo_name,
+        description: record.description,
+        website_url: record.website_url,
+        visibility: record.visibility.as_str().to_string(),
+        default_branch: record.default_branch,
+        archived: record.archived,
+        updated_at: record.updated_at,
+    }))
+}
+
+async fn repo_maintainers_view_handler(
+    State(state): State<StateAppState>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<RepoMaintainersResponse>, StateHttpError> {
+    let owner_pubkey = parse_npub_param(&owner)?;
+    let maintainers = state
+        .projection_repositories
+        .v1_list_active_repo_maintainers(&owner_pubkey, &repo)
+        .await
+        .map_err(|err| StateHttpError::Storage(err.to_string()))?;
+    let mut values = maintainers
+        .into_iter()
+        .filter_map(|maintainer| npub_from_bytes(&maintainer).ok())
+        .collect::<Vec<_>>();
+    values.sort();
+
+    Ok(Json(RepoMaintainersResponse {
+        owner,
+        repo,
+        maintainers: values,
+    }))
+}
+
+async fn repo_activity_view_handler(
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<RepoActivityResponse>, StateHttpError> {
+    Ok(Json(RepoActivityResponse {
+        owner,
+        repo,
+        activity: Vec::new(),
+    }))
+}
+
+fn parse_npub_param(npub: &str) -> Result<Vec<u8>, StateHttpError> {
+    pubkey_bytes_from_npub(npub)
+        .map_err(|_| StateHttpError::BadRequest(format!("invalid npub: {npub}")))
 }
 
 #[derive(Debug)]
@@ -790,6 +977,7 @@ mod tests {
     use gittree_core::{RelayCapability, RelayCompatibilityReport};
     use gittree_storage::AnnouncementRepository;
     use gittree_storage::InMemoryRepositories;
+    use gittree_storage::PostgresRepositories;
     use gittree_storage::RelayCompatibilityRecord;
     use gittree_storage::RelayCompatibilityRepository;
     use gittree_storage::RelayProbeMetadata;
@@ -849,6 +1037,25 @@ mod tests {
             active_probe_error: None,
         };
         RelayCompatibilityRecord::new(&report, 123, &metadata).expect("record")
+    }
+
+    fn projection_repo_for_tests() -> std::sync::Arc<PostgresRepositories> {
+        let config = StateConfig {
+            bind: "127.0.0.1:18082".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://localhost/gittree".to_string(),
+                write_connection: None,
+                max_connections: 5,
+                min_connections: 1,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: vec!["wss://gittr.ee".to_string()],
+        };
+        std::sync::Arc::new(
+            super::build_projection_repositories(&config).expect("projection repositories"),
+        )
     }
 
     fn noop_init_observability() -> Result<(), StateError> {
@@ -1861,6 +2068,7 @@ mod tests {
         let cache = std::sync::Arc::new(StateCache::new(StateCacheConfig::default()));
         let app = super::build_router(super::StateAppState {
             repositories,
+            projection_repositories: projection_repo_for_tests(),
             cache,
         });
         let response = app
@@ -1894,6 +2102,7 @@ mod tests {
         let cache = std::sync::Arc::new(StateCache::new(StateCacheConfig::default()));
         let app = super::build_router(super::StateAppState {
             repositories,
+            projection_repositories: projection_repo_for_tests(),
             cache,
         });
         let response = app
@@ -1914,6 +2123,7 @@ mod tests {
         let cache = std::sync::Arc::new(StateCache::new(StateCacheConfig::default()));
         let app = super::build_router(super::StateAppState {
             repositories,
+            projection_repositories: projection_repo_for_tests(),
             cache,
         });
 

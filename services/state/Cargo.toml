@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = "0.7"
+gittree-app-core = { path = "../../crates/app-core" }
 gittree-config = { path = "../../crates/config" }
 gittree-observability = { path = "../../crates/observability" }
 gittree-storage = { path = "../../crates/storage" }

@@ -2289,6 +2289,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "dotenvy",
+ "gittree-app-core",
  "gittree-config",
  "gittree-core",
  "gittree-observability",
