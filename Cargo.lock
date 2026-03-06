@@ -2104,6 +2104,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gittree-dispatch"
+version = "0.1.0"
+dependencies = [
+ "dotenvy",
+ "gittree-observability",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gittree-forgejo"
 version = "0.1.0"
 dependencies = [

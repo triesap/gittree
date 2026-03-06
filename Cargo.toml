@@ -14,6 +14,7 @@ members = [
   "crates/migrate",
   "services/admin",
   "services/admission",
+  "services/dispatch",
   "services/app",
   "services/auth",
   "services/control",
