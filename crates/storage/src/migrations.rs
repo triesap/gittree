@@ -1,5 +1,4 @@
 use crate::StorageError;
-#[cfg(not(coverage))]
 use sqlx::postgres::PgConnection;
 use std::collections::HashSet;
 
@@ -22,12 +21,10 @@ trait MigrationBackend {
     async fn record_version(&mut self, version: i64) -> Result<(), StorageError>;
 }
 
-#[cfg(not(coverage))]
 struct PgMigrationBackend<'a> {
     connection: &'a mut PgConnection,
 }
 
-#[cfg(not(coverage))]
 impl<'a> MigrationBackend for PgMigrationBackend<'a> {
     async fn ensure_migrations_table(&mut self) -> Result<(), StorageError> {
         sqlx::query("CREATE TABLE IF NOT EXISTS migrations (serial_number BIGINT PRIMARY KEY)")
@@ -106,7 +103,6 @@ impl MigrationRunner {
             .unwrap_or(0)
     }
 
-    #[cfg(not(coverage))]
     pub async fn run(&self, connection: &mut PgConnection) -> Result<i64, StorageError> {
         let mut backend = PgMigrationBackend { connection };
         self.run_with_backend(&mut backend).await
@@ -257,19 +253,14 @@ mod tests {
     use super::core_migrations;
     use crate::StorageError;
     use crate::test_support::{skip_or_fail_without_db_with_policy, test_database_url_candidates};
-    #[cfg(not(coverage))]
     use crate::test_support::require_db_tests;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::collections::HashSet;
     use std::str::FromStr;
-    use std::sync::atomic::AtomicU64;
-    #[cfg(not(coverage))]
-    use std::sync::atomic::Ordering;
-    #[cfg(not(coverage))]
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
-    #[cfg(not(coverage))]
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Debug, Default)]
@@ -608,7 +599,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(coverage))]
     async fn runner_run_is_idempotent_on_database() {
         runner_run_is_idempotent_on_database_with_provision(
             provision_database().await,
@@ -623,7 +613,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(coverage))]
     async fn runner_run_with_empty_migrations_returns_current_version_on_database() {
         runner_run_with_empty_migrations_returns_current_with_provision(
             provision_database().await,
@@ -637,7 +626,6 @@ mod tests {
         runner_run_with_empty_migrations_returns_current_with_provision(None, false).await;
     }
 
-    #[cfg(not(coverage))]
     async fn runner_run_is_idempotent_on_database_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -665,15 +653,6 @@ mod tests {
         cleanup_database(&base_url, &database_name).await;
     }
 
-    #[cfg(coverage)]
-    async fn runner_run_is_idempotent_on_database_with_provision(
-        _provisioned: Option<(sqlx::PgPool, String, String)>,
-        require_db: bool,
-    ) {
-        skip_or_fail_without_db_with_policy("runner_run_is_idempotent_on_database", require_db);
-    }
-
-    #[cfg(not(coverage))]
     async fn runner_run_with_empty_migrations_returns_current_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -704,17 +683,6 @@ mod tests {
         drop(connection);
         pool.close().await;
         cleanup_database(&base_url, &database_name).await;
-    }
-
-    #[cfg(coverage)]
-    async fn runner_run_with_empty_migrations_returns_current_with_provision(
-        _provisioned: Option<(sqlx::PgPool, String, String)>,
-        require_db: bool,
-    ) {
-        skip_or_fail_without_db_with_policy(
-            "runner_run_with_empty_migrations_returns_current_version_on_database",
-            require_db,
-        );
     }
 
     #[test]
@@ -769,7 +737,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(coverage))]
     async fn provision_database_executes_and_returns_option() {
         provision_database_executes_and_returns_option_with_value(provision_database().await).await;
     }
@@ -820,7 +787,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(coverage))]
     async fn provision_database_from_candidates_returns_first_available_database() {
         provision_database_executes_and_returns_option_with_value(
             provision_database_from_candidates(vec![
@@ -833,7 +799,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(coverage))]
     async fn pg_migration_backend_executes_queries_on_database() {
         pg_migration_backend_executes_queries_with_provision(
             provision_database().await,
@@ -848,7 +813,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(coverage))]
     async fn pg_migration_backend_reports_query_errors_on_database() {
         pg_migration_backend_reports_query_errors_with_provision(
             provision_database().await,
@@ -862,7 +826,6 @@ mod tests {
         pg_migration_backend_reports_query_errors_with_provision(None, false).await;
     }
 
-    #[cfg(not(coverage))]
     async fn pg_migration_backend_executes_queries_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -900,18 +863,6 @@ mod tests {
         cleanup_database(&base_url, &database_name).await;
     }
 
-    #[cfg(coverage)]
-    async fn pg_migration_backend_executes_queries_with_provision(
-        _provisioned: Option<(sqlx::PgPool, String, String)>,
-        require_db: bool,
-    ) {
-        skip_or_fail_without_db_with_policy(
-            "pg_migration_backend_executes_queries_on_database",
-            require_db,
-        );
-    }
-
-    #[cfg(not(coverage))]
     async fn pg_migration_backend_reports_query_errors_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -967,17 +918,6 @@ mod tests {
         cleanup_database(&base_url, &database_name).await;
     }
 
-    #[cfg(coverage)]
-    async fn pg_migration_backend_reports_query_errors_with_provision(
-        _provisioned: Option<(sqlx::PgPool, String, String)>,
-        require_db: bool,
-    ) {
-        skip_or_fail_without_db_with_policy(
-            "pg_migration_backend_reports_query_errors_on_database",
-            require_db,
-        );
-    }
-
     fn test_database_base_urls_from_value(value: Option<String>) -> Vec<String> {
         test_database_url_candidates(
             value,
@@ -994,13 +934,10 @@ mod tests {
         test_database_base_urls_from_value(std::env::var("GITTREE_STORAGE_TEST_DATABASE_URL").ok())
     }
 
-    #[cfg_attr(coverage, allow(dead_code))]
-    #[cfg(not(coverage))]
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
         provision_database_from_candidates(test_database_base_urls()).await
     }
 
-    #[cfg(not(coverage))]
     async fn provision_database_from_candidates(
         base_urls: Vec<String>,
     ) -> Option<(sqlx::PgPool, String, String)> {
@@ -1012,26 +949,10 @@ mod tests {
         None
     }
 
-    #[cfg(coverage)]
-    async fn provision_database_from_candidates(
-        _base_urls: Vec<String>,
-    ) -> Option<(sqlx::PgPool, String, String)> {
-        None
-    }
-
-    #[cfg(not(coverage))]
     async fn provision_database_for_base_url(base_url: &str) -> Option<(sqlx::PgPool, String)> {
         provision_database_for_base_url_with_name(base_url, unique_database_name()).await
     }
 
-    #[cfg(coverage)]
-    async fn provision_database_for_base_url(
-        _base_url: &str,
-    ) -> Option<(sqlx::PgPool, String)> {
-        None
-    }
-
-    #[cfg(not(coverage))]
     async fn provision_database_for_base_url_with_name(
         base_url: &str,
         database_name: String,
@@ -1059,15 +980,6 @@ mod tests {
         Some((pool, database_name))
     }
 
-    #[cfg(coverage)]
-    async fn provision_database_for_base_url_with_name(
-        _base_url: &str,
-        _database_name: String,
-    ) -> Option<(sqlx::PgPool, String)> {
-        None
-    }
-
-    #[cfg(not(coverage))]
     async fn provision_database_executes_and_returns_option_with_value(
         provisioned: Option<(sqlx::PgPool, String, String)>,
     ) {
@@ -1077,13 +989,6 @@ mod tests {
         }
     }
 
-    #[cfg(coverage)]
-    async fn provision_database_executes_and_returns_option_with_value(
-        _provisioned: Option<(sqlx::PgPool, String, String)>,
-    ) {
-    }
-
-    #[cfg(not(coverage))]
     async fn cleanup_database(base_url: &str, database_name: &str) {
         let mut admin_options = match PgConnectOptions::from_str(base_url) {
             Ok(options) => options,
@@ -1115,10 +1020,6 @@ WHERE datname = $1
         admin_pool.close().await;
     }
 
-    #[cfg(coverage)]
-    async fn cleanup_database(_base_url: &str, _database_name: &str) {}
-
-    #[cfg(not(coverage))]
     async fn create_database(admin_pool: &sqlx::PgPool, database_name: &str) -> bool {
         let create_database = format!("CREATE DATABASE \"{database_name}\"");
         if sqlx::query(&create_database)
@@ -1133,12 +1034,6 @@ WHERE datname = $1
         true
     }
 
-    #[cfg(coverage)]
-    async fn create_database(_admin_pool: &sqlx::PgPool, _database_name: &str) -> bool {
-        false
-    }
-
-    #[cfg(not(coverage))]
     fn unique_database_name() -> String {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1151,12 +1046,5 @@ WHERE datname = $1
             now,
             counter
         )
-    }
-
-    #[cfg(coverage)]
-    fn unique_database_name() -> String {
-        static COVERAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
-        let counter = COVERAGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        format!("gittree_migrations_test_cov_{counter}")
     }
 }

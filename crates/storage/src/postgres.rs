@@ -1408,7 +1408,6 @@ mod tests {
         PostgresRepositories, relay_invite_from_row, relay_membership_from_row,
         relay_tenant_from_row,
     };
-    #[cfg(not(coverage))]
     use crate::migrations::{MigrationRunner, core_migrations};
     use crate::repositories::{
         AccountRepository, AnnouncementRepository, EventRepository, ProfileRepository,
@@ -1770,7 +1769,7 @@ WHERE datname = $1
         run(test_db).await;
     }
 
-    #[cfg(not(coverage))]
+    // Coverage and non-coverage test runs both require schema setup.
     async fn run_migrations(pool: &PgPool) -> Option<()> {
         let runner = MigrationRunner::new(core_migrations()).expect("build core migration runner");
         let mut connection = pool
@@ -1784,19 +1783,6 @@ WHERE datname = $1
             .run(&mut *connection)
             .await
             .expect("apply core migrations");
-        drop(connection);
-        Some(())
-    }
-
-    #[cfg(coverage)]
-    async fn run_migrations(pool: &PgPool) -> Option<()> {
-        let connection = pool
-            .acquire()
-            .await
-            .inspect_err(|error| {
-                debug_db(format!("failed to acquire migration connection: {error}"));
-            })
-            .ok()?;
         drop(connection);
         Some(())
     }
