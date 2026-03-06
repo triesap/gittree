@@ -5,6 +5,7 @@ pub struct RelayEventEnvelope {
     pub id: String,
     pub pubkey: String,
     pub kind: u32,
+    pub created_at: i64,
     pub content: String,
     pub tags: Vec<Vec<String>>,
     pub relay_url: String,
@@ -34,7 +35,11 @@ pub fn is_dispatch_command_event(
     if !event.content.trim_start().starts_with("gittree ") {
         return Err(IngestRejectReason::MissingPrefix);
     }
-    if !config.relay_allowlist.iter().any(|relay| relay == &event.relay_url) {
+    if !config
+        .relay_allowlist
+        .iter()
+        .any(|relay| relay == &event.relay_url)
+    {
         return Err(IngestRejectReason::RelayNotAllowed);
     }
     if !has_admin_tag(event, &config.admin_pubkey) {
@@ -44,9 +49,10 @@ pub fn is_dispatch_command_event(
 }
 
 fn has_admin_tag(event: &RelayEventEnvelope, admin_pubkey: &str) -> bool {
-    event.tags.iter().any(|tag| {
-        tag.len() >= 2 && tag[0] == "p" && tag[1] == admin_pubkey
-    })
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.len() >= 2 && tag[0] == "p" && tag[1] == admin_pubkey)
 }
 
 #[cfg(test)]
@@ -67,6 +73,7 @@ mod tests {
             id: "event-1".to_string(),
             pubkey: "npub1user".to_string(),
             kind: 1,
+            created_at: 100,
             content: "gittree account create".to_string(),
             tags: vec![vec!["p".to_string(), "npub1admin".to_string()]],
             relay_url: "wss://gittr.ee".to_string(),

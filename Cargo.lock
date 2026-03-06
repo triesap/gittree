@@ -2113,6 +2113,7 @@ dependencies = [
  "gittree-core",
  "gittree-observability",
  "gittree-storage",
+ "hex",
  "serde",
  "serde_json",
  "tokio",

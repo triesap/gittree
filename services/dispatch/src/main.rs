@@ -71,12 +71,22 @@ fn exit_status(exit_code: i32) -> ExitCode {
 mod tests {
     use super::{exit_status, handle_main_result, main_impl_with, run_with};
     use gittree_dispatch::{DispatchConfig, DispatchError};
+    use gittree_storage::StorageConfig;
 
     fn config() -> DispatchConfig {
         DispatchConfig {
             bind: "127.0.0.1:19091".to_string(),
             admin_pubkey: "npub1admin".to_string(),
             relay_urls: vec!["wss://gittr.ee".to_string()],
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
         }
     }
 
@@ -94,15 +104,15 @@ mod tests {
 
     fn serve_err(_: DispatchConfig) -> super::MainRunFuture {
         Box::pin(async {
-            Err::<(), DispatchError>(DispatchError::Config(
-                "serve failed".to_string(),
-            ))
+            Err::<(), DispatchError>(DispatchError::Config("serve failed".to_string()))
         })
     }
 
     #[tokio::test]
     async fn run_with_returns_config_error() {
-        let err = run_with(load_err, serve_ok).await.expect_err("config error");
+        let err = run_with(load_err, serve_ok)
+            .await
+            .expect_err("config error");
         assert!(matches!(err, DispatchError::Config(message) if message == "missing config"));
     }
 
@@ -118,9 +128,7 @@ mod tests {
         let mut load_dotenv = || {};
         let mut run_fn = || -> super::MainRunFuture {
             Box::pin(async {
-                Err::<(), DispatchError>(DispatchError::Config(
-                    "serve failed".to_string(),
-                ))
+                Err::<(), DispatchError>(DispatchError::Config("serve failed".to_string()))
             })
         };
 
