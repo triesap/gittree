@@ -435,7 +435,7 @@ async fn coordinator_runtime_handles_postgres_announcement_and_publish_paths() {
           "created_at":10,
           "tags":[
             ["d","repo-malformed-pubkey-{}"],
-            ["clone","https://gittr.ee/{TEST_NPUB}/repo-malformed-pubkey-{}.git"],
+            ["clone","https://gittr.ee/not-an-npub/repo-malformed-pubkey-{}.git"],
             ["relays","wss://relay.example"]
           ]
         }}"#,
@@ -445,7 +445,11 @@ async fn coordinator_runtime_handles_postgres_announcement_and_publish_paths() {
     );
     let (malformed_response, malformed_body) =
         http_post_response(&server.base_url, "/announcement", &malformed_pubkey_payload).await;
-    assert!(malformed_response == Some(500), "{malformed_body}");
+    assert_eq!(malformed_response, Some(400), "{malformed_body}");
+    assert!(
+        malformed_body.contains("missing npub") || malformed_body.contains("invalid npub"),
+        "{malformed_body}"
+    );
     let _ = tokio::time::timeout(Duration::from_secs(6), relay_handle).await;
 
     stop_runtime_server(server).await;
