@@ -1,4 +1,4 @@
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 pub use gittree_core::{CommandParseError, ParsedCommand, parse_cli_command};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{PostgresRepositories, StorageConfig, StorageError};
@@ -6,7 +6,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 pub mod handlers;
 pub mod ingest;
 use handlers::{CommandExecutionInput, CommandExecutionOutput, CommandStore, execute_command};
@@ -173,8 +173,7 @@ pub fn init_observability() -> Result<ObservabilityHandle, DispatchError> {
 
 pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
     let _guard = init_observability()?;
-    serve_with_shutdown(config, tokio::signal::ctrl_c()).await
-}
+    serve_with_shutdown(config, tokio::signal::ctrl_c()).await }
 
 async fn serve_with_shutdown(
     config: DispatchConfig,
@@ -189,9 +188,7 @@ async fn serve_with_shutdown(
         let store = Arc::clone(&repositories);
         let filter = filter.clone();
         let relay_url = relay_url.clone();
-        tasks.spawn(async move {
-            run_relay_subscription(store, filter, relay_url).await;
-        });
+        tasks.spawn(run_relay_subscription(store, filter, relay_url));
     }
 
     if let Err(err) = shutdown.await {
@@ -348,47 +345,14 @@ async fn run_relay_subscription(
             Ok((stream, _response)) => {
                 tracing::info!(relay = %relay_url, "dispatch relay connected");
                 let (mut writer, mut reader) = stream.split();
-                let req = build_relay_req_message(&filter.admin_pubkey);
-                if writer.send(Message::Text(req)).await.is_err() {
-                    tracing::warn!(relay = %relay_url, "dispatch failed to send relay req");
-                    tokio::time::sleep(Duration::from_secs(RELAY_RETRY_DELAY_SECS)).await;
-                    continue;
-                }
-
-                while let Some(next) = reader.next().await {
-                    match next {
-                        Ok(Message::Text(text)) => {
-                            match process_event_message(store.as_ref(), &filter, &relay_url, &text)
-                                .await
-                            {
-                                Ok(Some(DispatchEventOutcome::Applied(output))) => {
-                                    tracing::info!(relay = %relay_url, code = %output.code, "dispatch applied command event");
-                                }
-                                Ok(Some(DispatchEventOutcome::Ignored(reason))) => {
-                                    tracing::debug!(relay = %relay_url, ?reason, "dispatch ignored relay event");
-                                }
-                                Ok(Some(DispatchEventOutcome::Rejected(message))) => {
-                                    tracing::warn!(relay = %relay_url, %message, "dispatch rejected relay event");
-                                }
-                                Ok(None) => {}
-                                Err(err) => {
-                                    tracing::error!(relay = %relay_url, error = %err, "dispatch event processing failed");
-                                }
-                            }
-                        }
-                        Ok(Message::Ping(payload)) => {
-                            if writer.send(Message::Pong(payload)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Ok(Message::Close(_)) => break,
-                        Ok(_) => {}
-                        Err(err) => {
-                            tracing::warn!(relay = %relay_url, error = %err, "dispatch relay read failed");
-                            break;
-                        }
-                    }
-                }
+                process_relay_connection(
+                    store.as_ref(),
+                    &filter,
+                    &relay_url,
+                    &mut writer,
+                    &mut reader,
+                )
+                .await;
             }
             Err(err) => {
                 tracing::warn!(relay = %relay_url, error = %err, "dispatch relay connect failed");
@@ -398,13 +362,61 @@ async fn run_relay_subscription(
     }
 }
 
+async fn process_relay_connection<W, R>(
+    store: &dyn CommandStore,
+    filter: &DispatchFilterConfig,
+    relay_url: &str,
+    writer: &mut W,
+    reader: &mut R,
+) where
+    W: Sink<Message, Error = WsError> + Unpin,
+    R: Stream<Item = Result<Message, WsError>> + Unpin,
+{
+    let req = build_relay_req_message(&filter.admin_pubkey);
+    if writer.send(Message::Text(req)).await.is_err() {
+        tracing::warn!(relay = %relay_url, "dispatch failed to send relay req");
+        return;
+    }
+
+    while let Some(next) = reader.next().await {
+        match next {
+            Ok(Message::Text(text)) => match process_event_message(store, filter, relay_url, &text).await {
+                Ok(Some(DispatchEventOutcome::Applied(output))) => {
+                    tracing::info!(relay = %relay_url, code = %output.code, "dispatch applied command event");
+                }
+                Ok(Some(DispatchEventOutcome::Ignored(reason))) => {
+                    tracing::debug!(relay = %relay_url, ?reason, "dispatch ignored relay event");
+                }
+                Ok(Some(DispatchEventOutcome::Rejected(message))) => {
+                    tracing::warn!(relay = %relay_url, %message, "dispatch rejected relay event");
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::error!(relay = %relay_url, error = %err, "dispatch event processing failed");
+                }
+            },
+            Ok(Message::Ping(payload)) => {
+                if writer.send(Message::Pong(payload)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(relay = %relay_url, error = %err, "dispatch relay read failed");
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DispatchConfig, DispatchError, DispatchEventOutcome, DispatchFilterConfig,
         RelayEventEnvelope, build_repositories, build_relay_req_message, dispatch_filter_config,
         parse_csv, parse_relay_event_message, process_event_envelope, process_event_message,
-        run_relay_subscription, serve_with_shutdown,
+        process_relay_connection, run_relay_subscription, serve_with_shutdown,
     };
     use crate::handlers::CommandStore;
     use async_trait::async_trait;
@@ -414,11 +426,56 @@ mod tests {
         RepoMaintainerV1Record, RepoStateV1Record,
     };
     use std::collections::{HashMap, HashSet};
+    use std::io;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
-    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+
+    #[derive(Default)]
+    struct ScriptedWriter {
+        fail_send_on: Option<usize>,
+        send_count: usize,
+    }
+
+    impl futures_util::Sink<Message> for ScriptedWriter {
+        type Error = WsError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(
+            mut self: Pin<&mut Self>,
+            _item: Message,
+        ) -> Result<(), Self::Error> {
+            self.send_count += 1;
+            if self.fail_send_on == Some(self.send_count) {
+                return Err(WsError::Io(io::Error::other("scripted send failure")));
+            }
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn base_env() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -1348,6 +1405,62 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         relay_task.abort();
         let _ = relay_task.await;
+    }
+
+    #[tokio::test]
+    async fn process_relay_connection_covers_send_fail_pong_fail_and_reader_error() {
+        let filter = DispatchFilterConfig {
+            admin_pubkey: "npub1admin".to_string(),
+            relay_allowlist: vec!["wss://gittr.ee".to_string()],
+        };
+        let relay_url = "wss://gittr.ee";
+
+        let mut fail_first_send = ScriptedWriter {
+            fail_send_on: Some(1),
+            send_count: 0,
+        };
+        let mut empty_reader = futures_util::stream::empty::<Result<Message, WsError>>();
+        process_relay_connection(
+            &EventStore::default(),
+            &filter,
+            relay_url,
+            &mut fail_first_send,
+            &mut empty_reader,
+        )
+        .await;
+        assert_eq!(fail_first_send.send_count, 1);
+
+        let mut fail_second_send = ScriptedWriter {
+            fail_send_on: Some(2),
+            send_count: 0,
+        };
+        let mut ping_reader = futures_util::stream::iter(vec![Ok(Message::Ping(vec![1u8].into()))]);
+        process_relay_connection(
+            &EventStore::default(),
+            &filter,
+            relay_url,
+            &mut fail_second_send,
+            &mut ping_reader,
+        )
+        .await;
+        assert_eq!(fail_second_send.send_count, 2);
+
+        let mut ok_writer = ScriptedWriter::default();
+        let mut err_reader = futures_util::stream::iter(vec![Err(WsError::Io(io::Error::other(
+            "scripted read failure",
+        )))]);
+        process_relay_connection(
+            &EventStore::default(),
+            &filter,
+            relay_url,
+            &mut ok_writer,
+            &mut err_reader,
+        )
+        .await;
+        assert_eq!(ok_writer.send_count, 1);
+        futures_util::SinkExt::close(&mut ok_writer)
+            .await
+            .expect("close writer");
     }
 
     #[tokio::test]
