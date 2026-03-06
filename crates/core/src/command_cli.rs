@@ -48,9 +48,13 @@ impl std::error::Error for CommandParseError {}
 
 pub fn parse_cli_command(input: &str) -> Result<ParsedCommand, CommandParseError> {
     let trimmed = input.trim();
-    let rest = trimmed
-        .strip_prefix("gittree ")
-        .ok_or(CommandParseError::MissingPrefix)?;
+    let rest = if trimmed == "gittree" {
+        ""
+    } else {
+        trimmed
+            .strip_prefix("gittree ")
+            .ok_or(CommandParseError::MissingPrefix)?
+    };
     let tokens = tokenize(rest)?;
     if tokens.is_empty() {
         return Err(CommandParseError::EmptyCommand);
@@ -110,18 +114,18 @@ fn validate_shape(
 ) -> Result<(), CommandParseError> {
     match namespace {
         CommandNamespace::Account => match action {
-            "create" | "status" | "delete" if target.is_none() && args.is_empty() => Ok(()),
+            "create" | "status" | "delete" if args.is_empty() => Ok(()),
             "create" | "status" | "delete" => Err(CommandParseError::InvalidArgs(
-                "account commands accept no target or args".to_string(),
+                "account commands accept no args".to_string(),
             )),
             _ => Err(CommandParseError::InvalidCommand(action.to_string())),
         },
         CommandNamespace::Profile => match action {
-            "set" if target.is_none() && !args.is_empty() => Ok(()),
+            "set" if !args.is_empty() && args_are_key_values(args) => Ok(()),
             "set" => Err(CommandParseError::InvalidArgs(
                 "profile set requires key=value args".to_string(),
             )),
-            "visibility" if target.is_none() => match args {
+            "visibility" => match args {
                 [CommandArg::Positional(value)] if value == "public" || value == "private" => {
                     Ok(())
                 }
@@ -129,9 +133,6 @@ fn validate_shape(
                     "profile visibility requires public|private".to_string(),
                 )),
             },
-            "visibility" => Err(CommandParseError::InvalidArgs(
-                "profile visibility accepts no target".to_string(),
-            )),
             _ => Err(CommandParseError::InvalidCommand(action.to_string())),
         },
         CommandNamespace::Repo => match action {
@@ -165,6 +166,11 @@ fn validate_shape(
             _ => Err(CommandParseError::InvalidCommand(action.to_string())),
         },
     }
+}
+
+fn args_are_key_values(args: &[CommandArg]) -> bool {
+    args.iter()
+        .all(|arg| matches!(arg, CommandArg::KeyValue { .. }))
 }
 
 fn tokenize(input: &str) -> Result<Vec<String>, CommandParseError> {
@@ -270,9 +276,52 @@ mod tests {
     }
 
     #[test]
+    fn parses_account_status_and_delete() {
+        assert_eq!(parsed("gittree account status").action, "status");
+        assert_eq!(parsed("gittree account delete").action, "delete");
+    }
+
+    #[test]
+    fn parses_repo_targeted_actions() {
+        let actions = ["create", "announce", "sync", "archive", "unarchive"];
+        for action in actions {
+            let cmd = parsed(&format!("gittree repo {action} demo"));
+            assert_eq!(cmd.namespace, CommandNamespace::Repo);
+            assert_eq!(cmd.action, action);
+            assert_eq!(cmd.target.as_deref(), Some("demo"));
+            assert!(cmd.args.is_empty());
+        }
+    }
+
+    #[test]
+    fn parses_repo_maintainers_action() {
+        let cmd = parsed("gittree repo maintainers demo add npub1example");
+        assert_eq!(cmd.action, "maintainers");
+        assert_eq!(
+            cmd.args,
+            vec![
+                CommandArg::Positional("add".to_string()),
+                CommandArg::Positional("npub1example".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_missing_prefix() {
         let err = parse_cli_command("account create").expect_err("prefix required");
         assert_eq!(err, CommandParseError::MissingPrefix);
+    }
+
+    #[test]
+    fn rejects_empty_and_missing_action_commands() {
+        let empty = parse_cli_command("gittree ").expect_err("empty");
+        assert_eq!(empty, CommandParseError::EmptyCommand);
+        let missing_action = parse_cli_command("gittree account").expect_err("missing action");
+        assert!(matches!(
+            missing_action,
+            CommandParseError::InvalidCommand(message)
+            if message.contains("missing subcommand/action")
+        ));
     }
 
     #[test]
@@ -291,6 +340,64 @@ mod tests {
     fn rejects_invalid_repo_shape() {
         let err = parse_cli_command("gittree repo create").expect_err("target required");
         assert!(matches!(err, CommandParseError::InvalidArgs(message) if message.contains("target")));
+    }
+
+    #[test]
+    fn rejects_account_with_extra_args() {
+        let err = parse_cli_command("gittree account create unexpected").expect_err("no args");
+        assert!(matches!(
+            err,
+            CommandParseError::InvalidArgs(message)
+            if message.contains("account commands accept no args")
+        ));
+    }
+
+    #[test]
+    fn rejects_profile_set_without_key_value_args() {
+        let err = parse_cli_command("gittree profile set display").expect_err("key=value");
+        assert!(matches!(
+            err,
+            CommandParseError::InvalidArgs(message)
+            if message.contains("profile set requires key=value args")
+        ));
+    }
+
+    #[test]
+    fn rejects_repo_maintainers_without_npub() {
+        let err =
+            parse_cli_command("gittree repo maintainers demo add not-a-npub").expect_err("npub");
+        assert!(matches!(
+            err,
+            CommandParseError::InvalidArgs(message)
+            if message.contains("repo maintainers requires add|remove and npub")
+        ));
+    }
+
+    #[test]
+    fn command_parse_error_display_messages_are_stable() {
+        assert_eq!(
+            CommandParseError::MissingPrefix.to_string(),
+            "missing gittree command prefix"
+        );
+        assert_eq!(CommandParseError::EmptyCommand.to_string(), "empty command");
+        assert_eq!(
+            CommandParseError::InvalidNamespace("bad".to_string()).to_string(),
+            "invalid namespace: bad"
+        );
+        assert_eq!(
+            CommandParseError::UnterminatedQuote.to_string(),
+            "unterminated quote"
+        );
+        assert_eq!(
+            CommandParseError::InvalidCommand("oops".to_string()).to_string(),
+            "invalid command: oops"
+        );
+        assert_eq!(
+            CommandParseError::InvalidArgs("bad args".to_string()).to_string(),
+            "invalid args: bad args"
+        );
+        let err = CommandParseError::InvalidCommand("x".to_string());
+        assert!(std::error::Error::source(&err).is_none());
     }
 
     #[test]
