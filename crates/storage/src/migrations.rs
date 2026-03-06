@@ -68,6 +68,7 @@ pub fn core_migrations() -> Vec<Migration> {
         migration_relay_tenants(),
         migration_nostr_event_tenant(),
         migration_relay_membership(),
+        migration_v1_command_state(),
     ]
 }
 
@@ -245,6 +246,16 @@ fn migration_relay_membership() -> Migration {
     }
 }
 
+fn migration_v1_command_state() -> Migration {
+    const V1_COMMAND_STATE_SQL: &str =
+        include_str!("../../../migrations/0013_v1_command_state.sql");
+    Migration {
+        version: 13,
+        description: "v1 command and projection state",
+        sql: V1_COMMAND_STATE_SQL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Migration;
@@ -401,13 +412,18 @@ mod tests {
         assert!(sql.contains("ADD COLUMN tenant_id"));
         assert!(sql.contains("CREATE TABLE relay_membership"));
         assert!(sql.contains("CREATE TABLE relay_invite"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS v1_command_log"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS v1_account_state"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS v1_profile_state"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS v1_repo_state"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS v1_repo_maintainer"));
     }
 
     #[test]
     fn core_migrations_have_expected_versions() {
         let migrations = core_migrations();
         let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     }
 
     #[test]

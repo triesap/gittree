@@ -4,14 +4,16 @@ use crate::repositories::{
     RelayTenantRepository, RepoMappingRepository, StateRepository,
 };
 use crate::{
-    AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
+    AccountLifecycle, AccountRecord, AccountStateRecord, CommandLogRecord, EventQuery,
+    EventRecord, ProfileRecord, ProfileStateRecord, ProfileVisibility, ProfileVisibilityV1,
+    RepoMaintainerV1Record, RepoStateV1Record, RepoVisibilityV1,
     RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishJob,
     RelayPublishRequest, RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord,
     RepoMappingRecord, RepoStateRecord, StorageError, TagRecord,
 };
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone)]
@@ -68,6 +70,296 @@ ORDER BY id ASC
             });
         }
         Ok(tags)
+    }
+
+    pub async fn v1_insert_command_log(&self, record: &CommandLogRecord) -> Result<bool, StorageError> {
+        let created_at = Self::to_offset_datetime(record.created_at)?;
+        let status = record.status.as_str();
+        let result = sqlx::query(
+            r#"
+INSERT INTO v1_command_log (
+    event_id,
+    pubkey,
+    namespace,
+    action,
+    target,
+    args_json,
+    status,
+    code,
+    message,
+    created_at
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+ON CONFLICT (event_id) DO NOTHING
+"#,
+        )
+        .bind(&record.event_id)
+        .bind(&record.pubkey)
+        .bind(&record.namespace)
+        .bind(&record.action)
+        .bind(&record.target)
+        .bind(&record.args_json)
+        .bind(status)
+        .bind(&record.code)
+        .bind(&record.message)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn v1_upsert_account_state(&self, record: &AccountStateRecord) -> Result<(), StorageError> {
+        let created_at = Self::to_offset_datetime(record.created_at)?;
+        let updated_at = Self::to_offset_datetime(record.updated_at)?;
+        let deleted_at = match record.deleted_at {
+            Some(value) => Some(Self::to_offset_datetime(value)?),
+            None => None,
+        };
+        sqlx::query(
+            r#"
+INSERT INTO v1_account_state (pubkey, status, created_at, updated_at, deleted_at)
+VALUES ($1,$2,$3,$4,$5)
+ON CONFLICT (pubkey) DO UPDATE SET
+    status = EXCLUDED.status,
+    updated_at = EXCLUDED.updated_at,
+    deleted_at = EXCLUDED.deleted_at
+"#,
+        )
+        .bind(&record.pubkey)
+        .bind(record.status.as_str())
+        .bind(created_at)
+        .bind(updated_at)
+        .bind(deleted_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn v1_account_state(&self, pubkey: &[u8]) -> Result<Option<AccountStateRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT pubkey, status, created_at, updated_at, deleted_at
+FROM v1_account_state
+WHERE pubkey = $1
+"#,
+        )
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let status_raw: String = row.try_get("status")?;
+        let status = match status_raw.as_str() {
+            "active" => AccountLifecycle::Active,
+            "deleted" => AccountLifecycle::Deleted,
+            _ => {
+                return Err(StorageError::InvalidField {
+                    field: "status",
+                    value: status_raw,
+                });
+            }
+        };
+        let created_at: OffsetDateTime = row.try_get("created_at")?;
+        let updated_at: OffsetDateTime = row.try_get("updated_at")?;
+        let deleted_at: Option<OffsetDateTime> = row.try_get("deleted_at")?;
+        Ok(Some(AccountStateRecord {
+            pubkey: row.try_get("pubkey")?,
+            status,
+            created_at: Self::from_offset_datetime(created_at),
+            updated_at: Self::from_offset_datetime(updated_at),
+            deleted_at: deleted_at.map(Self::from_offset_datetime),
+        }))
+    }
+
+    pub async fn v1_upsert_profile_state(&self, record: &ProfileStateRecord) -> Result<(), StorageError> {
+        let updated_at = Self::to_offset_datetime(record.updated_at)?;
+        sqlx::query(
+            r#"
+INSERT INTO v1_profile_state (
+    pubkey,
+    display_name,
+    bio,
+    avatar_url,
+    website_url,
+    location,
+    visibility,
+    updated_at
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (pubkey) DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    bio = EXCLUDED.bio,
+    avatar_url = EXCLUDED.avatar_url,
+    website_url = EXCLUDED.website_url,
+    location = EXCLUDED.location,
+    visibility = EXCLUDED.visibility,
+    updated_at = EXCLUDED.updated_at
+"#,
+        )
+        .bind(&record.pubkey)
+        .bind(&record.display_name)
+        .bind(&record.bio)
+        .bind(&record.avatar_url)
+        .bind(&record.website_url)
+        .bind(&record.location)
+        .bind(record.visibility.as_str())
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn v1_profile_state(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<ProfileStateRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT pubkey, display_name, bio, avatar_url, website_url, location, visibility, updated_at
+FROM v1_profile_state
+WHERE pubkey = $1
+"#,
+        )
+        .bind(pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let visibility: String = row.try_get("visibility")?;
+        let updated_at: OffsetDateTime = row.try_get("updated_at")?;
+        Ok(Some(ProfileStateRecord {
+            pubkey: row.try_get("pubkey")?,
+            display_name: row.try_get("display_name")?,
+            bio: row.try_get("bio")?,
+            avatar_url: row.try_get("avatar_url")?,
+            website_url: row.try_get("website_url")?,
+            location: row.try_get("location")?,
+            visibility: ProfileVisibilityV1::parse(&visibility)?,
+            updated_at: Self::from_offset_datetime(updated_at),
+        }))
+    }
+
+    pub async fn v1_upsert_repo_state(&self, record: &RepoStateV1Record) -> Result<(), StorageError> {
+        let updated_at = Self::to_offset_datetime(record.updated_at)?;
+        sqlx::query(
+            r#"
+INSERT INTO v1_repo_state (
+    owner_pubkey,
+    repo_name,
+    description,
+    website_url,
+    visibility,
+    default_branch,
+    archived,
+    updated_at
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (owner_pubkey, repo_name) DO UPDATE SET
+    description = EXCLUDED.description,
+    website_url = EXCLUDED.website_url,
+    visibility = EXCLUDED.visibility,
+    default_branch = EXCLUDED.default_branch,
+    archived = EXCLUDED.archived,
+    updated_at = EXCLUDED.updated_at
+"#,
+        )
+        .bind(&record.owner_pubkey)
+        .bind(&record.repo_name)
+        .bind(&record.description)
+        .bind(&record.website_url)
+        .bind(record.visibility.as_str())
+        .bind(&record.default_branch)
+        .bind(record.archived)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn v1_repo_state(
+        &self,
+        owner_pubkey: &[u8],
+        repo_name: &str,
+    ) -> Result<Option<RepoStateV1Record>, StorageError> {
+        let row = sqlx::query(
+            r#"
+SELECT owner_pubkey, repo_name, description, website_url, visibility, default_branch, archived, updated_at
+FROM v1_repo_state
+WHERE owner_pubkey = $1 AND repo_name = $2
+"#,
+        )
+        .bind(owner_pubkey)
+        .bind(repo_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let visibility_raw: String = row.try_get("visibility")?;
+        let updated_at: OffsetDateTime = row.try_get("updated_at")?;
+        Ok(Some(RepoStateV1Record {
+            owner_pubkey: row.try_get("owner_pubkey")?,
+            repo_name: row.try_get("repo_name")?,
+            description: row.try_get("description")?,
+            website_url: row.try_get("website_url")?,
+            visibility: RepoVisibilityV1::parse(&visibility_raw)?,
+            default_branch: row.try_get("default_branch")?,
+            archived: row.try_get("archived")?,
+            updated_at: Self::from_offset_datetime(updated_at),
+        }))
+    }
+
+    pub async fn v1_set_repo_maintainer(&self, record: &RepoMaintainerV1Record) -> Result<(), StorageError> {
+        let updated_at = Self::to_offset_datetime(record.updated_at)?;
+        sqlx::query(
+            r#"
+INSERT INTO v1_repo_maintainer (
+    owner_pubkey,
+    repo_name,
+    maintainer_pubkey,
+    active,
+    updated_at
+)
+VALUES ($1,$2,$3,$4,$5)
+ON CONFLICT (owner_pubkey, repo_name, maintainer_pubkey) DO UPDATE SET
+    active = EXCLUDED.active,
+    updated_at = EXCLUDED.updated_at
+"#,
+        )
+        .bind(&record.owner_pubkey)
+        .bind(&record.repo_name)
+        .bind(&record.maintainer_pubkey)
+        .bind(record.active)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn v1_list_active_repo_maintainers(
+        &self,
+        owner_pubkey: &[u8],
+        repo_name: &str,
+    ) -> Result<HashSet<Vec<u8>>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+SELECT maintainer_pubkey
+FROM v1_repo_maintainer
+WHERE owner_pubkey = $1 AND repo_name = $2 AND active = true
+"#,
+        )
+        .bind(owner_pubkey)
+        .bind(repo_name)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut maintainers = HashSet::with_capacity(rows.len());
+        for row in rows {
+            maintainers.insert(row.try_get("maintainer_pubkey")?);
+        }
+        Ok(maintainers)
     }
 }
 

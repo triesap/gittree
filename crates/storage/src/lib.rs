@@ -1,5 +1,6 @@
 pub mod account;
 pub mod cache;
+pub mod command_state;
 pub mod config;
 pub mod error;
 pub mod event;
@@ -19,6 +20,10 @@ pub(crate) mod test_support;
 
 pub use account::AccountRecord;
 pub use cache::{CacheConfig, CachedRepositories};
+pub use command_state::{
+    AccountLifecycle, AccountStateRecord, CommandLogRecord, CommandStatus, ProfileStateRecord,
+    ProfileVisibilityV1, RepoMaintainerV1Record, RepoStateV1Record, RepoVisibilityV1,
+};
 pub use config::StorageConfig;
 pub use error::StorageError;
 pub use event::{EventQuery, EventRecord, TagRecord};
