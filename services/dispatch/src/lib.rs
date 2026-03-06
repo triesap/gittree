@@ -408,17 +408,22 @@ mod tests {
     use super::{
         DispatchConfig, DispatchError, DispatchEventOutcome, DispatchFilterConfig,
         RelayEventEnvelope, build_repositories, build_relay_req_message, dispatch_filter_config,
-        parse_csv,
-        parse_relay_event_message, process_event_envelope, process_event_message,
+        parse_csv, parse_relay_event_message, process_event_envelope, process_event_message,
+        run_relay_subscription,
     };
     use crate::handlers::CommandStore;
     use async_trait::async_trait;
+    use futures_util::{SinkExt, StreamExt};
     use gittree_storage::{
         AccountStateRecord, CommandLogRecord, CommandStatus, ProfileStateRecord,
         RepoMaintainerV1Record, RepoStateV1Record,
     };
     use std::collections::{HashMap, HashSet};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
 
     fn base_env() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -1075,6 +1080,98 @@ mod tests {
                 .expect("maintainers")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn run_relay_subscription_processes_text_ping_and_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let relay_addr = listener.local_addr().expect("addr");
+        let relay_url = format!("ws://{relay_addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("handshake");
+            let req = socket.next().await.expect("req frame").expect("req");
+            let req_text = match req {
+                Message::Text(text) => text,
+                other => panic!("unexpected req frame: {other:?}"),
+            };
+            assert!(req_text.contains("\"REQ\""));
+            assert!(req_text.contains("npub1admin"));
+
+            let event_message = serde_json::json!([
+                "EVENT",
+                "gittree-dispatch",
+                {
+                    "id": "11".repeat(32),
+                    "pubkey": "22".repeat(32),
+                    "kind": 1,
+                    "created_at": 321,
+                    "content": "gittree account create",
+                    "tags": [["p", "npub1admin"]]
+                }
+            ])
+            .to_string();
+            socket
+                .send(Message::Text(event_message))
+                .await
+                .expect("send event");
+            let payload = vec![1u8, 2, 3];
+            socket
+                .send(Message::Ping(payload.clone().into()))
+                .await
+                .expect("send ping");
+
+            let next = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("pong timeout")
+                .expect("pong frame")
+                .expect("pong");
+            match next {
+                Message::Pong(returned) => assert_eq!(returned, payload),
+                other => panic!("unexpected pong response: {other:?}"),
+            }
+
+            socket.send(Message::Close(None)).await.expect("send close");
+        });
+
+        let store = Arc::new(EventStore::default());
+        let filter = DispatchFilterConfig {
+            admin_pubkey: "npub1admin".to_string(),
+            relay_allowlist: vec![relay_url.clone()],
+        };
+        let relay_task = tokio::spawn(run_relay_subscription(
+            Arc::clone(&store),
+            filter,
+            relay_url,
+        ));
+
+        server.await.expect("server task");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        relay_task.abort();
+        let _ = relay_task.await;
+
+        let actor = hex::decode("22".repeat(32)).expect("actor");
+        assert!(store.account_state(&actor).await.expect("account").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_relay_subscription_connect_error_loop_is_abortable() {
+        let store = Arc::new(EventStore::default());
+        let filter = DispatchFilterConfig {
+            admin_pubkey: "npub1admin".to_string(),
+            relay_allowlist: vec!["ws://127.0.0.1:1".to_string()],
+        };
+        let relay_task = tokio::spawn(run_relay_subscription(
+            store,
+            filter,
+            "ws://127.0.0.1:1".to_string(),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        relay_task.abort();
+        let join_error = relay_task.await.expect_err("relay should be aborted");
+        assert!(join_error.is_cancelled());
     }
 
     #[test]
