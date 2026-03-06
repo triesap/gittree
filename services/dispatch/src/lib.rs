@@ -1,6 +1,8 @@
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 pub use gittree_core::{CommandParseError, ParsedCommand, parse_cli_command};
+use gittree_storage::StorageError;
 pub mod ingest;
+pub mod handlers;
 pub use ingest::{
     DispatchFilterConfig, IngestRejectReason, RelayEventEnvelope, is_dispatch_command_event,
 };
@@ -54,6 +56,7 @@ fn parse_csv(input: &str) -> Vec<String> {
 #[derive(Debug)]
 pub enum DispatchError {
     Config(String),
+    Storage(StorageError),
     ObservabilityConfig(ObservabilityConfigError),
     Observability(ObservabilityError),
 }
@@ -62,6 +65,7 @@ impl std::fmt::Display for DispatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DispatchError::Config(message) => write!(f, "dispatch config error: {message}"),
+            DispatchError::Storage(err) => write!(f, "dispatch storage error: {err}"),
             DispatchError::ObservabilityConfig(err) => {
                 write!(f, "dispatch observability config error: {err}")
             }
@@ -74,6 +78,7 @@ impl std::error::Error for DispatchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             DispatchError::Config(_) => None,
+            DispatchError::Storage(err) => Some(err),
             DispatchError::ObservabilityConfig(err) => Some(err),
             DispatchError::Observability(err) => Some(err),
         }

@@ -4,9 +4,9 @@ use crate::repositories::{
     RelayTenantRepository, RepoMappingRepository, StateRepository,
 };
 use crate::{
-    AccountLifecycle, AccountRecord, AccountStateRecord, CommandLogRecord, EventQuery,
-    EventRecord, ProfileRecord, ProfileStateRecord, ProfileVisibility, ProfileVisibilityV1,
-    RepoMaintainerV1Record, RepoStateV1Record, RepoVisibilityV1,
+    AccountLifecycle, AccountRecord, AccountStateRecord, CommandLogRecord, CommandStatus,
+    EventQuery, EventRecord, ProfileRecord, ProfileStateRecord, ProfileVisibility,
+    ProfileVisibilityV1, RepoMaintainerV1Record, RepoStateV1Record, RepoVisibilityV1,
     RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishJob,
     RelayPublishRequest, RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord,
     RepoMappingRecord, RepoStateRecord, StorageError, TagRecord,
@@ -106,6 +106,29 @@ ON CONFLICT (event_id) DO NOTHING
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn v1_update_command_log_outcome(
+        &self,
+        event_id: &[u8],
+        status: CommandStatus,
+        code: &str,
+        message: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+UPDATE v1_command_log
+SET status = $2, code = $3, message = $4
+WHERE event_id = $1
+"#,
+        )
+        .bind(event_id)
+        .bind(status.as_str())
+        .bind(code)
+        .bind(message)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn v1_upsert_account_state(&self, record: &AccountStateRecord) -> Result<(), StorageError> {
