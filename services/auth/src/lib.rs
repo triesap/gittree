@@ -2114,6 +2114,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_only_signup_returns_bad_request_message() {
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = super::build_router_with_mode(state, true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signup")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8(body.to_vec())
+            .expect("utf8")
+            .contains("signup disabled; use gittree kind-1 command flow"));
+    }
+
+    #[tokio::test]
+    async fn command_only_profile_patch_returns_bad_request_message() {
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = super::build_router_with_mode(state, true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/profile")
+                    .body(Body::from("{\"display_name\":\"alice\"}"))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8(body.to_vec())
+            .expect("utf8")
+            .contains("profile write disabled; use gittree kind-1 command flow"));
+    }
+
+    #[tokio::test]
+    async fn command_only_profile_get_still_requires_auth() {
+        let (state, _repos, _transport) = test_state(Vec::new());
+        let app = super::build_router_with_mode(state, true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/profile")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn signup_rejects_missing_host_header() {
         let now = unix_timestamp();
         let url = "http://localhost/v1/signup";
