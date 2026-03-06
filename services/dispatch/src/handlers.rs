@@ -129,8 +129,8 @@ impl CommandStore for PostgresRepositories {
     }
 }
 
-pub async fn execute_command<S: CommandStore>(
-    store: &S,
+pub async fn execute_command(
+    store: &dyn CommandStore,
     input: CommandExecutionInput,
 ) -> Result<CommandExecutionOutput, DispatchError> {
     let mut log_record = CommandLogRecord {
@@ -180,8 +180,8 @@ pub async fn execute_command<S: CommandStore>(
     Ok(outcome)
 }
 
-async fn apply_command<S: CommandStore>(
-    store: &S,
+async fn apply_command(
+    store: &dyn CommandStore,
     input: &CommandExecutionInput,
 ) -> Result<CommandExecutionOutput, DispatchError> {
     match input.parsed.namespace {
@@ -191,8 +191,8 @@ async fn apply_command<S: CommandStore>(
     }
 }
 
-async fn apply_account<S: CommandStore>(
-    store: &S,
+async fn apply_account(
+    store: &dyn CommandStore,
     input: &CommandExecutionInput,
 ) -> Result<CommandExecutionOutput, DispatchError> {
     let now = input.created_at;
@@ -237,8 +237,8 @@ async fn apply_account<S: CommandStore>(
     }
 }
 
-async fn apply_profile<S: CommandStore>(
-    store: &S,
+async fn apply_profile(
+    store: &dyn CommandStore,
     input: &CommandExecutionInput,
 ) -> Result<CommandExecutionOutput, DispatchError> {
     let now = input.created_at;
@@ -292,8 +292,8 @@ async fn apply_profile<S: CommandStore>(
     }
 }
 
-async fn apply_repo<S: CommandStore>(
-    store: &S,
+async fn apply_repo(
+    store: &dyn CommandStore,
     input: &CommandExecutionInput,
 ) -> Result<CommandExecutionOutput, DispatchError> {
     let repo_name = match input.parsed.target.as_deref() {
@@ -403,8 +403,8 @@ async fn apply_repo<S: CommandStore>(
     }
 }
 
-async fn actor_is_maintainer<S: CommandStore>(
-    store: &S,
+async fn actor_is_maintainer(
+    store: &dyn CommandStore,
     actor: &[u8],
     repo_name: &str,
 ) -> Result<bool, DispatchError> {

@@ -172,7 +172,7 @@ pub fn init_observability() -> Result<ObservabilityHandle, DispatchError> {
 
 pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
     let _guard = init_observability()?;
-    let repositories = Arc::new(build_repositories(&config)?);
+    let repositories: Arc<dyn CommandStore + Send + Sync> = Arc::new(build_repositories(&config)?);
     let filter = dispatch_filter_config(&config);
     tracing::info!(
         bind = %config.bind,
@@ -233,8 +233,8 @@ pub enum DispatchEventOutcome {
     Applied(CommandExecutionOutput),
 }
 
-pub async fn process_event_envelope<S: CommandStore>(
-    store: &S,
+pub async fn process_event_envelope(
+    store: &dyn CommandStore,
     filter: &DispatchFilterConfig,
     envelope: RelayEventEnvelope,
 ) -> Result<DispatchEventOutcome, DispatchError> {
@@ -322,8 +322,8 @@ fn parse_event_tags(value: &serde_json::Value) -> Option<Vec<Vec<String>>> {
     Some(tags)
 }
 
-async fn process_event_message<S: CommandStore>(
-    store: &S,
+async fn process_event_message(
+    store: &dyn CommandStore,
     filter: &DispatchFilterConfig,
     relay_url: &str,
     message: &str,
@@ -335,8 +335,8 @@ async fn process_event_message<S: CommandStore>(
     Ok(Some(outcome))
 }
 
-async fn run_relay_subscription<S: CommandStore + Send + Sync + 'static>(
-    store: Arc<S>,
+async fn run_relay_subscription(
+    store: Arc<dyn CommandStore + Send + Sync>,
     filter: DispatchFilterConfig,
     relay_url: String,
 ) {
@@ -1135,7 +1135,8 @@ mod tests {
             socket.send(Message::Close(None)).await.expect("send close");
         });
 
-        let store = Arc::new(EventStore::default());
+        let concrete_store = Arc::new(EventStore::default());
+        let store: Arc<dyn CommandStore + Send + Sync> = concrete_store.clone();
         let filter = DispatchFilterConfig {
             admin_pubkey: "npub1admin".to_string(),
             relay_allowlist: vec![relay_url.clone()],
@@ -1152,12 +1153,12 @@ mod tests {
         let _ = relay_task.await;
 
         let actor = hex::decode("22".repeat(32)).expect("actor");
-        assert!(store.account_state(&actor).await.expect("account").is_some());
+        assert!(concrete_store.account_state(&actor).await.expect("account").is_some());
     }
 
     #[tokio::test]
     async fn run_relay_subscription_connect_error_loop_is_abortable() {
-        let store = Arc::new(EventStore::default());
+        let store: Arc<dyn CommandStore + Send + Sync> = Arc::new(EventStore::default());
         let filter = DispatchFilterConfig {
             admin_pubkey: "npub1admin".to_string(),
             relay_allowlist: vec!["ws://127.0.0.1:1".to_string()],
