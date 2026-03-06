@@ -21,6 +21,8 @@ else
     gittree-relay-adapter
     gittree-forgejo
     gittree-relay
+    gittree-state
+    gittree-dispatch
     gittree-control
     gittree-auth
   )

@@ -114,6 +114,8 @@ Current stage contract for this repo requires:
   - `gittree-relay-adapter`
   - `gittree-forgejo`
   - `gittree-relay`
+  - `gittree-state`
+  - `gittree-dispatch`
   - `gittree-control`
   - `gittree-auth`
 
@@ -131,7 +133,7 @@ Use these commands for the required checks:
 COV_PACKAGES="gittree-storage" COV_STRICT_STORAGE=1 ./scripts/coverage-gate.sh
 
 # 2) Security-critical rust stack baseline.
-COV_PACKAGES="gittree-config gittree-core gittree-nostr-auth gittree-relay-adapter gittree-forgejo gittree-relay gittree-control gittree-auth" ./scripts/coverage-gate.sh
+COV_PACKAGES="gittree-config gittree-core gittree-nostr-auth gittree-relay-adapter gittree-forgejo gittree-relay gittree-state gittree-dispatch gittree-control gittree-auth" ./scripts/coverage-gate.sh
 ```
 
 When frontend coverage is required in a later stage, add `gittree-app-ui` and
