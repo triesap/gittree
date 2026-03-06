@@ -846,6 +846,51 @@ mod tests {
         assert!(parse_relay_event_message(&invalid_tag_column, "wss://gittr.ee").is_none());
     }
 
+    #[test]
+    fn parse_relay_event_message_rejects_missing_required_fields() {
+        let missing_id = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&missing_id, "wss://gittr.ee").is_none());
+
+        let missing_pubkey = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&missing_pubkey, "wss://gittr.ee").is_none());
+
+        let missing_created_at = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&missing_created_at, "wss://gittr.ee").is_none());
+    }
+
     #[tokio::test]
     async fn process_event_message_ignores_non_event_payloads() {
         let store = EventStore::default();
@@ -928,6 +973,108 @@ mod tests {
             Some(DispatchEventOutcome::Applied(output))
             if output.code == "account_created"
         ));
+    }
+
+    #[tokio::test]
+    async fn event_store_trait_methods_cover_all_paths() {
+        let store = EventStore::default();
+        let actor = vec![2u8; 32];
+        let repo_name = "demo".to_string();
+
+        let log_record = CommandLogRecord {
+            event_id: vec![1u8; 32],
+            pubkey: actor.clone(),
+            namespace: "account".to_string(),
+            action: "create".to_string(),
+            target: None,
+            args_json: serde_json::json!({}),
+            status: CommandStatus::Ok,
+            code: "ok".to_string(),
+            message: "ok".to_string(),
+            created_at: 1,
+        };
+        assert!(store.insert_command_log(&log_record).await.expect("insert first"));
+        assert!(!store.insert_command_log(&log_record).await.expect("insert duplicate"));
+        store
+            .update_command_log_outcome(&log_record.event_id, CommandStatus::Ok, "ok", "ok")
+            .await
+            .expect("update");
+
+        let account = AccountStateRecord {
+            pubkey: actor.clone(),
+            status: gittree_storage::AccountLifecycle::Active,
+            created_at: 1,
+            updated_at: 2,
+            deleted_at: None,
+        };
+        assert!(store.account_state(&actor).await.expect("account lookup").is_none());
+        store
+            .upsert_account_state(&account)
+            .await
+            .expect("upsert account");
+        assert!(store.account_state(&actor).await.expect("account lookup").is_some());
+
+        let profile = ProfileStateRecord {
+            pubkey: actor.clone(),
+            display_name: Some("alice".to_string()),
+            bio: None,
+            avatar_url: None,
+            website_url: None,
+            location: None,
+            visibility: gittree_storage::ProfileVisibilityV1::Private,
+            updated_at: 3,
+        };
+        assert!(store.profile_state(&actor).await.expect("profile lookup").is_none());
+        store
+            .upsert_profile_state(&profile)
+            .await
+            .expect("upsert profile");
+        assert!(store.profile_state(&actor).await.expect("profile lookup").is_none());
+
+        let repo = RepoStateV1Record {
+            owner_pubkey: actor.clone(),
+            repo_name: repo_name.clone(),
+            description: None,
+            website_url: None,
+            visibility: gittree_storage::RepoVisibilityV1::Private,
+            default_branch: "main".to_string(),
+            archived: false,
+            updated_at: 4,
+        };
+        assert!(
+            store
+                .repo_state(&actor, &repo_name)
+                .await
+                .expect("repo lookup")
+                .is_none()
+        );
+        store.upsert_repo_state(&repo).await.expect("upsert repo");
+        assert!(
+            store
+                .repo_state(&actor, &repo_name)
+                .await
+                .expect("repo lookup")
+                .is_none()
+        );
+
+        let maintainer = RepoMaintainerV1Record {
+            owner_pubkey: actor.clone(),
+            repo_name: repo_name.clone(),
+            maintainer_pubkey: actor.clone(),
+            active: true,
+            updated_at: 5,
+        };
+        store
+            .set_repo_maintainer(&maintainer)
+            .await
+            .expect("set maintainer");
+        assert!(
+            store
+                .list_active_repo_maintainers(&actor, &repo_name)
+                .await
+                .expect("maintainers")
+                .is_empty()
+        );
     }
 
     #[test]
