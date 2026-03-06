@@ -464,12 +464,13 @@ mod tests {
     use gittree_core::{CommandArg, CommandNamespace, ParsedCommand};
     use gittree_storage::{
         AccountLifecycle, AccountStateRecord, CommandLogRecord, CommandStatus,
-        ProfileStateRecord, ProfileVisibilityV1, RepoMaintainerV1Record, RepoStateV1Record,
-        RepoVisibilityV1, StorageError,
+        PostgresRepositories, ProfileStateRecord, ProfileVisibilityV1, RepoMaintainerV1Record,
+        RepoStateV1Record, RepoVisibilityV1, StorageConfig, StorageError,
     };
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct MemoryStore {
@@ -663,6 +664,23 @@ mod tests {
         gittree_core::parse_cli_command(input).expect("parse")
     }
 
+    async fn postgres_store_with_closed_pool() -> PostgresRepositories {
+        let storage = StorageConfig {
+            read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+            write_connection: None,
+            max_connections: 1,
+            min_connections: 1,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: Some("dispatch-handlers-test".to_string()),
+        };
+        let pool_options = storage.pool_options().expect("pool options");
+        let connect_options = storage.read_connect_options().expect("connect options");
+        let pool = pool_options.connect_lazy_with(connect_options);
+        pool.close().await;
+        PostgresRepositories::new(pool)
+    }
+
     #[tokio::test]
     async fn execute_account_create_and_status() {
         let store = MemoryStore::default();
@@ -676,6 +694,17 @@ mod tests {
         };
         let created = execute_command(&store, create).await.expect("create");
         assert_eq!(created.status, CommandStatus::Ok);
+
+        let create_again = CommandExecutionInput {
+            event_id: vec![8u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: command(CommandNamespace::Account, "create"),
+            created_at: 100,
+        };
+        let exists = execute_command(&store, create_again)
+            .await
+            .expect("create again");
+        assert_eq!(exists.code, "account_exists");
 
         let status = CommandExecutionInput {
             event_id: vec![2u8; 32],
@@ -1023,6 +1052,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_profile_set_ignores_unknown_and_positional_args() {
+        let store = MemoryStore::default();
+        let actor = vec![19u8; 32];
+        let output = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![54u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: ParsedCommand {
+                    namespace: CommandNamespace::Profile,
+                    action: "set".to_string(),
+                    target: None,
+                    args: vec![
+                        CommandArg::Positional("ignored".to_string()),
+                        CommandArg::KeyValue {
+                            key: "unsupported".to_string(),
+                            value: "noop".to_string(),
+                        },
+                        CommandArg::KeyValue {
+                            key: "name".to_string(),
+                            value: "alice".to_string(),
+                        },
+                    ],
+                },
+                created_at: 210,
+            },
+        )
+        .await
+        .expect("set");
+        assert_eq!(output.code, "profile_updated");
+
+        let profile = store
+            .profile_state(&actor)
+            .await
+            .expect("lookup")
+            .expect("profile");
+        assert_eq!(profile.display_name.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
     async fn execute_repo_branch_paths_cover_invalid_and_misc_actions() {
         let store = MemoryStore::default();
         let actor = vec![17u8; 32];
@@ -1194,10 +1263,52 @@ mod tests {
         assert_eq!(unauthorized_update.status, CommandStatus::Error);
         assert_eq!(unauthorized_update.code, "unauthorized");
 
-        let invalid = execute_command(
+        let unauthorized_maintainer_update = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![71u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse(&format!("gittree repo maintainers demo add {actor_npub}")),
+                created_at: 311,
+            },
+        )
+        .await
+        .expect("unauthorized maintainers");
+        assert_eq!(unauthorized_maintainer_update.status, CommandStatus::Error);
+        assert_eq!(unauthorized_maintainer_update.code, "unauthorized");
+
+        let archive_missing = execute_command(
             &store,
             CommandExecutionInput {
                 event_id: vec![72u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo archive missing"),
+                created_at: 312,
+            },
+        )
+        .await
+        .expect("archive missing");
+        assert_eq!(archive_missing.status, CommandStatus::Error);
+        assert_eq!(archive_missing.code, "not_found");
+
+        let archive_unauthorized = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![73u8; 32],
+                actor_pubkey: actor.clone(),
+                parsed: parse("gittree repo archive demo"),
+                created_at: 313,
+            },
+        )
+        .await
+        .expect("archive unauthorized");
+        assert_eq!(archive_unauthorized.status, CommandStatus::Error);
+        assert_eq!(archive_unauthorized.code, "unauthorized");
+
+        let invalid = execute_command(
+            &store,
+            CommandExecutionInput {
+                event_id: vec![74u8; 32],
                 actor_pubkey: actor,
                 parsed: ParsedCommand {
                     namespace: CommandNamespace::Repo,
@@ -1212,6 +1323,91 @@ mod tests {
         .expect("invalid");
         assert_eq!(invalid.status, CommandStatus::Error);
         assert_eq!(invalid.code, "invalid_command");
+    }
+
+    #[tokio::test]
+    async fn execute_repo_update_covers_visibility_website_and_default_branch_variants() {
+        let store = MemoryStore::default();
+        let actor = vec![20u8; 32];
+        assert_eq!(
+            execute_command(
+                &store,
+                CommandExecutionInput {
+                    event_id: vec![90u8; 32],
+                    actor_pubkey: actor.clone(),
+                    parsed: parse("gittree repo create demo"),
+                    created_at: 400,
+                },
+            )
+            .await
+            .expect("create")
+            .code,
+            "repo_created"
+        );
+
+        assert_eq!(
+            execute_command(
+                &store,
+                CommandExecutionInput {
+                    event_id: vec![91u8; 32],
+                    actor_pubkey: actor.clone(),
+                    parsed: ParsedCommand {
+                        namespace: CommandNamespace::Repo,
+                        action: "update".to_string(),
+                        target: Some("demo".to_string()),
+                        args: vec![
+                            CommandArg::Positional("ignored".to_string()),
+                            CommandArg::KeyValue {
+                                key: "website".to_string(),
+                                value: "https://gittr.ee/demo".to_string(),
+                            },
+                            CommandArg::KeyValue {
+                                key: "visibility".to_string(),
+                                value: "public".to_string(),
+                            },
+                            CommandArg::KeyValue {
+                                key: "default_branch".to_string(),
+                                value: "dev".to_string(),
+                            },
+                            CommandArg::KeyValue {
+                                key: "unsupported".to_string(),
+                                value: "noop".to_string(),
+                            },
+                        ],
+                    },
+                    created_at: 401,
+                },
+            )
+            .await
+            .expect("update")
+            .code,
+            "repo_updated"
+        );
+
+        assert_eq!(
+            execute_command(
+                &store,
+                CommandExecutionInput {
+                    event_id: vec![92u8; 32],
+                    actor_pubkey: actor.clone(),
+                    parsed: parse("gittree repo update demo visibility=private"),
+                    created_at: 402,
+                },
+            )
+            .await
+            .expect("update")
+            .code,
+            "repo_updated"
+        );
+
+        let state = store
+            .repo_state(&actor, "demo")
+            .await
+            .expect("repo")
+            .expect("state");
+        assert_eq!(state.website_url.as_deref(), Some("https://gittr.ee/demo"));
+        assert_eq!(state.default_branch, "dev");
+        assert_eq!(state.visibility, RepoVisibilityV1::Private);
     }
 
     #[tokio::test]
@@ -1411,5 +1607,142 @@ mod tests {
         let err_output = err("err_code", "err message");
         assert_eq!(err_output.status, CommandStatus::Error);
         assert_eq!(err_output.code, "err_code");
+    }
+
+    #[tokio::test]
+    async fn postgres_command_store_impl_maps_storage_errors() {
+        let store = postgres_store_with_closed_pool().await;
+        let actor = vec![31u8; 32];
+        let repo_name = "demo".to_string();
+        let log_record = CommandLogRecord {
+            event_id: vec![1u8; 32],
+            pubkey: actor.clone(),
+            namespace: "repo".to_string(),
+            action: "create".to_string(),
+            target: Some(repo_name.clone()),
+            args_json: json!({}),
+            status: CommandStatus::Ok,
+            code: "ok".to_string(),
+            message: "ok".to_string(),
+            created_at: 1,
+        };
+        let account = AccountStateRecord {
+            pubkey: actor.clone(),
+            status: AccountLifecycle::Active,
+            created_at: 1,
+            updated_at: 2,
+            deleted_at: None,
+        };
+        let profile = ProfileStateRecord {
+            pubkey: actor.clone(),
+            display_name: Some("alice".to_string()),
+            bio: None,
+            avatar_url: None,
+            website_url: None,
+            location: None,
+            visibility: ProfileVisibilityV1::Private,
+            updated_at: 2,
+        };
+        let repo = RepoStateV1Record {
+            owner_pubkey: actor.clone(),
+            repo_name: repo_name.clone(),
+            description: None,
+            website_url: None,
+            visibility: RepoVisibilityV1::Private,
+            default_branch: "main".to_string(),
+            archived: false,
+            updated_at: 2,
+        };
+        let maintainer = RepoMaintainerV1Record {
+            owner_pubkey: actor.clone(),
+            repo_name: repo_name.clone(),
+            maintainer_pubkey: actor.clone(),
+            active: true,
+            updated_at: 2,
+        };
+
+        let insert =
+            tokio::time::timeout(Duration::from_secs(3), CommandStore::insert_command_log(&store, &log_record))
+                .await
+                .expect("storage call timed out");
+        assert!(matches!(insert, Err(DispatchError::Storage(_))));
+
+        let update = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::update_command_log_outcome(
+                &store,
+                &log_record.event_id,
+                CommandStatus::Ok,
+                "ok",
+                "ok",
+            ),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(update, Err(DispatchError::Storage(_))));
+
+        let account_state = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::account_state(&store, &actor),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(account_state, Err(DispatchError::Storage(_))));
+
+        let upsert_account = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::upsert_account_state(&store, &account),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(upsert_account, Err(DispatchError::Storage(_))));
+
+        let profile_state = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::profile_state(&store, &actor),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(profile_state, Err(DispatchError::Storage(_))));
+
+        let upsert_profile = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::upsert_profile_state(&store, &profile),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(upsert_profile, Err(DispatchError::Storage(_))));
+
+        let repo_state = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::repo_state(&store, &actor, &repo_name),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(repo_state, Err(DispatchError::Storage(_))));
+
+        let upsert_repo = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::upsert_repo_state(&store, &repo),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(upsert_repo, Err(DispatchError::Storage(_))));
+
+        let set_maintainer = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::set_repo_maintainer(&store, &maintainer),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(set_maintainer, Err(DispatchError::Storage(_))));
+
+        let list_maintainers = tokio::time::timeout(
+            Duration::from_secs(3),
+            CommandStore::list_active_repo_maintainers(&store, &actor, &repo_name),
+        )
+        .await
+        .expect("storage call timed out");
+        assert!(matches!(list_maintainers, Err(DispatchError::Storage(_))));
     }
 }
