@@ -2149,6 +2149,69 @@ mod tests {
     }
 
     #[test]
+    fn cache_evicts_oldest_entries_for_maintainers_and_relay() {
+        let cache = StateCache::new(StateCacheConfig::new(Some(Duration::from_secs(30)), 1));
+
+        let old_maintainers_key = StateCache::key("aa", "repo");
+        let new_maintainers_key = StateCache::key("bb", "repo");
+        cache.insert_maintainers(
+            old_maintainers_key.clone(),
+            super::MaintainersResponse {
+                identifier: "repo".to_string(),
+                maintainers: vec!["aa".to_string()],
+            },
+        );
+        let new_maintainers = super::MaintainersResponse {
+            identifier: "repo".to_string(),
+            maintainers: vec!["bb".to_string()],
+        };
+        cache.insert_maintainers(new_maintainers_key.clone(), new_maintainers.clone());
+
+        assert!(cache.get_maintainers(&old_maintainers_key).is_none());
+        assert_eq!(
+            cache.get_maintainers(&new_maintainers_key),
+            Some(new_maintainers)
+        );
+
+        let old_relay_key = StateCache::relay_key("wss://old.example");
+        let new_relay_key = StateCache::relay_key("wss://new.example");
+        cache.insert_relay_compatibility(
+            old_relay_key.clone(),
+            super::RelayCompatibilityResponse {
+                relay_url: "wss://old.example".to_string(),
+                compatible: true,
+                supported_capabilities: vec!["nip01".to_string()],
+                missing_required: Vec::new(),
+                missing_optional: Vec::new(),
+                nip11_url: None,
+                nip11_available: true,
+                active_probe_ok: Some(true),
+                active_probe_error: None,
+                checked_at: 1,
+            },
+        );
+        let new_relay = super::RelayCompatibilityResponse {
+            relay_url: "wss://new.example".to_string(),
+            compatible: false,
+            supported_capabilities: vec!["nip01".to_string()],
+            missing_required: vec!["nip34".to_string()],
+            missing_optional: Vec::new(),
+            nip11_url: None,
+            nip11_available: false,
+            active_probe_ok: Some(false),
+            active_probe_error: Some("timeout".to_string()),
+            checked_at: 2,
+        };
+        cache.insert_relay_compatibility(new_relay_key.clone(), new_relay.clone());
+
+        assert!(cache.get_relay_compatibility(&old_relay_key).is_none());
+        assert_eq!(
+            cache.get_relay_compatibility(&new_relay_key),
+            Some(new_relay)
+        );
+    }
+
+    #[test]
     fn cache_respects_ttl_for_maintainers_and_relay_entries() {
         let cache = StateCache::new(StateCacheConfig::new(Some(Duration::from_millis(1)), 2));
         let maintainers_key = StateCache::key("11", "repo");
