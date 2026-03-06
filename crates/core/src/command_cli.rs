@@ -445,6 +445,14 @@ mod tests {
             CommandParseError::InvalidCommand(action)
             if action == "unknown"
         ));
+
+        let repo_extra_args = parse_cli_command("gittree repo create demo extra")
+            .expect_err("repo create extra args");
+        assert!(matches!(
+            repo_extra_args,
+            CommandParseError::InvalidArgs(message)
+            if message.contains("repo command requires target and no extra args")
+        ));
     }
 
     #[test]
@@ -455,6 +463,15 @@ mod tests {
             vec![CommandArg::KeyValue {
                 key: "bio".to_string(),
                 value: "hello world".to_string(),
+            }]
+        );
+
+        let trailing_escape = parsed("gittree profile set bio=hello\\");
+        assert_eq!(
+            trailing_escape.args,
+            vec![CommandArg::KeyValue {
+                key: "bio".to_string(),
+                value: "hello".to_string(),
             }]
         );
     }
