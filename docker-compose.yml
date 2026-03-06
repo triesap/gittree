@@ -105,6 +105,28 @@ services:
     volumes:
       - ./logs:/var/log/gittree
 
+  dispatch:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.dispatch
+    env_file:
+      - .env
+    environment:
+      GITTREE_DISPATCH_BIND: 0.0.0.0:8091
+      GITTREE_DISPATCH_ADMIN_PUBKEY: ${GITTREE_DISPATCH_ADMIN_PUBKEY}
+      GITTREE_DISPATCH_RELAY_URLS: ${GITTREE_DISPATCH_RELAY_URLS:-ws://relay:8080}
+      GITTREE_LOG_DIR: /var/log/gittree
+      GITTREE_LOG_STDOUT: "true"
+    ports:
+      - "8091:8091"
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      relay:
+        condition: service_started
+    volumes:
+      - ./logs:/var/log/gittree
+
   state:
     build:
       context: .
