@@ -407,7 +407,8 @@ async fn run_relay_subscription<S: CommandStore + Send + Sync + 'static>(
 mod tests {
     use super::{
         DispatchConfig, DispatchError, DispatchEventOutcome, DispatchFilterConfig,
-        RelayEventEnvelope, build_relay_req_message, dispatch_filter_config, parse_csv,
+        RelayEventEnvelope, build_repositories, build_relay_req_message, dispatch_filter_config,
+        parse_csv,
         parse_relay_event_message, process_event_envelope, process_event_message,
     };
     use crate::handlers::CommandStore;
@@ -647,6 +648,18 @@ mod tests {
     }
 
     #[test]
+    fn from_env_rejects_invalid_storage_timeout_values() {
+        let mut env = base_env();
+        env.push(("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "xyz"));
+        let err = from_pairs(&env).expect_err("invalid idle timeout");
+        assert!(matches!(
+            err,
+            DispatchError::Config(message)
+            if message.contains("GITTREE_STORAGE_IDLE_TIMEOUT_SECS")
+        ));
+    }
+
+    #[test]
     fn from_env_rejects_invalid_storage_pool_bounds() {
         let mut env = base_env();
         env.push(("GITTREE_STORAGE_MAX_CONNECTIONS", "1"));
@@ -667,6 +680,32 @@ mod tests {
         let config = from_pairs(&env).expect("config");
         assert_eq!(config.storage.max_connections, 10);
         assert_eq!(config.storage.min_connections, 2);
+    }
+
+    #[test]
+    fn from_env_loads_optional_storage_fields() {
+        let mut env = base_env();
+        env.push((
+            "GITTREE_STORAGE_WRITE_URL",
+            "postgres://gittree:gittree@127.0.0.1:5432/gittree",
+        ));
+        env.push(("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "60"));
+        env.push(("GITTREE_STORAGE_MAX_LIFETIME_SECS", "120"));
+        env.push(("GITTREE_STORAGE_APP_NAME", "dispatch-tests"));
+        let config = from_pairs(&env).expect("config");
+        assert!(config.storage.write_connection.is_some());
+        assert_eq!(config.storage.idle_timeout_secs, Some(60));
+        assert_eq!(config.storage.max_lifetime_secs, Some(120));
+        assert_eq!(
+            config.storage.application_name.as_deref(),
+            Some("dispatch-tests")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_repositories_constructs_lazy_pool_from_config() {
+        let config = from_pairs(&base_env()).expect("config");
+        let _repositories = build_repositories(&config).expect("repositories");
     }
 
     #[tokio::test]
@@ -770,6 +809,12 @@ mod tests {
         .to_string();
         assert!(parse_relay_event_message(&invalid_kind, "wss://gittr.ee").is_none());
 
+        assert!(parse_relay_event_message("{not-json", "wss://gittr.ee").is_none());
+        assert!(parse_relay_event_message("[]", "wss://gittr.ee").is_none());
+
+        let notice = serde_json::json!(["NOTICE", "ok"]).to_string();
+        assert!(parse_relay_event_message(&notice, "wss://gittr.ee").is_none());
+
         let invalid_tags = serde_json::json!([
             "EVENT",
             "gittree-dispatch",
@@ -784,6 +829,21 @@ mod tests {
         ])
         .to_string();
         assert!(parse_relay_event_message(&invalid_tags, "wss://gittr.ee").is_none());
+
+        let invalid_tag_column = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", 1]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&invalid_tag_column, "wss://gittr.ee").is_none());
     }
 
     #[tokio::test]
@@ -819,6 +879,28 @@ mod tests {
             outcome,
             Some(DispatchEventOutcome::Rejected(message))
             if message.contains("invalid command")
+        ));
+
+        let invalid_event_id = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11",
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        let outcome = process_event_message(&store, &filter(), "wss://gittr.ee", &invalid_event_id)
+            .await
+            .expect("result");
+        assert!(matches!(
+            outcome,
+            Some(DispatchEventOutcome::Rejected(message))
+            if message.contains("invalid event id")
         ));
     }
 
