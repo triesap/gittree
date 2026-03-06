@@ -139,6 +139,7 @@ async fn serve_runtime_path_executes_non_test_instantiations() {
             public_git_url: "https://gittr.ee".to_string(),
             auth_url: "http://localhost:8089".to_string(),
             app_url: format!("http://127.0.0.1:{port}"),
+            state_url: "http://localhost:8082".to_string(),
             control_url: "http://localhost:8088".to_string(),
         },
     };
@@ -195,6 +196,7 @@ async fn serve_runtime_path_maps_storage_config_errors_for_production_instantiat
             public_git_url: "https://gittr.ee".to_string(),
             auth_url: "http://localhost:8089".to_string(),
             app_url: format!("http://127.0.0.1:{port}"),
+            state_url: "http://localhost:8082".to_string(),
             control_url: "http://localhost:8088".to_string(),
         },
     };

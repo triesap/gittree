@@ -15,6 +15,7 @@ const DEFAULT_CONTROL_BIND: &str = "127.0.0.1:8088";
 const DEFAULT_AUTH_BIND: &str = "127.0.0.1:8089";
 const DEFAULT_UI_AUTH_URL: &str = "http://localhost:8089";
 const DEFAULT_UI_APP_URL: &str = "http://localhost:8090";
+const DEFAULT_UI_STATE_URL: &str = "http://localhost:8082";
 const DEFAULT_UI_CONTROL_URL: &str = "http://localhost:8088";
 const ENV_RELAY_BIND: &str = "GITTREE_RELAY_BIND";
 const ENV_RELAY_URLS: &str = "GITTREE_RELAY_URLS";
@@ -53,6 +54,7 @@ const ENV_UI_REPO_ROOT: &str = "GITTREE_UI_REPO_ROOT";
 const ENV_UI_PUBLIC_GIT_URL: &str = "GITTREE_UI_PUBLIC_GIT_URL";
 const ENV_UI_AUTH_URL: &str = "GITTREE_UI_AUTH_URL";
 const ENV_UI_APP_URL: &str = "GITTREE_UI_APP_URL";
+const ENV_UI_STATE_URL: &str = "GITTREE_UI_STATE_URL";
 const ENV_UI_CONTROL_URL: &str = "GITTREE_UI_CONTROL_URL";
 const ENV_CONTROL_TOKEN: &str = "GITTREE_CONTROL_TOKEN";
 const ENV_CONTROL_ADMIN_KEYS: &str = "GITTREE_CONTROL_ADMIN_KEYS";
@@ -222,6 +224,7 @@ pub struct UiConfig {
     pub public_git_url: String,
     pub auth_url: String,
     pub app_url: String,
+    pub state_url: String,
     pub control_url: String,
 }
 
@@ -233,6 +236,8 @@ impl UiConfig {
             env_optional_string(ENV_UI_AUTH_URL).unwrap_or_else(|| DEFAULT_UI_AUTH_URL.to_string());
         let app_url =
             env_optional_string(ENV_UI_APP_URL).unwrap_or_else(|| DEFAULT_UI_APP_URL.to_string());
+        let state_url = env_optional_string(ENV_UI_STATE_URL)
+            .unwrap_or_else(|| DEFAULT_UI_STATE_URL.to_string());
         let control_url = env_optional_string(ENV_UI_CONTROL_URL)
             .unwrap_or_else(|| DEFAULT_UI_CONTROL_URL.to_string());
         let config = Self {
@@ -240,6 +245,7 @@ impl UiConfig {
             public_git_url,
             auth_url,
             app_url,
+            state_url,
             control_url,
         };
         config.validate()?;
@@ -273,6 +279,7 @@ impl UiConfig {
         validate_http_url("ui.public_git_url", &self.public_git_url)?;
         validate_http_url("ui.auth_url", &self.auth_url)?;
         validate_http_url("ui.app_url", &self.app_url)?;
+        validate_http_url("ui.state_url", &self.state_url)?;
         validate_http_url("ui.control_url", &self.control_url)?;
         Ok(())
     }
@@ -1087,6 +1094,7 @@ struct TomlUiConfig {
     public_git_url: Option<String>,
     auth_url: Option<String>,
     app_url: Option<String>,
+    state_url: Option<String>,
     control_url: Option<String>,
 }
 
@@ -1104,6 +1112,9 @@ impl TomlUiRoot {
         let app_url = config
             .app_url
             .unwrap_or_else(|| DEFAULT_UI_APP_URL.to_string());
+        let state_url = config
+            .state_url
+            .unwrap_or_else(|| DEFAULT_UI_STATE_URL.to_string());
         let control_url = config
             .control_url
             .unwrap_or_else(|| DEFAULT_UI_CONTROL_URL.to_string());
@@ -1112,6 +1123,7 @@ impl TomlUiRoot {
             public_git_url,
             auth_url,
             app_url,
+            state_url,
             control_url,
         })
     }
@@ -1518,8 +1530,11 @@ mod tests {
     use crate::ENV_UI_BIND;
     use crate::ENV_UI_PUBLIC_GIT_URL;
     use crate::ENV_UI_REPO_ROOT;
+    use crate::ENV_UI_STATE_URL;
     use crate::ENV_WEBHOOK_BIND;
-    use crate::{DEFAULT_UI_APP_URL, DEFAULT_UI_AUTH_URL, DEFAULT_UI_CONTROL_URL};
+    use crate::{
+        DEFAULT_UI_APP_URL, DEFAULT_UI_AUTH_URL, DEFAULT_UI_CONTROL_URL, DEFAULT_UI_STATE_URL,
+    };
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2817,15 +2832,18 @@ webhook_secret = "secret"
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(ENV_UI_REPO_ROOT, "/tmp/gittree-ui", &mut || {
             with_env_var(ENV_UI_PUBLIC_GIT_URL, "http://localhost:8085", &mut || {
-                let config = UiConfig::from_env().expect("ui");
-                assert_eq!(
-                    config.repo_root,
-                    std::path::PathBuf::from("/tmp/gittree-ui")
-                );
-                assert_eq!(config.public_git_url, "http://localhost:8085");
-                assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
-                assert_eq!(config.app_url, DEFAULT_UI_APP_URL);
-                assert_eq!(config.control_url, DEFAULT_UI_CONTROL_URL);
+                with_env_var(ENV_UI_STATE_URL, "http://localhost:8082", &mut || {
+                    let config = UiConfig::from_env().expect("ui");
+                    assert_eq!(
+                        config.repo_root,
+                        std::path::PathBuf::from("/tmp/gittree-ui")
+                    );
+                    assert_eq!(config.public_git_url, "http://localhost:8085");
+                    assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
+                    assert_eq!(config.app_url, DEFAULT_UI_APP_URL);
+                    assert_eq!(config.state_url, "http://localhost:8082");
+                    assert_eq!(config.control_url, DEFAULT_UI_CONTROL_URL);
+                });
             });
         });
     }
@@ -2885,6 +2903,7 @@ public_git_url = "http://localhost:8085"
         assert_eq!(config.public_git_url, "http://localhost:8085");
         assert_eq!(config.auth_url, DEFAULT_UI_AUTH_URL);
         assert_eq!(config.app_url, DEFAULT_UI_APP_URL);
+        assert_eq!(config.state_url, DEFAULT_UI_STATE_URL);
         assert_eq!(config.control_url, DEFAULT_UI_CONTROL_URL);
     }
 
@@ -2915,6 +2934,7 @@ auth_url = "ws://localhost:8089"
             public_git_url: "http://localhost:8085".to_string(),
             auth_url: DEFAULT_UI_AUTH_URL.to_string(),
             app_url: DEFAULT_UI_APP_URL.to_string(),
+            state_url: DEFAULT_UI_STATE_URL.to_string(),
             control_url: DEFAULT_UI_CONTROL_URL.to_string(),
         };
         assert!(matches!(
@@ -2930,6 +2950,7 @@ auth_url = "ws://localhost:8089"
             public_git_url: "ftp://localhost:8085".to_string(),
             auth_url: DEFAULT_UI_AUTH_URL.to_string(),
             app_url: DEFAULT_UI_APP_URL.to_string(),
+            state_url: DEFAULT_UI_STATE_URL.to_string(),
             control_url: DEFAULT_UI_CONTROL_URL.to_string(),
         };
         assert!(matches!(
@@ -2939,12 +2960,13 @@ auth_url = "ws://localhost:8089"
     }
 
     #[test]
-    fn ui_config_rejects_invalid_auth_app_and_control_urls() {
+    fn ui_config_rejects_invalid_auth_app_state_and_control_urls() {
         let base = UiConfig {
             repo_root: std::path::PathBuf::from("/tmp/gittree-ui"),
             public_git_url: "http://localhost:8085".to_string(),
             auth_url: DEFAULT_UI_AUTH_URL.to_string(),
             app_url: DEFAULT_UI_APP_URL.to_string(),
+            state_url: DEFAULT_UI_STATE_URL.to_string(),
             control_url: DEFAULT_UI_CONTROL_URL.to_string(),
         };
 
@@ -2964,6 +2986,16 @@ auth_url = "ws://localhost:8089"
             invalid_app.validate(),
             Err(ConfigError::InvalidConfig {
                 field: "ui.app_url",
+                ..
+            })
+        ));
+
+        let mut invalid_state = base.clone();
+        invalid_state.state_url = "ws://localhost:8082".to_string();
+        assert!(matches!(
+            invalid_state.validate(),
+            Err(ConfigError::InvalidConfig {
+                field: "ui.state_url",
                 ..
             })
         ));

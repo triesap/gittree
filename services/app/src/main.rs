@@ -121,6 +121,7 @@ mod tests {
                 public_git_url: "https://gittr.ee".to_string(),
                 auth_url: "https://auth.gittr.ee".to_string(),
                 app_url: "https://app.gittr.ee".to_string(),
+                state_url: "https://state.gittr.ee".to_string(),
                 control_url: "https://api.gittr.ee".to_string(),
             },
         }

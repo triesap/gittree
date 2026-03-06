@@ -314,6 +314,7 @@ async fn serve_with(config: AppServiceConfig, init_fn: InitFn, serve_fn: ServeFn
             config.ui.auth_url
         },
         config.ui.app_url,
+        config.ui.state_url,
         config.ui.control_url,
         config.base_path,
         leptos_options,
@@ -486,6 +487,7 @@ mod tests {
             public_git_url: "http://localhost:8085".to_string(),
             auth_url: "http://localhost:8089".to_string(),
             app_url: "http://localhost:8090".to_string(),
+            state_url: "http://localhost:8082".to_string(),
             control_url: "http://localhost:8088".to_string(),
         }
     }
@@ -513,6 +515,7 @@ mod tests {
             "http://localhost:8085".to_string(),
             "http://localhost:8089".to_string(),
             "http://localhost:8090".to_string(),
+            "http://localhost:8082".to_string(),
             "http://localhost:8088".to_string(),
             "/".to_string(),
             LeptosOptions::builder()
@@ -955,6 +958,7 @@ mod tests {
             "http://localhost:8085".to_string(),
             "http://localhost:8089".to_string(),
             "http://localhost:8090".to_string(),
+            "http://localhost:8082".to_string(),
             "http://localhost:8088".to_string(),
             "/ui".to_string(),
             LeptosOptions::builder()

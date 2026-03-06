@@ -527,6 +527,7 @@ mod tests {
             public_git_url: "http://localhost:8085".to_string(),
             auth_url: "http://localhost:8089".to_string(),
             app_url: "http://localhost:8090".to_string(),
+            state_url: "http://localhost:8082".to_string(),
             control_url: "http://localhost:8088".to_string(),
         }
     }
