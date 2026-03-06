@@ -1419,7 +1419,7 @@ mod tests {
             fail_send_on: Some(1),
             send_count: 0,
         };
-        let mut empty_reader = futures_util::stream::empty::<Result<Message, WsError>>();
+        let mut empty_reader = futures_util::stream::iter(Vec::<Result<Message, WsError>>::new());
         process_relay_connection(
             &EventStore::default(),
             &filter,
@@ -1461,6 +1461,51 @@ mod tests {
         futures_util::SinkExt::close(&mut ok_writer)
             .await
             .expect("close writer");
+
+        let mut scripted_writer = ScriptedWriter::default();
+        let valid_event = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        let invalid_event = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account nope",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        let mut text_and_non_text_reader = futures_util::stream::iter(vec![
+            Ok(Message::Text("not-json".to_string())),
+            Ok(Message::Text(valid_event)),
+            Ok(Message::Text(invalid_event)),
+            Ok(Message::Binary(vec![0x01].into())),
+            Ok(Message::Ping(vec![0x02].into())),
+            Ok(Message::Close(None)),
+        ]);
+        process_relay_connection(
+            &EventStore::default(),
+            &filter,
+            relay_url,
+            &mut scripted_writer,
+            &mut text_and_non_text_reader,
+        )
+        .await;
+        assert!(scripted_writer.send_count >= 2);
     }
 
     #[tokio::test]
