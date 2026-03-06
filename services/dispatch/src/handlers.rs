@@ -455,7 +455,9 @@ fn err(code: &str, message: &str) -> CommandExecutionOutput {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandExecutionInput, CommandStore, execute_command};
+    use super::{
+        CommandExecutionInput, CommandStore, args_to_json, err, execute_command, namespace_name, ok,
+    };
     use crate::DispatchError;
     use async_trait::async_trait;
     use gittree_app_core::npub_from_bytes;
@@ -465,6 +467,7 @@ mod tests {
         ProfileStateRecord, ProfileVisibilityV1, RepoMaintainerV1Record, RepoStateV1Record,
         RepoVisibilityV1, StorageError,
     };
+    use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
@@ -1229,5 +1232,184 @@ mod tests {
         assert_eq!(output.status, CommandStatus::Error);
         assert_eq!(output.code, "internal");
         assert!(output.message.contains("dispatch storage error"));
+    }
+
+    #[tokio::test]
+    async fn helper_builders_and_store_trait_methods_are_exercised() {
+        let memory = MemoryStore::default();
+        let actor = vec![21u8; 32];
+        let repo_name = "demo".to_string();
+
+        let log_record = CommandLogRecord {
+            event_id: vec![1u8; 32],
+            pubkey: actor.clone(),
+            namespace: "account".to_string(),
+            action: "status".to_string(),
+            target: None,
+            args_json: json!({}),
+            status: CommandStatus::Ok,
+            code: "ok".to_string(),
+            message: "ok".to_string(),
+            created_at: 1,
+        };
+        assert!(
+            memory
+                .insert_command_log(&log_record)
+                .await
+                .expect("insert first")
+        );
+        assert!(
+            !memory
+                .insert_command_log(&log_record)
+                .await
+                .expect("insert duplicate")
+        );
+        memory
+            .update_command_log_outcome(&log_record.event_id, CommandStatus::Ok, "ok", "ok")
+            .await
+            .expect("update");
+
+        let account = AccountStateRecord {
+            pubkey: actor.clone(),
+            status: AccountLifecycle::Active,
+            created_at: 1,
+            updated_at: 2,
+            deleted_at: None,
+        };
+        assert!(memory.account_state(&actor).await.expect("account lookup").is_none());
+        memory
+            .upsert_account_state(&account)
+            .await
+            .expect("upsert account");
+        assert!(memory.account_state(&actor).await.expect("account lookup").is_some());
+
+        let profile = ProfileStateRecord {
+            pubkey: actor.clone(),
+            display_name: Some("alice".to_string()),
+            bio: None,
+            avatar_url: None,
+            website_url: None,
+            location: None,
+            visibility: ProfileVisibilityV1::Private,
+            updated_at: 3,
+        };
+        assert!(memory.profile_state(&actor).await.expect("profile lookup").is_none());
+        memory
+            .upsert_profile_state(&profile)
+            .await
+            .expect("upsert profile");
+        assert!(memory.profile_state(&actor).await.expect("profile lookup").is_some());
+
+        let repo = RepoStateV1Record {
+            owner_pubkey: actor.clone(),
+            repo_name: repo_name.clone(),
+            description: None,
+            website_url: None,
+            visibility: RepoVisibilityV1::Private,
+            default_branch: "main".to_string(),
+            archived: false,
+            updated_at: 4,
+        };
+        assert!(
+            memory
+                .repo_state(&actor, &repo_name)
+                .await
+                .expect("repo lookup")
+                .is_none()
+        );
+        memory.upsert_repo_state(&repo).await.expect("upsert repo");
+        assert!(
+            memory
+                .repo_state(&actor, &repo_name)
+                .await
+                .expect("repo lookup")
+                .is_some()
+        );
+
+        let maintainer_record = RepoMaintainerV1Record {
+            owner_pubkey: actor.clone(),
+            repo_name: repo_name.clone(),
+            maintainer_pubkey: actor.clone(),
+            active: true,
+            updated_at: 5,
+        };
+        memory
+            .set_repo_maintainer(&maintainer_record)
+            .await
+            .expect("set maintainer");
+        let active = memory
+            .list_active_repo_maintainers(&actor, &repo_name)
+            .await
+            .expect("list maintainers");
+        assert!(active.contains(&actor));
+
+        let remove_record = RepoMaintainerV1Record {
+            active: false,
+            ..maintainer_record
+        };
+        memory
+            .set_repo_maintainer(&remove_record)
+            .await
+            .expect("unset maintainer");
+        let active = memory
+            .list_active_repo_maintainers(&actor, &repo_name)
+            .await
+            .expect("list maintainers");
+        assert!(!active.contains(&actor));
+
+        let apply_fail = ApplyFailStore;
+        assert!(
+            apply_fail
+                .insert_command_log(&log_record)
+                .await
+                .expect("insert")
+        );
+        apply_fail
+            .update_command_log_outcome(&log_record.event_id, CommandStatus::Error, "err", "err")
+            .await
+            .expect("update");
+        assert!(apply_fail.upsert_account_state(&account).await.is_ok());
+        assert!(apply_fail.profile_state(&actor).await.expect("profile").is_none());
+        assert!(apply_fail.upsert_profile_state(&profile).await.is_ok());
+        assert!(
+            apply_fail
+                .repo_state(&actor, &repo_name)
+                .await
+                .expect("repo")
+                .is_none()
+        );
+        assert!(apply_fail.upsert_repo_state(&repo).await.is_ok());
+        assert!(apply_fail.set_repo_maintainer(&remove_record).await.is_ok());
+        assert!(
+            apply_fail
+                .list_active_repo_maintainers(&actor, &repo_name)
+                .await
+                .expect("maintainers")
+                .is_empty()
+        );
+        assert!(apply_fail.account_state(&actor).await.is_err());
+
+        assert_eq!(namespace_name(CommandNamespace::Account), "account");
+        assert_eq!(namespace_name(CommandNamespace::Profile), "profile");
+        assert_eq!(namespace_name(CommandNamespace::Repo), "repo");
+
+        let args = vec![
+            CommandArg::Positional("public".to_string()),
+            CommandArg::KeyValue {
+                key: "description".to_string(),
+                value: "hello".to_string(),
+            },
+        ];
+        assert_eq!(
+            args_to_json(&args),
+            json!({"description": "hello", "_positional": ["public"]})
+        );
+
+        let ok_output = ok("ok_code", "ok message");
+        assert_eq!(ok_output.status, CommandStatus::Ok);
+        assert_eq!(ok_output.code, "ok_code");
+        let err_output = err("err_code", "err message");
+        assert_eq!(err_output.status, CommandStatus::Error);
+        assert_eq!(err_output.code, "err_code");
     }
 }
