@@ -2,6 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 pub use gittree_core::{CommandParseError, ParsedCommand, parse_cli_command};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{PostgresRepositories, StorageConfig, StorageError};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
@@ -172,14 +173,16 @@ pub fn init_observability() -> Result<ObservabilityHandle, DispatchError> {
 
 pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
     let _guard = init_observability()?;
+    serve_with_shutdown(config, tokio::signal::ctrl_c()).await
+}
+
+async fn serve_with_shutdown(
+    config: DispatchConfig,
+    shutdown: impl Future<Output = Result<(), std::io::Error>>,
+) -> Result<(), DispatchError> {
     let repositories: Arc<dyn CommandStore + Send + Sync> = Arc::new(build_repositories(&config)?);
     let filter = dispatch_filter_config(&config);
-    tracing::info!(
-        bind = %config.bind,
-        relay_count = config.relay_urls.len(),
-        storage = %config.storage.read_connection,
-        "dispatch relay subscriber initialized"
-    );
+    tracing::info!(bind = %config.bind, relay_count = config.relay_urls.len(), storage = %config.storage.read_connection, "dispatch relay subscriber initialized");
 
     let mut tasks = tokio::task::JoinSet::new();
     for relay_url in &config.relay_urls {
@@ -191,7 +194,7 @@ pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
         });
     }
 
-    if let Err(err) = tokio::signal::ctrl_c().await {
+    if let Err(err) = shutdown.await {
         return Err(DispatchError::Config(format!(
             "dispatch shutdown signal failed: {err}"
         )));
@@ -359,21 +362,13 @@ async fn run_relay_subscription(
                                 .await
                             {
                                 Ok(Some(DispatchEventOutcome::Applied(output))) => {
-                                    tracing::info!(
-                                        relay = %relay_url,
-                                        code = %output.code,
-                                        "dispatch applied command event"
-                                    );
+                                    tracing::info!(relay = %relay_url, code = %output.code, "dispatch applied command event");
                                 }
                                 Ok(Some(DispatchEventOutcome::Ignored(reason))) => {
                                     tracing::debug!(relay = %relay_url, ?reason, "dispatch ignored relay event");
                                 }
                                 Ok(Some(DispatchEventOutcome::Rejected(message))) => {
-                                    tracing::warn!(
-                                        relay = %relay_url,
-                                        %message,
-                                        "dispatch rejected relay event"
-                                    );
+                                    tracing::warn!(relay = %relay_url, %message, "dispatch rejected relay event");
                                 }
                                 Ok(None) => {}
                                 Err(err) => {
@@ -409,7 +404,7 @@ mod tests {
         DispatchConfig, DispatchError, DispatchEventOutcome, DispatchFilterConfig,
         RelayEventEnvelope, build_repositories, build_relay_req_message, dispatch_filter_config,
         parse_csv, parse_relay_event_message, process_event_envelope, process_event_message,
-        run_relay_subscription,
+        run_relay_subscription, serve_with_shutdown,
     };
     use crate::handlers::CommandStore;
     use async_trait::async_trait;
@@ -419,7 +414,7 @@ mod tests {
         RepoMaintainerV1Record, RepoStateV1Record,
     };
     use std::collections::{HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
@@ -434,6 +429,28 @@ mod tests {
                 "postgres://gittree:gittree@127.0.0.1:5432/gittree",
             ),
         ]
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env_vars(vars: &[(&str, &str)], run: impl FnOnce()) {
+        let _guard = env_lock().lock().expect("env lock");
+        let mut previous = Vec::with_capacity(vars.len());
+        for (key, value) in vars {
+            let before = std::env::var(key).ok();
+            previous.push((*key, before));
+            unsafe { std::env::set_var(key, value) };
+        }
+        run();
+        for (key, value) in previous {
+            match value {
+                Some(existing) => unsafe { std::env::set_var(key, existing) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
     }
 
     fn from_pairs(
@@ -467,6 +484,7 @@ mod tests {
     struct EventStore {
         command_log: Mutex<HashSet<Vec<u8>>>,
         accounts: Mutex<HashMap<Vec<u8>, AccountStateRecord>>,
+        fail_insert: bool,
     }
 
     #[async_trait]
@@ -475,6 +493,9 @@ mod tests {
             &self,
             record: &CommandLogRecord,
         ) -> Result<bool, DispatchError> {
+            if self.fail_insert {
+                return Err(DispatchError::Config("boom".to_string()));
+            }
             let mut log = self.command_log.lock().expect("command log");
             Ok(log.insert(record.event_id.clone()))
         }
@@ -685,6 +706,43 @@ mod tests {
         let config = from_pairs(&env).expect("config");
         assert_eq!(config.storage.max_connections, 10);
         assert_eq!(config.storage.min_connections, 2);
+    }
+
+    #[test]
+    fn from_env_reads_process_environment() {
+        unsafe { std::env::set_var("GITTREE_DISPATCH_BIND", "127.0.0.1:19991") };
+        with_env_vars(
+            &[
+                ("GITTREE_DISPATCH_BIND", "127.0.0.1:19091"),
+                ("GITTREE_DISPATCH_ADMIN_PUBKEY", "npub1admin"),
+                ("GITTREE_DISPATCH_RELAY_URLS", "wss://gittr.ee"),
+                (
+                    "GITTREE_STORAGE_READ_URL",
+                    "postgres://gittree:gittree@127.0.0.1:5432/gittree",
+                ),
+            ],
+            || {
+                let config = DispatchConfig::from_env().expect("config");
+                assert_eq!(config.bind, "127.0.0.1:19091");
+                assert_eq!(config.admin_pubkey, "npub1admin");
+                assert_eq!(config.relay_urls, vec!["wss://gittr.ee".to_string()]);
+            },
+        );
+        assert_eq!(
+            std::env::var("GITTREE_DISPATCH_BIND").expect("restored bind"),
+            "127.0.0.1:19991"
+        );
+        unsafe { std::env::remove_var("GITTREE_DISPATCH_BIND") };
+    }
+
+    #[test]
+    fn from_env_treats_blank_u64_values_as_none() {
+        let mut env = base_env();
+        env.push(("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", " "));
+        env.push(("GITTREE_STORAGE_MAX_LIFETIME_SECS", ""));
+        let config = from_pairs(&env).expect("config");
+        assert_eq!(config.storage.idle_timeout_secs, None);
+        assert_eq!(config.storage.max_lifetime_secs, None);
     }
 
     #[test]
@@ -1083,6 +1141,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_with_shutdown_covers_ok_and_error_paths() {
+        let config = from_pairs(&base_env()).expect("config");
+        let ok = serve_with_shutdown(config.clone(), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        })
+        .await;
+        assert!(ok.is_ok());
+
+        let err = serve_with_shutdown(
+            config,
+            async { Err(std::io::Error::other("shutdown failure")) },
+        )
+        .await
+        .expect_err("shutdown error");
+        assert!(matches!(
+            err,
+            DispatchError::Config(message)
+            if message.contains("dispatch shutdown signal failed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn serve_starts_and_waits_for_shutdown_signal() {
+        let config = from_pairs(&base_env()).expect("config");
+        let task = tokio::spawn(super::serve(config));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        task.abort();
+        let join_error = task.await.expect_err("serve should be aborted");
+        assert!(join_error.is_cancelled());
+    }
+
+    #[tokio::test]
     async fn run_relay_subscription_processes_text_ping_and_close() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let relay_addr = listener.local_addr().expect("addr");
@@ -1092,10 +1183,8 @@ mod tests {
             let (stream, _) = listener.accept().await.expect("accept");
             let mut socket = accept_async(stream).await.expect("handshake");
             let req = socket.next().await.expect("req frame").expect("req");
-            let req_text = match req {
-                Message::Text(text) => text,
-                other => panic!("unexpected req frame: {other:?}"),
-            };
+            assert!(matches!(req, Message::Text(_)));
+            let req_text = req.into_text().expect("req text");
             assert!(req_text.contains("\"REQ\""));
             assert!(req_text.contains("npub1admin"));
 
@@ -1127,10 +1216,9 @@ mod tests {
                 .expect("pong timeout")
                 .expect("pong frame")
                 .expect("pong");
-            match next {
-                Message::Pong(returned) => assert_eq!(returned, payload),
-                other => panic!("unexpected pong response: {other:?}"),
-            }
+            assert!(matches!(next, Message::Pong(_)));
+            let returned = next.into_data();
+            assert_eq!(returned, payload);
 
             socket.send(Message::Close(None)).await.expect("send close");
         });
@@ -1154,6 +1242,112 @@ mod tests {
 
         let actor = hex::decode("22".repeat(32)).expect("actor");
         assert!(concrete_store.account_state(&actor).await.expect("account").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_relay_subscription_handles_req_send_fail_and_non_text_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let relay_addr = listener.local_addr().expect("addr");
+        let relay_url = format!("ws://{relay_addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("handshake");
+            let _ = socket.next().await.expect("req frame").expect("req");
+            socket
+                .send(Message::Text(
+                    serde_json::json!(["EVENT", "sub", {"id":"11".repeat(32),"pubkey":"22".repeat(32),"kind":7,"created_at":1,"content":"gittree account create","tags":[["p","npub1admin"]]}]).to_string(),
+                ))
+                .await
+                .expect("send ignored");
+            socket
+                .send(Message::Text(
+                    serde_json::json!(["EVENT", "sub", {"id":"11".repeat(32),"pubkey":"22".repeat(32),"kind":1,"created_at":1,"content":"gittree account nope","tags":[["p","npub1admin"]]}]).to_string(),
+                ))
+                .await
+                .expect("send rejected");
+            socket
+                .send(Message::Binary(vec![1u8, 2, 3].into()))
+                .await
+                .expect("send binary");
+            socket.send(Message::Close(None)).await.expect("close");
+        });
+
+        let store: Arc<dyn CommandStore + Send + Sync> = Arc::new(EventStore::default());
+        let filter = DispatchFilterConfig {
+            admin_pubkey: "npub1admin".to_string(),
+            relay_allowlist: vec![relay_url.clone()],
+        };
+        let relay_task = tokio::spawn(run_relay_subscription(store, filter, relay_url));
+
+        server.await.expect("server task");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        relay_task.abort();
+        let _ = relay_task.await;
+    }
+
+    #[tokio::test]
+    async fn run_relay_subscription_covers_text_none_and_processing_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let relay_addr = listener.local_addr().expect("addr");
+        let relay_url = format!("ws://{relay_addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("handshake");
+            let _ = socket.next().await.expect("req frame").expect("req");
+            socket
+                .send(Message::Text("not-json".to_string()))
+                .await
+                .expect("send non-event text");
+            socket
+                .send(Message::Text(
+                    serde_json::json!(["EVENT", "sub", {"id":"11".repeat(32),"pubkey":"22".repeat(32),"kind":1,"created_at":1,"content":"gittree account create","tags":[["p","npub1admin"]]}]).to_string(),
+                ))
+                .await
+                .expect("send event");
+            socket.send(Message::Close(None)).await.expect("close");
+        });
+
+        let store: Arc<dyn CommandStore + Send + Sync> = Arc::new(EventStore {
+            fail_insert: true,
+            ..Default::default()
+        });
+        let filter = DispatchFilterConfig {
+            admin_pubkey: "npub1admin".to_string(),
+            relay_allowlist: vec![relay_url.clone()],
+        };
+        let relay_task = tokio::spawn(run_relay_subscription(store, filter, relay_url));
+
+        server.await.expect("server task");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        relay_task.abort();
+        let _ = relay_task.await;
+    }
+
+    #[tokio::test]
+    async fn run_relay_subscription_handles_req_send_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let relay_addr = listener.local_addr().expect("addr");
+        let relay_url = format!("ws://{relay_addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("handshake");
+            socket.send(Message::Close(None)).await.expect("close");
+        });
+
+        let store: Arc<dyn CommandStore + Send + Sync> = Arc::new(EventStore::default());
+        let filter = DispatchFilterConfig {
+            admin_pubkey: "npub1admin".to_string(),
+            relay_allowlist: vec![relay_url.clone()],
+        };
+        let relay_task = tokio::spawn(run_relay_subscription(store, filter, relay_url));
+
+        server.await.expect("server task");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        relay_task.abort();
+        let _ = relay_task.await;
     }
 
     #[tokio::test]
