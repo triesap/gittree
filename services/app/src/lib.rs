@@ -29,6 +29,7 @@ const ENV_APP_BIND: &str = "GITTREE_APP_BIND";
 const ENV_APP_BASE_PATH: &str = "GITTREE_APP_BASE_PATH";
 const ENV_APP_SITE_ROOT: &str = "GITTREE_APP_SITE_ROOT";
 const ENV_APP_SITE_PKG_DIR: &str = "GITTREE_APP_SITE_PKG_DIR";
+const ENV_APP_COMMAND_ONLY: &str = "GITTREE_APP_COMMAND_ONLY";
 
 const ENV_STORAGE_READ_URL: &str = "GITTREE_STORAGE_READ_URL";
 const ENV_STORAGE_WRITE_URL: &str = "GITTREE_STORAGE_WRITE_URL";
@@ -49,6 +50,7 @@ pub struct AppServiceConfig {
     pub base_path: String,
     pub site_root: PathBuf,
     pub site_pkg_dir: String,
+    pub command_only: bool,
     pub storage: StorageConfig,
     pub ui: UiConfig,
 }
@@ -67,12 +69,14 @@ impl AppServiceConfig {
             env_path(ENV_APP_SITE_ROOT).unwrap_or_else(|| PathBuf::from(DEFAULT_APP_SITE_ROOT));
         let site_pkg_dir = env_string(ENV_APP_SITE_PKG_DIR)
             .unwrap_or_else(|| DEFAULT_APP_SITE_PKG_DIR.to_string());
+        let command_only = env_bool(ENV_APP_COMMAND_ONLY).unwrap_or(false);
 
         Ok(Self {
             bind,
             base_path,
             site_root,
             site_pkg_dir,
+            command_only,
             storage,
             ui,
         })
@@ -219,6 +223,10 @@ fn env_path(key: &'static str) -> Option<PathBuf> {
     env_string(key).map(PathBuf::from)
 }
 
+fn env_bool(key: &'static str) -> Option<bool> {
+    env_string(key).map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
 fn normalize_base_path(base_path: &str) -> String {
     let trimmed = base_path.trim();
     if trimmed.is_empty() || trimmed == "/" {
@@ -300,7 +308,11 @@ async fn serve_with(config: AppServiceConfig, init_fn: InitFn, serve_fn: ServeFn
         profiles,
         config.ui.repo_root,
         config.ui.public_git_url,
-        config.ui.auth_url,
+        if config.command_only {
+            String::new()
+        } else {
+            config.ui.auth_url
+        },
         config.ui.app_url,
         config.ui.control_url,
         config.base_path,
@@ -725,6 +737,7 @@ mod tests {
             base_path: "/".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
@@ -786,6 +799,7 @@ mod tests {
             base_path: "/".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
@@ -830,6 +844,7 @@ mod tests {
             base_path: "/".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
@@ -844,6 +859,7 @@ mod tests {
             base_path: "/".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
@@ -858,6 +874,7 @@ mod tests {
             base_path: "/".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: StorageConfig {
                 max_connections: 0,
                 min_connections: 0,
@@ -878,6 +895,7 @@ mod tests {
             base_path: "/".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
@@ -896,6 +914,7 @@ mod tests {
             base_path: "/".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: test_storage_config(),
             ui: test_ui_config(),
         };
@@ -1030,6 +1049,7 @@ mod tests {
             base_path: "/ui".to_string(),
             site_root: PathBuf::from("/tmp/gittree-dist"),
             site_pkg_dir: "pkg-assets".to_string(),
+            command_only: false,
             storage: test_storage_config(),
             ui: test_ui_config(),
         };

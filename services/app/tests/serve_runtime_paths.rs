@@ -124,6 +124,7 @@ async fn serve_runtime_path_executes_non_test_instantiations() {
         base_path: "/".to_string(),
         site_root: repo_root().join("crates/app-ui/dist"),
         site_pkg_dir: "pkg".to_string(),
+        command_only: false,
         storage: StorageConfig {
             read_connection: storage_url,
             write_connection: None,
@@ -179,6 +180,7 @@ async fn serve_runtime_path_maps_storage_config_errors_for_production_instantiat
         base_path: "/".to_string(),
         site_root: repo_root().join("crates/app-ui/dist"),
         site_pkg_dir: "pkg".to_string(),
+        command_only: false,
         storage: StorageConfig {
             read_connection: runtime_storage_url(),
             write_connection: None,

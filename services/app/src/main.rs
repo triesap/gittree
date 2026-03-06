@@ -114,6 +114,7 @@ mod tests {
             base_path: "/ui".to_string(),
             site_root: PathBuf::from("crates/app-ui/dist"),
             site_pkg_dir: "pkg".to_string(),
+            command_only: false,
             storage: invalid_storage_config(),
             ui: UiConfig {
                 repo_root: PathBuf::from("."),
