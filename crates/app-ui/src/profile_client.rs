@@ -1,5 +1,5 @@
 use crate::auth::auth_header;
-use gittree_app_core::{Nip98Event, Profile};
+use gittree_app_core::{Nip98Event, Profile, ProfileVisibility, pubkey_bytes_from_npub};
 use serde::Deserialize;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -8,6 +8,18 @@ use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
 #[derive(Clone, Debug, Deserialize)]
 struct ProfileErrorResponse {
     pub error: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct StateProfileResponse {
+    pub npub: String,
+    pub display_name: Option<String>,
+    pub bio: Option<String>,
+    pub avatar_url: Option<String>,
+    pub website_url: Option<String>,
+    pub location: Option<String>,
+    pub visibility: String,
+    pub updated_at: i64,
 }
 
 #[derive(Debug)]
@@ -41,44 +53,17 @@ pub fn profile_endpoint(auth_url: &str) -> Option<String> {
     Some(format!("{}/v1/profile", trimmed.trim_end_matches('/')))
 }
 
-pub fn public_profile_endpoint(auth_url: &str, npub: &str) -> Option<String> {
-    let trimmed = auth_url.trim();
+pub fn state_profile_endpoint(state_url: &str, npub: &str) -> Option<String> {
+    let trimmed = state_url.trim();
     let npub = npub.trim();
     if trimmed.is_empty() || npub.is_empty() {
         return None;
     }
     Some(format!(
-        "{}/v1/profile/{}",
+        "{}/v1/profiles/{}",
         trimmed.trim_end_matches('/'),
         npub
     ))
-}
-
-pub async fn fetch_profile(
-    auth_endpoint: &str,
-    event: Nip98Event,
-) -> Result<Profile, ProfileClientError> {
-    let header = auth_header(&event).map_err(|err| ProfileClientError::Request(err.to_string()))?;
-    let init = RequestInit::new();
-    init.set_method("GET");
-    init.set_mode(RequestMode::Cors);
-
-    let headers = Headers::new().map_err(request_error)?;
-    headers
-        .set("Authorization", &header)
-        .map_err(request_error)?;
-    headers
-        .set("Accept", "application/json")
-        .map_err(request_error)?;
-    init.set_headers(&headers);
-
-    let request = Request::new_with_str_and_init(auth_endpoint, &init).map_err(request_error)?;
-    let window = web_sys::window().ok_or(ProfileClientError::MissingWindow)?;
-    let response = JsFuture::from(window.fetch_with_request(&request))
-        .await
-        .map_err(request_error)?;
-    let response: Response = response.dyn_into().map_err(request_error)?;
-    read_profile_response(response).await
 }
 
 pub async fn fetch_public_profile(auth_endpoint: &str) -> Result<Profile, ProfileClientError> {
@@ -142,11 +127,59 @@ async fn read_profile_response(response: Response) -> Result<Profile, ProfileCli
 
 fn parse_profile_response(status: u16, body: &str) -> Result<Profile, ProfileClientError> {
     if (200..300).contains(&status) {
-        serde_json::from_str::<Profile>(body)
-            .map_err(|err| ProfileClientError::InvalidResponse(err.to_string()))
+        parse_profile_success(body)
     } else {
         Err(ProfileClientError::ProfileFailed(parse_profile_error(body)))
     }
+}
+
+fn parse_profile_success(body: &str) -> Result<Profile, ProfileClientError> {
+    if let Ok(profile) = serde_json::from_str::<Profile>(body) {
+        return Ok(profile);
+    }
+    let state = serde_json::from_str::<StateProfileResponse>(body)
+        .map_err(|err| ProfileClientError::InvalidResponse(err.to_string()))?;
+    state_profile_to_profile(state)
+}
+
+fn state_profile_to_profile(state: StateProfileResponse) -> Result<Profile, ProfileClientError> {
+    let npub = state.npub.trim();
+    let pubkey_bytes = pubkey_bytes_from_npub(npub).map_err(|err| {
+        ProfileClientError::InvalidResponse(format!("invalid npub in state profile: {err}"))
+    })?;
+    let pubkey = hex::encode(pubkey_bytes);
+    let visibility = parse_visibility(&state.visibility)?;
+    Ok(Profile {
+        pubkey: pubkey.clone(),
+        username: username_from_pubkey(&pubkey),
+        display_name: state.display_name,
+        bio: state.bio,
+        avatar_url: state.avatar_url,
+        website_url: state.website_url,
+        location: state.location,
+        visibility,
+        created_at: state.updated_at,
+        updated_at: state.updated_at,
+    })
+}
+
+fn parse_visibility(value: &str) -> Result<ProfileVisibility, ProfileClientError> {
+    match value {
+        "public" => Ok(ProfileVisibility::Public),
+        "private" => Ok(ProfileVisibility::Private),
+        other => Err(ProfileClientError::InvalidResponse(format!(
+            "invalid profile visibility: {other}"
+        ))),
+    }
+}
+
+fn username_from_pubkey(pubkey: &str) -> String {
+    if pubkey.len() < 24 {
+        return format!("gt_{pubkey}");
+    }
+    let prefix = &pubkey[..12];
+    let suffix = &pubkey[pubkey.len() - 12..];
+    format!("gt_{prefix}{suffix}")
 }
 
 fn parse_profile_error(body: &str) -> String {
@@ -172,7 +205,7 @@ fn js_error(value: JsValue) -> String {
 mod tests {
     use super::{
         ProfileClientError, parse_profile_error, parse_profile_response, profile_endpoint,
-        public_profile_endpoint,
+        state_profile_endpoint,
     };
     use gittree_app_core::{Profile, ProfileVisibility};
 
@@ -188,16 +221,16 @@ mod tests {
     }
 
     #[test]
-    fn public_profile_endpoint_joins_paths() {
+    fn state_profile_endpoint_joins_paths() {
         let endpoint =
-            public_profile_endpoint("http://localhost:8089", "npub1test").expect("endpoint");
-        assert_eq!(endpoint, "http://localhost:8089/v1/profile/npub1test");
+            state_profile_endpoint("http://localhost:8082", "npub1test").expect("endpoint");
+        assert_eq!(endpoint, "http://localhost:8082/v1/profiles/npub1test");
     }
 
     #[test]
-    fn public_profile_endpoint_rejects_empty() {
-        assert!(public_profile_endpoint("", "npub1").is_none());
-        assert!(public_profile_endpoint("http://localhost:8089", "").is_none());
+    fn state_profile_endpoint_rejects_empty() {
+        assert!(state_profile_endpoint("", "npub1").is_none());
+        assert!(state_profile_endpoint("http://localhost:8082", "").is_none());
     }
 
     #[test]
@@ -227,6 +260,30 @@ mod tests {
     fn parse_profile_response_rejects_invalid_success_json() {
         let error = parse_profile_response(200, "{}").expect_err("invalid response");
         assert!(matches!(error, ProfileClientError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn parse_profile_response_decodes_state_profile_shape() {
+        let body = r#"{
+            "npub":"npub1gjttreegkzys8jlhdnfm3qe39h2gka79cpndd0jsms5fk7tuhcnsdw56jq",
+            "display_name":"gittree",
+            "bio":"state profile",
+            "avatar_url":null,
+            "website_url":"https://gittr.ee",
+            "location":"internet",
+            "visibility":"public",
+            "updated_at":1700000000
+        }"#;
+        let profile = parse_profile_response(200, body).expect("profile");
+        assert_eq!(
+            profile.pubkey,
+            "4496b1e728b08903cbf76cd3b883312dd48b77c5c066d6be50dc289b797cbe27"
+        );
+        assert_eq!(profile.username, "gt_4496b1e728b0289b797cbe27");
+        assert_eq!(profile.display_name.as_deref(), Some("gittree"));
+        assert_eq!(profile.visibility, ProfileVisibility::Public);
+        assert_eq!(profile.created_at, 1_700_000_000);
+        assert_eq!(profile.updated_at, 1_700_000_000);
     }
 
     #[test]

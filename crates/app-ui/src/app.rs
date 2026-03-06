@@ -9,7 +9,7 @@ use crate::control_client::{ControlRepoInput, ControlRepoResponse, create_repo};
 use crate::control_token::{clear_control_token, load_control_token, store_control_token};
 use crate::i18n::app_i18n_init;
 use crate::profile_client::{
-    fetch_profile, fetch_public_profile, profile_endpoint, public_profile_endpoint, update_profile,
+    fetch_public_profile, profile_endpoint, state_profile_endpoint, update_profile,
 };
 use crate::profile_validation::validate_profile_update;
 use crate::server::{list_repositories, repo_detail};
@@ -45,6 +45,7 @@ pub fn GittreeApp() -> impl IntoView {
     provide_context(AppBasePath(base_path.clone()));
     let auth_url = resolve_auth_url();
     let app_url = resolve_app_url();
+    let state_url = resolve_state_url();
     let control_url = resolve_control_url();
 
     view! {
@@ -55,6 +56,7 @@ pub fn GittreeApp() -> impl IntoView {
                 data-base-path=base_path
                 data-auth-url=auth_url
                 data-app-url=app_url
+                data-state-url=state_url
                 data-control-url=control_url
             >
                 <Routes fallback=|| view! { <NotFoundPage /> }>
@@ -352,12 +354,13 @@ fn SignupPage() -> impl IntoView {
 fn ProfilePage() -> impl IntoView {
     let base_path = app_base_path();
     let auth_url = resolve_auth_url();
-    if !auth_url_configured(&auth_url) {
+    let state_url = resolve_state_url();
+    if !state_url_configured(&state_url) {
         return view! {
             <section class="gt-panel">
                 <h1 class="gt-title">{t!("app.profile.title")}</h1>
                 <p class="gt-tagline">{t!("app.profile.tagline")}</p>
-                <p class="gt-meta">{t!("app.signup.missing_auth")}</p>
+                <p class="gt-meta">{t!("app.profile.public.error")} " missing state url"</p>
             </section>
         }
         .into_any();
@@ -414,22 +417,22 @@ fn ProfilePage() -> impl IntoView {
     let has_validation_errors = move || !validation_errors.get().is_empty();
 
     let fetch_profile_action = Callback::new({
-        let auth_endpoint = auth_endpoint.clone();
+        let state_url = state_url.clone();
         let set_profile = set_profile.clone();
         let set_error = set_error.clone();
         let set_status = set_status.clone();
         let set_busy = set_busy.clone();
         let set_fetch_attempted = set_fetch_attempted.clone();
         move |()| {
-            if auth_endpoint.is_empty() {
-                set_error.set(Some(t!("app.profile.missing_auth").to_string()));
-                return;
-            }
             let Some(session) = session.get() else {
                 return;
             };
+            let Some(state_endpoint) = state_profile_endpoint(&state_url, &session.npub) else {
+                set_error.set(Some("missing profile endpoint".to_string()));
+                return;
+            };
             set_fetch_attempted.set(true);
-            let auth_endpoint = auth_endpoint.clone();
+            let state_endpoint = state_endpoint.clone();
             let set_profile = set_profile.clone();
             let set_error = set_error.clone();
             let set_status = set_status.clone();
@@ -438,17 +441,11 @@ fn ProfilePage() -> impl IntoView {
                 set_busy.set(true);
                 set_error.set(None);
                 set_status.set(Some(t!("app.profile.loading").to_string()));
-
-                let now = unix_timestamp();
-                let event = session_sign_nip98(&session, "GET", &auth_endpoint, None, now).await;
-                match event {
-                    Ok(event) => match fetch_profile(&auth_endpoint, event).await {
-                        Ok(profile) => {
-                            set_profile.set(Some(profile));
-                            set_status.set(Some(t!("app.profile.loaded").to_string()));
-                        }
-                        Err(err) => set_error.set(Some(err.to_string())),
-                    },
+                match fetch_public_profile(&state_endpoint).await {
+                    Ok(profile) => {
+                        set_profile.set(Some(profile));
+                        set_status.set(Some(t!("app.profile.loaded").to_string()));
+                    }
                     Err(err) => set_error.set(Some(err.to_string())),
                 }
                 set_busy.set(false);
@@ -461,7 +458,7 @@ fn ProfilePage() -> impl IntoView {
         if !fetch_attempted.get()
             && profile.get().is_none()
             && session.get().is_some()
-            && auth_ready
+            && state_url_configured(&state_url)
             && !busy.get()
         {
             fetch_profile_on_mount.run(());
@@ -661,7 +658,7 @@ fn ProfilePage() -> impl IntoView {
                                 class="gt-button"
                                 type="button"
                                 on:click=move |_| save_profile_action.run(())
-                                disabled=move || busy.get() || has_validation_errors()
+                                disabled=move || busy.get() || has_validation_errors() || !auth_ready
                             >
                                 {t!("app.profile.save")}
                             </button>
@@ -787,7 +784,7 @@ fn AccountPage() -> impl IntoView {
 #[component]
 fn PublicProfilePage() -> impl IntoView {
     let base_path = app_base_path();
-    let auth_url = resolve_auth_url();
+    let state_url = resolve_state_url();
     let app_url = resolve_app_url();
     let params = use_params_map();
     let list_href = base_href(&base_path);
@@ -798,7 +795,7 @@ fn PublicProfilePage() -> impl IntoView {
 
     create_effect(move |_| {
         let npub = params.get().get("npub").unwrap_or_default();
-        let auth_url = auth_url.clone();
+        let state_url = state_url.clone();
         let app_url = app_url.clone();
         let set_profile = set_profile.clone();
         let set_repos = set_repos.clone();
@@ -815,12 +812,13 @@ fn PublicProfilePage() -> impl IntoView {
 
         set_loading.set(true);
         leptos::task::spawn_local(async move {
-            if let Some(endpoint) = public_profile_endpoint(&auth_url, &npub) {
-                let profile_result = fetch_public_profile(&endpoint)
+            let profile_result = match state_profile_endpoint(&state_url, &npub) {
+                Some(endpoint) => fetch_public_profile(&endpoint)
                     .await
-                    .map_err(|err| err.to_string());
-                set_profile.set(Some(profile_result));
-            }
+                    .map_err(|err| err.to_string()),
+                None => Err("missing profile endpoint".to_string()),
+            };
+            set_profile.set(Some(profile_result));
 
             let repos_result = {
                 let endpoint = repo_list_by_owner_endpoint(&app_url, &npub);
@@ -1478,6 +1476,13 @@ fn resolve_app_url() -> String {
         .unwrap_or_default()
 }
 
+fn resolve_state_url() -> String {
+    state_url_from_context()
+        .or_else(state_url_from_dom)
+        .or_else(state_url_from_meta)
+        .unwrap_or_default()
+}
+
 fn resolve_control_url() -> String {
     control_url_from_context()
         .or_else(control_url_from_dom)
@@ -1522,6 +1527,18 @@ fn app_url_from_context() -> Option<String> {
 }
 
 #[cfg(feature = "ssr")]
+fn state_url_from_context() -> Option<String> {
+    use crate::AppUiState;
+
+    use_context::<AppUiState>().map(|state| state.state_url)
+}
+
+#[cfg(not(feature = "ssr"))]
+fn state_url_from_context() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
 fn control_url_from_context() -> Option<String> {
     use crate::AppUiState;
 
@@ -1561,6 +1578,15 @@ fn app_url_from_dom() -> Option<String> {
 }
 
 #[cfg(not(feature = "ssr"))]
+fn state_url_from_dom() -> Option<String> {
+    use leptos::prelude::window;
+
+    let document = window().document()?;
+    let element = document.get_element_by_id("gittree-app")?;
+    element.get_attribute("data-state-url")
+}
+
+#[cfg(not(feature = "ssr"))]
 fn auth_url_from_meta() -> Option<String> {
     meta_content("gittree-auth-url")
 }
@@ -1568,6 +1594,11 @@ fn auth_url_from_meta() -> Option<String> {
 #[cfg(not(feature = "ssr"))]
 fn app_url_from_meta() -> Option<String> {
     meta_content("gittree-app-url")
+}
+
+#[cfg(not(feature = "ssr"))]
+fn state_url_from_meta() -> Option<String> {
+    meta_content("gittree-state-url")
 }
 
 #[cfg(not(feature = "ssr"))]
@@ -1617,6 +1648,11 @@ fn app_url_from_dom() -> Option<String> {
 }
 
 #[cfg(feature = "ssr")]
+fn state_url_from_dom() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
 fn control_url_from_dom() -> Option<String> {
     None
 }
@@ -1628,6 +1664,11 @@ fn auth_url_from_meta() -> Option<String> {
 
 #[cfg(feature = "ssr")]
 fn app_url_from_meta() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn state_url_from_meta() -> Option<String> {
     None
 }
 
@@ -1662,6 +1703,10 @@ fn normalize_base_path(base_path: &str) -> String {
 
 fn auth_url_configured(auth_url: &str) -> bool {
     !auth_url.trim().is_empty()
+}
+
+fn state_url_configured(state_url: &str) -> bool {
+    !state_url.trim().is_empty()
 }
 
 fn base_href(base_path: &str) -> String {
@@ -1889,7 +1934,7 @@ mod tests {
         AuthSource, HealthState, account_href, auth_source_label, auth_url_configured, base_href,
         health_endpoint, normalize_base_path, persist_session, profile_href, public_profile_href,
         render_health, repo_href, repo_list_by_owner_endpoint, repo_list_endpoint, signup_href,
-        test_href,
+        state_url_configured, test_href,
     };
 
     #[test]
@@ -1935,6 +1980,13 @@ mod tests {
         assert!(!auth_url_configured(""));
         assert!(!auth_url_configured("   "));
         assert!(auth_url_configured("http://localhost:8089"));
+    }
+
+    #[test]
+    fn state_url_configured_requires_non_empty_trimmed_value() {
+        assert!(!state_url_configured(""));
+        assert!(!state_url_configured("   "));
+        assert!(state_url_configured("http://localhost:8082"));
     }
 
     #[test]
