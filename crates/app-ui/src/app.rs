@@ -78,13 +78,12 @@ fn RepoListPage() -> impl IntoView {
     let profile_href = profile_href(&base_path);
     let account_href = account_href(&base_path);
     let test_href = test_href(&base_path);
+    let auth_enabled = auth_url_configured(&resolve_auth_url());
     let repos = Resource::new(|| (), |_| list_repositories());
 
-    view! {
-        <section class="gt-panel">
-            <h1 class="gt-title">{t!("app.title")}</h1>
-            <p class="gt-tagline">{t!("app.tagline")}</p>
-            <p class="gt-meta">
+    let nav_links = if auth_enabled {
+        view! {
+            <>
                 <a class="gt-link" href=signup_href>{t!("app.signup.cta")}</a>
                 " · "
                 <a class="gt-link" href=profile_href>{t!("app.profile.cta")}</a>
@@ -92,7 +91,18 @@ fn RepoListPage() -> impl IntoView {
                 <a class="gt-link" href=account_href>{t!("app.account.cta")}</a>
                 " · "
                 <a class="gt-link" href=test_href>{t!("app.test.title")}</a>
-            </p>
+            </>
+        }
+        .into_any()
+    } else {
+        view! { <a class="gt-link" href=test_href>{t!("app.test.title")}</a> }.into_any()
+    };
+
+    view! {
+        <section class="gt-panel">
+            <h1 class="gt-title">{t!("app.title")}</h1>
+            <p class="gt-tagline">{t!("app.tagline")}</p>
+            <p class="gt-meta">{nav_links}</p>
             <Suspense fallback=|| view! { <p class="gt-meta">{t!("app.repo.loading")}</p> }>
                 {move || match repos.get() {
                     None => view! { <p class="gt-meta">{t!("app.repo.loading")}</p> }.into_any(),
@@ -179,6 +189,20 @@ fn RepoDetailPage() -> impl IntoView {
 fn SignupPage() -> impl IntoView {
     let base_path = app_base_path();
     let auth_url = resolve_auth_url();
+    let list_href = base_href(&base_path);
+    if !auth_url_configured(&auth_url) {
+        return view! {
+            <section class="gt-panel">
+                <h1 class="gt-title">{t!("app.signup.title")}</h1>
+                <p class="gt-tagline">{t!("app.signup.tagline")}</p>
+                <p class="gt-meta">{t!("app.signup.missing_auth")}</p>
+                <p>
+                    <a class="gt-link" href=list_href>{t!("app.signup.back")}</a>
+                </p>
+            </section>
+        }
+        .into_any();
+    }
     let auth_endpoint = signup_endpoint(&auth_url);
     let auth_ready = auth_endpoint.is_some();
     let auth_endpoint = auth_endpoint.unwrap_or_default();
@@ -266,8 +290,6 @@ fn SignupPage() -> impl IntoView {
         });
     };
 
-    let list_href = base_href(&base_path);
-
     view! {
         <section class="gt-panel">
             <h1 class="gt-title">{t!("app.signup.title")}</h1>
@@ -323,13 +345,24 @@ fn SignupPage() -> impl IntoView {
             </p>
         </section>
     }
+    .into_any()
 }
 
 #[component]
 fn ProfilePage() -> impl IntoView {
     let base_path = app_base_path();
-    let signup_href = signup_href(&base_path);
     let auth_url = resolve_auth_url();
+    if !auth_url_configured(&auth_url) {
+        return view! {
+            <section class="gt-panel">
+                <h1 class="gt-title">{t!("app.profile.title")}</h1>
+                <p class="gt-tagline">{t!("app.profile.tagline")}</p>
+                <p class="gt-meta">{t!("app.signup.missing_auth")}</p>
+            </section>
+        }
+        .into_any();
+    }
+    let signup_href = signup_href(&base_path);
     let auth_endpoint = profile_endpoint(&auth_url);
     let auth_ready = auth_endpoint.is_some();
     let auth_endpoint = auth_endpoint.unwrap_or_default();
@@ -658,11 +691,23 @@ fn ProfilePage() -> impl IntoView {
             }}
         </section>
     }
+    .into_any()
 }
 
 #[component]
 fn AccountPage() -> impl IntoView {
     let base_path = app_base_path();
+    let auth_url = resolve_auth_url();
+    if !auth_url_configured(&auth_url) {
+        return view! {
+            <section class="gt-panel">
+                <h1 class="gt-title">{t!("app.account.title")}</h1>
+                <p class="gt-tagline">{t!("app.account.tagline")}</p>
+                <p class="gt-meta">{t!("app.signup.missing_auth")}</p>
+            </section>
+        }
+        .into_any();
+    }
     let signup_href = signup_href(&base_path);
     let profile_href = profile_href(&base_path);
     let (session, set_session) = signal::<Option<AuthSession>>(None);
@@ -736,6 +781,7 @@ fn AccountPage() -> impl IntoView {
             }}
         </section>
     }
+    .into_any()
 }
 
 #[component]
@@ -749,7 +795,6 @@ fn PublicProfilePage() -> impl IntoView {
     let (profile, set_profile) = signal::<Option<Result<Profile, String>>>(None);
     let (repos, set_repos) = signal::<Option<Result<RepoListResponse, String>>>(None);
     let (loading, set_loading) = signal(false);
-    let missing_auth_message = t!("app.profile.missing_auth").to_string();
 
     create_effect(move |_| {
         let npub = params.get().get("npub").unwrap_or_default();
@@ -758,7 +803,6 @@ fn PublicProfilePage() -> impl IntoView {
         let set_profile = set_profile.clone();
         let set_repos = set_repos.clone();
         let set_loading = set_loading.clone();
-        let missing_auth_message = missing_auth_message.clone();
 
         set_profile.set(None);
         set_repos.set(None);
@@ -771,13 +815,12 @@ fn PublicProfilePage() -> impl IntoView {
 
         set_loading.set(true);
         leptos::task::spawn_local(async move {
-            let profile_result = match public_profile_endpoint(&auth_url, &npub) {
-                Some(endpoint) => fetch_public_profile(&endpoint)
+            if let Some(endpoint) = public_profile_endpoint(&auth_url, &npub) {
+                let profile_result = fetch_public_profile(&endpoint)
                     .await
-                    .map_err(|err| err.to_string()),
-                None => Err(missing_auth_message),
-            };
-            set_profile.set(Some(profile_result));
+                    .map_err(|err| err.to_string());
+                set_profile.set(Some(profile_result));
+            }
 
             let repos_result = {
                 let endpoint = repo_list_by_owner_endpoint(&app_url, &npub);
@@ -1617,6 +1660,10 @@ fn normalize_base_path(base_path: &str) -> String {
     }
 }
 
+fn auth_url_configured(auth_url: &str) -> bool {
+    !auth_url.trim().is_empty()
+}
+
 fn base_href(base_path: &str) -> String {
     if base_path == "/" {
         "/".to_string()
@@ -1839,9 +1886,10 @@ fn event_checked(event: &leptos::ev::Event) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthSource, HealthState, account_href, auth_source_label, base_href, health_endpoint,
-        normalize_base_path, persist_session, profile_href, public_profile_href, render_health,
-        repo_href, repo_list_by_owner_endpoint, repo_list_endpoint, signup_href, test_href,
+        AuthSource, HealthState, account_href, auth_source_label, auth_url_configured, base_href,
+        health_endpoint, normalize_base_path, persist_session, profile_href, public_profile_href,
+        render_health, repo_href, repo_list_by_owner_endpoint, repo_list_endpoint, signup_href,
+        test_href,
     };
 
     #[test]
@@ -1880,6 +1928,13 @@ mod tests {
             health_endpoint("http://localhost:8090/"),
             "http://localhost:8090/health"
         );
+    }
+
+    #[test]
+    fn auth_url_configured_requires_non_empty_trimmed_value() {
+        assert!(!auth_url_configured(""));
+        assert!(!auth_url_configured("   "));
+        assert!(auth_url_configured("http://localhost:8089"));
     }
 
     #[test]
