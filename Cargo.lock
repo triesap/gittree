@@ -2108,6 +2108,7 @@ name = "gittree-dispatch"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "gittree-core",
  "gittree-observability",
  "serde",
  "serde_json",

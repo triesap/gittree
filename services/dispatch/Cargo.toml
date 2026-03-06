@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15"
+gittree-core = { path = "../../crates/core" }
 gittree-observability = { path = "../../crates/observability" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }

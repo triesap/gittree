@@ -1,4 +1,5 @@
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
+pub use gittree_core::{CommandParseError, ParsedCommand, parse_cli_command};
 
 const ENV_BIND: &str = "GITTREE_DISPATCH_BIND";
 const ENV_ADMIN_PUBKEY: &str = "GITTREE_DISPATCH_ADMIN_PUBKEY";
@@ -92,6 +93,10 @@ pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
     Ok(())
 }
 
+pub fn parse_command_content(content: &str) -> Result<ParsedCommand, CommandParseError> {
+    parse_cli_command(content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DispatchConfig, DispatchError, parse_csv};
@@ -107,6 +112,12 @@ mod tests {
     fn parse_csv_handles_empty_segments() {
         let values = parse_csv("a, ,b,, c ");
         assert_eq!(values, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_command_content_delegates_to_core_parser() {
+        let command = super::parse_command_content("gittree account create").expect("command");
+        assert_eq!(command.action, "create");
     }
 
     #[test]
