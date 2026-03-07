@@ -1505,6 +1505,56 @@ mod tests {
     }
 
     #[test]
+    fn storage_from_env_covers_success_and_invalid_config_paths() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var(
+            ENV_STORAGE_READ_URL,
+            "postgres://user:pass@localhost:5432/gittree",
+            &mut || {
+                with_env_var(
+                    "GITTREE_STORAGE_WRITE_URL",
+                    "postgres://user:pass@localhost:5432/gittree",
+                    &mut || {
+                        with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "5", &mut || {
+                            with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "1", &mut || {
+                                with_env_var("GITTREE_STORAGE_APP_NAME", "state-tests", &mut || {
+                                    let cfg = super::storage_from_env().expect("storage config");
+                                    assert!(cfg.write_connection.is_some());
+                                    assert_eq!(cfg.max_connections, 5);
+                                    assert_eq!(cfg.min_connections, 1);
+                                    assert_eq!(
+                                        cfg.application_name.as_deref(),
+                                        Some("state-tests")
+                                    );
+                                });
+                            });
+                        });
+                    },
+                );
+
+                with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", &mut || {
+                    with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", &mut || {
+                        let err = super::storage_from_env().expect_err("invalid config");
+                        assert!(matches!(err, StateConfigError::Storage(StorageConfigError::InvalidConfig(_))));
+                    });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn parse_npub_param_covers_valid_and_invalid_paths() {
+        let pubkey = vec![0x11; 32];
+        let npub = gittree_app_core::npub_from_bytes(&pubkey).expect("npub");
+        let parsed = super::parse_npub_param(&npub).expect("pubkey");
+        assert_eq!(parsed, pubkey);
+
+        let err = super::parse_npub_param("not-an-npub").expect_err("invalid npub");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn config_uses_default_min_connections_when_empty() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         with_env_var(
