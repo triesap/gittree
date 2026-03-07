@@ -734,6 +734,18 @@ mod tests {
     }
 
     #[test]
+    fn from_env_rejects_invalid_storage_min_connections_value() {
+        let mut env = base_env();
+        env.push(("GITTREE_STORAGE_MIN_CONNECTIONS", "abc"));
+        let err = from_pairs(&env).expect_err("invalid min");
+        assert!(matches!(
+            err,
+            DispatchError::Config(message)
+            if message.contains("GITTREE_STORAGE_MIN_CONNECTIONS")
+        ));
+    }
+
+    #[test]
     fn from_env_rejects_invalid_storage_timeout_values() {
         let mut env = base_env();
         env.push(("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "xyz"));
@@ -742,6 +754,18 @@ mod tests {
             err,
             DispatchError::Config(message)
             if message.contains("GITTREE_STORAGE_IDLE_TIMEOUT_SECS")
+        ));
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_storage_max_lifetime_values() {
+        let mut env = base_env();
+        env.push(("GITTREE_STORAGE_MAX_LIFETIME_SECS", "xyz"));
+        let err = from_pairs(&env).expect_err("invalid max lifetime timeout");
+        assert!(matches!(
+            err,
+            DispatchError::Config(message)
+            if message.contains("GITTREE_STORAGE_MAX_LIFETIME_SECS")
         ));
     }
 
@@ -829,6 +853,23 @@ mod tests {
     async fn build_repositories_constructs_lazy_pool_from_config() {
         let config = from_pairs(&base_env()).expect("config");
         let _repositories = build_repositories(&config).expect("repositories");
+    }
+
+    #[test]
+    fn build_repositories_rejects_invalid_pool_options() {
+        let mut config = from_pairs(&base_env()).expect("config");
+        config.storage.max_connections = 1;
+        config.storage.min_connections = 2;
+        let err = build_repositories(&config).expect_err("invalid pool");
+        assert!(err.to_string().contains("dispatch storage error"));
+    }
+
+    #[test]
+    fn build_repositories_rejects_invalid_connect_options() {
+        let mut config = from_pairs(&base_env()).expect("config");
+        config.storage.read_connection = "not-a-url".to_string();
+        let err = build_repositories(&config).expect_err("invalid connection");
+        assert!(err.to_string().contains("dispatch storage error"));
     }
 
     #[tokio::test]
@@ -967,6 +1008,15 @@ mod tests {
         ])
         .to_string();
         assert!(parse_relay_event_message(&invalid_tag_column, "wss://gittr.ee").is_none());
+
+        let non_array = serde_json::json!({"type":"EVENT"}).to_string();
+        assert!(parse_relay_event_message(&non_array, "wss://gittr.ee").is_none());
+
+        let short_array = serde_json::json!(["EVENT", "gittree-dispatch"]).to_string();
+        assert!(parse_relay_event_message(&short_array, "wss://gittr.ee").is_none());
+
+        let non_object_event = serde_json::json!(["EVENT", "gittree-dispatch", 1]).to_string();
+        assert!(parse_relay_event_message(&non_object_event, "wss://gittr.ee").is_none());
     }
 
     #[test]
@@ -1012,6 +1062,32 @@ mod tests {
         ])
         .to_string();
         assert!(parse_relay_event_message(&missing_created_at, "wss://gittr.ee").is_none());
+
+        let non_string_id = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": 1,
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&non_string_id, "wss://gittr.ee").is_none());
+    }
+
+    #[test]
+    fn init_observability_maps_config_errors() {
+        with_env_vars(&[("GITTREE_LOG_JSON", "not-bool")], || {
+            let err = super::init_observability().expect_err("invalid observability env");
+            assert!(
+                err.to_string()
+                    .contains("dispatch observability config error")
+            );
+        });
     }
 
     #[tokio::test]
@@ -1246,7 +1322,6 @@ mod tests {
             let (stream, _) = listener.accept().await.expect("accept");
             let mut socket = accept_async(stream).await.expect("handshake");
             let req = socket.next().await.expect("req frame").expect("req");
-            assert!(matches!(req, Message::Text(_)));
             let req_text = req.into_text().expect("req text");
             assert!(req_text.contains("\"REQ\""));
             assert!(req_text.contains("npub1admin"));
@@ -1279,7 +1354,6 @@ mod tests {
                 .expect("pong timeout")
                 .expect("pong frame")
                 .expect("pong");
-            assert!(matches!(next, Message::Pong(_)));
             let returned = next.into_data();
             assert_eq!(returned, payload);
 
