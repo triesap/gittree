@@ -299,11 +299,11 @@ fn build_relay_req_message(admin_pubkey: &str) -> String {
 fn parse_relay_event_message(message: &str, relay_url: &str) -> Option<RelayEventEnvelope> {
     let value = serde_json::from_str::<serde_json::Value>(message).ok()?;
     let parts = value.as_array()?;
-    if parts.len() < 3 || parts.first()?.as_str()? != "EVENT" {
+    if parts.len() < 3 || parts[0].as_str()? != "EVENT" {
         return None;
     }
 
-    let event = parts.get(2)?.as_object()?;
+    let event = parts[2].as_object()?;
     let id = event.get("id")?.as_str()?.to_string();
     let pubkey = event.get("pubkey")?.as_str()?.to_string();
     let kind = event.get("kind")?.as_u64()? as u32;
@@ -448,6 +448,26 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+
+    fn trace_guard() -> tracing::subscriber::DefaultGuard {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_test_writer()
+            .without_time()
+            .finish();
+        tracing::subscriber::set_default(subscriber)
+    }
+
+    fn is_storage_error(err: &DispatchError) -> bool {
+        matches!(err, DispatchError::Storage(_))
+    }
+
+    fn assert_trace_enabled_levels() {
+        assert!(tracing::enabled!(tracing::Level::INFO));
+        assert!(tracing::enabled!(tracing::Level::DEBUG));
+        assert!(tracing::enabled!(tracing::Level::WARN));
+        assert!(tracing::enabled!(tracing::Level::ERROR));
+    }
 
     #[derive(Default)]
     struct ScriptedWriter {
@@ -1095,6 +1115,20 @@ mod tests {
         .to_string();
         assert!(parse_relay_event_message(&missing_created_at, "wss://gittr.ee").is_none());
 
+        let missing_kind = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&missing_kind, "wss://gittr.ee").is_none());
+
         let non_string_id = serde_json::json!([
             "EVENT",
             "gittree-dispatch",
@@ -1397,8 +1431,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn serve_with_shutdown_covers_ok_and_error_paths() {
+        let _guard = trace_guard();
+        assert_trace_enabled_levels();
         let config = from_pairs(&base_env()).expect("config");
         let ok = serve_with_shutdown(
             config.clone(),
@@ -1444,7 +1480,7 @@ mod tests {
         let err = serve_with_init(config, || Ok(()), Box::pin(tokio::signal::ctrl_c()))
             .await
             .expect_err("serve should return an error");
-        assert!(matches!(err, DispatchError::Storage(_)));
+        assert!(is_storage_error(&err));
     }
 
     #[tokio::test]
@@ -1469,8 +1505,10 @@ mod tests {
         assert!(matches!(err, DispatchError::Config(message) if message == "init failed"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn run_relay_subscription_processes_text_ping_and_close() {
+        let _guard = trace_guard();
+        assert_trace_enabled_levels();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let relay_addr = listener.local_addr().expect("addr");
         let relay_url = format!("ws://{relay_addr}");
@@ -1538,8 +1576,10 @@ mod tests {
         assert!(concrete_store.account_state(&actor).await.expect("account").is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn run_relay_subscription_handles_req_send_fail_and_non_text_messages() {
+        let _guard = trace_guard();
+        assert_trace_enabled_levels();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let relay_addr = listener.local_addr().expect("addr");
         let relay_url = format!("ws://{relay_addr}");
@@ -1580,8 +1620,10 @@ mod tests {
         let _ = relay_task.await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn run_relay_subscription_covers_text_none_and_processing_error() {
+        let _guard = trace_guard();
+        assert_trace_enabled_levels();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let relay_addr = listener.local_addr().expect("addr");
         let relay_url = format!("ws://{relay_addr}");
@@ -1619,8 +1661,10 @@ mod tests {
         let _ = relay_task.await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn run_relay_subscription_handles_req_send_failure() {
+        let _guard = trace_guard();
+        assert_trace_enabled_levels();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let relay_addr = listener.local_addr().expect("addr");
         let relay_url = format!("ws://{relay_addr}");
@@ -1644,8 +1688,10 @@ mod tests {
         let _ = relay_task.await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn process_relay_connection_covers_send_fail_pong_fail_and_reader_error() {
+        let _guard = trace_guard();
+        assert_trace_enabled_levels();
         let filter = DispatchFilterConfig {
             admin_pubkey: "npub1admin".to_string(),
             relay_allowlist: vec!["wss://gittr.ee".to_string()],
@@ -1790,8 +1836,10 @@ mod tests {
         assert!(error_writer.send_count >= 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn run_relay_subscription_connect_error_loop_is_abortable() {
+        let _guard = trace_guard();
+        assert_trace_enabled_levels();
         let store: Arc<dyn CommandStore + Send + Sync> = Arc::new(EventStore::default());
         let filter = DispatchFilterConfig {
             admin_pubkey: "npub1admin".to_string(),
@@ -1807,6 +1855,16 @@ mod tests {
         relay_task.abort();
         let join_error = relay_task.await.expect_err("relay should be aborted");
         assert!(join_error.is_cancelled());
+    }
+
+    #[test]
+    fn is_storage_error_matches_expected_variant() {
+        let storage = DispatchError::Storage(gittree_storage::StorageError::Internal {
+            message: "storage".to_string(),
+        });
+        let config = DispatchError::Config("config".to_string());
+        assert!(is_storage_error(&storage));
+        assert!(!is_storage_error(&config));
     }
 
     #[test]
