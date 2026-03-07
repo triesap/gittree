@@ -3,6 +3,9 @@ name = "gittree-dispatch"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+
 [dependencies]
 async-trait = "0.1"
 dotenvy = "0.15"

@@ -810,6 +810,14 @@ mod tests {
         assert!(err.to_string().contains("dispatch storage error"));
     }
 
+    #[test]
+    fn assert_storage_dispatch_error_panics_for_non_storage_error() {
+        let panic = std::panic::catch_unwind(|| {
+            assert_storage_dispatch_error(DispatchError::Config("not storage".to_string()));
+        });
+        assert!(panic.is_err());
+    }
+
     async fn run_with_timeout<T>(
         duration: Duration,
         future: impl Future<Output = Result<T, DispatchError>>,
@@ -1901,6 +1909,21 @@ mod tests {
         let result = run_with_timeout(
             Duration::from_millis(1),
             std::future::pending::<Result<(), DispatchError>>(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Storage(StorageError::Internal { message }))
+                if message == "timeout waiting for storage call"
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_with_timeout_maps_elapsed_to_storage_error_for_string_output() {
+        let result = run_with_timeout(
+            Duration::from_millis(1),
+            std::future::pending::<Result<&'static str, DispatchError>>(),
         )
         .await;
 

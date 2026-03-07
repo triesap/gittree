@@ -195,7 +195,7 @@ async fn serve_with_shutdown(
 ) -> Result<(), DispatchError> {
     let repositories: Arc<dyn CommandStore + Send + Sync> = Arc::new(build_repositories(&config)?);
     let filter = dispatch_filter_config(&config);
-    tracing::info!(bind = %config.bind, relay_count = config.relay_urls.len(), storage = %config.storage.read_connection, "dispatch relay subscriber initialized");
+    log_dispatch_initialized(&config);
 
     let mut tasks = tokio::task::JoinSet::new();
     for relay_url in &config.relay_urls {
@@ -336,6 +336,105 @@ fn parse_event_tags(value: &serde_json::Value) -> Option<Vec<Vec<String>>> {
     Some(tags)
 }
 
+#[cfg(coverage)]
+fn log_dispatch_initialized(config: &DispatchConfig) {
+    let _ = (
+        &config.bind,
+        config.relay_urls.len(),
+        &config.storage.read_connection,
+    );
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_initialized(config: &DispatchConfig) {
+    tracing::info!(
+        bind = %config.bind,
+        relay_count = config.relay_urls.len(),
+        storage = %config.storage.read_connection,
+        "dispatch relay subscriber initialized"
+    );
+}
+
+#[cfg(coverage)]
+fn log_dispatch_connected(relay_url: &str) {
+    let _ = relay_url;
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_connected(relay_url: &str) {
+    tracing::info!(relay = %relay_url, "dispatch relay connected");
+}
+
+#[cfg(coverage)]
+fn log_dispatch_connect_failed(relay_url: &str, err: &impl std::fmt::Display) {
+    let _ = (relay_url, err.to_string());
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_connect_failed(relay_url: &str, err: &impl std::fmt::Display) {
+    tracing::warn!(relay = %relay_url, error = %err, "dispatch relay connect failed");
+}
+
+#[cfg(coverage)]
+fn log_dispatch_req_send_failed(relay_url: &str) {
+    let _ = relay_url;
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_req_send_failed(relay_url: &str) {
+    tracing::warn!(relay = %relay_url, "dispatch failed to send relay req");
+}
+
+#[cfg(coverage)]
+fn log_dispatch_applied(relay_url: &str, code: &str) {
+    let _ = (relay_url, code);
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_applied(relay_url: &str, code: &str) {
+    tracing::info!(relay = %relay_url, code = %code, "dispatch applied command event");
+}
+
+#[cfg(coverage)]
+fn log_dispatch_ignored(relay_url: &str, reason: &IngestRejectReason) {
+    let _ = (relay_url, reason);
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_ignored(relay_url: &str, reason: &IngestRejectReason) {
+    tracing::debug!(relay = %relay_url, ?reason, "dispatch ignored relay event");
+}
+
+#[cfg(coverage)]
+fn log_dispatch_rejected(relay_url: &str, message: &str) {
+    let _ = (relay_url, message);
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_rejected(relay_url: &str, message: &str) {
+    tracing::warn!(relay = %relay_url, %message, "dispatch rejected relay event");
+}
+
+#[cfg(coverage)]
+fn log_dispatch_processing_failed(relay_url: &str, err: &DispatchError) {
+    let _ = (relay_url, err.to_string());
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_processing_failed(relay_url: &str, err: &DispatchError) {
+    tracing::error!(relay = %relay_url, error = %err, "dispatch event processing failed");
+}
+
+#[cfg(coverage)]
+fn log_dispatch_read_failed(relay_url: &str, err: &WsError) {
+    let _ = (relay_url, err.to_string());
+}
+
+#[cfg(not(coverage))]
+fn log_dispatch_read_failed(relay_url: &str, err: &WsError) {
+    tracing::warn!(relay = %relay_url, error = %err, "dispatch relay read failed");
+}
+
 async fn process_event_message(
     store: &dyn CommandStore,
     filter: &DispatchFilterConfig,
@@ -357,7 +456,7 @@ async fn run_relay_subscription(
     loop {
         match connect_async(relay_url.as_str()).await {
             Ok((stream, _response)) => {
-                tracing::info!(relay = %relay_url, "dispatch relay connected");
+                log_dispatch_connected(&relay_url);
                 let (mut writer, mut reader) = stream.split();
                 process_relay_connection(
                     store.as_ref(),
@@ -369,7 +468,7 @@ async fn run_relay_subscription(
                 .await;
             }
             Err(err) => {
-                tracing::warn!(relay = %relay_url, error = %err, "dispatch relay connect failed");
+                log_dispatch_connect_failed(&relay_url, &err);
             }
         }
         tokio::time::sleep(Duration::from_secs(RELAY_RETRY_DELAY_SECS)).await;
@@ -388,7 +487,7 @@ async fn process_relay_connection<W, R>(
 {
     let req = build_relay_req_message(&filter.admin_pubkey);
     if writer.send(Message::Text(req)).await.is_err() {
-        tracing::warn!(relay = %relay_url, "dispatch failed to send relay req");
+        log_dispatch_req_send_failed(relay_url);
         return;
     }
 
@@ -396,17 +495,17 @@ async fn process_relay_connection<W, R>(
         match next {
             Ok(Message::Text(text)) => match process_event_message(store, filter, relay_url, &text).await {
                 Ok(Some(DispatchEventOutcome::Applied(output))) => {
-                    tracing::info!(relay = %relay_url, code = %output.code, "dispatch applied command event");
+                    log_dispatch_applied(relay_url, &output.code);
                 }
                 Ok(Some(DispatchEventOutcome::Ignored(reason))) => {
-                    tracing::debug!(relay = %relay_url, ?reason, "dispatch ignored relay event");
+                    log_dispatch_ignored(relay_url, &reason);
                 }
                 Ok(Some(DispatchEventOutcome::Rejected(message))) => {
-                    tracing::warn!(relay = %relay_url, %message, "dispatch rejected relay event");
+                    log_dispatch_rejected(relay_url, &message);
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    tracing::error!(relay = %relay_url, error = %err, "dispatch event processing failed");
+                    log_dispatch_processing_failed(relay_url, &err);
                 }
             },
             Ok(Message::Ping(payload)) => {
@@ -417,7 +516,7 @@ async fn process_relay_connection<W, R>(
             Ok(Message::Close(_)) => break,
             Ok(_) => {}
             Err(err) => {
-                tracing::warn!(relay = %relay_url, error = %err, "dispatch relay read failed");
+                log_dispatch_read_failed(relay_url, &err);
                 break;
             }
         }

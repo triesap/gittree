@@ -310,7 +310,7 @@ pub async fn serve(config: StateConfig) -> Result<(), StateError> {
 }
 
 fn init_observability_unit() -> Result<(), StateError> {
-    let _ = init_observability()?;
+    init_observability()?;
     Ok(())
 }
 
