@@ -469,6 +469,7 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
+    use std::future::Future;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -803,6 +804,18 @@ mod tests {
 
     fn parse(input: &str) -> ParsedCommand {
         gittree_core::parse_cli_command(input).expect("parse")
+    }
+
+    async fn run_with_timeout<T>(
+        duration: Duration,
+        future: impl Future<Output = Result<T, DispatchError>>,
+    ) -> Result<T, DispatchError> {
+        match tokio::time::timeout(duration, future).await {
+            Ok(result) => result,
+            Err(_) => Err(DispatchError::Storage(StorageError::Internal {
+                message: "timeout waiting for storage call".to_string(),
+            })),
+        }
     }
 
     async fn postgres_store_with_closed_pool() -> PostgresRepositories {
@@ -1802,13 +1815,14 @@ mod tests {
             updated_at: 2,
         };
 
-        let insert =
-            tokio::time::timeout(Duration::from_secs(3), CommandStore::insert_command_log(&store, &log_record))
-                .await
-                .expect("storage call timed out");
+        let insert = run_with_timeout(
+            Duration::from_secs(3),
+            CommandStore::insert_command_log(&store, &log_record),
+        )
+        .await;
         assert!(matches!(insert, Err(DispatchError::Storage(_))));
 
-        let update = tokio::time::timeout(
+        let update = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::update_command_log_outcome(
                 &store,
@@ -1818,73 +1832,89 @@ mod tests {
                 "ok",
             ),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(update, Err(DispatchError::Storage(_))));
 
-        let account_state = tokio::time::timeout(
+        let account_state = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::account_state(&store, &actor),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(account_state, Err(DispatchError::Storage(_))));
 
-        let upsert_account = tokio::time::timeout(
+        let upsert_account = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::upsert_account_state(&store, &account),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(upsert_account, Err(DispatchError::Storage(_))));
 
-        let profile_state = tokio::time::timeout(
+        let profile_state = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::profile_state(&store, &actor),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(profile_state, Err(DispatchError::Storage(_))));
 
-        let upsert_profile = tokio::time::timeout(
+        let upsert_profile = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::upsert_profile_state(&store, &profile),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(upsert_profile, Err(DispatchError::Storage(_))));
 
-        let repo_state = tokio::time::timeout(
+        let repo_state = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::repo_state(&store, &actor, &repo_name),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(repo_state, Err(DispatchError::Storage(_))));
 
-        let upsert_repo = tokio::time::timeout(
+        let upsert_repo = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::upsert_repo_state(&store, &repo),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(upsert_repo, Err(DispatchError::Storage(_))));
 
-        let set_maintainer = tokio::time::timeout(
+        let set_maintainer = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::set_repo_maintainer(&store, &maintainer),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(set_maintainer, Err(DispatchError::Storage(_))));
 
-        let list_maintainers = tokio::time::timeout(
+        let list_maintainers = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::list_active_repo_maintainers(&store, &actor, &repo_name),
         )
-        .await
-        .expect("storage call timed out");
+        .await;
         assert!(matches!(list_maintainers, Err(DispatchError::Storage(_))));
+    }
+
+    #[tokio::test]
+    async fn run_with_timeout_maps_elapsed_to_storage_error() {
+        let result = run_with_timeout(
+            Duration::from_millis(1),
+            std::future::pending::<Result<(), DispatchError>>(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Storage(StorageError::Internal { message }))
+                if message == "timeout waiting for storage call"
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_with_timeout_returns_inner_result() {
+        let result = run_with_timeout(Duration::from_secs(1), async {
+            Ok::<&'static str, DispatchError>("ok")
+        })
+        .await
+        .expect("ok result");
+        assert_eq!(result, "ok");
     }
 
     #[tokio::test]
