@@ -174,8 +174,19 @@ pub fn init_observability() -> Result<ObservabilityHandle, DispatchError> {
 }
 
 pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
-    let _guard = init_observability()?;
-    serve_with_shutdown(config, Box::pin(tokio::signal::ctrl_c())).await
+    serve_with_init(config, init_observability, Box::pin(tokio::signal::ctrl_c())).await
+}
+
+async fn serve_with_init<G, F>(
+    config: DispatchConfig,
+    init: F,
+    shutdown: DispatchShutdownFuture,
+) -> Result<(), DispatchError>
+where
+    F: FnOnce() -> Result<G, DispatchError>,
+{
+    let _guard = init()?;
+    serve_with_shutdown(config, shutdown).await
 }
 
 async fn serve_with_shutdown(
@@ -419,7 +430,7 @@ mod tests {
         DispatchConfig, DispatchError, DispatchEventOutcome, DispatchFilterConfig,
         RelayEventEnvelope, build_repositories, build_relay_req_message, dispatch_filter_config,
         parse_csv, parse_relay_event_message, process_event_envelope, process_event_message,
-        process_relay_connection, run_relay_subscription, serve_with_shutdown,
+        process_relay_connection, run_relay_subscription, serve_with_init, serve_with_shutdown,
     };
     use crate::handlers::CommandStore;
     use async_trait::async_trait;
@@ -1399,11 +1410,47 @@ mod tests {
     #[tokio::test]
     async fn serve_starts_and_waits_for_shutdown_signal() {
         let config = from_pairs(&base_env()).expect("config");
-        let task = tokio::spawn(super::serve(config));
+        let task = tokio::spawn(serve_with_init(
+            config,
+            || Ok(()),
+            Box::pin(tokio::signal::ctrl_c()),
+        ));
         tokio::time::sleep(Duration::from_millis(150)).await;
         task.abort();
         let join_error = task.await.expect_err("serve should be aborted");
         assert!(join_error.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn serve_returns_storage_error_for_invalid_pool_config() {
+        let mut config = from_pairs(&base_env()).expect("config");
+        config.storage.max_connections = 0;
+        let err = serve_with_init(config, || Ok(()), Box::pin(tokio::signal::ctrl_c()))
+            .await
+            .expect_err("serve should return an error");
+        assert!(matches!(err, DispatchError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_entrypoint_returns_error_for_invalid_pool_config() {
+        let mut config = from_pairs(&base_env()).expect("config");
+        config.storage.max_connections = 0;
+        assert!(super::serve(config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn serve_with_init_propagates_init_error() {
+        let config = from_pairs(&base_env()).expect("config");
+        let err = serve_with_init(
+            config,
+            || -> Result<(), DispatchError> {
+                Err(DispatchError::Config("init failed".to_string()))
+            },
+            Box::pin(tokio::signal::ctrl_c()),
+        )
+        .await
+        .expect_err("init error");
+        assert!(matches!(err, DispatchError::Config(message) if message == "init failed"));
     }
 
     #[tokio::test]
