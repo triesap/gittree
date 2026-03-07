@@ -1021,6 +1021,9 @@ mod tests {
         let non_string_type = serde_json::json!([1, "gittree-dispatch", {}]).to_string();
         assert!(parse_relay_event_message(&non_string_type, "wss://gittr.ee").is_none());
 
+        let null_type = serde_json::json!([null, "gittree-dispatch", {}]).to_string();
+        assert!(parse_relay_event_message(&null_type, "wss://gittr.ee").is_none());
+
         let tags_not_array = serde_json::json!([
             "EVENT",
             "gittree-dispatch",
@@ -1123,6 +1126,51 @@ mod tests {
         ])
         .to_string();
         assert!(parse_relay_event_message(&missing_tags, "wss://gittr.ee").is_none());
+
+        let non_string_pubkey = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": ["22".repeat(32)],
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&non_string_pubkey, "wss://gittr.ee").is_none());
+
+        let non_i64_created_at = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": "321",
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&non_i64_created_at, "wss://gittr.ee").is_none());
+
+        let non_string_content = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": ["gittree account create"],
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&non_string_content, "wss://gittr.ee").is_none());
     }
 
     #[test]
