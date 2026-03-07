@@ -1017,6 +1017,24 @@ mod tests {
 
         let non_object_event = serde_json::json!(["EVENT", "gittree-dispatch", 1]).to_string();
         assert!(parse_relay_event_message(&non_object_event, "wss://gittr.ee").is_none());
+
+        let non_string_type = serde_json::json!([1, "gittree-dispatch", {}]).to_string();
+        assert!(parse_relay_event_message(&non_string_type, "wss://gittr.ee").is_none());
+
+        let tags_not_array = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": {"p":"npub1admin"}
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&tags_not_array, "wss://gittr.ee").is_none());
     }
 
     #[test]
@@ -1077,6 +1095,34 @@ mod tests {
         ])
         .to_string();
         assert!(parse_relay_event_message(&non_string_id, "wss://gittr.ee").is_none());
+
+        let missing_content = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&missing_content, "wss://gittr.ee").is_none());
+
+        let missing_tags = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "11".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create"
+            }
+        ])
+        .to_string();
+        assert!(parse_relay_event_message(&missing_tags, "wss://gittr.ee").is_none());
     }
 
     #[test]
@@ -1569,10 +1615,24 @@ mod tests {
             }
         ])
         .to_string();
+        let ignored_event = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "33".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 7,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
         let mut text_and_non_text_reader = futures_util::stream::iter(vec![
             Ok(Message::Text("not-json".to_string())),
             Ok(Message::Text(valid_event)),
             Ok(Message::Text(invalid_event)),
+            Ok(Message::Text(ignored_event)),
             Ok(Message::Binary(vec![0x01].into())),
             Ok(Message::Ping(vec![0x02].into())),
             Ok(Message::Close(None)),
@@ -1586,6 +1646,37 @@ mod tests {
         )
         .await;
         assert!(scripted_writer.send_count >= 2);
+
+        let mut error_writer = ScriptedWriter::default();
+        let error_event = serde_json::json!([
+            "EVENT",
+            "gittree-dispatch",
+            {
+                "id": "44".repeat(32),
+                "pubkey": "22".repeat(32),
+                "kind": 1,
+                "created_at": 321,
+                "content": "gittree account create",
+                "tags": [["p", "npub1admin"]]
+            }
+        ])
+        .to_string();
+        let mut error_reader = futures_util::stream::iter(vec![
+            Ok(Message::Text(error_event)),
+            Ok(Message::Close(None)),
+        ]);
+        process_relay_connection(
+            &EventStore {
+                fail_insert: true,
+                ..Default::default()
+            },
+            &filter,
+            relay_url,
+            &mut error_writer,
+            &mut error_reader,
+        )
+        .await;
+        assert!(error_writer.send_count >= 1);
     }
 
     #[tokio::test]
