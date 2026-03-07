@@ -265,11 +265,12 @@ mod tests {
     use crate::StorageError;
     use crate::test_support::{skip_or_fail_without_db_with_policy, test_database_url_candidates};
     use crate::test_support::require_db_tests;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::Connection;
+    use sqlx::postgres::{PgConnectOptions, PgConnection, PgPoolOptions};
     use std::collections::HashSet;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const DEFAULT_TEST_DATABASE_URL: &str = "postgres://gittree:gittree@127.0.0.1:5432/gittree";
     static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -842,6 +843,114 @@ mod tests {
         pg_migration_backend_reports_query_errors_with_provision(None, false).await;
     }
 
+    #[tokio::test]
+    async fn pg_migration_backend_methods_run_on_existing_database_when_available() {
+        let Some(mut connection) = connect_existing_database().await else {
+            skip_or_fail_without_db_with_policy(
+                "pg_migration_backend_methods_run_on_existing_database_when_available",
+                require_db_tests(),
+            );
+            return;
+        };
+
+        let mut backend = super::PgMigrationBackend {
+            connection: &mut connection,
+        };
+        backend
+            .ensure_migrations_table()
+            .await
+            .expect("ensure migrations table");
+        let _ = backend.current_version().await.expect("current version");
+        backend.execute_sql("SELECT 1").await.expect("execute sql");
+
+        let version =
+            9_300_000_000_i64 + TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed) as i64;
+        backend
+            .record_version(version)
+            .await
+            .expect("record version");
+        sqlx::query("DELETE FROM migrations WHERE serial_number = $1")
+            .bind(version)
+            .execute(&mut *backend.connection)
+            .await
+            .expect("cleanup migration row");
+    }
+
+    #[tokio::test]
+    async fn runner_run_executes_via_pg_backend_on_existing_database() {
+        let Some(mut connection) = connect_existing_database().await else {
+            skip_or_fail_without_db_with_policy(
+                "runner_run_executes_via_pg_backend_on_existing_database",
+                require_db_tests(),
+            );
+            return;
+        };
+
+        sqlx::query("CREATE TABLE IF NOT EXISTS migrations (serial_number BIGINT PRIMARY KEY)")
+            .execute(&mut connection)
+            .await
+            .expect("ensure migrations table");
+
+        let version = 9_400_000_000_i64 + TEST_DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed) as i64;
+        sqlx::query("INSERT INTO migrations (serial_number) VALUES ($1)")
+            .bind(version)
+            .execute(&mut connection)
+            .await
+            .expect("seed migration");
+
+        let runner = MigrationRunner::new(Vec::new()).expect("runner");
+        let applied = runner.run(&mut connection).await.expect("run");
+        assert_eq!(applied, version);
+
+        sqlx::query("DELETE FROM migrations WHERE serial_number = $1")
+            .bind(version)
+            .execute(&mut connection)
+            .await
+            .expect("cleanup migration row");
+    }
+
+    #[tokio::test]
+    async fn create_database_and_cleanup_round_trip_when_admin_available() {
+        let Some(base_url) = test_database_base_urls().into_iter().next() else {
+            skip_or_fail_without_db_with_policy(
+                "create_database_and_cleanup_round_trip_when_admin_available",
+                require_db_tests(),
+            );
+            return;
+        };
+
+        let Some(mut options) = PgConnectOptions::from_str(&base_url).ok() else {
+            skip_or_fail_without_db_with_policy(
+                "create_database_and_cleanup_round_trip_when_admin_available",
+                require_db_tests(),
+            );
+            return;
+        };
+        options = options.database("postgres");
+        let Ok(admin_pool) = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_with(options)
+            .await
+        else {
+            skip_or_fail_without_db_with_policy(
+                "create_database_and_cleanup_round_trip_when_admin_available",
+                require_db_tests(),
+            );
+            return;
+        };
+
+        let database_name = unique_database_name();
+        if !create_database(&admin_pool, &database_name).await {
+            skip_or_fail_without_db_with_policy(
+                "create_database_and_cleanup_round_trip_when_admin_available",
+                require_db_tests(),
+            );
+            return;
+        }
+        cleanup_database(&base_url, &database_name).await;
+    }
+
     async fn pg_migration_backend_executes_queries_with_provision(
         provisioned: Option<(sqlx::PgPool, String, String)>,
         require_db: bool,
@@ -952,6 +1061,18 @@ mod tests {
 
     async fn provision_database() -> Option<(sqlx::PgPool, String, String)> {
         provision_database_from_candidates(test_database_base_urls()).await
+    }
+
+    async fn connect_existing_database() -> Option<PgConnection> {
+        for base_url in test_database_base_urls() {
+            let Ok(options) = PgConnectOptions::from_str(&base_url) else {
+                continue;
+            };
+            if let Ok(connection) = PgConnection::connect_with(&options).await {
+                return Some(connection);
+            }
+        }
+        None
     }
 
     async fn provision_database_from_candidates(
