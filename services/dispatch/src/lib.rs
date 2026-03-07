@@ -3,6 +3,7 @@ pub use gittree_core::{CommandParseError, ParsedCommand, parse_cli_command};
 use gittree_observability::{ObservabilityConfigError, ObservabilityError, ObservabilityHandle};
 use gittree_storage::{PostgresRepositories, StorageConfig, StorageError};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
@@ -26,6 +27,7 @@ const ENV_STORAGE_MAX_LIFETIME_SECS: &str = "GITTREE_STORAGE_MAX_LIFETIME_SECS";
 const ENV_STORAGE_APP_NAME: &str = "GITTREE_STORAGE_APP_NAME";
 const DISPATCH_SUB_ID: &str = "gittree-dispatch";
 const RELAY_RETRY_DELAY_SECS: u64 = 2;
+type DispatchShutdownFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchConfig {
@@ -173,11 +175,12 @@ pub fn init_observability() -> Result<ObservabilityHandle, DispatchError> {
 
 pub async fn serve(config: DispatchConfig) -> Result<(), DispatchError> {
     let _guard = init_observability()?;
-    serve_with_shutdown(config, tokio::signal::ctrl_c()).await }
+    serve_with_shutdown(config, Box::pin(tokio::signal::ctrl_c())).await
+}
 
 async fn serve_with_shutdown(
     config: DispatchConfig,
-    shutdown: impl Future<Output = Result<(), std::io::Error>>,
+    shutdown: DispatchShutdownFuture,
 ) -> Result<(), DispatchError> {
     let repositories: Arc<dyn CommandStore + Send + Sync> = Arc::new(build_repositories(&config)?);
     let filter = dispatch_filter_config(&config);
@@ -1200,16 +1203,19 @@ mod tests {
     #[tokio::test]
     async fn serve_with_shutdown_covers_ok_and_error_paths() {
         let config = from_pairs(&base_env()).expect("config");
-        let ok = serve_with_shutdown(config.clone(), async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Ok(())
-        })
+        let ok = serve_with_shutdown(
+            config.clone(),
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(())
+            }),
+        )
         .await;
         assert!(ok.is_ok());
 
         let err = serve_with_shutdown(
             config,
-            async { Err(std::io::Error::other("shutdown failure")) },
+            Box::pin(async { Err(std::io::Error::other("shutdown failure")) }),
         )
         .await
         .expect_err("shutdown error");
