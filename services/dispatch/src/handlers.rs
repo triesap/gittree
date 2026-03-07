@@ -484,6 +484,64 @@ mod tests {
     #[derive(Default)]
     struct ApplyFailStore;
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FaultPoint {
+        InsertCommandLog,
+        UpdateCommandLogOutcome,
+        AccountState,
+        UpsertAccountState,
+        ProfileState,
+        UpsertProfileState,
+        RepoState,
+        UpsertRepoState,
+        SetRepoMaintainer,
+        ListActiveRepoMaintainers,
+    }
+
+    struct FaultStore {
+        fault: Option<FaultPoint>,
+        account: Option<AccountStateRecord>,
+        profile: Option<ProfileStateRecord>,
+        repo: Option<RepoStateV1Record>,
+        maintainers: HashSet<Vec<u8>>,
+    }
+
+    impl FaultStore {
+        fn new(fault: Option<FaultPoint>) -> Self {
+            Self {
+                fault,
+                account: None,
+                profile: None,
+                repo: None,
+                maintainers: HashSet::new(),
+            }
+        }
+
+        fn with_account(mut self, account: AccountStateRecord) -> Self {
+            self.account = Some(account);
+            self
+        }
+
+        fn with_repo(mut self, repo: RepoStateV1Record) -> Self {
+            self.repo = Some(repo);
+            self
+        }
+
+        fn with_maintainer(mut self, maintainer: Vec<u8>) -> Self {
+            self.maintainers.insert(maintainer);
+            self
+        }
+
+        fn maybe_fail(&self, point: FaultPoint) -> Result<(), DispatchError> {
+            if self.fault == Some(point) {
+                return Err(DispatchError::Storage(StorageError::Internal {
+                    message: "fault store".to_string(),
+                }));
+            }
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl CommandStore for ApplyFailStore {
         async fn insert_command_log(
@@ -561,6 +619,89 @@ mod tests {
             _repo_name: &str,
         ) -> Result<HashSet<Vec<u8>>, DispatchError> {
             Ok(HashSet::new())
+        }
+    }
+
+    #[async_trait]
+    impl CommandStore for FaultStore {
+        async fn insert_command_log(
+            &self,
+            _record: &CommandLogRecord,
+        ) -> Result<bool, DispatchError> {
+            self.maybe_fail(FaultPoint::InsertCommandLog)?;
+            Ok(true)
+        }
+
+        async fn update_command_log_outcome(
+            &self,
+            _event_id: &[u8],
+            _status: CommandStatus,
+            _code: &str,
+            _message: &str,
+        ) -> Result<(), DispatchError> {
+            self.maybe_fail(FaultPoint::UpdateCommandLogOutcome)
+        }
+
+        async fn account_state(
+            &self,
+            _pubkey: &[u8],
+        ) -> Result<Option<AccountStateRecord>, DispatchError> {
+            self.maybe_fail(FaultPoint::AccountState)?;
+            Ok(self.account.clone())
+        }
+
+        async fn upsert_account_state(
+            &self,
+            _record: &AccountStateRecord,
+        ) -> Result<(), DispatchError> {
+            self.maybe_fail(FaultPoint::UpsertAccountState)
+        }
+
+        async fn profile_state(
+            &self,
+            _pubkey: &[u8],
+        ) -> Result<Option<ProfileStateRecord>, DispatchError> {
+            self.maybe_fail(FaultPoint::ProfileState)?;
+            Ok(self.profile.clone())
+        }
+
+        async fn upsert_profile_state(
+            &self,
+            _record: &ProfileStateRecord,
+        ) -> Result<(), DispatchError> {
+            self.maybe_fail(FaultPoint::UpsertProfileState)
+        }
+
+        async fn repo_state(
+            &self,
+            _owner_pubkey: &[u8],
+            _repo_name: &str,
+        ) -> Result<Option<RepoStateV1Record>, DispatchError> {
+            self.maybe_fail(FaultPoint::RepoState)?;
+            Ok(self.repo.clone())
+        }
+
+        async fn upsert_repo_state(
+            &self,
+            _record: &RepoStateV1Record,
+        ) -> Result<(), DispatchError> {
+            self.maybe_fail(FaultPoint::UpsertRepoState)
+        }
+
+        async fn set_repo_maintainer(
+            &self,
+            _record: &RepoMaintainerV1Record,
+        ) -> Result<(), DispatchError> {
+            self.maybe_fail(FaultPoint::SetRepoMaintainer)
+        }
+
+        async fn list_active_repo_maintainers(
+            &self,
+            _owner_pubkey: &[u8],
+            _repo_name: &str,
+        ) -> Result<HashSet<Vec<u8>>, DispatchError> {
+            self.maybe_fail(FaultPoint::ListActiveRepoMaintainers)?;
+            Ok(self.maintainers.clone())
         }
     }
 
@@ -1744,5 +1885,210 @@ mod tests {
         .await
         .expect("storage call timed out");
         assert!(matches!(list_maintainers, Err(DispatchError::Storage(_))));
+    }
+
+    #[tokio::test]
+    async fn execute_command_propagates_update_command_log_outcome_error() {
+        let store = FaultStore::new(Some(FaultPoint::UpdateCommandLogOutcome));
+        let actor = vec![44u8; 32];
+        let input = CommandExecutionInput {
+            event_id: vec![88u8; 32],
+            actor_pubkey: actor,
+            parsed: parse("gittree account status"),
+            created_at: 500,
+        };
+
+        let output = execute_command(&store, input).await;
+        assert!(matches!(output, Err(DispatchError::Storage(_))));
+    }
+
+    #[tokio::test]
+    async fn apply_account_and_profile_propagate_store_errors() {
+        let actor = vec![45u8; 32];
+
+        let account_create = CommandExecutionInput {
+            event_id: vec![90u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: parse("gittree account create"),
+            created_at: 600,
+        };
+        let create_err = super::apply_account(
+            &FaultStore::new(Some(FaultPoint::UpsertAccountState)),
+            &account_create,
+        )
+        .await;
+        assert!(matches!(create_err, Err(DispatchError::Storage(_))));
+
+        let account_delete = CommandExecutionInput {
+            event_id: vec![91u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: parse("gittree account delete"),
+            created_at: 601,
+        };
+        let delete_err = super::apply_account(
+            &FaultStore::new(Some(FaultPoint::UpsertAccountState)).with_account(
+                AccountStateRecord {
+                    pubkey: actor.clone(),
+                    status: AccountLifecycle::Active,
+                    created_at: 500,
+                    updated_at: 500,
+                    deleted_at: None,
+                },
+            ),
+            &account_delete,
+        )
+        .await;
+        assert!(matches!(delete_err, Err(DispatchError::Storage(_))));
+
+        let profile_set = CommandExecutionInput {
+            event_id: vec![92u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: parse("gittree profile set name=alice"),
+            created_at: 602,
+        };
+        let profile_state_err =
+            super::apply_profile(&FaultStore::new(Some(FaultPoint::ProfileState)), &profile_set).await;
+        assert!(matches!(profile_state_err, Err(DispatchError::Storage(_))));
+
+        let profile_set_err = super::apply_profile(
+            &FaultStore::new(Some(FaultPoint::UpsertProfileState)),
+            &profile_set,
+        )
+        .await;
+        assert!(matches!(profile_set_err, Err(DispatchError::Storage(_))));
+
+        let profile_visibility = CommandExecutionInput {
+            event_id: vec![93u8; 32],
+            actor_pubkey: actor,
+            parsed: parse("gittree profile visibility public"),
+            created_at: 603,
+        };
+        let profile_visibility_err = super::apply_profile(
+            &FaultStore::new(Some(FaultPoint::UpsertProfileState)),
+            &profile_visibility,
+        )
+        .await;
+        assert!(matches!(profile_visibility_err, Err(DispatchError::Storage(_))));
+    }
+
+    #[tokio::test]
+    async fn apply_repo_propagates_store_errors_for_each_mutation_step() {
+        let actor = vec![46u8; 32];
+        let actor_npub = npub_from_bytes(&actor).expect("npub");
+        let repo_record = RepoStateV1Record {
+            owner_pubkey: actor.clone(),
+            repo_name: "demo".to_string(),
+            description: None,
+            website_url: None,
+            visibility: RepoVisibilityV1::Private,
+            default_branch: "main".to_string(),
+            archived: false,
+            updated_at: 700,
+        };
+
+        let repo_create = CommandExecutionInput {
+            event_id: vec![94u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: parse("gittree repo create demo"),
+            created_at: 701,
+        };
+        assert!(matches!(
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_create).await,
+            Err(DispatchError::Storage(_))
+        ));
+        assert!(matches!(
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::UpsertRepoState)), &repo_create).await,
+            Err(DispatchError::Storage(_))
+        ));
+        assert!(matches!(
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::SetRepoMaintainer)), &repo_create).await,
+            Err(DispatchError::Storage(_))
+        ));
+
+        let repo_update = CommandExecutionInput {
+            event_id: vec![95u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: parse("gittree repo update demo description=hello"),
+            created_at: 702,
+        };
+        assert!(matches!(
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_update).await,
+            Err(DispatchError::Storage(_))
+        ));
+        assert!(matches!(
+            super::apply_repo(
+                &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
+                    .with_repo(repo_record.clone()),
+                &repo_update
+            )
+            .await,
+            Err(DispatchError::Storage(_))
+        ));
+        assert!(matches!(
+            super::apply_repo(
+                &FaultStore::new(Some(FaultPoint::UpsertRepoState))
+                    .with_repo(repo_record.clone())
+                    .with_maintainer(actor.clone()),
+                &repo_update
+            )
+            .await,
+            Err(DispatchError::Storage(_))
+        ));
+
+        let repo_archive = CommandExecutionInput {
+            event_id: vec![96u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: parse("gittree repo archive demo"),
+            created_at: 703,
+        };
+        assert!(matches!(
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_archive).await,
+            Err(DispatchError::Storage(_))
+        ));
+        assert!(matches!(
+            super::apply_repo(
+                &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
+                    .with_repo(repo_record.clone()),
+                &repo_archive
+            )
+            .await,
+            Err(DispatchError::Storage(_))
+        ));
+        assert!(matches!(
+            super::apply_repo(
+                &FaultStore::new(Some(FaultPoint::UpsertRepoState))
+                    .with_repo(repo_record.clone())
+                    .with_maintainer(actor.clone()),
+                &repo_archive
+            )
+            .await,
+            Err(DispatchError::Storage(_))
+        ));
+
+        let repo_maintainers = CommandExecutionInput {
+            event_id: vec![97u8; 32],
+            actor_pubkey: actor.clone(),
+            parsed: parse(&format!("gittree repo maintainers demo add {actor_npub}")),
+            created_at: 704,
+        };
+        assert!(matches!(
+            super::apply_repo(
+                &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
+                    .with_repo(repo_record.clone()),
+                &repo_maintainers
+            )
+            .await,
+            Err(DispatchError::Storage(_))
+        ));
+        assert!(matches!(
+            super::apply_repo(
+                &FaultStore::new(Some(FaultPoint::SetRepoMaintainer))
+                    .with_repo(repo_record)
+                    .with_maintainer(actor),
+                &repo_maintainers
+            )
+            .await,
+            Err(DispatchError::Storage(_))
+        ));
     }
 }
