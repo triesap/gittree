@@ -1122,6 +1122,23 @@ mod tests {
         )
     }
 
+    async fn closed_projection_repo_for_tests() -> std::sync::Arc<super::DynProjectionRepositories> {
+        let storage = StorageConfig {
+            read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+            write_connection: None,
+            max_connections: 1,
+            min_connections: 1,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            application_name: Some("gittree-state-closed-projection".to_string()),
+        };
+        let pool_options = storage.pool_options().expect("pool options");
+        let connect_options = storage.read_connect_options().expect("connect options");
+        let pool = pool_options.connect_lazy_with(connect_options);
+        pool.close().await;
+        std::sync::Arc::new(gittree_storage::PostgresRepositories::new(pool))
+    }
+
     #[derive(Default)]
     struct FakeProjectionRepositories {
         account: Option<gittree_storage::AccountStateRecord>,
@@ -1357,6 +1374,44 @@ mod tests {
         assert!(compat_err.to_string().contains("internal error"));
     }
 
+    #[tokio::test]
+    async fn projection_repository_wrapper_methods_cover_postgres_delegate_paths() {
+        let repositories = closed_projection_repo_for_tests().await;
+        let owner = vec![0x44; 32];
+
+        let account = tokio::time::timeout(
+            Duration::from_secs(3),
+            repositories.v1_account_state(&owner),
+        )
+        .await
+        .expect("account timeout");
+        assert!(account.is_err());
+
+        let profile = tokio::time::timeout(
+            Duration::from_secs(3),
+            repositories.v1_profile_state(&owner),
+        )
+        .await
+        .expect("profile timeout");
+        assert!(profile.is_err());
+
+        let repo = tokio::time::timeout(
+            Duration::from_secs(3),
+            repositories.v1_repo_state(&owner, "demo"),
+        )
+        .await
+        .expect("repo timeout");
+        assert!(repo.is_err());
+
+        let maintainers = tokio::time::timeout(
+            Duration::from_secs(3),
+            repositories.v1_list_active_repo_maintainers(&owner, "demo"),
+        )
+        .await
+        .expect("maintainers timeout");
+        assert!(maintainers.is_err());
+    }
+
     #[test]
     fn config_loads_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
@@ -1535,7 +1590,12 @@ mod tests {
                 with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", &mut || {
                     with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", &mut || {
                         let err = super::storage_from_env().expect_err("invalid config");
-                        assert!(matches!(err, StateConfigError::Storage(StorageConfigError::InvalidConfig(_))));
+                        match err {
+                            StateConfigError::Storage(StorageConfigError::InvalidConfig(message)) => {
+                                assert!(!message.is_empty());
+                            }
+                            other => panic!("unexpected storage error: {other:?}"),
+                        }
                     });
                 });
             },
@@ -3012,7 +3072,10 @@ mod tests {
         let err = super::serve_with(config, noop_init_observability, noop_server)
             .await
             .expect_err("bind error");
-        assert!(matches!(err, StateError::Serve(message) if !message.is_empty()));
+        match err {
+            StateError::Serve(message) => assert!(!message.is_empty()),
+            other => panic!("unexpected serve_with error: {other:?}"),
+        }
     }
 
     #[tokio::test]
