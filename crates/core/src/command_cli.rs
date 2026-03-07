@@ -239,6 +239,12 @@ mod tests {
         assert_eq!(cmd.action, "visibility");
         assert_eq!(cmd.target, None);
         assert_eq!(cmd.args, vec![CommandArg::Positional("private".to_string())]);
+
+        let public = parsed("gittree profile visibility public");
+        assert_eq!(
+            public.args,
+            vec![CommandArg::Positional("public".to_string())]
+        );
     }
 
     #[test]
@@ -301,6 +307,15 @@ mod tests {
             cmd.args,
             vec![
                 CommandArg::Positional("add".to_string()),
+                CommandArg::Positional("npub1example".to_string())
+            ]
+        );
+
+        let remove = parsed("gittree repo maintainers demo remove npub1example");
+        assert_eq!(
+            remove.args,
+            vec![
+                CommandArg::Positional("remove".to_string()),
                 CommandArg::Positional("npub1example".to_string())
             ]
         );
@@ -472,6 +487,15 @@ mod tests {
             vec![CommandArg::KeyValue {
                 key: "bio".to_string(),
                 value: "hello".to_string(),
+            }]
+        );
+
+        let escaped_quote = parsed("gittree profile set bio=\"hello\\\" world\"");
+        assert_eq!(
+            escaped_quote.args,
+            vec![CommandArg::KeyValue {
+                key: "bio".to_string(),
+                value: "hello\" world".to_string(),
             }]
         );
     }
