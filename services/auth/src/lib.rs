@@ -1790,6 +1790,15 @@ mod tests {
         assert!(is_auth_error_forgejo(&err));
     }
 
+    #[test]
+    fn parse_bool_flag_handles_truthy_and_falsey_values() {
+        assert!(super::parse_bool_flag(Some("true".to_string())));
+        assert!(super::parse_bool_flag(Some(" YES ".to_string())));
+        assert!(!super::parse_bool_flag(Some("0".to_string())));
+        assert!(!super::parse_bool_flag(Some("no".to_string())));
+        assert!(!super::parse_bool_flag(None));
+    }
+
     #[tokio::test]
     async fn serve_with_components_starts_and_can_be_aborted() {
         let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
@@ -1833,6 +1842,31 @@ mod tests {
             auth,
             test_config(),
             false,
+            transport_dyn,
+            accounts,
+            profiles,
+        )
+        .await
+        .expect_err("bind error");
+        assert!(is_auth_error_serve(&err));
+    }
+
+    #[tokio::test]
+    async fn serve_with_components_command_only_returns_serve_error_for_invalid_bind() {
+        let repositories = Arc::new(gittree_storage::InMemoryRepositories::new());
+        let accounts: Arc<dyn AccountRepository> = repositories.clone();
+        let profiles: Arc<dyn ProfileRepository> = repositories;
+        let transport = Arc::new(MockTransport::new(Vec::new()));
+        let transport_dyn: Arc<dyn ForgejoTransport> = transport;
+        let auth = AuthSettings {
+            email_domain: "example.com".to_string(),
+            max_skew_seconds: 60,
+        };
+        let err = super::serve_with_components(
+            "not-a-socket",
+            auth,
+            test_config(),
+            true,
             transport_dyn,
             accounts,
             profiles,
