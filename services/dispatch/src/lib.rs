@@ -1195,6 +1195,22 @@ mod tests {
         });
     }
 
+    #[test]
+    fn init_observability_maps_subscriber_reinit_errors() {
+        with_env_vars(
+            &[
+                ("GITTREE_LOG_JSON", "0"),
+                ("GITTREE_LOG_STDOUT", "1"),
+                ("GITTREE_METRICS_ENABLED", "1"),
+            ],
+            || {
+                let _ = super::init_observability();
+                let err = super::init_observability().expect_err("subscriber reinit");
+                assert!(err.to_string().contains("dispatch observability error"));
+            },
+        );
+    }
+
     #[tokio::test]
     async fn process_event_message_ignores_non_event_payloads() {
         let store = EventStore::default();
