@@ -217,6 +217,7 @@ fn tokenize(input: &str) -> Result<Vec<String>, CommandParseError> {
 mod tests {
     use super::{
         CommandArg, CommandNamespace, CommandParseError, ParsedCommand, parse_cli_command,
+        tokenize,
     };
 
     fn parsed(input: &str) -> ParsedCommand {
@@ -279,6 +280,12 @@ mod tests {
                 value: "hello world".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn tokenize_collapses_repeated_unquoted_whitespace() {
+        let tokens = tokenize("account   create").expect("tokens");
+        assert_eq!(tokens, vec!["account".to_string(), "create".to_string()]);
     }
 
     #[test]
