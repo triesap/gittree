@@ -806,6 +806,10 @@ mod tests {
         gittree_core::parse_cli_command(input).expect("parse")
     }
 
+    fn assert_storage_dispatch_error(err: DispatchError) {
+        assert!(err.to_string().contains("dispatch storage error"));
+    }
+
     async fn run_with_timeout<T>(
         duration: Duration,
         future: impl Future<Output = Result<T, DispatchError>>,
@@ -1820,7 +1824,7 @@ mod tests {
             CommandStore::insert_command_log(&store, &log_record),
         )
         .await;
-        assert!(matches!(insert, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(insert.expect_err("storage error"));
 
         let update = run_with_timeout(
             Duration::from_secs(3),
@@ -1833,63 +1837,63 @@ mod tests {
             ),
         )
         .await;
-        assert!(matches!(update, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(update.expect_err("storage error"));
 
         let account_state = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::account_state(&store, &actor),
         )
         .await;
-        assert!(matches!(account_state, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(account_state.expect_err("storage error"));
 
         let upsert_account = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::upsert_account_state(&store, &account),
         )
         .await;
-        assert!(matches!(upsert_account, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(upsert_account.expect_err("storage error"));
 
         let profile_state = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::profile_state(&store, &actor),
         )
         .await;
-        assert!(matches!(profile_state, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(profile_state.expect_err("storage error"));
 
         let upsert_profile = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::upsert_profile_state(&store, &profile),
         )
         .await;
-        assert!(matches!(upsert_profile, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(upsert_profile.expect_err("storage error"));
 
         let repo_state = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::repo_state(&store, &actor, &repo_name),
         )
         .await;
-        assert!(matches!(repo_state, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(repo_state.expect_err("storage error"));
 
         let upsert_repo = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::upsert_repo_state(&store, &repo),
         )
         .await;
-        assert!(matches!(upsert_repo, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(upsert_repo.expect_err("storage error"));
 
         let set_maintainer = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::set_repo_maintainer(&store, &maintainer),
         )
         .await;
-        assert!(matches!(set_maintainer, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(set_maintainer.expect_err("storage error"));
 
         let list_maintainers = run_with_timeout(
             Duration::from_secs(3),
             CommandStore::list_active_repo_maintainers(&store, &actor, &repo_name),
         )
         .await;
-        assert!(matches!(list_maintainers, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(list_maintainers.expect_err("storage error"));
     }
 
     #[tokio::test]
@@ -1929,7 +1933,7 @@ mod tests {
         };
 
         let output = execute_command(&store, input).await;
-        assert!(matches!(output, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(output.expect_err("storage error"));
     }
 
     #[tokio::test]
@@ -1947,7 +1951,7 @@ mod tests {
             &account_create,
         )
         .await;
-        assert!(matches!(create_err, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(create_err.expect_err("storage error"));
 
         let account_delete = CommandExecutionInput {
             event_id: vec![91u8; 32],
@@ -1968,7 +1972,7 @@ mod tests {
             &account_delete,
         )
         .await;
-        assert!(matches!(delete_err, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(delete_err.expect_err("storage error"));
 
         let profile_set = CommandExecutionInput {
             event_id: vec![92u8; 32],
@@ -1978,14 +1982,14 @@ mod tests {
         };
         let profile_state_err =
             super::apply_profile(&FaultStore::new(Some(FaultPoint::ProfileState)), &profile_set).await;
-        assert!(matches!(profile_state_err, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(profile_state_err.expect_err("storage error"));
 
         let profile_set_err = super::apply_profile(
             &FaultStore::new(Some(FaultPoint::UpsertProfileState)),
             &profile_set,
         )
         .await;
-        assert!(matches!(profile_set_err, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(profile_set_err.expect_err("storage error"));
 
         let profile_visibility = CommandExecutionInput {
             event_id: vec![93u8; 32],
@@ -1998,7 +2002,7 @@ mod tests {
             &profile_visibility,
         )
         .await;
-        assert!(matches!(profile_visibility_err, Err(DispatchError::Storage(_))));
+        assert_storage_dispatch_error(profile_visibility_err.expect_err("storage error"));
     }
 
     #[tokio::test]
@@ -2022,18 +2026,17 @@ mod tests {
             parsed: parse("gittree repo create demo"),
             created_at: 701,
         };
-        assert!(matches!(
-            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_create).await,
-            Err(DispatchError::Storage(_))
-        ));
-        assert!(matches!(
-            super::apply_repo(&FaultStore::new(Some(FaultPoint::UpsertRepoState)), &repo_create).await,
-            Err(DispatchError::Storage(_))
-        ));
-        assert!(matches!(
-            super::apply_repo(&FaultStore::new(Some(FaultPoint::SetRepoMaintainer)), &repo_create).await,
-            Err(DispatchError::Storage(_))
-        ));
+        let repo_state_err =
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_create).await;
+        assert_storage_dispatch_error(repo_state_err.expect_err("storage error"));
+        let upsert_repo_err =
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::UpsertRepoState)), &repo_create)
+                .await;
+        assert_storage_dispatch_error(upsert_repo_err.expect_err("storage error"));
+        let set_maintainer_err =
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::SetRepoMaintainer)), &repo_create)
+                .await;
+        assert_storage_dispatch_error(set_maintainer_err.expect_err("storage error"));
 
         let repo_update = CommandExecutionInput {
             event_id: vec![95u8; 32],
@@ -2041,29 +2044,24 @@ mod tests {
             parsed: parse("gittree repo update demo description=hello"),
             created_at: 702,
         };
-        assert!(matches!(
-            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_update).await,
-            Err(DispatchError::Storage(_))
-        ));
-        assert!(matches!(
-            super::apply_repo(
-                &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
-                    .with_repo(repo_record.clone()),
-                &repo_update
-            )
-            .await,
-            Err(DispatchError::Storage(_))
-        ));
-        assert!(matches!(
-            super::apply_repo(
-                &FaultStore::new(Some(FaultPoint::UpsertRepoState))
-                    .with_repo(repo_record.clone())
-                    .with_maintainer(actor.clone()),
-                &repo_update
-            )
-            .await,
-            Err(DispatchError::Storage(_))
-        ));
+        let repo_update_state_err =
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_update).await;
+        assert_storage_dispatch_error(repo_update_state_err.expect_err("storage error"));
+        let list_maintainers_err = super::apply_repo(
+            &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
+                .with_repo(repo_record.clone()),
+            &repo_update,
+        )
+        .await;
+        assert_storage_dispatch_error(list_maintainers_err.expect_err("storage error"));
+        let update_repo_err = super::apply_repo(
+            &FaultStore::new(Some(FaultPoint::UpsertRepoState))
+                .with_repo(repo_record.clone())
+                .with_maintainer(actor.clone()),
+            &repo_update,
+        )
+        .await;
+        assert_storage_dispatch_error(update_repo_err.expect_err("storage error"));
 
         let repo_archive = CommandExecutionInput {
             event_id: vec![96u8; 32],
@@ -2071,29 +2069,24 @@ mod tests {
             parsed: parse("gittree repo archive demo"),
             created_at: 703,
         };
-        assert!(matches!(
-            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_archive).await,
-            Err(DispatchError::Storage(_))
-        ));
-        assert!(matches!(
-            super::apply_repo(
-                &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
-                    .with_repo(repo_record.clone()),
-                &repo_archive
-            )
-            .await,
-            Err(DispatchError::Storage(_))
-        ));
-        assert!(matches!(
-            super::apply_repo(
-                &FaultStore::new(Some(FaultPoint::UpsertRepoState))
-                    .with_repo(repo_record.clone())
-                    .with_maintainer(actor.clone()),
-                &repo_archive
-            )
-            .await,
-            Err(DispatchError::Storage(_))
-        ));
+        let repo_archive_state_err =
+            super::apply_repo(&FaultStore::new(Some(FaultPoint::RepoState)), &repo_archive).await;
+        assert_storage_dispatch_error(repo_archive_state_err.expect_err("storage error"));
+        let archive_list_maintainers_err = super::apply_repo(
+            &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
+                .with_repo(repo_record.clone()),
+            &repo_archive,
+        )
+        .await;
+        assert_storage_dispatch_error(archive_list_maintainers_err.expect_err("storage error"));
+        let archive_repo_err = super::apply_repo(
+            &FaultStore::new(Some(FaultPoint::UpsertRepoState))
+                .with_repo(repo_record.clone())
+                .with_maintainer(actor.clone()),
+            &repo_archive,
+        )
+        .await;
+        assert_storage_dispatch_error(archive_repo_err.expect_err("storage error"));
 
         let repo_maintainers = CommandExecutionInput {
             event_id: vec![97u8; 32],
@@ -2101,24 +2094,20 @@ mod tests {
             parsed: parse(&format!("gittree repo maintainers demo add {actor_npub}")),
             created_at: 704,
         };
-        assert!(matches!(
-            super::apply_repo(
-                &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
-                    .with_repo(repo_record.clone()),
-                &repo_maintainers
-            )
-            .await,
-            Err(DispatchError::Storage(_))
-        ));
-        assert!(matches!(
-            super::apply_repo(
-                &FaultStore::new(Some(FaultPoint::SetRepoMaintainer))
-                    .with_repo(repo_record)
-                    .with_maintainer(actor),
-                &repo_maintainers
-            )
-            .await,
-            Err(DispatchError::Storage(_))
-        ));
+        let repo_maintainers_list_err = super::apply_repo(
+            &FaultStore::new(Some(FaultPoint::ListActiveRepoMaintainers))
+                .with_repo(repo_record.clone()),
+            &repo_maintainers,
+        )
+        .await;
+        assert_storage_dispatch_error(repo_maintainers_list_err.expect_err("storage error"));
+        let repo_maintainers_set_err = super::apply_repo(
+            &FaultStore::new(Some(FaultPoint::SetRepoMaintainer))
+                .with_repo(repo_record)
+                .with_maintainer(actor),
+            &repo_maintainers,
+        )
+        .await;
+        assert_storage_dispatch_error(repo_maintainers_set_err.expect_err("storage error"));
     }
 }
