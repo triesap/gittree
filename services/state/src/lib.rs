@@ -263,6 +263,8 @@ impl ProjectionRepositoriesDyn for PostgresRepositories {
 type DynProjectionRepositories = dyn ProjectionRepositoriesDyn + Send + Sync;
 type StateServerFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
 type StateShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type BuildRepositoriesFn = fn(&StateConfig) -> Result<StateRepositories, StateError>;
+type BuildProjectionRepositoriesFn = fn(&StateConfig) -> Result<PostgresRepositories, StateError>;
 
 pub fn build_repositories(config: &StateConfig) -> Result<StateRepositories, StateError> {
     let pool_options = config.storage.pool_options().map_err(StateError::Storage)?;
@@ -317,9 +319,26 @@ async fn serve_with(
     init_observability_fn: fn() -> Result<(), StateError>,
     run_server: fn(tokio::net::TcpListener, Router) -> StateServerFuture,
 ) -> Result<(), StateError> {
+    serve_with_components(
+        config,
+        init_observability_fn,
+        build_repositories,
+        build_projection_repositories,
+        run_server,
+    )
+    .await
+}
+
+async fn serve_with_components(
+    config: StateConfig,
+    init_observability_fn: fn() -> Result<(), StateError>,
+    build_repositories_fn: BuildRepositoriesFn,
+    build_projection_repositories_fn: BuildProjectionRepositoriesFn,
+    run_server: fn(tokio::net::TcpListener, Router) -> StateServerFuture,
+) -> Result<(), StateError> {
     let _observability = init_observability_fn()?;
-    let repositories = build_repositories(&config)?;
-    let projection_repositories = build_projection_repositories(&config)?;
+    let repositories = build_repositories_fn(&config)?;
+    let projection_repositories = build_projection_repositories_fn(&config)?;
     let cache = Arc::new(StateCache::new(StateCacheConfig::default()));
     let state = StateAppState {
         repositories: Arc::new(repositories),
@@ -1040,6 +1059,7 @@ mod tests {
     use gittree_storage::AccountLifecycle;
     use gittree_storage::AnnouncementRepository;
     use gittree_storage::InMemoryRepositories;
+    use gittree_storage::PostgresRepositories;
     use gittree_storage::ProfileVisibilityV1;
     use gittree_storage::RelayCompatibilityRecord;
     use gittree_storage::RelayCompatibilityRepository;
@@ -1048,6 +1068,7 @@ mod tests {
     use gittree_storage::RepoVisibilityV1;
     use gittree_storage::StateRepository;
     use gittree_storage::StorageConfig;
+    use gittree_storage::StorageError;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -1122,7 +1143,8 @@ mod tests {
         )
     }
 
-    async fn closed_projection_repo_for_tests() -> std::sync::Arc<super::DynProjectionRepositories> {
+    async fn closed_projection_repo_for_tests() -> std::sync::Arc<super::DynProjectionRepositories>
+    {
         let storage = StorageConfig {
             read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
             write_connection: None,
@@ -1242,6 +1264,18 @@ mod tests {
         _router: Router,
     ) -> super::StateServerFuture {
         Box::pin(async { Err(std::io::Error::other("boom")) })
+    }
+
+    fn failing_projection_repositories(
+        _config: &StateConfig,
+    ) -> Result<PostgresRepositories, StateError> {
+        Err(StateError::Storage(StorageError::Internal {
+            message: "projection build failed".to_string(),
+        }))
+    }
+
+    fn assert_non_empty_message(message: &str) {
+        assert!(!message.is_empty());
     }
 
     #[derive(Debug, Default)]
@@ -1525,37 +1559,47 @@ mod tests {
     fn env_helpers_handle_missing_blank_and_invalid_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         without_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", &mut || {
-            assert!(super::env_u32("GITTREE_STORAGE_MAX_CONNECTIONS")
-                .expect("missing is none")
-                .is_none());
+            assert!(
+                super::env_u32("GITTREE_STORAGE_MAX_CONNECTIONS")
+                    .expect("missing is none")
+                    .is_none()
+            );
         });
         with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "  ", &mut || {
-            assert!(super::env_u32("GITTREE_STORAGE_MAX_CONNECTIONS")
-                .expect("blank is none")
-                .is_none());
+            assert!(
+                super::env_u32("GITTREE_STORAGE_MAX_CONNECTIONS")
+                    .expect("blank is none")
+                    .is_none()
+            );
         });
         with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "bad", &mut || {
             let err = super::env_u32("GITTREE_STORAGE_MAX_CONNECTIONS").expect_err("invalid");
-            assert!(err
-                .to_string()
-                .contains("invalid env GITTREE_STORAGE_MAX_CONNECTIONS: bad"));
+            assert!(
+                err.to_string()
+                    .contains("invalid env GITTREE_STORAGE_MAX_CONNECTIONS: bad")
+            );
         });
 
         without_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", &mut || {
-            assert!(super::env_u64("GITTREE_STORAGE_IDLE_TIMEOUT_SECS")
-                .expect("missing is none")
-                .is_none());
+            assert!(
+                super::env_u64("GITTREE_STORAGE_IDLE_TIMEOUT_SECS")
+                    .expect("missing is none")
+                    .is_none()
+            );
         });
         with_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "", &mut || {
-            assert!(super::env_u64("GITTREE_STORAGE_IDLE_TIMEOUT_SECS")
-                .expect("blank is none")
-                .is_none());
+            assert!(
+                super::env_u64("GITTREE_STORAGE_IDLE_TIMEOUT_SECS")
+                    .expect("blank is none")
+                    .is_none()
+            );
         });
         with_env_var("GITTREE_STORAGE_IDLE_TIMEOUT_SECS", "oops", &mut || {
             let err = super::env_u64("GITTREE_STORAGE_IDLE_TIMEOUT_SECS").expect_err("invalid");
-            assert!(err
-                .to_string()
-                .contains("invalid env GITTREE_STORAGE_IDLE_TIMEOUT_SECS: oops"));
+            assert!(
+                err.to_string()
+                    .contains("invalid env GITTREE_STORAGE_IDLE_TIMEOUT_SECS: oops")
+            );
         });
     }
 
@@ -1572,16 +1616,21 @@ mod tests {
                     &mut || {
                         with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "5", &mut || {
                             with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "1", &mut || {
-                                with_env_var("GITTREE_STORAGE_APP_NAME", "state-tests", &mut || {
-                                    let cfg = super::storage_from_env().expect("storage config");
-                                    assert!(cfg.write_connection.is_some());
-                                    assert_eq!(cfg.max_connections, 5);
-                                    assert_eq!(cfg.min_connections, 1);
-                                    assert_eq!(
-                                        cfg.application_name.as_deref(),
-                                        Some("state-tests")
-                                    );
-                                });
+                                with_env_var(
+                                    "GITTREE_STORAGE_APP_NAME",
+                                    "state-tests",
+                                    &mut || {
+                                        let cfg =
+                                            super::storage_from_env().expect("storage config");
+                                        assert!(cfg.write_connection.is_some());
+                                        assert_eq!(cfg.max_connections, 5);
+                                        assert_eq!(cfg.min_connections, 1);
+                                        assert_eq!(
+                                            cfg.application_name.as_deref(),
+                                            Some("state-tests")
+                                        );
+                                    },
+                                );
                             });
                         });
                     },
@@ -1590,12 +1639,8 @@ mod tests {
                 with_env_var("GITTREE_STORAGE_MAX_CONNECTIONS", "1", &mut || {
                     with_env_var("GITTREE_STORAGE_MIN_CONNECTIONS", "2", &mut || {
                         let err = super::storage_from_env().expect_err("invalid config");
-                        match err {
-                            StateConfigError::Storage(StorageConfigError::InvalidConfig(message)) => {
-                                assert!(!message.is_empty());
-                            }
-                            other => panic!("unexpected storage error: {other:?}"),
-                        }
+                        let message = err.to_string();
+                        assert_non_empty_message(&message);
                     });
                 });
             },
@@ -2966,8 +3011,8 @@ mod tests {
             },
             relay_urls: Vec::new(),
         };
-        let err = super::build_projection_repositories(&invalid_pool)
-            .expect_err("invalid pool config");
+        let err =
+            super::build_projection_repositories(&invalid_pool).expect_err("invalid pool config");
         assert!(err.to_string().contains("state storage error"));
     }
 
@@ -3034,6 +3079,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_with_components_maps_projection_repository_build_errors() {
+        let config = StateConfig {
+            bind: "127.0.0.1:0".to_string(),
+            storage: StorageConfig {
+                read_connection: "postgres://gittree:gittree@127.0.0.1:5432/gittree".to_string(),
+                write_connection: None,
+                max_connections: 10,
+                min_connections: 2,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                application_name: None,
+            },
+            relay_urls: Vec::new(),
+        };
+        let err = super::serve_with_components(
+            config,
+            noop_init_observability,
+            super::build_repositories,
+            failing_projection_repositories,
+            noop_server,
+        )
+        .await
+        .expect_err("projection repository build error");
+        assert!(err.to_string().contains("projection build failed"));
+    }
+
+    #[tokio::test]
     async fn serve_with_maps_server_errors() {
         let config = StateConfig {
             bind: "127.0.0.1:0".to_string(),
@@ -3072,10 +3144,7 @@ mod tests {
         let err = super::serve_with(config, noop_init_observability, noop_server)
             .await
             .expect_err("bind error");
-        match err {
-            StateError::Serve(message) => assert!(!message.is_empty()),
-            other => panic!("unexpected serve_with error: {other:?}"),
-        }
+        assert!(err.to_string().starts_with("state serve error:"));
     }
 
     #[tokio::test]
@@ -3143,6 +3212,12 @@ mod tests {
         unsafe {
             std::env::remove_var(KEY);
         }
+    }
+
+    #[test]
+    fn assert_non_empty_message_panics_for_empty_input() {
+        let panic = std::panic::catch_unwind(|| assert_non_empty_message(""));
+        assert!(panic.is_err());
     }
 
     #[test]
