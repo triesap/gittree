@@ -1733,10 +1733,12 @@ mod tests {
         require_db_tests, skip_or_fail_without_db_with_policy, test_database_url_candidates,
     };
     use crate::{
-        AccountRecord, EventQuery, EventRecord, ProfileRecord, ProfileVisibility,
-        RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord, RelayPublishRequest,
-        RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord, RepoMappingRecord,
-        RepoStateRecord, StorageError, TagRecord,
+        AccountLifecycle, AccountRecord, AccountStateRecord, CommandLogRecord, CommandStatus,
+        EventQuery, EventRecord, ProfileRecord, ProfileStateRecord, ProfileVisibility,
+        ProfileVisibilityV1, RelayCompatibilityRecord, RelayInviteRecord, RelayMembershipRecord,
+        RelayPublishRequest, RelayPublishStatus, RelayTenantRecord, RepoAnnouncementRecord,
+        RepoMaintainerV1Record, RepoMappingRecord, RepoStateRecord, RepoStateV1Record,
+        RepoVisibilityV1, StorageError, TagRecord,
     };
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -2270,6 +2272,192 @@ WHERE datname = $1
                 .await
                 .expect_err("fetch tags"),
         );
+    }
+
+    #[tokio::test]
+    async fn v1_methods_surface_database_or_validation_errors_without_database() {
+        let repositories = unreachable_repositories();
+
+        let command = CommandLogRecord {
+            event_id: vec![0x11; 32],
+            pubkey: vec![0x22; 32],
+            namespace: "account".to_string(),
+            action: "create".to_string(),
+            target: Some("demo".to_string()),
+            args_json: serde_json::json!({"source":"test"}),
+            status: CommandStatus::Ok,
+            code: "ok".to_string(),
+            message: "ok".to_string(),
+            created_at: 1,
+        };
+        assert_db_error(
+            repositories
+                .v1_insert_command_log(&command)
+                .await
+                .expect_err("insert command"),
+        );
+        assert_db_error(
+            repositories
+                .v1_update_command_log_outcome(&command.event_id, CommandStatus::Error, "err", "err")
+                .await
+                .expect_err("update command outcome"),
+        );
+
+        let account = AccountStateRecord {
+            pubkey: vec![0x33; 32],
+            status: AccountLifecycle::Active,
+            created_at: 2,
+            updated_at: 3,
+            deleted_at: None,
+        };
+        assert_db_error(
+            repositories
+                .v1_upsert_account_state(&account)
+                .await
+                .expect_err("upsert account"),
+        );
+        assert_db_error(
+            repositories
+                .v1_account_state(&account.pubkey)
+                .await
+                .expect_err("account lookup"),
+        );
+
+        let profile = ProfileStateRecord {
+            pubkey: vec![0x44; 32],
+            display_name: Some("alice".to_string()),
+            bio: Some("bio".to_string()),
+            avatar_url: Some("https://gittr.ee/avatar.png".to_string()),
+            website_url: Some("https://gittr.ee".to_string()),
+            location: Some("earth".to_string()),
+            visibility: ProfileVisibilityV1::Private,
+            updated_at: 4,
+        };
+        assert_db_error(
+            repositories
+                .v1_upsert_profile_state(&profile)
+                .await
+                .expect_err("upsert profile"),
+        );
+        assert_db_error(
+            repositories
+                .v1_profile_state(&profile.pubkey)
+                .await
+                .expect_err("profile lookup"),
+        );
+
+        let repo = RepoStateV1Record {
+            owner_pubkey: vec![0x55; 32],
+            repo_name: "demo".to_string(),
+            description: Some("repo".to_string()),
+            website_url: Some("https://gittr.ee/demo".to_string()),
+            visibility: RepoVisibilityV1::Public,
+            default_branch: "main".to_string(),
+            archived: false,
+            updated_at: 5,
+        };
+        assert_db_error(
+            repositories
+                .v1_upsert_repo_state(&repo)
+                .await
+                .expect_err("upsert repo"),
+        );
+        assert_db_error(
+            repositories
+                .v1_repo_state(&repo.owner_pubkey, &repo.repo_name)
+                .await
+                .expect_err("repo lookup"),
+        );
+
+        let maintainer = RepoMaintainerV1Record {
+            owner_pubkey: repo.owner_pubkey.clone(),
+            repo_name: repo.repo_name.clone(),
+            maintainer_pubkey: vec![0x66; 32],
+            active: true,
+            updated_at: 6,
+        };
+        assert_db_error(
+            repositories
+                .v1_set_repo_maintainer(&maintainer)
+                .await
+                .expect_err("set maintainer"),
+        );
+        assert_db_error(
+            repositories
+                .v1_list_active_repo_maintainers(&repo.owner_pubkey, &repo.repo_name)
+                .await
+                .expect_err("list maintainers"),
+        );
+
+        let mut invalid_command = command.clone();
+        invalid_command.created_at = i64::MIN;
+        assert!(matches!(
+            repositories
+                .v1_insert_command_log(&invalid_command)
+                .await
+                .expect_err("invalid command timestamp"),
+            StorageError::InvalidField { field: "created_at", .. }
+        ));
+
+        let mut invalid_account = account.clone();
+        invalid_account.created_at = i64::MIN;
+        assert!(matches!(
+            repositories
+                .v1_upsert_account_state(&invalid_account)
+                .await
+                .expect_err("invalid account created_at"),
+            StorageError::InvalidField { field: "created_at", .. }
+        ));
+
+        let mut invalid_account_updated = account.clone();
+        invalid_account_updated.updated_at = i64::MIN;
+        assert!(matches!(
+            repositories
+                .v1_upsert_account_state(&invalid_account_updated)
+                .await
+                .expect_err("invalid account updated_at"),
+            StorageError::InvalidField { field: "created_at", .. }
+        ));
+
+        let mut invalid_account_deleted = account;
+        invalid_account_deleted.deleted_at = Some(i64::MIN);
+        assert!(matches!(
+            repositories
+                .v1_upsert_account_state(&invalid_account_deleted)
+                .await
+                .expect_err("invalid account deleted_at"),
+            StorageError::InvalidField { field: "created_at", .. }
+        ));
+
+        let mut invalid_profile = profile;
+        invalid_profile.updated_at = i64::MIN;
+        assert!(matches!(
+            repositories
+                .v1_upsert_profile_state(&invalid_profile)
+                .await
+                .expect_err("invalid profile updated_at"),
+            StorageError::InvalidField { field: "created_at", .. }
+        ));
+
+        let mut invalid_repo = repo;
+        invalid_repo.updated_at = i64::MIN;
+        assert!(matches!(
+            repositories
+                .v1_upsert_repo_state(&invalid_repo)
+                .await
+                .expect_err("invalid repo updated_at"),
+            StorageError::InvalidField { field: "created_at", .. }
+        ));
+
+        let mut invalid_maintainer = maintainer;
+        invalid_maintainer.updated_at = i64::MIN;
+        assert!(matches!(
+            repositories
+                .v1_set_repo_maintainer(&invalid_maintainer)
+                .await
+                .expect_err("invalid maintainer updated_at"),
+            StorageError::InvalidField { field: "created_at", .. }
+        ));
     }
 
     #[tokio::test]
